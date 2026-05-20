@@ -11,7 +11,7 @@ The name: "ken" is Scottish/Old English for *to perceive, to know* ("beyond my k
 - **Tokenizer parity: 11,447-input corpus-scale harness** (`scripts/parity_dump.py` + `internal/embed/parity_test.go` under build tag `parity`) reports 0 drift across `normalize` / `pre_tokenize` / `wordpiece` / `other`. Surfaced and fixed three real bugs the spot-check had missed (see §3).
 - **Hybrid retrieval: ported verbatim** from semble's live source (`search.py`, `ranking/{boosting,penalties,weighting}.py`, `tokens.py`); see §7.
 - **MCP server: drop-in replacement** for semble's MCP server; same tool surface and wire format (§8).
-- **NDCG vs semble: deferred** — benchmark corpus is not publicly accessible (§10).
+- **NDCG vs semble: measured at v0.1.0** — hybrid 0.840 vs semble 0.854 (Δ 0.014, 63 repos × 1251 queries). Semantic raw matches within 0.003 (validates algorithm port); residual gap concentrated in non-Python supported languages and chunker-attributable (§10).
 
 ## Decisions
 
@@ -589,10 +589,10 @@ command = "/absolute/path/to/ken-mcp"
 
 Consolidated deferred items. Each entry: the item, then the trigger that would unblock or motivate it. Items without triggers calcify into permanent TODOs.
 
-- **Python class-body-aware chunking.** v1 is top-level-only; large Django models, SQLAlchemy declarative bases, and ML wrapper classes will line-split through their methods rather than split at method boundaries. Tracked as `TODO(stage4-risk)` in `internal/chunk/regex/python.go`. **Trigger:** Python NDCG measurably below other languages on a real corpus.
+- **Python class-body-aware chunking.** v1 is top-level-only; large Django models, SQLAlchemy declarative bases, and ML wrapper classes will line-split through their methods rather than split at method boundaries. Tracked as `TODO(stage4-risk)` in `internal/chunk/regex/python.go`. **Trigger:** Python NDCG measurably below other languages on a real corpus. **Status (v0.1.0):** not triggered — Python NDCG@10 hybrid is 0.869 (semble 0.867, +0.002); Python is in fact the best-tracking supported language.
 - **Chroma chunker (Option B).** ~200-language coverage via heuristic Keyword detection. **Trigger:** users with polyglot repos where the regex chunker doesn't cover a needed language.
-- **WASM tree-sitter chunker (Option A).** Highest parity; bigger binary; slower. **Trigger:** regex chunker's NDCG measurably below tree-sitter-based on a benchmark we can run.
-- **NDCG vs semble (target ≈ 0.854).** Verbatim algorithm port means any gap should be measurement, not algorithm — but the comparison is currently impossible because the benchmark corpus is not publicly downloadable. **Trigger:** corpus becomes available (issue on semble repo, or an alternative methodology surfaces).
+- **WASM tree-sitter chunker (Option A).** Highest parity; bigger binary; slower. **Trigger:** regex chunker's NDCG measurably below tree-sitter-based on a benchmark we can run. **Status (v0.1.0): triggered.** Measured on semble's benchmark: hybrid gap is 0.014 overall (0.840 vs 0.854) and is concentrated in non-Python supported languages: go −0.051, rust −0.050, zig −0.047, cpp −0.031, typescript −0.029, java −0.020. Python at +0.002 confirms the rest of the pipeline ports cleanly; the chunker is the remaining lever.
+- **NDCG vs semble (target ≈ 0.854).** **Resolved at v0.1.0:** measured at 0.840 hybrid (gap 0.014) on the full published benchmark (63 repos, 1251 queries, semble's own `benchmarks.metrics`). Per-ablation: semantic raw matches semble within 0.003 (validates the embedding + tokenizer + ANN port); BM25 raw at 0.622 vs 0.675 is chunker- and tokenizer-driven. Per-category hybrid: architecture matches within 0.005, semantic and symbol within 0.017. Reproduce via `docs/BENCH.md`. The closing-the-gap path is the WASM tree-sitter chunker item above; the algorithm port itself is no longer the open question.
 - **HNSW for the dense retriever.** `internal/ann/flat.go` is exact and fine at repo scale. Behind an interface so the swap is local. **Trigger:** dense matrix size makes exact cosine the bottleneck on a real workload.
 - **Full pathspec gitignore.** `internal/repo/walk.go` ships a deliberate common-subset matcher; `github.com/sabhiram/go-gitignore` is the planned drop-in. **Trigger:** a real repo with nested or exotic gitignore patterns shows incorrect inclusion/exclusion.
 - **Persistent on-disk index cache.** Per-process MCP cache only today; semble has none either. **Trigger:** a usage pattern where rebuild cost across process restarts dominates.

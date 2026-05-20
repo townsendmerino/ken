@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`ken` is a **pure-Go, no-cgo** port of [MinishLab/semble](https://github.com/MinishLab/semble), a hybrid code-search tool (lexical BM25 + Model2Vec semantic embeddings + RRF fusion + rerank heuristics). The authoritative design — algorithm spec, precision contracts, license chain, risk register — lives in **[`docs/DESIGN.md`](docs/DESIGN.md)**; read it before any non-trivial change. This is **not** a git repository.
+`ken` is a **pure-Go, no-cgo** port of [MinishLab/semble](https://github.com/MinishLab/semble), a hybrid code-search tool (lexical BM25 + Model2Vec semantic embeddings + RRF fusion + rerank heuristics). The authoritative design — algorithm spec, precision contracts, license chain, risk register — lives in **[`docs/DESIGN.md`](docs/DESIGN.md)**; read it before any non-trivial change. The repo is on GitHub at **[townsendmerino/ken](https://github.com/townsendmerino/ken)**.
 
 ## Repository ownership (read this first)
 

@@ -169,12 +169,20 @@ The retrieval algorithm is a verbatim port of semble's `search.py` + `ranking/*.
 | Index `/tmp/semble` checkout (hybrid w/ model) | (not measured locally) | **1.80 s** (measured) |
 | Index this repo (BM25 only) | (not measured locally) | **0.06 s** (measured) |
 | Retrieval algorithm | reference implementation | verbatim port (constants and pipeline order ported from `search.py` + `ranking/*.py`) |
-| NDCG@10 on semble's benchmark | 0.854 ([semble README](https://github.com/MinishLab/semble#benchmarks)) | pending† |
+| NDCG@10 on semble's benchmark | 0.854 ([semble README](https://github.com/MinishLab/semble#benchmarks)) | **0.840 hybrid** (gap 0.014, full corpus 63 repos × 1251 queries)† |
 | MCP server | yes | yes — drop-in compatible (same tool schemas, same wire format) |
 | Binary size | n/a (Python env) | `ken` 3.9 MB · `ken-mcp` 16 MB |
 | Requires `huggingface-cli` for model | yes | yes (or skip and use `--mode bm25`) |
 
-† **NDCG vs semble's benchmark is deferred** — the benchmark corpus isn't publicly downloadable from semble's repo. Since the algorithm is ported verbatim (with verbatim constants), any future gap would be a measurement question, not an algorithm question. See the [risk register](docs/DESIGN.md#10-risk-register).
+† **Measured at v0.1.0 against semble's published benchmark** (63 repos, 1251 queries, semble's own `benchmarks.metrics.ndcg_at_k` + `target_rank`). Reproduce: see [`docs/BENCH.md`](docs/BENCH.md). Ablation breakdown vs semble's published raw retrieval numbers:
+>
+> | Mode | semble (raw) | ken | Δ |
+> |---|---:|---:|---:|
+> | Semantic only (potion-code-16M) | 0.650 | **0.647** | −0.003 |
+> | BM25 only | 0.675 | 0.622 | −0.053 |
+> | **Hybrid (full ranker)** | **0.854** | **0.840** | **−0.014** |
+>
+> The semantic-raw match within 0.003 isolates and validates the embedding + tokenizer + ANN port. The remaining ~0.014 hybrid gap is concentrated in languages where ken's regex chunker draws different boundaries than semble's tree-sitter chunker (via Chonkie) — Python tracks semble exactly (+0.002); go/rust/zig/cpp are −0.03 to −0.05. The chunker dependency tradeoff is called out as expected divergence in [`docs/DESIGN.md` §2](docs/DESIGN.md#2-chunker); closing it is the trigger for the WASM tree-sitter chunker on the roadmap. See [docs/DESIGN.md §10](docs/DESIGN.md#10-risk-register).
 
 semble timings cited above are from semble's own [README "Benchmarks" section](https://github.com/MinishLab/semble#benchmarks); ken's are measured on the included `testdata/repo` polyglot fixture and on a sibling shallow clone of `/tmp/semble`. Cold-start was timed by `/usr/bin/time -p ken search testdata/repo "validate" -k 1 --mode bm25` over three trials (M2 MacBook Air, Go 1.26.3, darwin/amd64 build under Rosetta).
 
@@ -182,10 +190,10 @@ semble timings cited above are from semble's own [README "Benchmarks" section](h
 
 The full risk register with explicit triggers is in [docs/DESIGN.md §10](docs/DESIGN.md#10-risk-register). Highlights:
 
-- **NDCG vs semble** — gated on benchmark-corpus access. If you're at MinishLab and there's a publishable corpus, file an issue.
+- **NDCG vs semble — measured at v0.1.0**: hybrid 0.840 vs semble 0.854 (Δ 0.014). The 1.6% gap is chunker-driven (see [`docs/BENCH.md`](docs/BENCH.md)); the algorithm port is validated by the semantic-raw match within 0.003.
+- **WASM tree-sitter chunker (Option A)** — closing the remaining hybrid gap. Trigger: now triggered by the measured per-language drift on go/rust/zig.
 - **Chroma chunker (Option B)** — broader language coverage via a token-stream lexer. Trigger: a polyglot repo where the regex chunker doesn't cover a needed language.
-- **WASM tree-sitter chunker (Option A)** — highest parity with semble's Chonkie. Trigger: regex chunker NDCG measurably below tree-sitter-based on a benchmark we can run.
-- **Class-body-aware Python chunking** — currently top-level only; large Django models / SQLAlchemy bases line-split through methods. Trigger: Python NDCG visibly below the other languages.
+- **Class-body-aware Python chunking** — currently top-level only; large Django models / SQLAlchemy bases line-split through methods. Trigger: Python NDCG visibly below the other languages (not currently triggered — Python is +0.002 vs semble).
 
 ## Acknowledgments
 

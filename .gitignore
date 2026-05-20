@@ -30,3 +30,7 @@ __pycache__/
 # 100k-input tokenizer parity dump (Stage-3 acceptance, regenerated via
 # scripts/parity_dump.py). Tens of MB; never committed.
 testdata/parity.jsonl
+
+# NDCG@10 benchmark output (regenerated via bench/semble/run_ken.py;
+# corpus + annotations live in MinishLab/semble's checkout, not here).
+bench/semble/results/

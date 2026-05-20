@@ -3,10 +3,13 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/townsendmerino/ken/internal/search"
 )
@@ -25,7 +28,13 @@ func usage() {
 
 usage:
   ken index  <path>           [--chunker regex|line] [--mode bm25|semantic|hybrid] [--model DIR]
-  ken search <path> <query>...  [-k N] [--chunker regex|line] [--mode bm25|semantic|hybrid] [--model DIR]
+  ken search <path> <query>...  [-k N] [--json] [--chunker ...] [--mode ...] [--model DIR]
+  ken bench  <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR]
+
+ken bench reads queries from stdin (one per line; lines starting with '#'
+ignored) and emits one JSON record per query to stdout against a single
+in-process index. Designed for the semble benchmark harness; see
+docs/BENCH.md.
 
 semantic/hybrid modes need a Model2Vec model dir (default ./testdata/model);
 bm25 mode needs no model.
@@ -84,6 +93,8 @@ func main() {
 		os.Exit(cmdIndex(os.Args[2:]))
 	case "search":
 		os.Exit(cmdSearch(os.Args[2:]))
+	case "bench":
+		os.Exit(cmdBench(os.Args[2:]))
 	default:
 		usage()
 		os.Exit(2)
@@ -122,6 +133,49 @@ type searchArgs struct {
 	chunker string
 	mode    string
 	model   string
+	jsonOut bool // --json: emit structured JSON instead of the markdown preview
+}
+
+// jsonResult is the per-result shape emitted by `ken search --json` and by
+// the per-query records of `ken bench`. Field names match what the semble
+// benchmark adapter expects (see docs/BENCH.md and bench/semble/run_ken.py).
+type jsonResult struct {
+	FilePath  string  `json:"file_path"`
+	StartLine int     `json:"start_line"`
+	EndLine   int     `json:"end_line"`
+	Score     float64 `json:"score"`
+	Content   string  `json:"content"`
+}
+
+func toJSONResults(rs []search.Result) []jsonResult {
+	out := make([]jsonResult, len(rs))
+	for i, r := range rs {
+		out[i] = jsonResult{
+			FilePath:  r.Chunk.File,
+			StartLine: r.Chunk.StartLine,
+			EndLine:   r.Chunk.EndLine,
+			Score:     r.Score,
+			Content:   r.Chunk.Text,
+		}
+	}
+	return out
+}
+
+// stripBoolFlag removes any matching boolean flag (`--name`, `-name`) from
+// args, returning the filtered slice plus whether it was seen. Used for
+// flags that take no value (`--json`).
+func stripBoolFlag(args []string, name string) ([]string, bool) {
+	long, short := "--"+name, "-"+name
+	rest := make([]string, 0, len(args))
+	found := false
+	for _, a := range args {
+		if a == long || a == short {
+			found = true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	return rest, found
 }
 
 // parseSearchArgs extracts the -k / -k=N option from ANY position and
@@ -134,6 +188,7 @@ type searchArgs struct {
 // CLI — see TestParseSearchArgs.
 func parseSearchArgs(args []string) (searchArgs, error) {
 	sa := searchArgs{k: 10, chunker: defaultChunker, mode: defaultMode, model: defaultModel}
+	args, sa.jsonOut = stripBoolFlag(args, "json")
 	args, chunker, mode, model, err := commonFlags(args)
 	if err != nil {
 		return sa, err
@@ -197,6 +252,15 @@ func cmdSearch(args []string) int {
 		return 1
 	}
 	results := ix.Search(sa.query, sa.k)
+	if sa.jsonOut {
+		// Always emit a valid JSON array, even for zero results — the
+		// benchmark adapter relies on parseable output unconditionally.
+		if err := json.NewEncoder(os.Stdout).Encode(toJSONResults(results)); err != nil {
+			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+			return 1
+		}
+		return 0
+	}
 	if len(results) == 0 {
 		fmt.Println("no matches")
 		return 0
@@ -205,6 +269,86 @@ func cmdSearch(args []string) int {
 		fmt.Printf("%.4f  %s:%d-%d  %s\n",
 			r.Score, r.Chunk.File, r.Chunk.StartLine, r.Chunk.EndLine,
 			firstLine(r.Chunk.Text))
+	}
+	return 0
+}
+
+// cmdBench reads queries from stdin (one per line; lines beginning with
+// '#' are comments, blank lines skipped) and emits one JSON record per
+// query to stdout against a single in-process index. The Python adapter
+// in bench/semble/run_ken.py drives this for the semble benchmark.
+//
+// Per-query record shape:
+//
+//	{"query":"...", "results":[{"file_path":..., "start_line":..., ...}, ...]}
+//
+// This exists because subprocess-per-query would force a fresh index
+// build on every call; with 63 repos × ~20 queries × 5 latency runs the
+// indexing time alone would dominate. cmdBench builds the index once
+// per process invocation, then accepts arbitrarily many queries.
+func cmdBench(args []string) int {
+	rest, chunker, modeStr, model, err := commonFlags(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+		usage()
+		return 2
+	}
+	rest, kStr, err := extractFlag(rest, "k", "10")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+		return 2
+	}
+	k, err := strconv.Atoi(kStr)
+	if err != nil || k < 0 {
+		fmt.Fprintln(os.Stderr, "ken: -k expects a non-negative integer")
+		return 2
+	}
+	if len(rest) != 1 {
+		usage()
+		return 2
+	}
+	mode, err := search.ParseMode(modeStr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+		return 2
+	}
+	ix, err := search.FromPath(rest[0], mode, chunker, model)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "ken bench: indexed %d chunks from %s (mode=%s chunker=%s)\n",
+		ix.Len(), rest[0], modeStr, chunker)
+
+	type record struct {
+		Query   string       `json:"query"`
+		Results []jsonResult `json:"results"`
+		// QueryMS is the wall-clock cost of just ix.Search — the index is
+		// already built. Lets the Python adapter compute per-query median
+		// latency over N runs (semble methodology) without paying
+		// subprocess/IO overhead between runs.
+		QueryMS float64 `json:"query_ms"`
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(make([]byte, 64*1024), 1<<20) // tolerate fat queries
+	for sc.Scan() {
+		q := strings.TrimSpace(sc.Text())
+		if q == "" || strings.HasPrefix(q, "#") {
+			continue
+		}
+		started := time.Now()
+		results := ix.Search(q, k)
+		ms := float64(time.Since(started).Microseconds()) / 1000.0
+		if err := enc.Encode(record{Query: q, Results: toJSONResults(results), QueryMS: ms}); err != nil {
+			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+			return 1
+		}
+	}
+	if err := sc.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+		return 1
 	}
 	return 0
 }
