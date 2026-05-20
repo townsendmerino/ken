@@ -1,0 +1,72 @@
+# GoReleaser config for ken — invoked by .github/workflows/release.yml on
+# pushed tags matching `v*`. Builds `ken` and `ken-mcp` for macOS + Linux,
+# arm64 + amd64, archives them with LICENSE / NOTICE / README / DESIGN.
+
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: ken
+    binary: ken
+    main: ./cmd/ken
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}}
+
+  - id: ken-mcp
+    binary: ken-mcp
+    main: ./cmd/ken-mcp
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}}
+
+archives:
+  - id: default
+    ids: [ken, ken-mcp]
+    name_template: "ken_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - LICENSE
+      - NOTICE
+      - THIRD_PARTY_LICENSES.md
+      - README.md
+      - docs/DESIGN.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"

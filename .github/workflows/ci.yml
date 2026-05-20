@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / build · vet · gofmt · test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Match go.mod's toolchain. setup-go auto-resolves go.mod's `go`
+          # directive when go-version-file is set; pin via go-version-file
+          # so a future bump in go.mod is honored without editing this file.
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - run: go version
+
+      - name: gofmt -l (must print nothing)
+        run: |
+          out=$(gofmt -l cmd internal mcp)
+          if [ -n "$out" ]; then
+            echo "gofmt found unformatted files:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet ./...
+        run: go vet ./...
+
+      - name: go build ./...
+        run: go build ./...
+
+      # The golden embed tests in internal/embed/golden_test.go skip
+      # themselves cleanly when testdata/model/ is absent (it is —
+      # gitignored, downloaded per-machine), so the default `go test ./...`
+      # is the right CI command. The parity test (build tag `parity`) is
+      # opt-in for the same reason and is not run in CI.
+      - name: go test ./...
+        run: go test ./...

@@ -1,0 +1,41 @@
+ken
+Copyright (c) 2026 Francis Townsend-Merino
+
+This product includes the following third-party components when distributed
+with embedded model artifacts:
+
+──────────────────────────────────────────────────────────────────────────────
+potion-code-16M model weights and tokenizer
+──────────────────────────────────────────────────────────────────────────────
+
+Distributed via Hugging Face: https://huggingface.co/minishlab/potion-code-16M
+Copyright (c) 2024 Minish Lab — Thomas van Dongen, Stephan Tulkens
+Licensed under the MIT License.
+
+Files: model.safetensors, tokenizer.json, config.json
+
+──────────────────────────────────────────────────────────────────────────────
+Upstream lineage attribution
+──────────────────────────────────────────────────────────────────────────────
+
+potion-code-16M is a static-embedding distillation of:
+
+    nomic-ai/CodeRankEmbed
+    Copyright (c) Nomic AI
+    Licensed under the MIT License.
+    https://huggingface.co/nomic-ai/CodeRankEmbed
+
+which is itself initialized from:
+
+    Snowflake/snowflake-arctic-embed-m-long
+    Copyright (c) Snowflake Inc.
+    Licensed under the Apache License, Version 2.0.
+    https://huggingface.co/Snowflake/snowflake-arctic-embed-m-long
+
+A copy of the Apache License, Version 2.0, may be obtained at:
+    http://www.apache.org/licenses/LICENSE-2.0
+
+──────────────────────────────────────────────────────────────────────────────
+
+For a generated listing of Go-module dependencies and their licenses, see
+THIRD_PARTY_LICENSES.md (produced by `go-licenses report`).

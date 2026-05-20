@@ -1,0 +1,32 @@
+# Build artifacts
+/ken
+/ken-mcp
+/dist/
+
+# Model artifacts — large, downloaded per-machine, never committed
+testdata/model/
+*.safetensors
+
+# Go
+*.test
+*.out
+/vendor/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Python tooling (pin_inference.py is for regenerating the golden fixture;
+# its venv is reproducible and should not be committed)
+.venv/
+__pycache__/
+*.pyc
+
+# Generated fixture at root — the canonical copy is testdata/golden.json
+/ken_golden.json
+
+# 100k-input tokenizer parity dump (Stage-3 acceptance, regenerated via
+# scripts/parity_dump.py). Tens of MB; never committed.
+testdata/parity.jsonl
