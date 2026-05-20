@@ -36,8 +36,13 @@ func ParseMode(s string) (Mode, error) {
 	case "hybrid":
 		return ModeHybrid, nil
 	}
-	return 0, fmt.Errorf("search: unknown mode %q (want bm25|semantic|hybrid)", s)
+	return 0, fmt.Errorf("search: unknown mode %q (want %v)", s, ModeNames())
 }
+
+// ModeNames returns the CLI strings accepted by ParseMode, in CLI-flag
+// order (bm25, semantic, hybrid). Callers building allowed-value lists
+// for env-var / flag validation should use this rather than hardcoding.
+func ModeNames() []string { return []string{"bm25", "semantic", "hybrid"} }
 
 func (m Mode) needsModel() bool { return m == ModeSemantic || m == ModeHybrid }
 

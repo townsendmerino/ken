@@ -69,8 +69,10 @@ stdin and stdout **are** the JSON-RPC channel. ANY write to stdout outside of th
 - `KEN_MCP_MODE` — `bm25`/`semantic`/`hybrid` (default `hybrid`; auto-downgrades to bm25 with a stderr warning if the model is unreachable).
 - `KEN_MCP_MODEL_DIR` — Model2Vec snapshot dir (must contain `model.safetensors`). Empty ⇒ bm25-only.
 - `KEN_MCP_CHUNKER` — `regex`/`line` (default `regex`).
-- `KEN_MCP_CACHE_SIZE` — LRU bound (default 16).
+- `KEN_MCP_CACHE_SIZE` — LRU bound (default 16); `0` means caching is disabled (re-index on every request).
 - `KEN_MCP_LOG_LEVEL` — `debug`/`info`/`warn`/`error` (default `warn`); all logs go to stderr.
+
+All env vars are validated at startup. Invalid values (typoed enums like `KEN_MCP_MODE=hybryd`, non-integer `KEN_MCP_CACHE_SIZE=of`, `KEN_MCP_MODEL_DIR` pointing at a non-existent path) log a stderr warning and fall back to the documented default — the silent-typo failure mode (where `Atoi("of")` returned 0 and disabled the cache) is gone. Enum match is case-sensitive: `Hybrid` warns and falls back to `hybrid`. Helpers live in `cmd/ken-mcp/env.go` (`envInt` / `envEnum` / `envPath` / `envPathOrURL`).
 
 ### Install snippets (mirror semble's, swap `uvx … semble` for the `ken-mcp` binary)
 

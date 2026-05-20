@@ -27,12 +27,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/townsendmerino/ken/internal/chunk"
 	"github.com/townsendmerino/ken/internal/search"
 	kenmcp "github.com/townsendmerino/ken/mcp"
 )
@@ -92,23 +92,38 @@ func (ll *leveledLogger) logf(at int, format string, args ...any) {
 }
 
 func main() {
+	// Bootstrap the logger at the default warn level so we can warn about
+	// a bad KEN_MCP_LOG_LEVEL itself (chicken-and-egg: we need the logger
+	// to log that the level was invalid). Then bump it once validated.
 	logger := &leveledLogger{
-		level: parseLevel(envOr("KEN_MCP_LOG_LEVEL", "warn")),
+		level: lvlWarn,
 		l:     log.New(os.Stderr, "ken-mcp ", log.LstdFlags|log.Lmicroseconds),
 	}
+	logLevelStr := envEnum("KEN_MCP_LOG_LEVEL", []string{"debug", "info", "warn", "error"}, "warn", logger)
+	logger.level = parseLevel(logLevelStr)
 
-	size, _ := strconv.Atoi(envOr("KEN_MCP_CACHE_SIZE", strconv.Itoa(kenmcp.DefaultCacheSize)))
-	chunker := envOr("KEN_MCP_CHUNKER", "regex")
-	modelDir := envOr("KEN_MCP_MODEL_DIR", "")
-	modeStr := envOr("KEN_MCP_MODE", "hybrid")
-	defaultRepo := envOr("KEN_MCP_DEFAULT_REPO", "")
+	size := envInt("KEN_MCP_CACHE_SIZE", kenmcp.DefaultCacheSize, logger)
+	if size < 0 {
+		logger.logf(lvlWarn, "KEN_MCP_CACHE_SIZE=%d: must be non-negative — using default %d",
+			size, kenmcp.DefaultCacheSize)
+		size = kenmcp.DefaultCacheSize
+	}
+	if size == 0 {
+		logger.logf(lvlInfo, "cache disabled via KEN_MCP_CACHE_SIZE=0")
+	}
 
-	// Resolve the effective mode. If semantic/hybrid is requested but no
-	// model is reachable, downgrade to bm25 with a loud warning rather
-	// than failing every request: lexical-only ken-mcp is still useful.
+	chunker := envEnum("KEN_MCP_CHUNKER", chunk.Names(), "regex", logger)
+	modeStr := envEnum("KEN_MCP_MODE", search.ModeNames(), "hybrid", logger)
+	modelDir := envPath("KEN_MCP_MODEL_DIR", logger)
+	defaultRepo := envPathOrURL("KEN_MCP_DEFAULT_REPO", logger)
+
+	// modeStr is now guaranteed to be one of ModeNames(); ParseMode can
+	// never fail here. Keep the call so a future ParseMode addition
+	// (e.g. a new mode wired into ModeNames before the parser) is caught.
 	mode, err := search.ParseMode(modeStr)
 	if err != nil {
-		logger.logf(lvlError, "bad KEN_MCP_MODE=%q: %v — defaulting to bm25", modeStr, err)
+		logger.logf(lvlError, "internal: KEN_MCP_MODE=%q passed envEnum but failed ParseMode: %v — defaulting to bm25",
+			modeStr, err)
 		mode = search.ModeBM25
 	}
 	if mode != search.ModeBM25 && !modelAvailable(modelDir) {
