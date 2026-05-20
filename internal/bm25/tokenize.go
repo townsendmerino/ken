@@ -6,35 +6,72 @@ package bm25
 
 import (
 	"strings"
-	"unicode"
 )
 
-// Tokenize lowercases and splits text the way code search wants: it breaks
-// on every non-alphanumeric rune, then further splits each run on
-// camelCase, PascalCase, ACRONYMBoundary, and letter/digit transitions.
+// Tokenize is a verbatim port of /tmp/semble/src/semble/tokens.py. It
+// extracts identifier-like ASCII runs matching `[a-zA-Z_][a-zA-Z0-9_]*`
+// (Python `_TOKEN_RE`) from text, then splits each run with snake-or-camel
+// rules. When a run produces ≥2 sub-tokens, it emits the lowercased
+// compound FIRST, then each lowered sub-token; a single-piece run emits
+// just its lower form.
 //
-// When a run splits into more than one piece it ALSO emits the whole run
-// (lowercased, separators already gone) so a query for "camelcase" still
-// matches an identifier written "camelCase" — recall the splitter would
-// otherwise lose.
+// Verbatim parity matters because doc and query both flow through this
+// function, and the snake-case compound is load-bearing: a query for
+// `validate_user` only gets a strong BM25 hit when the doc index also
+// has the rare `validate_user` compound term — otherwise the score
+// splits across two common parts (`validate`, `user`) and BM25 IDF
+// distributes weight thinly. See docs/BENCH.md for the measured impact
+// on semble's NDCG benchmark.
+//
+// Behavior to keep in lock-step with semble:
+//   - Run extraction follows `_TOKEN_RE` exactly: first rune must be
+//     `[a-zA-Z_]` (ASCII letter or underscore — digits and non-ASCII
+//     letters never start a run); continuation may also include digits.
+//     Standalone digit-only runs are therefore dropped, matching Python.
+//   - Sub-tokenization follows `split_identifier`: if `_` is in the run,
+//     split on `_` (drop empties) — no camel recursion inside the parts.
+//     Otherwise camelCase-split via the same `_CAMEL_RE` regex, modeled
+//     by camelSplit below.
+//   - Output order is `[compound, *parts]` (compound first), matching
+//     semble.split_identifier exactly.
 func Tokenize(text string) []string {
 	var out []string
 	var run []rune
+	inRun := false
 	flush := func() {
 		if len(run) == 0 {
 			return
 		}
-		parts := splitIdentifier(run)
-		for _, p := range parts {
-			out = append(out, strings.ToLower(p))
+		compound := strings.ToLower(string(run))
+		var parts []string
+		if containsUnderscore(run) {
+			// snake_case: split on '_' (drop empties), no camel recursion.
+			for _, p := range strings.Split(compound, "_") {
+				if p != "" {
+					parts = append(parts, p)
+				}
+			}
+		} else {
+			parts = camelSplit(run)
 		}
-		if len(parts) > 1 {
-			out = append(out, strings.ToLower(string(run)))
+		if len(parts) >= 2 {
+			out = append(out, compound)
+			out = append(out, parts...)
+		} else {
+			out = append(out, compound)
 		}
 		run = run[:0]
+		inRun = false
 	}
 	for _, r := range text {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		if !inRun {
+			if isIdentStart(r) {
+				run = append(run, r)
+				inRun = true
+			}
+			continue
+		}
+		if isIdentCont(r) {
 			run = append(run, r)
 		} else {
 			flush()
@@ -44,37 +81,91 @@ func Tokenize(text string) []string {
 	return out
 }
 
-// splitIdentifier breaks one alphanumeric run at sub-token boundaries.
-func splitIdentifier(rs []rune) []string {
-	if len(rs) == 0 {
-		return nil
-	}
-	var parts []string
-	start := 0
-	for i := 1; i < len(rs); i++ {
-		if boundary(rs, i) {
-			parts = append(parts, string(rs[start:i]))
-			start = i
-		}
-	}
-	return append(parts, string(rs[start:]))
+// isIdentStart matches Python regex `[a-zA-Z_]` — ASCII only. A digit or
+// any non-ASCII letter cannot start an identifier run.
+func isIdentStart(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_'
 }
 
-// boundary reports whether a sub-token cut belongs between rs[i-1] and rs[i].
-func boundary(rs []rune, i int) bool {
-	p, c := rs[i-1], rs[i]
-	switch {
-	case !unicode.IsUpper(p) && unicode.IsUpper(c):
-		// camelCase / digitToUpper: lower|Upper
-		return true
-	case unicode.IsUpper(p) && unicode.IsUpper(c) && i+1 < len(rs) && unicode.IsLower(rs[i+1]):
-		// ACRONYM|Word: HTTPServer -> HTTP | Server
-		return true
-	case isAlpha(p) && unicode.IsDigit(c), unicode.IsDigit(p) && isAlpha(c):
-		// letter<->digit: utf8 -> utf | 8 ; sha256sum -> sha | 256 | sum
-		return true
+// isIdentCont matches Python regex `[a-zA-Z0-9_]` — ASCII only.
+func isIdentCont(r rune) bool {
+	return isIdentStart(r) || (r >= '0' && r <= '9')
+}
+
+func isUpper(r rune) bool { return r >= 'A' && r <= 'Z' }
+func isLower(r rune) bool { return r >= 'a' && r <= 'z' }
+func isDigit(r rune) bool { return r >= '0' && r <= '9' }
+
+func containsUnderscore(rs []rune) bool {
+	for _, r := range rs {
+		if r == '_' {
+			return true
+		}
 	}
 	return false
 }
 
-func isAlpha(r rune) bool { return unicode.IsLetter(r) }
+// camelSplit implements semble's `_CAMEL_RE` under Python `re.findall` on a
+// run that contains only `[a-zA-Z0-9]` (no underscores). Returns the
+// lowercased sub-tokens in match order.
+//
+//	_CAMEL_RE = r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+"
+//
+// Ordered alternation: at each position try the alternatives left-to-right.
+// Greedy `[A-Z]+(?=[A-Z][a-z])` consumes the largest upper prefix such that
+// the next char is upper AND the one after that is lower — equivalent to:
+// for an upper run rs[i:j], if rs[j] is lowercase and the run has ≥2
+// uppers, consume rs[i:j-1] and let rs[j-1] start the next match. This is
+// what splits "HTTPResponse" into "HTTP" + "Response" and "XMLParser" into
+// "XML" + "Parser".
+func camelSplit(rs []rune) []string {
+	var parts []string
+	n := len(rs)
+	for i := 0; i < n; {
+		r := rs[i]
+		switch {
+		case isUpper(r):
+			j := i
+			for j < n && isUpper(rs[j]) {
+				j++
+			}
+			// Alt 1: [A-Z]+(?=[A-Z][a-z]) — need ≥2 uppers and rs[j] lower.
+			if j-i >= 2 && j < n && isLower(rs[j]) {
+				parts = append(parts, strings.ToLower(string(rs[i:j-1])))
+				i = j - 1
+				continue
+			}
+			// Alt 2: [A-Z]?[a-z]+ — one upper here + lowercase tail.
+			if j < n && isLower(rs[j]) {
+				k := j
+				for k < n && isLower(rs[k]) {
+					k++
+				}
+				parts = append(parts, strings.ToLower(string(rs[i:k])))
+				i = k
+				continue
+			}
+			// Alt 3: [A-Z]+ — pure uppercase (no following lowercase).
+			parts = append(parts, strings.ToLower(string(rs[i:j])))
+			i = j
+		case isLower(r):
+			j := i + 1
+			for j < n && isLower(rs[j]) {
+				j++
+			}
+			parts = append(parts, string(rs[i:j]))
+			i = j
+		case isDigit(r):
+			j := i + 1
+			for j < n && isDigit(rs[j]) {
+				j++
+			}
+			parts = append(parts, string(rs[i:j]))
+			i = j
+		default:
+			// Unreachable: caller filters underscores and non-ASCII.
+			i++
+		}
+	}
+	return parts
+}

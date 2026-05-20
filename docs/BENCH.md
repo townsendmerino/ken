@@ -101,6 +101,14 @@ The three modes triangulate where any gap is coming from:
 
 Don't tune ken's constants to match the benchmark — the constants are ported verbatim from semble's source and any divergence is a port bug to find, not a hyperparameter to twist. The known and documented expected divergence is the regex-vs-tree-sitter chunker mismatch; that gap is a dependency tradeoff (pure-Go, no cgo) called out in `docs/DESIGN.md` §2, not a regression.
 
+## Empirical findings (v0.1.0)
+
+Recorded so future readers don't relitigate the obvious paths:
+
+- **The BM25 tokenizer divergence is not the dominant cause.** Bringing `internal/bm25/tokenize.go` to verbatim parity with semble's `tokens.py` (snake-case compound preservation, ASCII-only run extraction matching `_TOKEN_RE`, compound-first emission order matching `split_identifier`) moved hybrid by **only +0.002** (0.840 → 0.842) and BM25-raw by **only +0.002** (0.622 → 0.624). The per-repo deltas were directionally mixed (e.g. nlohmann-json +0.039, aiohttp −0.018) which is consistent with reshuffling rather than systematic improvement. Conclusion: the tokenizer fix is still the right change (the design contract is verbatim parity), but the residual gap is **chunker-bound**, not tokenizer-bound.
+- **The BM25 TF formula divergence is cosmetic, not load-bearing.** ken's `internal/bm25/query.go` currently uses the ATIRE TF formula `(tf*(k1+1)) / (tf + k1*(1-b+b*l_d/l_avg))` while semble's `bm25s` default is Lucene `tf / (k1*(1-b+b*l_d/l_avg) + tf)`. These differ by a constant `(k1+1) = 2.5` factor at fixed `k1`, which preserves ranking exactly. After RRF rank normalization in hybrid, even absolute scores are discarded. Fixing it would be a one-line cleanup for fidelity but cannot change NDCG.
+- **The chunker is the lever.** With the tokenizer at verbatim parity, the remaining gap distributes per-language as expected for a chunker mismatch: Python (which our regex chunker handles best) at +0.003 vs semble, while go/rust/zig sit at ~−0.05. The path forward is the WASM tree-sitter chunker (Option A per `docs/DESIGN.md` §2 — wazero + tree-sitter WASM grammars), not further tuning of BM25 or the rerank pipeline.
+
 ## Files
 
 - `bench/semble/run_ken.py` — the Python adapter (this file's main consumer).

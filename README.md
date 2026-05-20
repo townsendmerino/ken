@@ -169,7 +169,7 @@ The retrieval algorithm is a verbatim port of semble's `search.py` + `ranking/*.
 | Index `/tmp/semble` checkout (hybrid w/ model) | (not measured locally) | **1.80 s** (measured) |
 | Index this repo (BM25 only) | (not measured locally) | **0.06 s** (measured) |
 | Retrieval algorithm | reference implementation | verbatim port (constants and pipeline order ported from `search.py` + `ranking/*.py`) |
-| NDCG@10 on semble's benchmark | 0.854 ([semble README](https://github.com/MinishLab/semble#benchmarks)) | **0.840 hybrid** (gap 0.014, full corpus 63 repos × 1251 queries)† |
+| NDCG@10 on semble's benchmark | 0.854 ([semble README](https://github.com/MinishLab/semble#benchmarks)) | **0.842 hybrid** (gap 0.012, full corpus 63 repos × 1251 queries)† |
 | MCP server | yes | yes — drop-in compatible (same tool schemas, same wire format) |
 | Binary size | n/a (Python env) | `ken` 3.9 MB · `ken-mcp` 16 MB |
 | Requires `huggingface-cli` for model | yes | yes (or skip and use `--mode bm25`) |
@@ -179,10 +179,10 @@ The retrieval algorithm is a verbatim port of semble's `search.py` + `ranking/*.
 > | Mode | semble (raw) | ken | Δ |
 > |---|---:|---:|---:|
 > | Semantic only (potion-code-16M) | 0.650 | **0.647** | −0.003 |
-> | BM25 only | 0.675 | 0.622 | −0.053 |
-> | **Hybrid (full ranker)** | **0.854** | **0.840** | **−0.014** |
+> | BM25 only | 0.675 | 0.624 | −0.051 |
+> | **Hybrid (full ranker)** | **0.854** | **0.842** | **−0.012** |
 >
-> The semantic-raw match within 0.003 isolates and validates the embedding + tokenizer + ANN port. The remaining ~0.014 hybrid gap is concentrated in languages where ken's regex chunker draws different boundaries than semble's tree-sitter chunker (via Chonkie) — Python tracks semble exactly (+0.002); go/rust/zig/cpp are −0.03 to −0.05. The chunker dependency tradeoff is called out as expected divergence in [`docs/DESIGN.md` §2](docs/DESIGN.md#2-chunker); closing it is the trigger for the WASM tree-sitter chunker on the roadmap. See [docs/DESIGN.md §10](docs/DESIGN.md#10-risk-register).
+> The semantic-raw match within 0.003 isolates and validates the embedding + tokenizer + ANN port. The BM25 tokenizer was also re-aligned to a verbatim port of semble's `tokens.py` (snake-case compound preservation, ASCII-only identifier extraction, compound-first emission order) — that fix moved both BM25-raw and hybrid by +0.002, confirming the residual gap is chunker-driven rather than tokenizer-driven. ken's regex chunker draws different boundaries than semble's tree-sitter chunker (via Chonkie): Python tracks semble exactly (+0.003); go/rust/zig/cpp are −0.03 to −0.05. The chunker dependency tradeoff is called out as expected divergence in [`docs/DESIGN.md` §2](docs/DESIGN.md#2-chunker); closing it is the trigger for the WASM tree-sitter chunker on the roadmap. See [docs/DESIGN.md §10](docs/DESIGN.md#10-risk-register).
 
 semble timings cited above are from semble's own [README "Benchmarks" section](https://github.com/MinishLab/semble#benchmarks); ken's are measured on the included `testdata/repo` polyglot fixture and on a sibling shallow clone of `/tmp/semble`. Cold-start was timed by `/usr/bin/time -p ken search testdata/repo "validate" -k 1 --mode bm25` over three trials (M2 MacBook Air, Go 1.26.3, darwin/amd64 build under Rosetta).
 
