@@ -48,16 +48,27 @@ go test -tags=parity ./internal/embed/ -run TestParity -v
 A local snapshot of `minishlab/potion-code-16M` for tests that exercise
 the full inference pipeline (the golden cosine assertion, and the parity
 harness). Tests using it `t.Skip()` when it's absent — CI without HF
-access stays green:
+access stays green.
+
+ken's CLI resolves a model dir via the priority order `--model` →
+`$KEN_MODEL_DIR` → `~/.ken/model` → `./testdata/model`, so repo
+developers have two equally-supported options:
+
+- **Follow the public convention** (preferred — same as end users):
+  ```bash
+  ken download-model            # → ~/.ken/model
+  ```
+- **Repo-local override** (useful when iterating on the model code):
+  ```bash
+  ken download-model --to testdata/model
+  ```
+
+The HF tooling still works if you prefer it:
 
 ```bash
-# Pure-Go fetch via ken's own downloader (no Python toolchain needed):
-ken download-model --to testdata/model
-
-# Or, if you prefer the HF tooling:
 huggingface-cli download minishlab/potion-code-16M \
     tokenizer.json config.json model.safetensors \
-    --local-dir testdata/model
+    --local-dir testdata/model     # or ~/.ken/model
 ```
 
 ## `repo/`

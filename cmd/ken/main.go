@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -24,8 +25,56 @@ import (
 const (
 	defaultChunker = "regex"
 	defaultMode    = "hybrid" // docs/DESIGN.md Stage 4: hybrid is the default
-	defaultModel   = "testdata/model"
 )
+
+// resolveModelDir returns the directory ken will look for a Model2Vec
+// snapshot in. Priority order, first wins:
+//
+//  1. flagValue — whatever --model was set to; empty means not passed.
+//  2. $KEN_MODEL_DIR — environment override.
+//  3. $HOME/.ken/model — the canonical end-user location, if it exists.
+//  4. ./testdata/model — repo-developer fallback, if it exists.
+//
+// (1) and (2) are returned unconditionally: a user who explicitly set
+// either of those wants errors against that exact path, not a silent
+// fallback to a different one. (3) and (4) require the candidate
+// directory to actually contain model.safetensors before they're
+// chosen; otherwise we fall through to the next.
+//
+// If none of the candidates exist, we return the canonical end-user
+// path so the "not found" error from search.FromPath points users at
+// the right `ken download-model --to <path>` command.
+func resolveModelDir(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if env := os.Getenv("KEN_MODEL_DIR"); env != "" {
+		return env
+	}
+	var homeCandidate string
+	if home, err := os.UserHomeDir(); err == nil {
+		homeCandidate = filepath.Join(home, ".ken", "model")
+		if fileExists(filepath.Join(homeCandidate, "model.safetensors")) {
+			return homeCandidate
+		}
+	}
+	repoCandidate := filepath.Join("testdata", "model")
+	if fileExists(filepath.Join(repoCandidate, "model.safetensors")) {
+		return repoCandidate
+	}
+	// None exist; point at the canonical end-user path for the
+	// not-found error. Only fall back to testdata/model when $HOME
+	// is unset (CI without HOME, exotic environments).
+	if homeCandidate != "" {
+		return homeCandidate
+	}
+	return repoCandidate
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
 
 func usage() {
 	fmt.Fprint(os.Stderr, `ken — code search
@@ -64,7 +113,10 @@ func commonFlags(args []string) (rest []string, chunker, mode, model string, err
 	if rest, mode, err = extractFlag(rest, "mode", defaultMode); err != nil {
 		return
 	}
-	rest, model, err = extractFlag(rest, "model", defaultModel)
+	rest, model, err = extractFlag(rest, "model", "")
+	if err == nil {
+		model = resolveModelDir(model)
+	}
 	return
 }
 
@@ -311,7 +363,8 @@ func stripBoolFlag(args []string, name string) ([]string, bool) {
 // CLI's flag-acceptance surface is uniform across subcommands and
 // future test helpers can pin parsing behavior. See cmdSearch.
 func parseSearchArgs(args []string) (searchArgs, error) {
-	sa := searchArgs{k: 10, chunker: defaultChunker, mode: defaultMode, model: defaultModel}
+	// model: "" means "let resolveModelDir pick" once commonFlags resolves.
+	sa := searchArgs{k: 10, chunker: defaultChunker, mode: defaultMode, model: ""}
 	args, sa.jsonOut = stripBoolFlag(args, "json")
 	// Consume --watch / --no-watch defensively; we don't surface the
 	// value because ken search is one-shot, but accepting the flag

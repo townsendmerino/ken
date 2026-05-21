@@ -24,6 +24,18 @@ with pre-built binaries.
 
 ### Changed
 
+- **Model directory resolution.** The CLI now searches a priority list
+  for the Model2Vec snapshot — `--model <DIR>` → `$KEN_MODEL_DIR` →
+  `~/.ken/model` (canonical end-user location) → `./testdata/model`
+  (repo-developer fallback) — instead of defaulting to a single
+  repo-relative `testdata/model` path. A user who `go install`ed ken
+  and ran `ken download-model` now gets working hybrid/semantic search
+  out of the box; repo developers can either follow the same public
+  convention or pass `--model testdata/model` for local-only iteration.
+  The "model not found" error continues to point at whichever path
+  was tried and includes the exact `ken download-model --to <path>`
+  command to resolve it.
+
 - **Tombstone compaction.** Watched indexes now drop tombstoned chunks
   during every debounced snapshot rebuild instead of accumulating
   them. Memory plateaus at live-chunk working-set size; multi-day

@@ -35,7 +35,7 @@ go run ./cmd/ken search <path> <query>...  [-k N] [--chunker=...] [--mode=...] [
 go run ./cmd/ken-mcp                               # stdio MCP server (env-configured; see MCP section)
 ```
 
-Default mode is **hybrid** (Stage 4). hybrid/semantic need `--model <dir-with-model.safetensors>` (default `testdata/model`); without it the CLI errors clearly. `ken-mcp` instead **downgrades to bm25 with a stderr warning** if the model dir is missing — first-launch usability for agents.
+Default mode is **hybrid** (Stage 4). hybrid/semantic need a model directory; the CLI resolves one in priority order: `--model <DIR>` → `$KEN_MODEL_DIR` → `~/.ken/model` (canonical end-user location) → `./testdata/model` (repo-developer fallback). Run `ken download-model` to populate `~/.ken/model` without Python tooling. If none of those resolve, the loader errors clearly with the suggested fix. `ken-mcp` instead **downgrades to bm25 with a stderr warning** if the model dir is missing — first-launch usability for agents.
 
 As of v0.3, **`ken index <path>` defaults to `--watch`** — the process stays alive and re-publishes the index 2 s after any file change (fsnotify + atomic snapshot swap, ADR-012). `--no-watch` is the v0.2-compatible build-once-and-exit opt-out for batch / CI / huge-corpus scenarios. `ken-mcp` **always watches**; no env var to disable it in v0.3.
 
