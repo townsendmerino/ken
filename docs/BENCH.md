@@ -19,9 +19,10 @@ The harness re-uses semble's annotations, semble's metric (`benchmarks.metrics.n
 - **A semble checkout** with its `benchmarks/` directory. `git clone https://github.com/MinishLab/semble /tmp/semble` is the path the scripts assume; pass `--semble-checkout PATH` (or set `SEMBLE_CHECKOUT`) to override.
 - **The model**, for semantic and hybrid modes: a `minishlab/potion-code-16M` snapshot at `~/.ken/model` (or pass `--model PATH`):
   ```bash
-  huggingface-cli download minishlab/potion-code-16M \
-      tokenizer.json config.json model.safetensors \
-      --local-dir ~/.ken/model
+  ken download-model                # pure-Go fetch, no Python required
+  # Equivalent fallback if you prefer the HF tooling:
+  # huggingface-cli download minishlab/potion-code-16M \
+  #     tokenizer.json config.json model.safetensors --local-dir ~/.ken/model
   ```
 - **`ken` on `$PATH`** (or pass `--ken /path/to/ken`):
   ```bash

@@ -10,6 +10,18 @@ with pre-built binaries.
 
 ## [Unreleased]
 
+### Added
+
+- **`ken download-model`** — pure-Go fetch of the three Model2Vec files
+  (`model.safetensors`, `tokenizer.json`, `config.json`) directly from
+  HuggingFace's CDN. Closes the gap between ken's "single static binary"
+  claim and the previous Quickstart's `huggingface-cli` dependency.
+  Defaults to `minishlab/potion-code-16M` into `~/.ken/model`; pass
+  `--model ORG/NAME` / `--to DIR` to override; `--force` re-downloads
+  files already on disk. Public models only — gated/private models
+  still need `huggingface-cli`. Atomic-rename writes so a cancelled
+  download leaves no partial files.
+
 ### Changed
 
 - **Tombstone compaction.** Watched indexes now drop tombstoned chunks

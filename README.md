@@ -19,9 +19,8 @@ go install github.com/townsendmerino/ken/cmd/ken@latest
 go install github.com/townsendmerino/ken/cmd/ken-mcp@latest
 
 # Download the default Model2Vec model (~64 MB, one-time).
-huggingface-cli download minishlab/potion-code-16M \
-    tokenizer.json config.json model.safetensors \
-    --local-dir ~/.ken/model
+# Pure Go, no Python tooling required.
+ken download-model
 
 # Search any local repo from the CLI.
 ken search /path/to/myrepo "save model to disk" --model ~/.ken/model
@@ -234,7 +233,7 @@ The full per-language NDCG breakdown plus the empirical findings that informed t
 | Median tokens to recall@10 on agent queries | (not measured; semble doesn't run this bench) | **4,269 tok @ 82% recall** on semble NL queries — vs grep+Read's 189,591 tok @ 99.9% (44× cheaper at 17 pp lower recall)††† |
 | MCP server | yes | yes — drop-in compatible (same tool schemas, same wire format) |
 | Binary size | n/a (Python env) | `ken` 3.9 MB · `ken-mcp` 16 MB |
-| Requires `huggingface-cli` for model | yes | yes (or skip and use `--mode bm25`) |
+| Requires `huggingface-cli` for model | yes | **no** — `ken download-model` fetches direct from HF (or skip and use `--mode bm25`) |
 
 † **Measured at v0.1.0 / v0.2.0 against semble's published benchmark** (63 repos, 1251 queries, semble's own `benchmarks.metrics.ndcg_at_k` + `target_rank`). Reproduce: see [`docs/BENCH.md`](docs/BENCH.md). Ablation breakdown vs semble's published raw retrieval numbers:
 >

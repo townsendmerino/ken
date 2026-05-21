@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/townsendmerino/ken/internal/modelfetch"
 	"github.com/townsendmerino/ken/internal/search"
 )
 
@@ -30,9 +31,10 @@ func usage() {
 	fmt.Fprint(os.Stderr, `ken — code search
 
 usage:
-  ken index  <path>           [--watch|--no-watch] [--chunker regex|treesitter|line] [--mode bm25|semantic|hybrid] [--model DIR]
-  ken search <path> <query>...  [-k N] [--json] [--chunker ...] [--mode ...] [--model DIR]
-  ken bench  <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR]
+  ken index           <path>           [--watch|--no-watch] [--chunker regex|treesitter|line] [--mode bm25|semantic|hybrid] [--model DIR]
+  ken search          <path> <query>...  [-k N] [--json] [--chunker ...] [--mode ...] [--model DIR]
+  ken bench           <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR]
+  ken download-model                     [--model ORG/NAME] [--to DIR] [--force]
 
 ken index --watch (default in v0.3+) keeps the process alive and re-indexes
 files on change; --no-watch is the v0.2 behavior (build once, print, exit).
@@ -43,6 +45,11 @@ ken bench reads queries from stdin (one per line; lines starting with '#'
 ignored) and emits one JSON record per query to stdout against a single
 in-process index. Designed for the semble benchmark harness; see
 docs/BENCH.md.
+
+ken download-model fetches the three files Model2Vec needs (model.safetensors,
+tokenizer.json, config.json) directly from HuggingFace into ~/.ken/model by
+default. No Python tooling required. Public models only; gated/private models
+still need huggingface-cli.
 
 semantic/hybrid modes need a Model2Vec model dir (default ./testdata/model);
 bm25 mode needs no model.
@@ -119,10 +126,60 @@ func main() {
 		os.Exit(cmdSearch(os.Args[2:]))
 	case "bench":
 		os.Exit(cmdBench(os.Args[2:]))
+	case "download-model":
+		os.Exit(cmdDownloadModel(os.Args[2:]))
 	default:
 		usage()
 		os.Exit(2)
 	}
+}
+
+// cmdDownloadModel fetches the Model2Vec snapshot into a local directory
+// without going through huggingface-cli. Defaults match what the rest
+// of ken's tooling expects: minishlab/potion-code-16M into ~/.ken/model.
+// Honors Ctrl-C via a SIGINT-aware context so a half-downloaded
+// safetensors file gets cleaned up by the atomic-rename contract in
+// internal/modelfetch.
+func cmdDownloadModel(args []string) int {
+	args, model, err := extractFlag(args, "model", modelfetch.DefaultModel)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+		return 2
+	}
+	defaultDest, derr := modelfetch.DefaultDest()
+	if derr != nil {
+		// $HOME unset (CI without HOME or similar). Force the user to
+		// pass --to explicitly rather than picking a surprising default.
+		defaultDest = ""
+	}
+	args, dest, err := extractFlag(args, "to", defaultDest)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+		return 2
+	}
+	if dest == "" {
+		fmt.Fprintln(os.Stderr, "ken: --to is required when $HOME is unset")
+		return 2
+	}
+	args, force := stripBoolFlag(args, "force")
+	if len(args) != 0 {
+		fmt.Fprintf(os.Stderr, "ken: unexpected positional arg(s): %v\n", args)
+		usage()
+		return 2
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if _, err := modelfetch.Fetch(ctx, modelfetch.Options{
+		Model: model,
+		Dest:  dest,
+		Force: force,
+	}); err != nil {
+		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+		return 1
+	}
+	return 0
 }
 
 func cmdIndex(args []string) int {
