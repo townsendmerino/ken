@@ -348,3 +348,13 @@ File changes are detected via `github.com/fsnotify/fsnotify` (pure Go, no cgo, O
 - **`Chunk.Tombstoned` field added.** Every read path (Search / FindRelated / ResolveChunk) checks it. Over-fetch by the current tombstone count keeps result lists stable as tombstone density grows.
 - **`ken index --watch` and `--no-watch` flags.** `--watch` (default) keeps the process alive watching; `--no-watch` restores v0.2 behavior (build once, print, exit). `ken search` and `ken bench` accept the flags but the values are no-ops since the processes are one-shot.
 - **fsnotify dep.** Pure Go, MIT, ~14KB compiled, well-maintained (Kubernetes / Hugo / VS Code use it). Backends: inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows. v0.3 ships at v1.10.1.
+
+### Empirical confirmation
+
+**2 s debounce — confirmed correct at v0.3.** The locked decision picked 2 s as "above editor save-on-keystroke timescales (VS Code, vim temp-file rename) but small enough that an agent doesn't notice it." Both halves landed empirically:
+
+- *Editor noise absorbed.* Bulk writes from vim's atomic-rename save flow and VS Code's save-on-keystroke (250 ms typing-pause heuristic) both collapse into a single debounce-flush. `TestWatchedIndex_Debounce_BatchedWrites` pins this at the synthetic level (5 writes in 500 ms → 1 publish); manual `ken index --watch` sessions on real editors confirm in practice.
+- *Below agent think-time.* Claude Code's typical edit-then-query cadence has hundreds of milliseconds of model + tool-call latency between any two edits an agent makes, so 2 s consistently lands before the next query that would observe the previous edit. No user-visible debounce delay in interactive use.
+- *Memory growth bounded by edit rate.* In a 100-edit synthetic burst on `testdata/repo`, RSS grew by ~884 KB (≈9 KB/edit-batch, dominated by tombstone accumulation and BM25 postings rebuild). Within v0.3's tolerance; compaction trigger is a multi-day session — not a per-edit concern.
+
+**OnFlush feedback hook added late v0.3.** Initial v0.3 had no per-flush user-visible signal — fine for ken-mcp (agents query whenever and get fresh results) but a gap for interactive `ken index --watch` users who couldn't tell whether the watcher was alive. Added `WatchedIndex.SetOnFlush(func(msg string))` so callers wire stderr / leveled-logger output without `internal/search` knowing about either. CLI logs each flush at one line; ken-mcp routes it at info-level so warn-default runs stay quiet.

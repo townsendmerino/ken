@@ -80,6 +80,14 @@ type WatchedIndex struct {
 	onSwapMu sync.Mutex
 	onSwap   chan<- struct{}
 
+	// Caller-facing hook: invoked once per published snapshot with a
+	// one-line human-readable message. Used by `ken index --watch` to
+	// give interactive users feedback that the watcher is alive, and
+	// by ken-mcp at info-level to log reindex activity. nil disables.
+	// Set via SetOnFlush.
+	onFlushMu sync.Mutex
+	onFlush   func(msg string)
+
 	// Debounce delay; overridable for tests. Defaults to WatchDebounce.
 	debounce time.Duration
 }
@@ -180,6 +188,18 @@ func (w *WatchedIndex) SetOnSwap(ch chan<- struct{}) {
 	w.onSwapMu.Lock()
 	defer w.onSwapMu.Unlock()
 	w.onSwap = ch
+}
+
+// SetOnFlush installs a callback invoked once per snapshot publish
+// with a one-line summary like "reindexed: 1234 chunks total,
+// 3 files changed in 47 ms". `ken index --watch` uses this to give
+// interactive users feedback that the watcher is alive; ken-mcp uses
+// it at info-level so reindex activity shows up in --log-level=info
+// runs. Pass nil to disable. Safe to call at any time.
+func (w *WatchedIndex) SetOnFlush(f func(msg string)) {
+	w.onFlushMu.Lock()
+	defer w.onFlushMu.Unlock()
+	w.onFlush = f
 }
 
 // Close stops the watcher, cancels in-flight work, and waits for the
@@ -294,6 +314,7 @@ func (w *WatchedIndex) loop() {
 // flush rebuilds the snapshot from the current corpus state plus the
 // batched dirty events. Called from the debouncer goroutine only.
 func (w *WatchedIndex) flush(batch map[string]fsnotify.Op) {
+	start := time.Now()
 	w.corpusMu.Lock()
 	defer w.corpusMu.Unlock()
 
@@ -311,6 +332,55 @@ func (w *WatchedIndex) flush(batch map[string]fsnotify.Op) {
 	newIx := BuildIndex(w.chunks, w.vecs, w.mode, w.model)
 	w.ix.Store(newIx)
 	w.notifySwap()
+	w.notifyFlush(len(w.chunks), len(batch), time.Since(start))
+}
+
+// notifyFlush calls the OnFlush callback (if set) with a one-line
+// summary of the just-published snapshot. Format is stable enough for
+// users to grep but not part of any public contract.
+func (w *WatchedIndex) notifyFlush(totalChunks, filesChanged int, dur time.Duration) {
+	w.onFlushMu.Lock()
+	f := w.onFlush
+	w.onFlushMu.Unlock()
+	if f == nil {
+		return
+	}
+	f(formatFlush(totalChunks, filesChanged, dur))
+}
+
+// formatFlush builds the OnFlush message. Pulled out for testability.
+// Duration is always emitted as integer milliseconds — a sub-ms rebuild
+// shows as "0 ms" rather than "0s" (time.Duration.String collapses
+// fractions, which makes the message inconsistent across small repos).
+func formatFlush(totalChunks, filesChanged int, dur time.Duration) string {
+	return "reindexed: " +
+		intStr(totalChunks) + " chunks total, " +
+		intStr(filesChanged) + " files changed in " +
+		intStr(int(dur.Milliseconds())) + " ms"
+}
+
+// intStr is a tiny strconv helper to keep the formatFlush call site
+// readable. Avoids importing strconv just for one call.
+func intStr(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var digits [20]byte
+	i := len(digits)
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	for n > 0 {
+		i--
+		digits[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		digits[i] = '-'
+	}
+	return string(digits[i:])
 }
 
 // tombstoneFile marks every existing chunk whose File == rel as

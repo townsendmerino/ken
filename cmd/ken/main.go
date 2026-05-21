@@ -168,6 +168,14 @@ func cmdIndex(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1
 	}
+	// Per-flush stderr log: gives the interactive user feedback each
+	// time the watcher rebuilds, so they don't have to wonder whether
+	// their edits are landing. Single line per debounce flush; safe to
+	// stderr because the CLI does not multiplex stdout/stderr for
+	// protocol use the way ken-mcp does.
+	wix.SetOnFlush(func(msg string) {
+		fmt.Fprintln(os.Stderr, "ken: "+msg)
+	})
 	fmt.Fprintf(os.Stderr, "ken: indexed %d chunks from %s (chunker=%s mode=%s); watching for changes — ^C to stop\n",
 		wix.Len(), rest[0], chunker, modeStr)
 

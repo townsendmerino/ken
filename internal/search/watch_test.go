@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -288,6 +289,53 @@ func TestWatchedIndex_Close_StopsWatcher(t *testing.T) {
 	// what we care about, and that's far less than the slack.
 	if after > before+2 {
 		t.Errorf("goroutine leak: before=%d, after=%d (slack 2)", before, after)
+	}
+}
+
+// TestWatchedIndex_OnFlush_DeliversMessage — SetOnFlush installs a
+// callback that fires once per debounce flush with a non-empty
+// "reindexed: ..." string. The CLI's `ken index --watch` interactive
+// log and ken-mcp's info-level diagnostic both depend on this.
+func TestWatchedIndex_OnFlush_DeliversMessage(t *testing.T) {
+	root := makeTempRepo(t, map[string]string{
+		"a.py": "def alpha():\n    return 1\n",
+	})
+	wi := withShortDebounce(t, root, true)
+
+	swaps := make(chan struct{}, 4)
+	wi.SetOnSwap(swaps)
+
+	var mu sync.Mutex
+	var msgs []string
+	wi.SetOnFlush(func(msg string) {
+		mu.Lock()
+		defer mu.Unlock()
+		msgs = append(msgs, msg)
+	})
+
+	drainSwaps(swaps)
+
+	if err := os.WriteFile(filepath.Join(root, "beta.py"), []byte("def beta(): pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForSwap(t, swaps, 5*time.Second) {
+		t.Fatal("no swap after file write")
+	}
+	// Give the goroutine a beat to call the callback after the swap.
+	time.Sleep(20 * time.Millisecond)
+
+	mu.Lock()
+	got := append([]string(nil), msgs...)
+	mu.Unlock()
+
+	if len(got) == 0 {
+		t.Fatal("OnFlush never fired after a file write")
+	}
+	last := got[len(got)-1]
+	for _, want := range []string{"reindexed:", "chunks total", "files changed", "ms"} {
+		if !strings.Contains(last, want) {
+			t.Errorf("flush message %q missing %q", last, want)
+		}
 	}
 }
 

@@ -168,6 +168,13 @@ func main() {
 			}
 			return nil, nil, err
 		}
+		// Log reindex activity at info-level so warn-default runs stay
+		// quiet but `KEN_MCP_LOG_LEVEL=info` shows agents the file
+		// watcher is doing its job. Stays on stderr (never stdout, the
+		// MCP JSON-RPC channel).
+		ix.SetOnFlush(func(msg string) {
+			logger.logf(lvlInfo, "%s: %s", dir, msg)
+		})
 		logger.logf(lvlInfo, "indexed %s (%d chunks, watching)", dir, ix.Len())
 		return ix, cleanup, nil
 	}
