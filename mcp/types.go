@@ -43,11 +43,15 @@ type FindRelatedArgs struct {
 	TopK     int    `json:"top_k,omitempty" jsonschema:"Number of similar chunks to return."`
 }
 
-// formatResults mirrors semble utils._format_results: a header, then each
+// FormatResults mirrors semble utils._format_results: a header, then each
 // result as a numbered, fenced code block with score=X.XXX. Returning a
 // preformatted string keeps wire compatibility with semble — agents see
 // the same text they're already trained against in semble-using prompts.
-func formatResults(header string, results []search.Result) string {
+//
+// Exported because bench/tokens/ measures token budgets against this
+// exact wire format (not the in-memory chunk text), so it has to call
+// the same formatter ken-mcp emits over the JSON-RPC channel.
+func FormatResults(header string, results []search.Result) string {
 	var b strings.Builder
 	b.WriteString(header)
 	b.WriteString("\n\n")

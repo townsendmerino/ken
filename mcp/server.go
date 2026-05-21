@@ -114,7 +114,7 @@ func handleSearch(ctx context.Context, cfg *Config, args SearchArgs) (*sdk.CallT
 		return textResult("No results found."), nil, nil
 	}
 	header := fmt.Sprintf("Search results for: %q (mode=%s)", args.Query, modeStr)
-	return textResult(formatResults(header, results)), nil, nil
+	return textResult(FormatResults(header, results)), nil, nil
 }
 
 func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
@@ -147,5 +147,5 @@ func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (
 		return textResult(fmt.Sprintf("No related chunks found for %s:%d.", args.FilePath, args.Line)), nil, nil
 	}
 	header := fmt.Sprintf("Chunks related to %s:%d", args.FilePath, args.Line)
-	return textResult(formatResults(header, results)), nil, nil
+	return textResult(FormatResults(header, results)), nil, nil
 }

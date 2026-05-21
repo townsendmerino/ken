@@ -170,6 +170,77 @@ KEN_CHUNKER_TREESITTER=1 KEN_COIR_QUERY_LIMIT=1000 go test -tags=bench ./bench/n
 | #2: hybrid > bm25 + 0.05 | +0.05 | −0.0904 | ❌ **fails** (informative, not a bug) |
 | #3: hybrid absolute | report | 0.7839 | ✅ |
 
+## Token-budget recall — agent-side efficiency
+
+### Why this exists
+
+The NDCG sections above measure **retrieval quality**: did the system rank the right chunk at the right position? This section measures something different and complementary: **agent-input cost at fixed recall**. An agent that takes 200,000 tokens to find the same answer ken finds in 4,000 tokens is paying for those tokens whether or not the ranking was technically "correct." The CLAUDE.md routing advice ken-mcp emits ("prefer ken for code-related questions over grep") makes an implicit claim about token efficiency vs the grep+Read fallback; this section quantifies that.
+
+### Methodology
+
+For each (query, qrel) pair in two bench corpora:
+
+- **ken side:** build the index once per repo, call `Search(query, K)` at K ∈ {1, 3, 5, 10}, format the top-K via `mcp.FormatResults` (the exact wire format ken-mcp emits over MCP, so we're counting what an agent actually sees), count cl100k_base BPE tokens on that string. Recall@K is true iff any returned chunk's file matches the qrel target (suffix-aware path matching, mirroring semble's [`benchmarks/data.py:path_matches`](https://github.com/MinishLab/semble/blob/main/benchmarks/data.py)).
+- **grep baseline:** identifier-tokenize the query (same tokenizer ken's BM25 uses, so the comparison is "an agent who knows how to grep code well" vs ken — not a strawman regex-on-NL grep), take the union of corpus files containing any token, sum cl100k_base tokens per file capped at 20,000 per file (an agent Reading a 50 MB minified blob isn't realistic). For symbol queries we also report a literal-grep variant — the realistic best case for identifier lookups.
+- Token counting via [`pkoukk/tiktoken-go`](https://github.com/pkoukk/tiktoken-go) (pure-Go, MIT, behind `//go:build bench` so it never enters the released binaries — verify via `go list -deps ./cmd/ken ./cmd/ken-mcp | grep -E 'tiktoken|regexp2|uuid'` returning empty). cl100k_base is GPT-4's encoder used as a universal proxy; Anthropic doesn't publish a local Claude tokenizer, and Claude tokens typically differ ~10–20% — see Caveats.
+
+### Results
+
+#### semble bench (63 repos, 1072 queries — 158 symbol, 914 NL)
+
+| Class  | K  | ken med tokens | ken recall@K | grep med tokens | grep recall | grep variant |
+|--------|----|---------------:|-------------:|----------------:|------------:|:-------------|
+| symbol |  1 |            356 |        0.468 |          56,752 |       0.994 | literal      |
+| symbol |  3 |          1,049 |        0.677 |          56,752 |       0.994 | literal      |
+| symbol |  5 |          1,766 |        0.772 |          56,752 |       0.994 | literal      |
+| symbol | 10 |          3,478 |        0.867 |          56,752 |       0.994 | literal      |
+| nl     |  1 |            431 |        0.418 |         189,591 |       0.999 | tokenized    |
+| nl     |  3 |          1,285 |        0.629 |         189,591 |       0.999 | tokenized    |
+| nl     |  5 |          2,145 |        0.730 |         189,591 |       0.999 | tokenized    |
+| nl     | 10 |          4,269 |        0.822 |         189,591 |       0.999 | tokenized    |
+
+#### CoIR-CSN-Python (280k-file corpus, 200-query subsample, NL-only)
+
+| Class | K  | ken med tokens | ken recall@K | grep med tokens | grep recall | grep variant |
+|-------|----|---------------:|-------------:|----------------:|------------:|:-------------|
+| nl    |  1 |            220 |        0.795 |      16,055,428 |       1.000 | tokenized    |
+| nl    |  3 |            454 |        0.875 |      16,055,428 |       1.000 | tokenized    |
+| nl    |  5 |            695 |        0.895 |      16,055,428 |       1.000 | tokenized    |
+| nl    | 10 |          1,296 |        0.915 |      16,055,428 |       1.000 | tokenized    |
+
+(CoIR's queries are docstrings, all classified as NL; no symbol-class column.)
+
+### Headline finding
+
+On semble's diverse-query benchmark, **at K=10 ken catches 82% of NL queries' qrel target in 4,269 median tokens; tokenized grep+Read catches 99.9% but in 189,591 tokens — for the 82% of queries ken covers, agents pay ~44× fewer tokens going through ken than running grep+Read.** Symbol queries are a closer fight (16× cheaper at 87%/99% recall) because literal grep on a unique identifier is already pretty efficient.
+
+The CoIR-CSN-Python numbers amplify the same pattern at corpus scale: on a 280K-file repo, any NL query's tokens match thousands of files; grep+Read sums to **16M tokens** (well past any agent context window) for 100% recall, while ken finds the target chunk in 1,296 tokens at 91% recall — a >10,000× token reduction for a 9 percentage-point recall trade.
+
+Important nuance: **grep wins on recall completeness**. If an agent's task absolutely must enumerate every match (pre-rename audits, exhaustive refactors), grep+Read is the right tool — that's exactly what ken-mcp's CLAUDE.md routing advice says. If the task is "find me the chunk that answers this" — which is most of what code-search-using agents do — ken's recall ceiling around 82–91% covers the typical case at 1-2 orders of magnitude lower token cost.
+
+### Reproduce
+
+```bash
+# semble bench (~45 seconds, needs /tmp/semble + ~/.cache/semble-bench):
+go test -tags=bench ./bench/tokens/ -run TestTokens_Semble -v -timeout 30m
+
+# CoIR-CSN-Python bench (~14 min, needs scripts/bench_coir.py output):
+KEN_COIR_QUERY_LIMIT=200 go test -tags=bench ./bench/tokens/ -run TestTokens_CoIR -v -timeout 60m
+
+# Render the markdown tables from results JSON:
+python scripts/plot_token_budget.py
+```
+
+The bench writes `bench/tokens/results/{semble,coir}-tokens.json` — gitignored, regenerate at will.
+
+### Caveats
+
+- **cl100k_base is a proxy for Claude tokens.** Anthropic doesn't publish a local tokenizer. Empirically Claude's tokens run ~10–20% different from cl100k_base on prose; for code-heavy chunks the divergence may be larger. For *ratios* between ken and grep on the same query the choice of encoder doesn't matter much; absolute numbers are advisory not authoritative.
+- **Recall@K is the fixed-bar evaluation.** An agent might still wring value from a chunk surfaced at K=10 even when the "correct" answer was at K=1; this benchmark doesn't capture downstream agent behavior. The agent-loop measurement (run an actual model against ken vs grep, see who answers the user's question with fewer tokens) is a separate tier-2 follow-up.
+- **grep baseline assumes "Read whole matched files."** An agent with a smarter heuristic (`grep -C 5` for context windows, or `head -N` for sampling) would burn fewer tokens. The deliberate choice here is the realistic agent-fallback path, not the theoretical optimum.
+- **CoIR-CSN-Python warning.** The docstring-overlap structural quirk that makes BM25 beat hybrid on this corpus (see ["Why BM25 beats hybrid on CSN-Python"](#why-bm25-beats-hybrid-on-csn-python) above) also makes grep more competitive on recall — but not on tokens, because the corpus size makes any grep result set ridiculous. The headline number is semble's bench; CoIR confirms the direction on a different distribution but isn't the cleanest demonstration of ken's value on its own.
+- **Suffix-aware qrel matching.** Recall is computed via the same `path_matches` semble uses (`norm_file == target OR file.endswith("/"+target) OR target.endswith("/"+file)`) — handles the common case where semble's annotations are repo-rooted (`aiohttp/client.py`) but ken's chunk.File is benchmark-root-relative (`client.py`).
+
 ## Files
 
 semble bench (this doc's primary reference):
@@ -184,3 +255,12 @@ CoIR-CSN-Python external bench:
 - `bench/ndcg/ndcg.go` + `ndcg_test.go` — pure-Go NDCG@10 helper, unit-tested against the Wikipedia worked example.
 - `bench/ndcg/coir_test.go` (build tag `bench`) — the harness.
 - `testdata/bench/coir-csn-python/` — corpus (280k `.py` files), `queries.jsonl`, `qrels.jsonl`, `summary.json`. Gitignored; ~1 GB on disk.
+
+Token-budget bench (agent-side efficiency vs grep):
+
+- `bench/tokens/tokens.go` + `tokens_test.go` (build tag `bench`) — cl100k_base counter wrapping `pkoukk/tiktoken-go`. Encoder dep is bench-tag-only; never reaches the released binary dep graph.
+- `bench/tokens/budget.go` (build tag `bench`) — ken side: per-query, per-K formatted-output token counts + suffix-aware recall.
+- `bench/tokens/grep_baseline.go` (build tag `bench`) — `CorpusCache` pre-tokenizes the corpus once; per-query in-memory grep scan, 20K-token per-file cap.
+- `bench/tokens/coir_test.go` + `semble_test.go` (build tag `bench`) — per-bench harnesses.
+- `bench/tokens/results/{semble,coir}-tokens.json` — written per run. Gitignored.
+- `scripts/plot_token_budget.py` — read JSON, emit the markdown tables in this section.
