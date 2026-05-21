@@ -52,9 +52,13 @@ type WatchedIndex struct {
 	ix atomic.Pointer[Index]
 
 	// Mutable corpus state owned by the debouncer goroutine. chunks
-	// and vecs are parallel; tombstoned chunks stay in `chunks` for
-	// index stability across rebuilds, their vecs slot stays as the
-	// originally-computed embedding (cheap; not zeroed).
+	// and vecs are parallel. During a flush, deletes mark entries as
+	// Tombstoned in-place; compactCorpus then drops tombstoned entries
+	// (and their parallel vecs slots) into fresh slices before
+	// BuildIndex publishes, so published snapshots never carry
+	// tombstones. A previously-published *Index references the prior
+	// backing slices; those stay intact (and readable, with tombstones
+	// filtered on every read path) until GC reclaims them.
 	//
 	// Held under corpusMu, but ONLY the debouncer touches them — the
 	// mutex is defensive against future code that might grow a second
@@ -174,10 +178,9 @@ func (w *WatchedIndex) ResolveChunk(filePath string, line int) *chunk.Chunk {
 	return w.Load().ResolveChunk(filePath, line)
 }
 
-// Len returns the current snapshot's chunk count (includes tombstones).
-// Useful for diagnostics; for an "active" count use Load().Len() minus
-// the tombstone count (or just trust the chunks tombstone density to
-// stay reasonable until v0.3.x compaction lands).
+// Len returns the current snapshot's chunk count. Published snapshots
+// never carry tombstones (compaction runs at flush time, before the
+// snapshot is exposed), so this is the live-chunk count.
 func (w *WatchedIndex) Len() int { return w.Load().Len() }
 
 // SetOnSwap installs a channel that receives one nonblocking send
@@ -329,34 +332,79 @@ func (w *WatchedIndex) flush(batch map[string]fsnotify.Op) {
 		w.appendFile(rel)
 	}
 
+	compacted := w.compactCorpus()
 	newIx := BuildIndex(w.chunks, w.vecs, w.mode, w.model)
 	w.ix.Store(newIx)
 	w.notifySwap()
-	w.notifyFlush(len(w.chunks), len(batch), time.Since(start))
+	w.notifyFlush(len(w.chunks), len(batch), compacted, time.Since(start))
+}
+
+// compactCorpus drops tombstoned chunks (and their parallel vecs slots)
+// from the writer-side corpus state, allocating fresh backing slices so
+// any previously-published *Index that references the old slices stays
+// unmodified. Returns the number of tombstones dropped — zero when
+// there's nothing to compact. Caller holds corpusMu.
+//
+// Unconditional: runs on every flush. The iteration is already paid by
+// BuildIndex below; an unconditional rule has no failure mode where
+// compaction silently never triggers. See ADR-012.
+func (w *WatchedIndex) compactCorpus() int {
+	dropped := 0
+	for i := range w.chunks {
+		if w.chunks[i].Tombstoned {
+			dropped++
+		}
+	}
+	if dropped == 0 {
+		return 0
+	}
+	newChunks := make([]chunk.Chunk, 0, len(w.chunks)-dropped)
+	var newVecs [][]float32
+	if w.vecs != nil {
+		newVecs = make([][]float32, 0, len(w.vecs)-dropped)
+	}
+	for i, c := range w.chunks {
+		if c.Tombstoned {
+			continue
+		}
+		newChunks = append(newChunks, c)
+		if newVecs != nil {
+			newVecs = append(newVecs, w.vecs[i])
+		}
+	}
+	w.chunks = newChunks
+	w.vecs = newVecs
+	return dropped
 }
 
 // notifyFlush calls the OnFlush callback (if set) with a one-line
 // summary of the just-published snapshot. Format is stable enough for
 // users to grep but not part of any public contract.
-func (w *WatchedIndex) notifyFlush(totalChunks, filesChanged int, dur time.Duration) {
+func (w *WatchedIndex) notifyFlush(totalChunks, filesChanged, compacted int, dur time.Duration) {
 	w.onFlushMu.Lock()
 	f := w.onFlush
 	w.onFlushMu.Unlock()
 	if f == nil {
 		return
 	}
-	f(formatFlush(totalChunks, filesChanged, dur))
+	f(formatFlush(totalChunks, filesChanged, compacted, dur))
 }
 
 // formatFlush builds the OnFlush message. Pulled out for testability.
 // Duration is always emitted as integer milliseconds — a sub-ms rebuild
 // shows as "0 ms" rather than "0s" (time.Duration.String collapses
 // fractions, which makes the message inconsistent across small repos).
-func formatFlush(totalChunks, filesChanged int, dur time.Duration) string {
-	return "reindexed: " +
+// The "(compacted N tombstones)" suffix is appended only when N>0 so
+// pure-write flushes keep their existing v0.3 format.
+func formatFlush(totalChunks, filesChanged, compacted int, dur time.Duration) string {
+	msg := "reindexed: " +
 		intStr(totalChunks) + " chunks total, " +
 		intStr(filesChanged) + " files changed in " +
 		intStr(int(dur.Milliseconds())) + " ms"
+	if compacted > 0 {
+		msg += " (compacted " + intStr(compacted) + " tombstones)"
+	}
+	return msg
 }
 
 // intStr is a tiny strconv helper to keep the formatFlush call site

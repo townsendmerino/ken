@@ -35,12 +35,15 @@ type Chunk struct {
 	Text      string // exact source slice for [StartLine, EndLine]
 	// Tombstoned marks a chunk whose source file has been deleted or
 	// replaced under v0.3's incremental indexing (see
-	// internal/search/watch.go). The chunk stays in the chunks slice so
-	// indices remain stable across snapshot rebuilds, but every query
-	// path (Search / FindRelated / ResolveChunk) skips it. Wire-format
-	// callers that round-trip Chunk to disk should preserve this field;
-	// today the only such caller is the bench harness, which never
-	// observes tombstoned chunks because they never escape the search
-	// package.
+	// internal/search/watch.go). Transiently true within a single flush
+	// — the mutator marks chunks as Tombstoned in-place, then
+	// compactCorpus drops them before the snapshot is published.
+	// Published snapshots never carry tombstones; the field matters
+	// only on previously-published snapshots that an in-flight reader
+	// still holds. Every read path (Search / FindRelated /
+	// ResolveChunk) filters this field defensively. Wire-format callers
+	// that round-trip Chunk to disk should preserve it; today the only
+	// such caller is the bench harness, which never observes tombstoned
+	// chunks because they never escape the search package.
 	Tombstoned bool
 }

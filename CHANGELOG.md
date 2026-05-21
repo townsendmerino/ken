@@ -10,6 +10,19 @@ with pre-built binaries.
 
 ## [Unreleased]
 
+### Changed
+
+- **Tombstone compaction.** Watched indexes now drop tombstoned chunks
+  during every debounced snapshot rebuild instead of accumulating
+  them. Memory plateaus at live-chunk working-set size; multi-day
+  agent sessions on actively-edited corpora no longer grow unbounded.
+  No user-visible behavior change; query results, `ResolveChunk`, and
+  `FindRelated` are unchanged. The `OnFlush` message format gains an
+  optional `(compacted N tombstones)` suffix that's emitted only when
+  N > 0, so pure-write flushes keep the v0.3.0 format. Closes the
+  v0.3.x compaction trigger named in
+  [`docs/DECISIONS.md` ADR-012](docs/DECISIONS.md#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap).
+
 ### Documentation
 
 - ADR-013 (Proposed): documents the design conversation around adding

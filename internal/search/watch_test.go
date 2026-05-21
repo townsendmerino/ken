@@ -116,9 +116,11 @@ func TestWatchedIndex_FileWrite_Republishes(t *testing.T) {
 	}
 }
 
-// TestWatchedIndex_FileDelete_Tombstones — watch=true: removing a file
-// makes its chunks Tombstoned=true and Search no longer surfaces them.
-func TestWatchedIndex_FileDelete_Tombstones(t *testing.T) {
+// TestWatchedIndex_FileDelete_DropsChunks — watch=true: removing a file
+// drops its chunks from the published snapshot entirely (compaction
+// runs every flush, so the tombstones don't survive into the published
+// snapshot) and Search no longer surfaces them.
+func TestWatchedIndex_FileDelete_DropsChunks(t *testing.T) {
 	root := makeTempRepo(t, map[string]string{
 		"keep.py":   "def keep():\n    return 'keep'\n",
 		"delete.py": "def doomed():\n    return 'doomed'\n",
@@ -137,30 +139,177 @@ func TestWatchedIndex_FileDelete_Tombstones(t *testing.T) {
 	}
 
 	got := wi.Load()
-	// chunks for delete.py should still be in the slice (stable indices)
-	// but marked Tombstoned. The active slice (filtered) excludes them.
-	var liveDoomed, tombDoomed int
+	// Post-compaction the published snapshot has zero entries for
+	// delete.py — live OR tombstoned. The tombstone existed transiently
+	// during the flush but was dropped before publish.
 	for _, c := range got.chunks {
 		if c.File == "delete.py" {
-			if c.Tombstoned {
-				tombDoomed++
-			} else {
-				liveDoomed++
-			}
+			t.Errorf("post-delete snapshot still has chunk for delete.py (tombstoned=%v); compaction should have dropped it", c.Tombstoned)
 		}
-	}
-	if liveDoomed != 0 {
-		t.Errorf("after delete, found %d non-tombstoned chunks for delete.py", liveDoomed)
-	}
-	if tombDoomed == 0 {
-		t.Errorf("after delete, found 0 tombstoned chunks for delete.py — expected the original chunks to be preserved with Tombstoned=true")
 	}
 
 	for _, r := range wi.Search("doomed", 5) {
 		if r.Chunk.File == "delete.py" {
-			t.Errorf("Search returned delete.py chunk after tombstone: %+v", r.Chunk)
+			t.Errorf("Search returned delete.py chunk after delete: %+v", r.Chunk)
 		}
 	}
+}
+
+// TestWatchedIndex_Compaction_DropsTombstones — multiple deletes within
+// a single debounce window result in a published snapshot whose chunks
+// slice has zero tombstoned entries at all (not just zero for the
+// deleted files — none for any file).
+func TestWatchedIndex_Compaction_DropsTombstones(t *testing.T) {
+	root := makeTempRepo(t, map[string]string{
+		"keep.py":  "def keep(): return 'keep'\n",
+		"drop1.py": "def doomed_one(): return 1\n",
+		"drop2.py": "def doomed_two(): return 2\n",
+	})
+	wi := withShortDebounce(t, root, true)
+	if wi.Load().Len() < 3 {
+		t.Fatalf("expected ≥3 initial chunks, got %d", wi.Load().Len())
+	}
+
+	swaps := make(chan struct{}, 4)
+	wi.SetOnSwap(swaps)
+	drainSwaps(swaps)
+
+	for _, name := range []string{"drop1.py", "drop2.py"} {
+		if err := os.Remove(filepath.Join(root, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if !waitForSwap(t, swaps, 5*time.Second) {
+		t.Fatal("no snapshot publish after deletes")
+	}
+
+	got := wi.Load()
+	var tombs int
+	for _, c := range got.chunks {
+		if c.Tombstoned {
+			tombs++
+		}
+		if c.File == "drop1.py" || c.File == "drop2.py" {
+			t.Errorf("published snapshot still references %s (tombstoned=%v)", c.File, c.Tombstoned)
+		}
+	}
+	if tombs != 0 {
+		t.Errorf("published snapshot has %d tombstones; compaction should have dropped them all", tombs)
+	}
+}
+
+// TestWatchedIndex_Compaction_PreservesChunkContent — deleting a file in
+// the middle of the chunks slice still resolves the surviving files'
+// chunks correctly via ResolveChunk and Search. Catches any remap bug
+// where the compacted slice and its parallel structures (vecs, BM25
+// postings, ann.Flat rows) drift out of sync.
+//
+// All inspection happens AFTER the swap completes so the read goes
+// through atomic.Pointer.Load → fresh compacted slice; reading the
+// initial-snapshot chunks directly before the swap races with the
+// debouncer's tombstoneFile write (the race detector can't see
+// fsnotify's OS-mediated happens-before).
+func TestWatchedIndex_Compaction_PreservesChunkContent(t *testing.T) {
+	root := makeTempRepo(t, map[string]string{
+		"a.py": "def alpha():\n    return 'a'\n",
+		"b.py": "def beta():\n    return 'b'\n",
+		"c.py": "def gamma():\n    return 'c'\n",
+	})
+	wi := withShortDebounce(t, root, true)
+	swaps := make(chan struct{}, 4)
+	wi.SetOnSwap(swaps)
+	drainSwaps(swaps)
+
+	if err := os.Remove(filepath.Join(root, "b.py")); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForSwap(t, swaps, 5*time.Second) {
+		t.Fatal("no snapshot publish after delete")
+	}
+
+	// ResolveChunk: survivors round-trip with content matching the
+	// substring we wrote. A bad remap would either return nil or
+	// surface a chunk whose Text belongs to a different file.
+	for _, want := range []struct{ file, contains string }{
+		{"a.py", "alpha"},
+		{"c.py", "gamma"},
+	} {
+		r := wi.ResolveChunk(want.file, 1)
+		if r == nil {
+			t.Errorf("ResolveChunk(%s, 1) returned nil after compaction", want.file)
+			continue
+		}
+		if !strings.Contains(r.Text, want.contains) {
+			t.Errorf("ResolveChunk(%s) returned wrong content: text=%q want substring %q", want.file, r.Text, want.contains)
+		}
+	}
+
+	// Search: BM25-rebuild path also survives the compaction — a
+	// remap-induced off-by-one in postings would either drop the result
+	// or attach it to the wrong file.
+	found := false
+	for _, r := range wi.Search("gamma", 5) {
+		if r.Chunk.File == "c.py" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Search('gamma') did not return c.py's chunk after b.py was compacted")
+	}
+}
+
+// TestWatchedIndex_Compaction_RaceClean — writer deletes + recreates
+// files in a tight loop while readers query. Must run race-clean and
+// never observe a tombstoned chunk in results. The atomic snapshot model
+// is what makes this safe: each compaction allocates fresh backing
+// slices, so the previously-published *Index that an in-flight reader
+// holds keeps pointing at the older (immutable) slice.
+func TestWatchedIndex_Compaction_RaceClean(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping concurrency stress in -short")
+	}
+	root := makeTempRepo(t, map[string]string{
+		"a.py": "def alpha(): return 1\n",
+		"b.py": "def beta(): return 2\n",
+	})
+	wi := withShortDebounce(t, root, true)
+
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	const readers = 10
+	const queries = 100
+
+	for range readers {
+		wg.Go(func() {
+			for q := 0; q < queries && !stop.Load(); q++ {
+				for _, r := range wi.Search("alpha", 5) {
+					if r.Chunk.Tombstoned {
+						t.Errorf("Search returned tombstoned chunk: %+v", r.Chunk)
+						return
+					}
+				}
+			}
+		})
+	}
+
+	// Writer: delete-then-recreate cycle on synth.py, repeatedly. Every
+	// recreate adds chunks, every delete tombstones them — every flush
+	// hits the compaction path.
+	go func() {
+		synth := filepath.Join(root, "synth.py")
+		for i := range 8 {
+			time.Sleep(10 * time.Millisecond)
+			_ = os.WriteFile(synth, []byte("def synth(): return "+string(rune('0'+i))+"\n"), 0o644)
+			time.Sleep(10 * time.Millisecond)
+			_ = os.Remove(synth)
+		}
+	}()
+
+	wg.Wait()
+	stop.Store(true)
+	time.Sleep(5 * shortDebounce)
 }
 
 // TestWatchedIndex_Debounce_BatchedWrites — five writes in quick
