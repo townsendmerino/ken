@@ -9,7 +9,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/townsendmerino/ken.svg)](https://pkg.go.dev/github.com/townsendmerino/ken)
 ![Go 1.26+](https://img.shields.io/badge/go-1.26%2B-blue)
 
-ken is a Go port of semble. The retrieval algorithm is ported verbatim from semble's `search.py` + `ranking/*.py`; the value ken adds is runtime properties, not retrieval quality: single-binary distribution, no Python interpreter import on cold start, no GIL on the indexing pipeline. If you already use semble in your agent, you can swap to ken-mcp without re-prompting; the wire format is the same string semble emits.
+ken is a Go port of semble. The retrieval algorithm is ported verbatim from semble's `search.py` + `ranking/*.py`; ken adds two things on top: **runtime properties** (single-binary distribution, no Python interpreter import on cold start, no GIL on the indexing pipeline) and **measured agent-input efficiency** (~44× fewer tokens than grep+Read at recall@10 on semble's diverse-query benchmark; at corpus scale — CoIR-CSN-Python's 280K files — corpus-wide grep is functionally impossible and ken's 1,296-token result is the only workable path). The honest tradeoff: ken's recall caps at 82–91% vs grep's ~99%, so exhaustive enumeration (refactors, pre-rename audits) still belongs to grep — but for "find the chunk that answers this," ken wins by 1–2 orders of magnitude on tokens. Full table in [`docs/BENCH.md`](docs/BENCH.md#token-budget-recall--agent-side-efficiency). If you already use semble in your agent, you can swap to ken-mcp without re-prompting; the wire format is the same string semble emits.
 
 ## Quickstart
 
@@ -55,6 +55,7 @@ The default `regex` chunker handles most cases well. If you index a lot of Kotli
 - **Pure Go, no cgo.** Single static binary; `GOOS`/`GOARCH` cross-compiles for free; no `libtokenizers.a` to vendor per platform.
 - **Drop-in MCP-compatible with semble.** Same `search` / `find_related` tool schemas, same markdown-string output format, install snippets adapted from semble's README.
 - **Algorithm verbatim from semble.** BM25 + Model2Vec semantic + α-weighted RRF fusion + code-aware rerank (definition / embedded-symbol / file-coherence / stem-match boosts) + path penalties + file-saturation decay. See [docs/DESIGN.md §7](docs/DESIGN.md#7-hybrid-retrieval--rerank).
+- **Measured agent-input efficiency.** ~44× fewer tokens than grep+Read at recall@10 on semble NL queries (4,269 vs 189,591 tok); ~16× on symbol queries; at 280K-file corpus scale, grep+Read is functionally impossible and ken is the only workable path. Full breakdown + caveats in [`docs/BENCH.md`](docs/BENCH.md#token-budget-recall--agent-side-efficiency).
 - **Tokenizer parity proven against `transformers.AutoTokenizer`** on an 11k-input adversarial+repo corpus (`scripts/parity_dump.py` + `internal/embed/parity_test.go`).
 - **Fast cold start.** No Python interpreter import (`ken search` from a tiny index returns in ~10–20 ms on a Mac).
 - **Concurrent indexing scaled to cores.** No GIL.
@@ -230,6 +231,7 @@ The full per-language NDCG breakdown plus the empirical findings that informed t
 | Retrieval algorithm | reference implementation | verbatim port (constants and pipeline order ported from `search.py` + `ranking/*.py`) |
 | NDCG@10 on semble's benchmark | 0.854 ([semble README](https://github.com/MinishLab/semble#benchmarks)) | **0.842 hybrid** (gap 0.012, full corpus 63 repos × 1251 queries)† |
 | NDCG@10 on CoIR-CSN-Python (external) | (not measured; semble doesn't run this bench) | **0.8743 bm25 / 0.7839 hybrid** ([see why](#benchmarks--external-reference-coir-csn-python))†† |
+| Median tokens to recall@10 on agent queries | (not measured; semble doesn't run this bench) | **4,269 tok @ 82% recall** on semble NL queries — vs grep+Read's 189,591 tok @ 99.9% (44× cheaper at 17 pp lower recall)††† |
 | MCP server | yes | yes — drop-in compatible (same tool schemas, same wire format) |
 | Binary size | n/a (Python env) | `ken` 3.9 MB · `ken-mcp` 16 MB |
 | Requires `huggingface-cli` for model | yes | yes (or skip and use `--mode bm25`) |
@@ -245,6 +247,8 @@ The full per-language NDCG breakdown plus the empirical findings that informed t
 > The semantic-raw match within 0.003 isolates and validates the embedding + tokenizer + ANN port. The BM25 tokenizer was also re-aligned to a verbatim port of semble's `tokens.py` (snake-case compound preservation, ASCII-only identifier extraction, compound-first emission order). The v0.2.0 tree-sitter chunker (`--chunker=treesitter` via [`gotreesitter`](https://github.com/odvcencio/gotreesitter)) trades NDCG per-language without net movement — clear wins on Kotlin / Zig / TypeScript / Java / PHP, losses on Python / Rust / C / Lua / Scala — so the **default chunker stays regex** and treesitter is opt-in. See ["Choosing a chunker"](#choosing-a-chunker) for the per-language recommendation and [`docs/DECISIONS.md` ADR-011](docs/DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in) for the full rationale.
 
 †† CoIR-CSN-Python numbers reported separately because they tell a different story than semble's bench: on CSN, BM25 beats hybrid by ~0.09 due to docstring-to-function query overlap (see the ["Benchmarks — external reference"](#benchmarks--external-reference-coir-csn-python) section for the full breakdown). semble's bench is the verbatim-port confirmation; CoIR-CSN is the externally-reproducible anchor against published code-IR baselines.
+
+††† Measured at v0.3.1 against semble's 63-repo benchmark (914 NL queries from semble's 1,251-query corpus, ranked by ken's regex chunker, K=10). The honest framing: ken trades ~17 percentage points of recall for ~44× fewer agent-input tokens. Exhaustive enumeration (refactors, pre-rename audits) still belongs to grep — ken is for "find the chunk that answers this." Full per-query-class table (symbol + NL) and the methodology + caveats are in [`docs/BENCH.md`](docs/BENCH.md#token-budget-recall--agent-side-efficiency).
 
 semble timings cited above are from semble's own [README "Benchmarks" section](https://github.com/MinishLab/semble#benchmarks); ken's are measured on the included `testdata/repo` polyglot fixture and on a sibling shallow clone of `/tmp/semble`. Cold-start was timed by `/usr/bin/time -p ken search testdata/repo "validate" -k 1 --mode bm25` over three trials (M2 MacBook Air, Go 1.26.3, darwin/amd64 build under Rosetta).
 
