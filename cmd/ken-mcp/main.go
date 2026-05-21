@@ -129,7 +129,8 @@ func main() {
 	if mode != search.ModeBM25 && !modelAvailable(modelDir) {
 		logger.logf(lvlWarn,
 			"no Model2Vec model at KEN_MCP_MODEL_DIR=%q — downgrading to bm25 mode "+
-				"(set KEN_MCP_MODEL_DIR to a directory containing model.safetensors to enable semantic/hybrid)",
+				"(run `ken download-model` to fetch one into ~/.ken/model, then set "+
+				"KEN_MCP_MODEL_DIR to that path to enable semantic/hybrid)",
 			modelDir)
 		mode = search.ModeBM25
 		modeStr = "bm25"

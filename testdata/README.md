@@ -51,6 +51,10 @@ harness). Tests using it `t.Skip()` when it's absent — CI without HF
 access stays green:
 
 ```bash
+# Pure-Go fetch via ken's own downloader (no Python toolchain needed):
+ken download-model --to testdata/model
+
+# Or, if you prefer the HF tooling:
 huggingface-cli download minishlab/potion-code-16M \
     tokenizer.json config.json model.safetensors \
     --local-dir testdata/model
