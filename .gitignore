@@ -39,3 +39,8 @@ bench/semble/results/
 # Downloaded per-machine via scripts/bench_coir.py (~140 MB compressed,
 # ~1 GB after materializing 280k corpus files). Never committed.
 testdata/bench/
+
+# Token-budget bench output (per-query JSON records, regenerated via
+# `go test -tags=bench ./bench/tokens/`). Tens of MB; never committed.
+# The markdown tables in docs/BENCH.md are the committed reference.
+bench/tokens/results/
