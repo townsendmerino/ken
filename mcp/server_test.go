@@ -17,11 +17,11 @@ import (
 // Index — exercise of the cache is in cache_test.go.
 func newInMemoryServerClient(t *testing.T) (context.Context, *sdk.ClientSession, func()) {
 	t.Helper()
-	ix, err := search.FromPath("../testdata/repo", search.ModeBM25, "regex", "")
+	ix, err := search.NewWatchedIndex("../testdata/repo", search.ModeBM25, "regex", "", false)
 	if err != nil {
-		t.Fatalf("FromPath: %v", err)
+		t.Fatalf("NewWatchedIndex: %v", err)
 	}
-	cache := NewCache(4, func(context.Context, string) (*search.Index, func(), error) {
+	cache := NewCache(4, func(context.Context, string) (*search.WatchedIndex, func(), error) {
 		return ix, nil, nil
 	})
 	srv := NewServer(Config{Cache: cache, DefaultRepo: "../testdata/repo"})
@@ -128,7 +128,7 @@ func TestServer_FindRelated_NeedsSemanticMode(t *testing.T) {
 func TestServer_NoRepoNoDefault_ReturnsValidationText(t *testing.T) {
 	// Build a server WITHOUT a default repo. Tools should reject a call
 	// that also omits `repo` — as text, not a protocol error.
-	cache := NewCache(2, func(context.Context, string) (*search.Index, func(), error) {
+	cache := NewCache(2, func(context.Context, string) (*search.WatchedIndex, func(), error) {
 		t.Fatal("builder should not be invoked when repo is missing")
 		return nil, nil, nil
 	})

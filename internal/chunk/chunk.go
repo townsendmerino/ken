@@ -33,4 +33,14 @@ type Chunk struct {
 	StartLine int    // 1-based, inclusive
 	EndLine   int    // 1-based, inclusive
 	Text      string // exact source slice for [StartLine, EndLine]
+	// Tombstoned marks a chunk whose source file has been deleted or
+	// replaced under v0.3's incremental indexing (see
+	// internal/search/watch.go). The chunk stays in the chunks slice so
+	// indices remain stable across snapshot rebuilds, but every query
+	// path (Search / FindRelated / ResolveChunk) skips it. Wire-format
+	// callers that round-trip Chunk to disk should preserve this field;
+	// today the only such caller is the bench harness, which never
+	// observes tombstoned chunks because they never escape the search
+	// package.
+	Tombstoned bool
 }

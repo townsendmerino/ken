@@ -30,12 +30,14 @@ go vet ./...                                      # must be clean
 gofmt -l cmd internal                             # must print nothing (whole tree gofmt-clean)
 go fix ./...                                      # Go 1.26 modernizers (SplitSeq, min, range-int)
 
-go run ./cmd/ken index  <path>  [--chunker=regex|treesitter|line] [--mode=bm25|semantic|hybrid] [--model=DIR]
+go run ./cmd/ken index  <path>  [--watch|--no-watch] [--chunker=regex|treesitter|line] [--mode=bm25|semantic|hybrid] [--model=DIR]
 go run ./cmd/ken search <path> <query>...  [-k N] [--chunker=...] [--mode=...] [--model=...]
 go run ./cmd/ken-mcp                               # stdio MCP server (env-configured; see MCP section)
 ```
 
 Default mode is **hybrid** (Stage 4). hybrid/semantic need `--model <dir-with-model.safetensors>` (default `testdata/model`); without it the CLI errors clearly. `ken-mcp` instead **downgrades to bm25 with a stderr warning** if the model dir is missing — first-launch usability for agents.
+
+As of v0.3, **`ken index <path>` defaults to `--watch`** — the process stays alive and re-publishes the index 2 s after any file change (fsnotify + atomic snapshot swap, ADR-012). `--no-watch` is the v0.2-compatible build-once-and-exit opt-out for batch / CI / huge-corpus scenarios. `ken-mcp` **always watches**; no env var to disable it in v0.3.
 
 Toolchain: `go.mod` pins `go 1.26.3` + `toolchain go1.26.3`. With `GOTOOLCHAIN=auto` (default) an older system Go auto-downloads 1.26.3. Deps are now: `golang.org/x/text` (embed normalizer), `github.com/go-git/go-git/v5` (ken-mcp clone), `github.com/modelcontextprotocol/go-sdk` (ken-mcp), `golang.org/x/sync` (singleflight). After a `go`/`toolchain` bump, run `go mod tidy`.
 
@@ -111,5 +113,5 @@ command = "/absolute/path/to/ken-mcp"
 ### Constraints that shape the code
 
 - **Pure Go, no cgo, no per-platform vendored artifacts** — this is the whole point of the port (single static cross-compiled binary). Tree-sitter, native tokenizers, etc. are off the table; pure-Go alternatives go behind interfaces.
-- **Deps land with the stage that needs them** — Stage 1 was stdlib-only; the embed normalizer pulled `golang.org/x/text`; ken-mcp pulled `go-sdk`, `go-git`, `x/sync`; v0.2.0's tree-sitter chunker pulled `github.com/odvcencio/gotreesitter`. HNSW and the Chroma chunker remain documented future paths in [`docs/DESIGN.md` §10](docs/DESIGN.md#10-risk-register).
+- **Deps land with the stage that needs them** — Stage 1 was stdlib-only; the embed normalizer pulled `golang.org/x/text`; ken-mcp pulled `go-sdk`, `go-git`, `x/sync`; v0.2.0's tree-sitter chunker pulled `github.com/odvcencio/gotreesitter`; v0.3's incremental indexing pulled `github.com/fsnotify/fsnotify`. HNSW and the Chroma chunker remain documented future paths in [`docs/DESIGN.md` §10](docs/DESIGN.md#10-risk-register).
 - **Validate-against-Python before advancing** — every stage's correctness is defined as parity with semble/`StaticModel.encode()` on the same corpus, not just "looks reasonable". The tokenizer's real acceptance test (100k-input parity dump vs `transformers.AutoTokenizer`) is still owed and is the main Stage-3 risk; the 18-case `golden.json` is a spot-check, not that harness.

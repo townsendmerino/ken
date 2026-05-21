@@ -141,7 +141,13 @@ func main() {
 	// Builder: clone http(s) URLs to a temp dir; index local paths
 	// in-place. mcp.NormalizeKey hands us either a canonical URL or an
 	// absolute path — we discriminate on the scheme prefix here.
-	builder := func(ctx context.Context, source string) (*search.Index, func(), error) {
+	//
+	// v0.3: returns *search.WatchedIndex. ken-mcp always watches (the
+	// in-process LRU otherwise serves stale results when an agent
+	// edits files mid-session). The cache calls wix.Close() before
+	// invoking the user cleanup, so the watcher's inotify fds drop
+	// before the temp clone dir is rm-rf'd.
+	builder := func(ctx context.Context, source string) (*search.WatchedIndex, func(), error) {
 		var dir string
 		var cleanup func()
 		if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
@@ -155,14 +161,14 @@ func main() {
 			dir = source
 		}
 		logger.logf(lvlInfo, "indexing %s (mode=%s)", dir, modeStr)
-		ix, err := search.FromPath(dir, mode, chunker, modelDir)
+		ix, err := search.NewWatchedIndex(dir, mode, chunker, modelDir, true)
 		if err != nil {
 			if cleanup != nil {
 				cleanup()
 			}
 			return nil, nil, err
 		}
-		logger.logf(lvlInfo, "indexed %s (%d chunks)", dir, ix.Len())
+		logger.logf(lvlInfo, "indexed %s (%d chunks, watching)", dir, ix.Len())
 		return ix, cleanup, nil
 	}
 

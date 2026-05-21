@@ -82,6 +82,68 @@ func Walk(opts Options) ([]string, error) {
 	return files, nil
 }
 
+// Matcher caches the per-root indexability rules (.gitignore + size cap
+// + binary heuristic) so a file watcher can re-ask "would Walk have
+// included this path?" cheaply on each fsnotify event, without
+// reloading + recompiling the gitignore on every call. v0.3 incremental
+// indexing (internal/search/watch.go) holds one Matcher per WatchedIndex.
+type Matcher struct {
+	root         string
+	gi           *gitignore
+	maxFileBytes int64
+}
+
+// NewMatcher loads the root .gitignore once and returns a reusable
+// filter. Same defaults as Walk(opts).
+func NewMatcher(opts Options) *Matcher {
+	maxBytes := opts.MaxFileBytes
+	if maxBytes == 0 {
+		maxBytes = DefaultMaxFileBytes
+	}
+	return &Matcher{
+		root:         opts.Root,
+		gi:           loadGitignore(filepath.Join(opts.Root, ".gitignore")),
+		maxFileBytes: maxBytes,
+	}
+}
+
+// ShouldIndex reports whether Walk would have included relPath
+// (slash-separated, relative to the matcher's root). Mirrors Walk's
+// rules: not under .git/, not gitignored, regular file, not binary,
+// within the size cap. A missing file (deleted since the event fired)
+// returns false — the watcher treats those as "remove from index" via
+// the event op, not via this check.
+//
+// Returns false (don't index) for any error; the watcher's filter is
+// fail-closed so a stat error doesn't accidentally trigger a reindex.
+func (m *Matcher) ShouldIndex(relPath string) bool {
+	if m == nil {
+		return false
+	}
+	// .git directory check matches Walk's directory-level prune.
+	if relPath == ".git" || strings.HasPrefix(relPath, ".git/") {
+		return false
+	}
+	if m.gi.match(relPath, false) {
+		return false
+	}
+	abs := filepath.Join(m.root, filepath.FromSlash(relPath))
+	info, err := os.Stat(abs)
+	if err != nil {
+		return false
+	}
+	if !info.Mode().IsRegular() {
+		return false
+	}
+	if info.Size() > m.maxFileBytes {
+		return false
+	}
+	if isBinary(abs) {
+		return false
+	}
+	return true
+}
+
 // isBinary reports whether the first 8 KiB of the file contains a NUL byte,
 // the same cheap heuristic git uses to classify a blob as binary.
 func isBinary(path string) bool {

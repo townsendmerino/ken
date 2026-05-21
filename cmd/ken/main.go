@@ -4,11 +4,14 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/townsendmerino/ken/internal/search"
@@ -27,9 +30,14 @@ func usage() {
 	fmt.Fprint(os.Stderr, `ken — code search
 
 usage:
-  ken index  <path>           [--chunker regex|line] [--mode bm25|semantic|hybrid] [--model DIR]
+  ken index  <path>           [--watch|--no-watch] [--chunker regex|treesitter|line] [--mode bm25|semantic|hybrid] [--model DIR]
   ken search <path> <query>...  [-k N] [--json] [--chunker ...] [--mode ...] [--model DIR]
   ken bench  <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR]
+
+ken index --watch (default in v0.3+) keeps the process alive and re-indexes
+files on change; --no-watch is the v0.2 behavior (build once, print, exit).
+For one-shot queries via 'ken search' the flag is accepted but a no-op since
+the process exits after the result.
 
 ken bench reads queries from stdin (one per line; lines starting with '#'
 ignored) and emits one JSON record per query to stdout against a single
@@ -51,6 +59,22 @@ func commonFlags(args []string) (rest []string, chunker, mode, model string, err
 	}
 	rest, model, err = extractFlag(rest, "model", defaultModel)
 	return
+}
+
+// extractWatch parses --watch / --no-watch from args. v0.3 onward
+// defaults to watching; --no-watch is the explicit opt-out (batch / CI /
+// huge-repo scenarios). Both forms present is an error — caller would
+// have one ambiguous intent.
+func extractWatch(args []string) ([]string, bool, error) {
+	args, hasWatch := stripBoolFlag(args, "watch")
+	args, hasNoWatch := stripBoolFlag(args, "no-watch")
+	if hasWatch && hasNoWatch {
+		return nil, false, fmt.Errorf("--watch and --no-watch are mutually exclusive")
+	}
+	if hasNoWatch {
+		return args, false, nil
+	}
+	return args, true, nil
 }
 
 // extractFlag pulls `-name V`, `--name V`, `-name=V`, or `--name=V` out of
@@ -102,6 +126,11 @@ func main() {
 }
 
 func cmdIndex(args []string) int {
+	args, watch, err := extractWatch(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+		return 2
+	}
 	rest, chunker, modeStr, model, err := commonFlags(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
@@ -117,12 +146,36 @@ func cmdIndex(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
-	ix, err := search.FromPath(rest[0], mode, chunker, model)
+
+	if !watch {
+		// v0.2 behavior: build once, print, exit.
+		ix, err := search.FromPath(rest[0], mode, chunker, model)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+			return 1
+		}
+		fmt.Printf("indexed %d chunks from %s (chunker=%s mode=%s)\n", ix.Len(), rest[0], chunker, modeStr)
+		return 0
+	}
+
+	// v0.3 default: build, print, and keep the process alive watching
+	// for changes. The CLI doesn't expose query I/O once the index is
+	// built (use ken search or ken-mcp for that); this mode is for
+	// "warm an index, observe it, ^C when done" workflows and as a
+	// surface to validate the watcher behavior without ken-mcp.
+	wix, err := search.NewWatchedIndex(rest[0], mode, chunker, model, true)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1
 	}
-	fmt.Printf("indexed %d chunks from %s (chunker=%s mode=%s)\n", ix.Len(), rest[0], chunker, modeStr)
+	fmt.Fprintf(os.Stderr, "ken: indexed %d chunks from %s (chunker=%s mode=%s); watching for changes — ^C to stop\n",
+		wix.Len(), rest[0], chunker, modeStr)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	<-ctx.Done()
+	_ = wix.Close()
+	fmt.Fprintln(os.Stderr, "ken: stopped watching")
 	return 0
 }
 
@@ -186,9 +239,22 @@ func stripBoolFlag(args []string, name string) ([]string, bool) {
 // (and leaked "-k 3" into the query). It is a pure function so that
 // behavior is pinned by tests rather than only surfacing by running the
 // CLI — see TestParseSearchArgs.
+//
+// --watch / --no-watch are accepted but their effective behavior for
+// `ken search` is a no-op: the process exits after the result, so a
+// short-lived watcher buys nothing. The flag is consumed here so the
+// CLI's flag-acceptance surface is uniform across subcommands and
+// future test helpers can pin parsing behavior. See cmdSearch.
 func parseSearchArgs(args []string) (searchArgs, error) {
 	sa := searchArgs{k: 10, chunker: defaultChunker, mode: defaultMode, model: defaultModel}
 	args, sa.jsonOut = stripBoolFlag(args, "json")
+	// Consume --watch / --no-watch defensively; we don't surface the
+	// value because ken search is one-shot, but accepting the flag
+	// avoids confusing "unknown flag" errors in scripts that pass it.
+	args, _, werr := extractWatch(args)
+	if werr != nil {
+		return sa, werr
+	}
 	args, chunker, mode, model, err := commonFlags(args)
 	if err != nil {
 		return sa, err

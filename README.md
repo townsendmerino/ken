@@ -46,6 +46,8 @@ for _, r := range ix.Search("save model to disk", 10) {
 
 Pre-built binaries for macOS and Linux are attached to each [release](https://github.com/townsendmerino/ken/releases).
 
+As of v0.3, `ken index <path>` defaults to **watch mode** — it keeps the process alive and re-indexes files on change (2 s debounce); pass `--no-watch` for the v0.2 build-once-and-exit behavior. `ken-mcp` watches always — an agent editing the repo mid-session sees its own changes without a restart.
+
 The default `regex` chunker handles most cases well. If you index a lot of Kotlin / Zig / TypeScript / Java / PHP, the opt-in `treesitter` chunker (`--chunker=treesitter` / `KEN_MCP_CHUNKER=treesitter`) measurably wins for those languages — see ["Choosing a chunker"](#choosing-a-chunker) for the per-language recommendation.
 
 ## Features
@@ -275,7 +277,7 @@ The full risk register with explicit triggers is in [docs/DESIGN.md §10](docs/D
 - **Tree-sitter chunker (Option A)** — landed in v0.2.0 via [`gotreesitter`](https://github.com/odvcencio/gotreesitter) as opt-in (`--chunker=treesitter`). Default stays `regex`. Per-language guidance in ["Choosing a chunker"](#choosing-a-chunker).
 - **Chroma chunker (Option B)** — broader language coverage via a token-stream lexer. Trigger: a polyglot repo where neither chunker covers a needed language. Not currently triggered.
 - **Class-body-aware Python chunking** — currently top-level only; large Django models / SQLAlchemy bases line-split through methods. Trigger: Python NDCG visibly below the other languages (not currently triggered).
-- **Incremental indexing** — today every `ken` invocation is a full walk + chunk + index from scratch; ken-mcp caches the built index in-process but does not invalidate on file changes (so a running ken-mcp serves a stale index until the LRU evicts that entry or the process restarts). True incremental indexing would patch the BM25 postings + dense matrix on file deltas instead of rebuilding. Trigger: users running ken-mcp on a repo they're actively editing report stale results, or full-rebuild latency on large corpora becomes the dominant per-query cost.
+- **~~Incremental indexing~~ — landed in v0.3.** `ken-mcp` watches the repo file tree and republishes a snapshot 2s after any edit, so an agent querying its own working tree sees its own edits without a restart. `ken index --watch` (default) keeps the CLI alive in a similar role; `ken index --no-watch` restores the v0.2 build-and-exit behavior. Tombstones for deletes, no compaction — memory grows monotonically with cumulative edit volume, which is fine for typical agent-session lifetimes; compaction is a v0.3.x trigger if multi-day sessions hit pressure. Atomic-snapshot reads keep query latency unchanged from v0.2. Implementation: [`internal/search/watch.go`](internal/search/watch.go), design rationale in [`docs/DECISIONS.md` ADR-012](docs/DECISIONS.md#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap).
 
 ## How this was built
 

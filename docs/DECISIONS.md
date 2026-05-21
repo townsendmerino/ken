@@ -17,6 +17,7 @@ ADR statuses: **Accepted**, **Superseded** (replaced by a later ADR), **Deprecat
 | [ADR-009](#adr-009-env-var-validation-fail-loud-not-silent) | Env-var validation in ken-mcp: fail-loud, not silent | Accepted |
 | [ADR-010](#adr-010-tree-sitter-via-gotreesitter-instead-of-wazerowasm) | Tree-sitter via `gotreesitter` (pivot from wazero+WASM) | Accepted |
 | [ADR-011](#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in) | Default chunker stays `regex` in v0.2.0; treesitter is opt-in | Accepted |
+| [ADR-012](#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap) | Incremental indexing via fsnotify + atomic snapshot swap | Accepted |
 
 ---
 
@@ -307,3 +308,43 @@ This is the "ship as opt-in" outcome: the work is real, the chunker is correct, 
 - `docs/BENCH.md` documents the treesitter NDCG numbers explicitly so users can decide whether the per-language wins matter for their corpus.
 - Binary size for the default build is unaffected (the treesitter dep is only pulled in via the blank-import in `internal/search`; the chunker code itself doesn't compile in a meaningfully expensive way — but gotreesitter's embedded grammars *do* add ~26 MB to both binaries). **TODO for a later ADR:** whether to put treesitter behind a build tag so the default binary stays slim. For v0.2.0 the +26 MB is acceptable because users who built ken at HEAD will get the treesitter option immediately.
 - The C# and bash grammar issues are recorded in `docs/DESIGN.md` §10 risk register. Both auto-fall-back to the line chunker; users won't see crashes.
+
+---
+
+## ADR-012: Incremental indexing via fsnotify + atomic snapshot swap
+
+**Status:** Accepted
+**Date:** 2026-05-20
+
+### Context
+Through v0.2.x, every `ken` invocation walked the tree from scratch and `ken-mcp` cached the built index in a per-process LRU but never invalidated entries on file changes. An agent editing files mid-session got stale results until the LRU evicted that repo or the process restarted — a real correctness gap for the headline use case (Claude Code-style agents querying their own working tree).
+
+The design conversation locked five sub-decisions before code:
+1. **Default-on**, no opt-in. `ken-mcp` watches always; `ken index` defaults to `--watch` with `--no-watch` as the v0.2-compatible escape.
+2. **Pure lazy IDF.** Recompute from current df + N at query time; no IDF cache.
+3. **2-second fixed debounce**, not configurable. Above editor save-on-keystroke timescales; small enough that an agent doesn't notice.
+4. **Tombstone deletes**, no compaction. Deleted file's chunks stay in `chunks` with `Tombstoned=true`; query paths skip them. Memory grows monotonically until compaction lands as a v0.3.x trigger.
+5. **No reader-side lock.** Writers must not block readers, and readers must not pay per-query copy cost.
+
+The implementation correction surfaced during drafting: "writer mutates in-place" isn't safe in Go. Slice-header writes and map writes have no memory-model guarantees for concurrent readers — a query iterating `ann.Flat.vecs` while the writer appends could read garbage or panic. The correct realization of property #5 is an immutable-snapshot model.
+
+### Decision
+**Implement #5 as `atomic.Pointer[Index]` swap of fully-built immutable snapshots.** Writers (the debouncer goroutine) keep the mutable corpus state (`chunks []chunk.Chunk` parallel to `vecs [][]float32`) under an internal mutex that only writers contend on; they build a brand-new `*Index` (with a new `*bm25.Index` and `*ann.Flat`) from the current corpus state, then publish via `atomic.Pointer.Store`. Readers (every query path) do exactly one `atomic.Pointer.Load` at query entry and use that pointer for the entire call. A new snapshot published mid-call doesn't affect the in-flight reader. The properties locked in design — readers never wait, no per-query data copy — hold; the immutable-snapshot model adds a property "for free": snapshot consistency for the duration of a single Search/FindRelated/ResolveChunk.
+
+File changes are detected via `github.com/fsnotify/fsnotify` (pure Go, no cgo, OS-specific backends abstracted). The watcher loop accumulates dirty events into a map, debounces 2s, then re-chunks/re-embeds only the changed files, tombstones removed files, and publishes a new snapshot.
+
+### Alternatives considered
+- **RWMutex over a mutable Index.** Rejected — reader-side latency would be unbounded by the writer's turn (a 100ms reindex pauses every reader). Fundamentally violates property #5.
+- **Per-query snapshot copy of postings + embedding matrix.** Rejected — O(corpus) per query, killing the lock-free design's value.
+- **Coarse-grained full reindex on every change** (no debounce). Rejected — `git checkout` and even `git status` fire hundreds of events; a cascade of full rebuilds would burn CPU and bury actual reindex work behind queue depth.
+- **In-place mutation with `sync/atomic` on the slice header.** Considered briefly. Rejected — Go's memory model doesn't make this safe; an in-flight reader can observe a partially-updated slice header or read past the new length into garbage. The correct expression of "no lock on reads" in Go is atomic.Pointer swap of an immutable value, which is what we did.
+
+### Consequences
+- **Snapshot consistency for free.** Each Search/FindRelated/ResolveChunk call uses one snapshot start-to-end. Stronger than the "best-effort" property we required.
+- **Monotonic memory growth with edit volume.** Tombstoned chunks stay in `chunks` slice for index stability. A long-running ken-mcp session that edits every file many times accumulates tombstones at O(cumulative-edit-volume). Compaction is a v0.3.x trigger; for v0.3's short-session use the growth is acceptable. The bm25 docs for tombstoned chunks are emitted as nil token slices so df isn't bumped.
+- **Reader latency unchanged from v0.2.** No lock on the query path; the single `atomic.Pointer.Load` is sub-nanosecond.
+- **Writer latency ~ debounce + rebuild time.** Edit → query latency is 2s (debounce) + O(corpus) (BM25 rebuild + chunk-count incremental embed). On `testdata/repo` with 6 chunks the rebuild is sub-millisecond; on a 100K-chunk corpus the rebuild itself is in the seconds range, embed cost dominates and incremental embed (only changed files) keeps it bounded.
+- **`*Flat` stays immutable.** The "No Add/Remove API today, by design" property from `internal/ann/flat.go` is preserved — incremental indexing builds new `*Flat` values; it never mutates an existing one. The `internal/ann/flat.go` package comment was updated to point at this pattern instead of the old "would require a lock" caveat.
+- **`Chunk.Tombstoned` field added.** Every read path (Search / FindRelated / ResolveChunk) checks it. Over-fetch by the current tombstone count keeps result lists stable as tombstone density grows.
+- **`ken index --watch` and `--no-watch` flags.** `--watch` (default) keeps the process alive watching; `--no-watch` restores v0.2 behavior (build once, print, exit). `ken search` and `ken bench` accept the flags but the values are no-ops since the processes are one-shot.
+- **fsnotify dep.** Pure Go, MIT, ~14KB compiled, well-maintained (Kubernetes / Hugo / VS Code use it). Backends: inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows. v0.3 ships at v1.10.1.

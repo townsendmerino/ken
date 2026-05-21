@@ -12,17 +12,22 @@ import (
 	"github.com/townsendmerino/ken/internal/search"
 )
 
-// makeFakeBuilder returns a Builder that produces a unique Index per key
-// (no real chunks; we don't use Search), counts how often it's invoked,
-// and records cleanups. Used to test the cache machinery in isolation.
+// makeFakeBuilder returns a Builder that produces a unique WatchedIndex
+// per key (no real chunks; we don't use Search), counts how often it's
+// invoked, and records cleanups. The watcher is enabled (watch=true) so
+// the test exercises the real lifecycle path — cache.Close() / eviction
+// must call wix.Close() on every entry, and these tests would leak
+// goroutines if it didn't.
 func makeFakeBuilder(t *testing.T) (Builder, *atomic.Int64, *atomic.Int64) {
 	t.Helper()
 	var builds, cleanups atomic.Int64
-	b := func(_ context.Context, _ string) (*search.Index, func(), error) {
+	b := func(_ context.Context, _ string) (*search.WatchedIndex, func(), error) {
 		builds.Add(1)
-		// Build a trivial BM25-only index over a tiny tempdir.
+		// Build a trivial BM25-only WatchedIndex over a tiny tempdir.
+		// watch=true so the cache exercises the Close-on-eviction
+		// path; no test waits on swaps, so debounce default is fine.
 		dir := t.TempDir()
-		ix, err := search.FromPath(dir, search.ModeBM25, "line", "")
+		ix, err := search.NewWatchedIndex(dir, search.ModeBM25, "line", "", true)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -54,11 +59,11 @@ func TestCache_HitMiss(t *testing.T) {
 func TestCache_SingleflightDedupesConcurrentBuilds(t *testing.T) {
 	var builds atomic.Int64
 	start := make(chan struct{})
-	b := func(ctx context.Context, _ string) (*search.Index, func(), error) {
+	b := func(ctx context.Context, _ string) (*search.WatchedIndex, func(), error) {
 		builds.Add(1)
 		<-start // hold until both goroutines are in-flight
 		dir := t.TempDir()
-		ix, _ := search.FromPath(dir, search.ModeBM25, "line", "")
+		ix, _ := search.NewWatchedIndex(dir, search.ModeBM25, "line", "", true)
 		return ix, nil, nil
 	}
 	c := NewCache(8, b)

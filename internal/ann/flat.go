@@ -18,10 +18,14 @@
 //   - **Goroutine-safety.** A built *Flat is read-only — Query takes no
 //     locks and is safe to call concurrently across goroutines. New is
 //     not thread-safe (single builder); Query is.
-//   - **No mutation.** There is no Add / Remove / Update API today, by
-//     design. Incremental indexing is tracked in DESIGN.md §10; adding
-//     it here means breaking the goroutine-safety property unless
-//     guarded by a lock, which is part of the cost.
+//   - **No mutation.** *Flat is immutable after New, by design. v0.3's
+//     incremental indexing (internal/search/watch.go, ADR-012) does not
+//     mutate an existing *Flat — instead the writer builds a brand-new
+//     *Flat alongside a new *bm25.Index + chunks slice, wraps them in a
+//     new *search.Index snapshot, and publishes the pointer atomically.
+//     Readers load the snapshot pointer once at query entry. So Flat
+//     stays goroutine-safe-by-immutability; what changes is that the
+//     containing search.Index can be swapped wholesale between queries.
 package ann
 
 import "sort"

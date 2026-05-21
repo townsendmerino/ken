@@ -22,11 +22,18 @@ const DefaultCacheSize = 16
 // (either a canonical http(s) URL or an absolute filesystem path). The
 // returned cleanup is called when the entry is evicted from the cache —
 // used to rm -rf temp clone dirs; pass nil for local-path entries.
-type Builder func(ctx context.Context, source string) (*search.Index, func(), error)
+//
+// As of v0.3, the returned *search.WatchedIndex wraps the index plus a
+// file-watcher goroutine. The cache calls (*WatchedIndex).Close() on
+// eviction (and on Cache.Close()) to stop the watcher before invoking
+// the user-supplied cleanup; without this the goroutine outlives the
+// cache entry and the temp clone dir gets rm-rf'd while the watcher
+// holds inotify fds pointing into it.
+type Builder func(ctx context.Context, source string) (*search.WatchedIndex, func(), error)
 
 type cacheEntry struct {
 	key     string
-	ix      *search.Index
+	ix      *search.WatchedIndex
 	cleanup func()
 }
 
@@ -100,10 +107,13 @@ func NormalizeKey(source string) (string, bool, error) {
 	}
 }
 
-// Get returns a cached Index for source, building it once on first
-// access. Concurrent first-access calls for the same key share a single
-// build via singleflight.
-func (c *Cache) Get(ctx context.Context, source string) (*search.Index, error) {
+// Get returns a cached WatchedIndex for source, building it once on
+// first access. Concurrent first-access calls for the same key share a
+// single build via singleflight. The returned *WatchedIndex is shared
+// across all callers and across subsequent Get calls until evicted;
+// callers MUST NOT call wix.Close() themselves — the cache owns the
+// lifecycle.
+func (c *Cache) Get(ctx context.Context, source string) (*search.WatchedIndex, error) {
 	key, _, err := NormalizeKey(source)
 	if err != nil {
 		return nil, err
@@ -127,7 +137,10 @@ func (c *Cache) Get(ctx context.Context, source string) (*search.Index, error) {
 		defer c.mu.Unlock()
 		// Re-check in case another sf turn populated it (cheap; sf
 		// coalesces same-key calls but being defensive is harmless).
+		// If we lost the race, close the just-built watcher AND run
+		// its cleanup — the cache already has a usable entry.
 		if e, ok := c.items[key]; ok {
+			_ = ix.Close()
 			if cleanup != nil {
 				cleanup()
 			}
@@ -141,6 +154,7 @@ func (c *Cache) Get(ctx context.Context, source string) (*search.Index, error) {
 			}
 			ev := c.ll.Remove(tail).(*cacheEntry)
 			delete(c.items, ev.key)
+			_ = ev.ix.Close()
 			if ev.cleanup != nil {
 				ev.cleanup()
 			}
@@ -152,16 +166,18 @@ func (c *Cache) Get(ctx context.Context, source string) (*search.Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	return v.(*search.Index), nil
+	return v.(*search.WatchedIndex), nil
 }
 
-// Close releases every cached entry's cleanup (rm -rf temp clones, etc.).
-// Safe to call multiple times.
+// Close releases every cached entry. Stops the watcher goroutine for
+// each (wix.Close()) and runs the user-supplied cleanup (rm -rf for
+// temp clones). Safe to call multiple times.
 func (c *Cache) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for e := c.ll.Front(); e != nil; e = e.Next() {
 		ent := e.Value.(*cacheEntry)
+		_ = ent.ix.Close()
 		if ent.cleanup != nil {
 			ent.cleanup()
 		}
