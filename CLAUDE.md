@@ -76,7 +76,7 @@ stdin and stdout **are** the JSON-RPC channel. ANY write to stdout outside of th
 - `KEN_MCP_DEFAULT_REPO` — optional pre-indexed source; tools may then be called without `repo`.
 - `KEN_MCP_MODE` — `bm25`/`semantic`/`hybrid` (default `hybrid`; auto-downgrades to bm25 with a stderr warning if the model is unreachable).
 - `KEN_MCP_MODEL_DIR` — Model2Vec snapshot dir (must contain `model.safetensors`). Empty ⇒ bm25-only.
-- `KEN_MCP_CHUNKER` — `regex`/`line` (default `regex`).
+- `KEN_MCP_CHUNKER` — `regex`/`treesitter`/`line` (default `regex`).
 - `KEN_MCP_CACHE_SIZE` — LRU bound (default 16); `0` means caching is disabled (re-index on every request).
 - `KEN_MCP_LOG_LEVEL` — `debug`/`info`/`warn`/`error` (default `warn`); all logs go to stderr.
 
@@ -114,4 +114,4 @@ command = "/absolute/path/to/ken-mcp"
 
 - **Pure Go, no cgo, no per-platform vendored artifacts** — this is the whole point of the port (single static cross-compiled binary). Tree-sitter, native tokenizers, etc. are off the table; pure-Go alternatives go behind interfaces.
 - **Deps land with the stage that needs them** — Stage 1 was stdlib-only; the embed normalizer pulled `golang.org/x/text`; ken-mcp pulled `go-sdk`, `go-git`, `x/sync`; v0.2.0's tree-sitter chunker pulled `github.com/odvcencio/gotreesitter`; v0.3's incremental indexing pulled `github.com/fsnotify/fsnotify`. HNSW and the Chroma chunker remain documented future paths in [`docs/DESIGN.md` §10](docs/DESIGN.md#10-risk-register).
-- **Validate-against-Python before advancing** — every stage's correctness is defined as parity with semble/`StaticModel.encode()` on the same corpus, not just "looks reasonable". The tokenizer's real acceptance test (100k-input parity dump vs `transformers.AutoTokenizer`) is still owed and is the main Stage-3 risk; the 18-case `golden.json` is a spot-check, not that harness.
+- **Validate-against-Python before advancing** — every stage's correctness is defined as parity with semble/`StaticModel.encode()` on the same corpus, not just "looks reasonable". The tokenizer is validated by an 11,447-input parity harness against `transformers.AutoTokenizer` (`scripts/parity_dump.py` + `internal/embed/parity_test.go` under `-tags=parity`) — zero drift across every category; the 18-case `golden.json` is the smaller embedding spot-check that runs on every `go test`. Future tokenizer changes are rejected if the parity harness reports non-zero drift in any category.

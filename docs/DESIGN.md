@@ -80,7 +80,8 @@ ken/
 │   │   ├── hybrid.go        # candidate pool (top_k*5) + RRF fusion (k=60)
 │   │   ├── rerank.go        # definition / embedded-symbol / stem / file-coherence boosts
 │   │   ├── penalties.go     # path penalties + file-saturation decay (rerank_topk)
-│   │   └── adaptive.go      # symbol-like vs NL query classifier + resolveAlpha
+│   │   ├── adaptive.go      # symbol-like vs NL query classifier + resolveAlpha
+│   │   └── watch.go         # WatchedIndex: fsnotify + atomic.Pointer[Index] snapshot swap (v0.3, ADR-012)
 │   └── repo/                # source acquisition
 │       └── walk.go          # gitignore-respecting walk (pathspec equivalent)
 ├── mcp/                     # MCP server: tool registration, repo cache, shallow clone
@@ -395,9 +396,11 @@ Quietly bigger than the parallelism gains, in some cases:
 
 ### Incremental indexing
 
-A capability the Python version doesn't expose: an `fsnotify` watcher in a background goroutine that re-chunks only the files that changed, then atomically swaps their entries in the BM25 postings and embedding matrix. This is hard to do well in Python because `multiprocessing` makes the shared-state update messy; it's straightforward in Go with a writer goroutine that owns the index and accepts edits over a channel.
+A capability the Python version doesn't expose, **landed in v0.3**: an `fsnotify` watcher in a background goroutine debounces filesystem events 2s, then re-chunks/re-embeds only the changed files and publishes a new immutable snapshot via `atomic.Pointer[Index]`. Readers do exactly one atomic load at query entry; writers never block readers and readers never pay a per-query copy. Deletes are tombstoned in-place; compaction is deferred to v0.3.x.
 
-For agents that hold a long-lived MCP session against a repo the user is actively editing, this turns "re-index on every save" into "re-index two files," which is a different category of latency.
+For agents that hold a long-lived MCP session against a repo the user is actively editing, this turns "re-index on every save" into "re-index two files," which is a different category of latency. ken-mcp watches always; `ken index` defaults to `--watch` with `--no-watch` as the v0.2-compatible escape.
+
+Design rationale and the five locked sub-decisions are in [`DECISIONS.md` ADR-012](DECISIONS.md#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap); the implementation lives in `internal/search/watch.go`.
 
 ### Sequencing — correctness before parallelism
 
@@ -556,7 +559,7 @@ http(s) URLs shallow-clone via `go-git` to `$TMPDIR/ken-mcp/<sha256-prefix>/`. N
 - `KEN_MCP_DEFAULT_REPO` — optional pre-indexed source; tools may then be called without `repo`.
 - `KEN_MCP_MODE` — `bm25`/`semantic`/`hybrid` (default `hybrid`). Auto-downgrades to `bm25` with a stderr warning if the model dir is unreachable.
 - `KEN_MCP_MODEL_DIR` — Model2Vec snapshot dir (must contain `model.safetensors`). Empty ⇒ `bm25`-only.
-- `KEN_MCP_CHUNKER` — `regex`/`line` (default `regex`).
+- `KEN_MCP_CHUNKER` — `regex`/`treesitter`/`line` (default `regex`).
 - `KEN_MCP_CACHE_SIZE` — LRU bound (default 16).
 - `KEN_MCP_LOG_LEVEL` — `debug`/`info`/`warn`/`error` (default `warn`); all logs go to stderr.
 
@@ -617,8 +620,11 @@ Consolidated deferred items. Each entry: the item, then the trigger that would u
 - [chonkie-inc/chonkie](https://github.com/chonkie-inc/chonkie)
 - [nlpodyssey/safetensors](https://github.com/nlpodyssey/safetensors) — format reference only; ken hand-rolls its reader (§4)
 - [modelcontextprotocol/go-sdk](https://github.com/modelcontextprotocol/go-sdk)
-- [tetratelabs/wazero](https://github.com/tetratelabs/wazero) — future Option A WASM runtime
-- [alecthomas/chroma](https://github.com/alecthomas/chroma) — future Option B lexer
-- [sugarme/tokenizer](https://github.com/sugarme/tokenizer) — considered then declined (§3)
+- [odvcencio/gotreesitter](https://github.com/odvcencio/gotreesitter) — pure-Go tree-sitter runtime (ADR-010); v0.2.0's treesitter chunker
+- [fsnotify/fsnotify](https://github.com/fsnotify/fsnotify) — v0.3's incremental indexing watcher (ADR-012)
+- [tetratelabs/wazero](https://github.com/tetratelabs/wazero) — original Option A WASM runtime (superseded by gotreesitter per ADR-010)
+- [alecthomas/chroma](https://github.com/alecthomas/chroma) — Option B lexer (documented future path, never triggered — see §10)
+- [sugarme/tokenizer](https://github.com/sugarme/tokenizer) — considered then declined (§3, ADR-003)
+- [CoIR-team/coir](https://github.com/CoIR-team/coir) — external NDCG benchmark (CoIR-CSN-Python; `docs/BENCH.md`)
 - [Snowflake/snowflake-arctic-embed-m-long (BERT/WordPiece lineage)](https://huggingface.co/Snowflake/snowflake-arctic-embed-m-long)
 - [WordPiece tokenization (HF course)](https://huggingface.co/learn/llm-course/en/chapter6/6)
