@@ -10,6 +10,22 @@ with pre-built binaries.
 
 ## [Unreleased]
 
+(no changes yet)
+
+## [0.4.0] — 2026-05-21
+
+The release that closes the gap between ken's pure-Go claim and its
+actual end-user experience. A user can now `go install` ken, run
+`ken download-model`, and reach hybrid retrieval without ever
+touching a Python interpreter — the "single static binary"
+positioning is finally 100% true end-to-end, not 80%-with-Python-
+bootstrap. Agent-side routing also gets honest: the MCP tool
+instructions now name the recall/token tradeoff explicitly so AI
+agents know to fall back to grep for exhaustive enumeration. Plus
+incremental-indexing memory hygiene (tombstone compaction) and the
+disciplined close of ADR-013 after the validation precondition
+caught a misread of the CSN-Python benchmark.
+
 ### Added
 
 - **`ken download-model`** — pure-Go fetch of the three Model2Vec files
@@ -24,15 +40,6 @@ with pre-built binaries.
 
 ### Changed
 
-- **ken-mcp tool instructions surface the recall/token tradeoff.** The
-  `Instructions` string every MCP agent reads on startup gained a
-  sentence directing exhaustive-enumeration tasks (every callsite,
-  pre-rename audits) at grep instead of ken — ken caps at ~82–91%
-  recall at K=10 and isn't built for that. Mirrors the "honest
-  tradeoff" framing already in `README.md`, grounded in the
-  token-budget bench's measured ceilings. Closes the gap where agents
-  were told "prefer ken over grep" without naming the exception.
-
 - **Model directory resolution.** The CLI now searches a priority list
   for the Model2Vec snapshot — `--model <DIR>` → `$KEN_MODEL_DIR` →
   `~/.ken/model` (canonical end-user location) → `./testdata/model`
@@ -44,6 +51,15 @@ with pre-built binaries.
   The "model not found" error continues to point at whichever path
   was tried and includes the exact `ken download-model --to <path>`
   command to resolve it.
+
+- **ken-mcp tool instructions surface the recall/token tradeoff.** The
+  `Instructions` string every MCP agent reads on startup gained a
+  sentence directing exhaustive-enumeration tasks (every callsite,
+  pre-rename audits) at grep instead of ken — ken caps at ~82–91%
+  recall at K=10 and isn't built for that. Mirrors the "honest
+  tradeoff" framing already in `README.md`, grounded in the
+  token-budget bench's measured ceilings. Closes the gap where agents
+  were told "prefer ken over grep" without naming the exception.
 
 - **Tombstone compaction.** Watched indexes now drop tombstoned chunks
   during every debounced snapshot rebuild instead of accumulating
