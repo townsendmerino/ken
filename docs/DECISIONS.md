@@ -18,7 +18,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-010](#adr-010-tree-sitter-via-gotreesitter-instead-of-wazerowasm) | Tree-sitter via `gotreesitter` (pivot from wazero+WASM) | Accepted |
 | [ADR-011](#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in) | Default chunker stays `regex` in v0.2.0; treesitter is opt-in | Accepted |
 | [ADR-012](#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap) | Incremental indexing via fsnotify + atomic snapshot swap | Accepted |
-| [ADR-013](#adr-013-corpus-adaptive-α--adding-a-third-query-class-branch) | Corpus-adaptive α — adding a third query-class branch | Proposed |
+| [ADR-013](#adr-013-corpus-adaptive-α--adding-a-third-query-class-branch) | Corpus-adaptive α — adding a third query-class branch | Deprecated |
 
 ---
 
@@ -364,12 +364,14 @@ File changes are detected via `github.com/fsnotify/fsnotify` (pure Go, no cgo, O
 
 ## ADR-013: Corpus-adaptive α — adding a third query-class branch
 
-**Status:** Proposed
-**Date:** 2026-05-22
+**Status:** Deprecated
+**Date:** 2026-05-22 (Proposed) / 2026-05-21 (Deprecated via Prompt 23)
 
 ### Context
 
-semble's bench shows hybrid retrieval ahead of BM25 by a clear margin — semble published 0.854 hybrid vs 0.675 BM25-raw; ken measures 0.842 vs 0.624 on the same 63-repo × 1251-query corpus. The CoIR-CSN-Python external benchmark reverses this: ken BM25 0.8743 > hybrid 0.7839 > semantic 0.7405 (1000-query subsample, regex chunker). The structural cause is documented at [`docs/BENCH.md` "Why BM25 beats hybrid on CSN-Python"](BENCH.md#why-bm25-beats-hybrid-on-csn-python): CSN's queries are full English docstrings whose answer is the function the docstring describes; identifier overlap is high enough that BM25 with identifier-aware tokenization is reading the answer key, and α=0.5 RRF-fusion averages the weaker semantic ranking into the hybrid score and drags it down ~0.09 NDCG.
+semble's bench shows hybrid retrieval ahead of BM25 by a clear margin — semble published 0.854 hybrid vs 0.675 BM25-raw; ken measures 0.842 vs 0.624 on the same 63-repo × 1251-query corpus. The CoIR-CSN-Python external benchmark reverses this: ken BM25 0.8743 > hybrid 0.7839 > semantic 0.7405 (1000-query subsample, regex chunker). The cause this ADR was originally built on — and which turned out to be a misread of the data — is documented at [`docs/BENCH.md` "Why BM25 beats hybrid on CSN-Python"](BENCH.md#why-bm25-beats-hybrid-on-csn-python): CSN-Python's queries (as CoIR re-hosts the dataset) are actually full **Python function sources**, and the relevant document for each query is the **docstring extracted from that same function**. Because the docstring lives inside the function source as a literal substring, any lexical retriever with identifier-aware tokenization is effectively doing substring-match — BM25 has the answer string as input.
+
+**This misdescription was the load-bearing premise this ADR was built on.** The original Context paragraph described CSN queries as English docstring-shaped natural-language questions answered by the function being described, and framed α-routing as a way to recover hybrid performance on a docstring-shaped NL query class. Prompt 22's precondition step — read `scripts/bench_coir.py`, inspect a sample query/document pair — surfaced the actual direction (queries = code, docs = docstrings) and replaced the identifier-overlap diagnosis with the sharper substring-leak diagnosis above. No α value beats "the answer string is literally in the query"; the structural finding doesn't generalize past CoIR's reframing of CodeSearchNet. See the "Validation outcome" section below.
 
 semble's `resolveAlpha` (verbatim in [`internal/search/adaptive.go`](../internal/search/adaptive.go)) recognizes two query classes: symbol (α=0.3) and NL (α=0.5). There is no third class for "docstring-shaped NL" — long English queries whose lexical overlap with the answer doc is unusually high. A third branch with a lower α (lean harder on BM25, perhaps 0.1–0.2) is the conservative extension that would recover the CSN performance without touching the existing branches' constants. The lever exists; the question is whether to pull it, with what detection signal, and whether the classifier risk justifies the gain.
 
@@ -436,3 +438,13 @@ The pre-implementation validation can run on top of the existing `bench/ndcg/` a
   - New failure mode: concept-NL misrouted to docstring-NL (α=0.1 means "ignore semantic, which has the answer"). Validation watches for semble-bench regressions.
   - One CHANGELOG / README line about ken's adaptive α recognizing docstring-shaped queries.
 - **If the gate kills it:** Status changes Proposed → Deprecated; [`docs/BENCH.md`](BENCH.md#external-benchmark--coir-csn-python) updates the CSN paragraph with the no-signal finding.
+
+### Validation outcome — Prompt 22 reconnaissance (2026-05-21)
+
+Prompt 22 paused before any labeling work after reading [`scripts/bench_coir.py`](../scripts/bench_coir.py) and inspecting a sample query/document pair from `testdata/bench/coir-csn-python/`. The motivating empirical claim that built this ADR — that CSN-Python queries are English docstring-shaped NL inputs and the relevant document is the function those queries describe — had the direction **backwards**: CoIR's CSN-Python reframing makes queries the full Python function sources and documents the docstrings extracted from those same functions. The docstring lives *inside* the query as a literal substring (the function's own `"""..."""` block). The BM25-beats-hybrid result on CSN-Python is therefore a **substring-leak artifact** of CoIR's dataset construction, not evidence of a query-class signal that an α-routing lever could exploit.
+
+Concretely, query `q265734` is a 12-line Python function whose docstring is `str->list / Convert XML to URL List. / From Biligrab.`; document `c265608` (the matching qrel, score 1.0) is exactly those three lines. BM25 with identifier-aware tokenization wins because the answer string is in its input — no choice of α changes that.
+
+With no alternative measured corpus showing the underlying phenomenon (a real "long, identifier-heavy NL query whose semantic ranking is genuinely weak"), the ADR closes as **Deprecated** without running the pre-implementation validation gate. This is a valid Proposed-ADR outcome: the validation discipline killed the proposal at the precondition step instead of the per-bucket-α-sweep step, which is cheaper and equally honest.
+
+ADR-013 may be revisited if a future NL-to-code benchmark (CodeSearchNet's original NL-query split, or a curated workflow corpus where users paste code looking for tests) provides a motivating empirical anchor that survives precondition inspection. The Alternatives / Consequences sections above remain as the record of the design conversation — they're useful for whoever picks this up later, even though no implementation will follow from *this* ADR.

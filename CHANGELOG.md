@@ -25,11 +25,17 @@ with pre-built binaries.
 
 ### Documentation
 
-- ADR-013 (Proposed): documents the design conversation around adding
-  a corpus-adaptive α router for hybrid retrieval, motivated by the
-  CoIR-CSN-Python BM25 > hybrid finding. Decision deferred pending
-  pre-implementation validation (per-bucket α sweep on a hand-labeled
-  query subset). See [`docs/DECISIONS.md` ADR-013](docs/DECISIONS.md#adr-013-corpus-adaptive-α--adding-a-third-query-class-branch).
+- ADR-013 closed as **Deprecated** (Proposed → Deprecated). Prompt 22's
+  precondition inspection of the CoIR-CSN-Python dataset revealed the
+  motivating empirical anchor was misread: CSN queries are full Python
+  function sources, not English docstrings; documents are docstrings
+  extracted from those same functions, so BM25's win on this benchmark
+  is a substring-leak artifact of dataset reframing, not a query-class
+  signal an α-routing lever could exploit. `docs/BENCH.md`,
+  `docs/DESIGN.md`, `docs/DECISIONS.md`, and `README.md` corrected
+  correspondingly. The CSN-Python NDCG and token-budget numbers
+  themselves are unchanged; only the causal explanation shifts. See
+  [`docs/DECISIONS.md` ADR-013](docs/DECISIONS.md#adr-013-corpus-adaptive-α--adding-a-third-query-class-branch).
 
 ## [0.3.0] — 2026-05-21
 
