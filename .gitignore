@@ -34,3 +34,8 @@ testdata/parity.jsonl
 # NDCG@10 benchmark output (regenerated via bench/semble/run_ken.py;
 # corpus + annotations live in MinishLab/semble's checkout, not here).
 bench/semble/results/
+
+# CoIR-CSN-Python external benchmark corpus + queries + qrels.
+# Downloaded per-machine via scripts/bench_coir.py (~140 MB compressed,
+# ~1 GB after materializing 280k corpus files). Never committed.
+testdata/bench/

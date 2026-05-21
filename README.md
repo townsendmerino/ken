@@ -243,6 +243,27 @@ The full per-language NDCG breakdown plus the empirical findings that informed t
 
 semble timings cited above are from semble's own [README "Benchmarks" section](https://github.com/MinishLab/semble#benchmarks); ken's are measured on the included `testdata/repo` polyglot fixture and on a sibling shallow clone of `/tmp/semble`. Cold-start was timed by `/usr/bin/time -p ken search testdata/repo "validate" -k 1 --mode bm25` over three trials (M2 MacBook Air, Go 1.26.3, darwin/amd64 build under Rosetta).
 
+## Benchmarks — external reference (CoIR-CSN-Python)
+
+A single externally-reproducible NDCG@10 number on [CoIR](https://github.com/CoIR-team/coir)'s `CodeSearchNet-python` task, independent of semble's own benchmark — gives readers a comparable anchor against published code-IR baselines.
+
+Result (v0.2.0, 1000-query subsample, regex chunker):
+
+| Mode                       | NDCG@10 |
+|----------------------------|--------:|
+| bm25                       |  0.8743 |
+| semantic                   |  0.7405 |
+| **hybrid (default)**       | **0.7839** |
+
+Reproduce:
+
+```bash
+python scripts/bench_coir.py                                # ~45 s download + 280k corpus files
+KEN_COIR_QUERY_LIMIT=1000 go test -tags=bench ./bench/ndcg/ -run TestCoIR -v   # ~13 min
+```
+
+A nuance worth surfacing up front: **on CSN-Python, BM25 beats hybrid by 0.09** — opposite of what semble's bench shows. CSN's queries are full English docstrings whose answers are the function they describe; identifier overlap is high, so BM25 with identifier-aware tokenization is already near-optimal and α=0.5 RRF fusion drags the hybrid number down. Not a ken bug — well-precedented in code-IR literature; CSN is a BM25-friendly benchmark. Detailed empirical findings and a comparison to potion-code-16M's published aggregate are in [`docs/BENCH.md`](docs/BENCH.md#external-benchmark--coir-csn-python).
+
 ## Roadmap
 
 The full risk register with explicit triggers is in [docs/DESIGN.md §10](docs/DESIGN.md#10-risk-register). Highlights:
