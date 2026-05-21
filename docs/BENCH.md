@@ -107,7 +107,25 @@ Recorded so future readers don't relitigate the obvious paths:
 
 - **The BM25 tokenizer divergence is not the dominant cause.** Bringing `internal/bm25/tokenize.go` to verbatim parity with semble's `tokens.py` (snake-case compound preservation, ASCII-only run extraction matching `_TOKEN_RE`, compound-first emission order matching `split_identifier`) moved hybrid by **only +0.002** (0.840 → 0.842) and BM25-raw by **only +0.002** (0.622 → 0.624). The per-repo deltas were directionally mixed (e.g. nlohmann-json +0.039, aiohttp −0.018) which is consistent with reshuffling rather than systematic improvement. Conclusion: the tokenizer fix is still the right change (the design contract is verbatim parity), but the residual gap is **chunker-bound**, not tokenizer-bound.
 - **The BM25 TF formula divergence is cosmetic, not load-bearing.** ken's `internal/bm25/query.go` currently uses the ATIRE TF formula `(tf*(k1+1)) / (tf + k1*(1-b+b*l_d/l_avg))` while semble's `bm25s` default is Lucene `tf / (k1*(1-b+b*l_d/l_avg) + tf)`. These differ by a constant `(k1+1) = 2.5` factor at fixed `k1`, which preserves ranking exactly. After RRF rank normalization in hybrid, even absolute scores are discarded. Fixing it would be a one-line cleanup for fidelity but cannot change NDCG.
-- **The chunker is the lever.** With the tokenizer at verbatim parity, the remaining gap distributes per-language as expected for a chunker mismatch: Python (which our regex chunker handles best) at +0.003 vs semble, while go/rust/zig sit at ~−0.05. The path forward is the WASM tree-sitter chunker (Option A per `docs/DESIGN.md` §2 — wazero + tree-sitter WASM grammars), not further tuning of BM25 or the rerank pipeline.
+- **The chunker is the lever.** With the tokenizer at verbatim parity, the remaining gap distributes per-language as expected for a chunker mismatch: Python (which our regex chunker handles best) at +0.003 vs semble, while go/rust/zig sit at ~−0.05. The path forward is the WASM tree-sitter chunker (Option A per `docs/DESIGN.md` §2), not further tuning of BM25 or the rerank pipeline.
+
+## Empirical findings (v0.2.0: the tree-sitter chunker)
+
+v0.2.0 landed the tree-sitter chunker via [`gotreesitter`](https://github.com/odvcencio/gotreesitter), running the cAST split-then-merge algorithm. Three iterations on the full benchmark produced a clean negative result for the "AST chunking closes the gap" hypothesis:
+
+| Config | Hybrid NDCG | Δ vs regex (0.842) |
+|---|---:|---:|
+| treesitter v1 (all 19 langs, default chunkSize=1500) | 0.831 | −0.011 |
+| treesitter v2 (skip bash + csharp, chunkSize floored at 3000) | 0.834 | −0.008 |
+| **treesitter v3 (skip bash + csharp, chunkSize=1500)** | **0.838** | **−0.004** |
+
+What we learned:
+
+- **AST chunking is not a clear win at this granularity.** The hypothesis going in: regex chunkers draw bad boundaries on languages we didn't hand-tune (go/rust/zig at −0.05 per-language vs semble in v0.1.0). The data: treesitter trades wins on some languages for losses on others, netting essentially zero (Δ −0.004 — within bench noise). Conclusion: **the v0.1.0 gap vs semble is not primarily a chunker-quality issue at the algorithm level**, even though the per-language signature looked like it could be.
+- **chunkSize is in bytes, not tokens.** The cAST paper uses tokens; Chonkie uses tokens. ken uses bytes (consistent with the rest of ken's pipeline). Increasing chunkSize from 1500 → 3000 bytes (≈ Chonkie's token budget) *hurt* NDCG by 0.004 on non-bash languages — bigger chunks dilute BM25 IDF and average out Model2Vec embeddings without preserving more structural signal. ken's existing 1500-byte budget is the right value for both chunkers.
+- **Two grammars failed badly enough to disable entirely.** The gotreesitter v0.18.0 **C# grammar** OOMs (1.7+ GB RSS) on real C# files. The **bash grammar** is pathologically slow (~39% of files timeout at 1 s per parse). Both are absent from the treesitter chunker's supported-languages list and route through the line chunker — identical behavior to the regex chunker's fallback path for them.
+- **The wins are real but narrow.** Kotlin +0.011, Zig +0.013, TypeScript +0.009, Java +0.006, PHP +0.005. Users who index those languages heavily should prefer `--chunker=treesitter`. Everyone else should stay on the default `regex` — losses on Python (−0.009), C (−0.017), Rust (−0.013), Lua (−0.022), Scala (−0.022) outweigh the wins on the average corpus.
+- **Net decision: ship treesitter as opt-in.** See [`docs/DECISIONS.md` ADR-011](DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in) for the full rationale; the per-language recommendation table is in [README.md "Choosing a chunker"](../README.md#choosing-a-chunker).
 
 ## Files
 

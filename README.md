@@ -158,6 +158,45 @@ gitignore-respecting walk
 
 The retrieval algorithm is a verbatim port of semble's `search.py` + `ranking/*.py`; see [docs/DESIGN.md §7](docs/DESIGN.md#7-hybrid-retrieval--rerank) for every constant, every pipeline-order subtlety, and where the original scoping reconstruction diverged from semble's live source. The Model2Vec inference path (three-tensor `safetensors` layout, the `mapping[]` indirection, the float64 precision contract that's load-bearing for ≥1−1e-5 cosine parity) is in [§4](docs/DESIGN.md#4-model2vec-inference-format).
 
+## Choosing a chunker
+
+ken ships with **two chunkers** behind the same `--chunker=` flag (CLI) / `KEN_MCP_CHUNKER=` env var (MCP):
+
+- **`regex`** *(default)* — hand-rolled per-language regex rules for Python / Go / TypeScript / Java / Rust with a line-window fallback for everything else. Smallest binary (3.9 MB ken / 16 MB ken-mcp).
+- **`treesitter`** *(opt-in)* — pure-Go tree-sitter via [`gotreesitter`](https://github.com/odvcencio/gotreesitter), running the cAST split-then-merge algorithm from [arXiv 2506.15655](https://arxiv.org/html/2506.15655). 206 grammars embedded (~+26 MB binary).
+
+**TL;DR:** stay on `regex` unless you index one of the languages where treesitter measurably wins.
+
+The NDCG@10 difference is small (overall hybrid: treesitter 0.838 vs regex 0.842 — Δ −0.004, within bench noise), but it's not uniform per-language. From the v0.2.0 measurement on semble's 63-repo benchmark:
+
+| Language | regex | treesitter | Recommendation |
+|---|---:|---:|---|
+| Kotlin | 0.806 | **0.817** | **`treesitter`** *(+0.011)* |
+| Zig | 0.867 | **0.880** | **`treesitter`** *(+0.013)* |
+| TypeScript | 0.676 | **0.685** | **`treesitter`** *(+0.009)* |
+| Java | 0.829 | **0.835** | **`treesitter`** *(+0.006)* |
+| PHP | 0.860 | **0.865** | **`treesitter`** *(+0.005)* |
+| Python | **0.870** | 0.861 | `regex` *(−0.009)* |
+| C | **0.748** | 0.731 | `regex` *(−0.017)* |
+| C++ | **0.896** | 0.884 | `regex` *(−0.012)* |
+| Rust | **0.806** | 0.793 | `regex` *(−0.013)* |
+| Lua | **0.838** | 0.816 | `regex` *(−0.022)* |
+| Scala | **0.905** | 0.883 | `regex` *(−0.022)* |
+| Go | **0.849** | 0.846 | either *(tied within ±0.005)* |
+| JavaScript | 0.917 | 0.912 | either |
+| Ruby | 0.903 | 0.903 | either |
+| Swift | 0.846 | 0.841 | either |
+| Elixir | 0.911 | 0.907 | either |
+| Haskell | 0.738 | 0.739 | either |
+| C# | 0.859 | 0.859 | either *(treesitter auto-falls-back to line)* |
+| Bash | 0.821 | 0.821 | either *(treesitter auto-falls-back to line)* |
+
+Notes on the auto-fallback rows:
+- **C#** — the gotreesitter v0.18.0 C# grammar OOMs on real-world C# files (1.7+ GB RSS during indexing). The treesitter chunker detects unsupported languages and routes them through the line chunker, so C# behaves identically under both selections.
+- **Bash** — the bash grammar is pathologically slow on real bash-it content (~39% of files timeout). Same auto-fallback behavior.
+
+The full per-language NDCG breakdown plus the empirical findings that informed this is in [`docs/BENCH.md`](docs/BENCH.md). The rationale for default-stays-regex is in [`docs/DECISIONS.md` ADR-011](docs/DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in).
+
 ## Comparison to semble
 
 | Property | semble | ken |
@@ -174,15 +213,15 @@ The retrieval algorithm is a verbatim port of semble's `search.py` + `ranking/*.
 | Binary size | n/a (Python env) | `ken` 3.9 MB · `ken-mcp` 16 MB |
 | Requires `huggingface-cli` for model | yes | yes (or skip and use `--mode bm25`) |
 
-† **Measured at v0.1.0 against semble's published benchmark** (63 repos, 1251 queries, semble's own `benchmarks.metrics.ndcg_at_k` + `target_rank`). Reproduce: see [`docs/BENCH.md`](docs/BENCH.md). Ablation breakdown vs semble's published raw retrieval numbers:
+† **Measured at v0.1.0 / v0.2.0 against semble's published benchmark** (63 repos, 1251 queries, semble's own `benchmarks.metrics.ndcg_at_k` + `target_rank`). Reproduce: see [`docs/BENCH.md`](docs/BENCH.md). Ablation breakdown vs semble's published raw retrieval numbers:
 >
-> | Mode | semble (raw) | ken | Δ |
+> | Mode | semble (raw) | ken regex (default) | ken treesitter (opt-in) |
 > |---|---:|---:|---:|
-> | Semantic only (potion-code-16M) | 0.650 | **0.647** | −0.003 |
-> | BM25 only | 0.675 | 0.624 | −0.051 |
-> | **Hybrid (full ranker)** | **0.854** | **0.842** | **−0.012** |
+> | Semantic only (potion-code-16M) | 0.650 | **0.647** | — |
+> | BM25 only | 0.675 | 0.624 | 0.621 |
+> | **Hybrid (full ranker)** | **0.854** | **0.842** | **0.838** |
 >
-> The semantic-raw match within 0.003 isolates and validates the embedding + tokenizer + ANN port. The BM25 tokenizer was also re-aligned to a verbatim port of semble's `tokens.py` (snake-case compound preservation, ASCII-only identifier extraction, compound-first emission order) — that fix moved both BM25-raw and hybrid by +0.002, confirming the residual gap is chunker-driven rather than tokenizer-driven. ken's regex chunker draws different boundaries than semble's tree-sitter chunker (via Chonkie): Python tracks semble exactly (+0.003); go/rust/zig/cpp are −0.03 to −0.05. The chunker dependency tradeoff is called out as expected divergence in [`docs/DESIGN.md` §2](docs/DESIGN.md#2-chunker); closing it is the trigger for the WASM tree-sitter chunker on the roadmap. See [docs/DESIGN.md §10](docs/DESIGN.md#10-risk-register).
+> The semantic-raw match within 0.003 isolates and validates the embedding + tokenizer + ANN port. The BM25 tokenizer was also re-aligned to a verbatim port of semble's `tokens.py` (snake-case compound preservation, ASCII-only identifier extraction, compound-first emission order). The v0.2.0 tree-sitter chunker (`--chunker=treesitter` via [`gotreesitter`](https://github.com/odvcencio/gotreesitter)) trades NDCG per-language without net movement — clear wins on Kotlin / Zig / TypeScript / Java / PHP, losses on Python / Rust / C / Lua / Scala — so the **default chunker stays regex** and treesitter is opt-in. See ["Choosing a chunker"](#choosing-a-chunker) for the per-language recommendation and [`docs/DECISIONS.md` ADR-011](docs/DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in) for the full rationale.
 
 semble timings cited above are from semble's own [README "Benchmarks" section](https://github.com/MinishLab/semble#benchmarks); ken's are measured on the included `testdata/repo` polyglot fixture and on a sibling shallow clone of `/tmp/semble`. Cold-start was timed by `/usr/bin/time -p ken search testdata/repo "validate" -k 1 --mode bm25` over three trials (M2 MacBook Air, Go 1.26.3, darwin/amd64 build under Rosetta).
 
@@ -190,10 +229,11 @@ semble timings cited above are from semble's own [README "Benchmarks" section](h
 
 The full risk register with explicit triggers is in [docs/DESIGN.md §10](docs/DESIGN.md#10-risk-register). Highlights:
 
-- **NDCG vs semble — measured at v0.1.0**: hybrid 0.840 vs semble 0.854 (Δ 0.014). The 1.6% gap is chunker-driven (see [`docs/BENCH.md`](docs/BENCH.md)); the algorithm port is validated by the semantic-raw match within 0.003.
-- **WASM tree-sitter chunker (Option A)** — closing the remaining hybrid gap. Trigger: now triggered by the measured per-language drift on go/rust/zig.
-- **Chroma chunker (Option B)** — broader language coverage via a token-stream lexer. Trigger: a polyglot repo where the regex chunker doesn't cover a needed language.
-- **Class-body-aware Python chunking** — currently top-level only; large Django models / SQLAlchemy bases line-split through methods. Trigger: Python NDCG visibly below the other languages (not currently triggered — Python is +0.002 vs semble).
+- **NDCG vs semble — measured at v0.1.0 / v0.2.0**: hybrid 0.842 (regex) and 0.838 (treesitter) vs semble's 0.854. The ~0.012 gap is **not primarily chunker-driven** — v0.2.0's tree-sitter chunker trades per-language wins and losses without closing the gap (see [docs/BENCH.md](docs/BENCH.md) "v0.2.0 empirical findings"). The algorithm port itself is validated by the semantic-raw match within 0.003.
+- **Tree-sitter chunker (Option A)** — landed in v0.2.0 via [`gotreesitter`](https://github.com/odvcencio/gotreesitter) as opt-in (`--chunker=treesitter`). Default stays `regex`. Per-language guidance in ["Choosing a chunker"](#choosing-a-chunker).
+- **Chroma chunker (Option B)** — broader language coverage via a token-stream lexer. Trigger: a polyglot repo where neither chunker covers a needed language. Not currently triggered.
+- **Class-body-aware Python chunking** — currently top-level only; large Django models / SQLAlchemy bases line-split through methods. Trigger: Python NDCG visibly below the other languages (not currently triggered).
+- **Incremental indexing** — today every `ken` invocation is a full walk + chunk + index from scratch; ken-mcp caches the built index in-process but does not invalidate on file changes (so a running ken-mcp serves a stale index until the LRU evicts that entry or the process restarts). True incremental indexing would patch the BM25 postings + dense matrix on file deltas instead of rebuilding. Trigger: users running ken-mcp on a repo they're actively editing report stale results, or full-rebuild latency on large corpora becomes the dominant per-query cost.
 
 ## Acknowledgments
 

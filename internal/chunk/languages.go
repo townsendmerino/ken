@@ -22,11 +22,20 @@ var extLang = map[string]string{
 	".java": "java",
 	".rs":   "rust",
 
-	// Known but not regex-chunked in v1 (fall through to line chunker).
+	// Languages tree-sitter chunks but the regex chunker does not (these
+	// fall through to the line chunker under --chunker=regex, and get
+	// AST chunking under --chunker=treesitter).
 	".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".hpp": "cpp", ".cxx": "cpp",
 	".rb": "ruby", ".php": "php", ".cs": "csharp", ".swift": "swift",
-	".kt": "kotlin", ".scala": "scala", ".m": "objc", ".mm": "objc",
+	".kt": "kotlin", ".kts": "kotlin", ".scala": "scala", ".sc": "scala",
+	".m": "objc", ".mm": "objc",
 	".sh": "shell", ".bash": "shell", ".zsh": "shell",
+	".ex": "elixir", ".exs": "elixir",
+	".hs":  "haskell",
+	".lua": "lua",
+	".zig": "zig",
+
+	// Known data/markup formats (no chunker handles these yet — line fallback).
 	".md": "markdown", ".rst": "rst", ".txt": "text",
 	".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
 	".xml": "xml", ".html": "html", ".css": "css", ".scss": "css",

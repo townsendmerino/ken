@@ -12,7 +12,8 @@ import (
 	"github.com/townsendmerino/ken/internal/ann"
 	"github.com/townsendmerino/ken/internal/bm25"
 	"github.com/townsendmerino/ken/internal/chunk"
-	_ "github.com/townsendmerino/ken/internal/chunk/regex" // registers the "regex" chunker
+	_ "github.com/townsendmerino/ken/internal/chunk/regex"      // registers the "regex" chunker
+	_ "github.com/townsendmerino/ken/internal/chunk/treesitter" // registers the "treesitter" chunker
 	"github.com/townsendmerino/ken/internal/embed"
 	"github.com/townsendmerino/ken/internal/repo"
 )
