@@ -2,6 +2,28 @@
 // scorer plus the identifier-aware tokenizer that feeds it. Stage 1 of
 // docs/DESIGN.md: the boring-but-correct foundation validated against semble's
 // SearchMode.BM25.
+//
+// Invariants pinned to semble's bm25s defaults (k1=1.5, b=0.75, Lucene
+// IDF: `ln(1 + (N - df + 0.5) / (df + 0.5))`, non-negative-clamped):
+//
+//   - **Lucene IDF.** index.go computes the IDF that the bm25s library
+//     emits by default — `ln(1 + (N-df+0.5)/(df+0.5))`. The `+1` inside
+//     the log keeps it non-negative even for terms that appear in most
+//     docs, which is the variant semble depends on. Changing this
+//     formula changes ranking on real corpora; tests cross-check it.
+//   - **TF formula = ATIRE, ranking-preserved.** query.go uses the
+//     ATIRE TF formula `(tf*(k1+1)) / (tf + k1*(1-b+b*ld/lavg))` while
+//     bm25s defaults to Lucene/Robertson `tf / (k1*(1-b+b*ld/lavg) + tf)`.
+//     They differ by a constant `k1+1 = 2.5` factor that preserves rank
+//     order exactly; ADR-006 records why this is intentional rather
+//     than a port bug.
+//   - **Tokenize is a verbatim port of `semble/tokens.py`.** Identifier
+//     extraction matches Python `_TOKEN_RE = [a-zA-Z_][a-zA-Z0-9_]*`
+//     (ASCII only; underscores join, leading digits drop). Snake-case
+//     compound preservation: `validate_user` tokenizes to `["validate_user",
+//     "validate", "user"]` (compound first), not `["validate", "user"]`.
+//     CamelCase splitting matches the `_CAMEL_RE` regex's ordered
+//     alternation. See ADR-008 for why verbatim parity is the contract.
 package bm25
 
 import (

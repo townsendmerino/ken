@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Go module deps (gotreesitter, go-git, go-sdk, etc.).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+
+  # GitHub Actions versions in .github/workflows/.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions

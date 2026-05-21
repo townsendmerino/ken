@@ -21,6 +21,14 @@ zero-vector contract for those directly rather than via cosine.
 To regenerate (from repo root):
 
 ```bash
+./scripts/regen_golden.sh
+```
+
+The script bootstraps `.venv/` if it doesn't exist, pip-installs the Python reference deps (`model2vec`, `safetensors`, `tokenizers`, `huggingface_hub`, `numpy`), runs `scripts/pin_inference.py`, copies the produced `ken_golden.json` into `testdata/golden.json`, and prints a one-line summary (case count + byte size) so a truncated fixture is visible immediately. Idempotent — re-run safely.
+
+Manual fallback if `regen_golden.sh` can't be used (e.g. existing venv with conflicting deps):
+
+```bash
 .venv/bin/python scripts/pin_inference.py
 cp ken_golden.json testdata/golden.json
 ```

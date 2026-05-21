@@ -2,6 +2,32 @@
 // hybrid pipeline: walk → chunk → {BM25 lexical | Model2Vec semantic} →
 // RRF fuse → file-coherence + query boosts → path penalties, all ported
 // verbatim from semble (search.py + ranking/*). Hybrid is the default.
+//
+// The Mode enum (ModeBM25 / ModeSemantic / ModeHybrid) picks which
+// retrievers run and whether the rerank pipeline applies:
+//
+//   - **ModeBM25** runs only the lexical retriever (BM25.TopK) — no
+//     rerank, no semantic, no model required. Corresponds to semble's
+//     "BM25 raw" row, not "BM25 + ranking".
+//   - **ModeSemantic** runs only the dense retriever (cosine over a
+//     flat ANN index) — no rerank. Corresponds to semble's
+//     "potion-code-16M raw" row.
+//   - **ModeHybrid** runs both, normalizes each via RRF (1/(60+rank),
+//     rank-based so absolute scores don't matter), α-weight-fuses
+//     (semble's resolveAlpha: α=0.3 for symbol queries, 0.5 for NL),
+//     then applies the full rerank pipeline.
+//
+// Pipeline-order invariants in ModeHybrid (hybrid.go + rerank.go +
+// penalties.go) — porting bug if reordered:
+//
+//   - candidate over-fetch (k*5) BEFORE any boosting
+//   - RRF normalization BEFORE α-fusion (rank-based, not score-based)
+//   - boost_multi_chunk_files BEFORE apply_query_boost
+//   - rerank_topk's path penalties applied LAST, gated `alpha < 1.0`
+//     (semantic-only mode skips path penalties)
+//
+// See docs/DESIGN.md §7 for the constants and the file:line audit trail
+// back to semble's live source.
 package search
 
 import (

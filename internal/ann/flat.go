@@ -2,10 +2,26 @@
 // cosine scan — the "vicinity" equivalent in docs/DESIGN.md §1. HNSW lands later
 // behind this same Hit/Query shape; flat is exact and fine at repo scale.
 //
-// ken's embeddings come out of embed.StaticModel.Encode already L2-
-// normalized, so cosine similarity is just the dot product. semble's
-// dense backend returns cosine *distance* (1 − sim) and search.py flips it
-// back to similarity; we skip the round-trip and score similarity directly.
+// Invariants the rest of the codebase depends on:
+//
+//   - **Input vectors are L2-normalized.** embed.StaticModel.Encode
+//     normalizes its output before returning, so cosine similarity is
+//     just the dot product — Query computes that, not a full
+//     ‖a‖‖b‖-divided cosine. Passing non-normalized vectors silently
+//     produces incorrect rankings; the precision contract lives at the
+//     embed boundary, not here.
+//   - **Similarity, not distance.** semble's dense backend (vicinity)
+//     returns cosine *distance* (1 − sim) and search.py flips it back to
+//     similarity; ken skips the round-trip and scores similarity
+//     directly, with "higher = better." Anything reading the Score
+//     field must treat it that way.
+//   - **Goroutine-safety.** A built *Flat is read-only — Query takes no
+//     locks and is safe to call concurrently across goroutines. New is
+//     not thread-safe (single builder); Query is.
+//   - **No mutation.** There is no Add / Remove / Update API today, by
+//     design. Incremental indexing is tracked in DESIGN.md §10; adding
+//     it here means breaking the goroutine-safety property unless
+//     guarded by a lock, which is part of the cost.
 package ann
 
 import "sort"

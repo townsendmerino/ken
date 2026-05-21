@@ -14,13 +14,46 @@
 // chunker stays registered ("--chunker=regex") for users who don't want
 // the +20 MB grammar bloat or the gotreesitter dep.
 //
-// Per-language parser pools: indexing a real repo calls Chunk() once
-// per file (often thousands of files of the same language). Allocating
-// a fresh gotreesitter.Parser on every call burned tens of minutes on
-// the 63-repo bench; ParserPool is a sync.Pool-backed reusable parser
-// designed exactly for this case. We cache one *ParserPool per
-// gotreesitter language, lazily created on first use, behind a
-// sync.Map so the Chunker stays safe to share across goroutines.
+// Load-bearing invariants the rest of the codebase depends on:
+//
+//   - **cAST split-then-merge** (cast.go). Pass 1 walks the AST top-
+//     down: for each named node whose byte span exceeds chunkSize,
+//     recurse into its named children instead of emitting it as a
+//     whole. Pass 2 walks the resulting span list in order, greedily
+//     merging adjacent spans while their combined span ≤ chunkSize.
+//     Inter-span gaps (whitespace, comments, blank lines) are absorbed
+//     into whichever chunk straddles them, preserving the byte-fidelity
+//     invariant from internal/chunk (concat == source). Changing either
+//     pass's loop structure breaks byte-fidelity; tests cross-check it
+//     per language.
+//   - **gotreesitter dep is pinned at the major.minor in go.mod.** It
+//     is pre-1.0 with a single maintainer (bus-factor: 1, ADR-010 risk).
+//     The chunker.Chunker interface (ADR-005) is the swap-out path if
+//     the dep ever needs to be replaced. Don't lift internal types
+//     across the interface boundary — keep all gotreesitter-specific
+//     state inside this package.
+//   - **Per-language ParserPool cache.** Indexing a real repo calls
+//     Chunk() once per file (thousands of files of the same language).
+//     Allocating a fresh gotreesitter.Parser on every call burned tens
+//     of minutes per bench repo (measured during v0.2.0 development).
+//     ParserPool is a sync.Pool-backed reusable parser designed for
+//     this; we cache one *ParserPool per gotreesitter language, lazily
+//     created on first use, in a sync.Map so the Chunker stays safe to
+//     share across goroutines.
+//   - **Per-parse timeout (parseTimeoutMicros, 1s).** Some grammars
+//     have pathological inputs (the gotreesitter v0.18.0 bash grammar
+//     hangs indefinitely on real bash-it content). The timeout aborts
+//     a runaway parse and falls through to fallback(), which routes
+//     the file to the registered "line" chunker instead of emitting a
+//     single whole-file chunk (whole-file fallback regressed bash NDCG
+//     by 0.119 in measurement; the current behavior matches what the
+//     regex chunker does for unsupported languages).
+//   - **Deliberate language omissions** (languages.go). The C# grammar
+//     OOMs on real-world C# (1.7+ GB RSS → SIGKILL); bash grammar is
+//     too slow even with the timeout. Both are absent from
+//     kenToTreeSitter and auto-fall-back to the line chunker, matching
+//     the regex chunker's behavior for those languages. Revisit when
+//     gotreesitter ships bounded-memory C# or a faster bash grammar.
 package treesitter
 
 import (
