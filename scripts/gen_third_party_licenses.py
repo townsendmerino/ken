@@ -97,6 +97,8 @@ def main() -> int:
     print("# Third-Party Go Module Licenses\n")
     print("Modules compiled into the released `ken` and `ken-mcp` binaries.")
     print("Test-only modules (reachable only via `*_test.go`) are excluded.\n")
+    print("Regenerate with `scripts/gen_third_party_licenses.py` after `go mod tidy`.")
+    print("The standard library is governed by Go's own [BSD-3-Clause license](https://go.dev/LICENSE) and is not re-listed here.\n")
     print(f"Generated {date.today().isoformat()} from `go list`.\n")
     print("For the bundled `potion-code-16M` model weights (MIT) and their upstream")
     print("attribution chain (Apache-2.0 for `snowflake-arctic-embed-m-long`), see")
