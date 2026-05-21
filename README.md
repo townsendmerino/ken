@@ -182,8 +182,8 @@ The retrieval algorithm is a verbatim port of semble's `search.py` + `ranking/*.
 
 ken ships with **two chunkers** behind the same `--chunker=` flag (CLI) / `KEN_MCP_CHUNKER=` env var (MCP):
 
-- **`regex`** *(default)* — hand-rolled per-language regex rules for Python / Go / TypeScript / Java / Rust with a line-window fallback for everything else. Smallest binary (3.9 MB ken / 16 MB ken-mcp).
-- **`treesitter`** *(opt-in)* — pure-Go tree-sitter via [`gotreesitter`](https://github.com/odvcencio/gotreesitter), running the cAST split-then-merge algorithm from [arXiv 2506.15655](https://arxiv.org/html/2506.15655). 206 grammars embedded (~+26 MB binary).
+- **`regex`** *(default)* — hand-rolled per-language regex rules for Python / Go / TypeScript / Java / Rust with a line-window fallback for everything else.
+- **`treesitter`** *(opt-in)* — pure-Go tree-sitter via [`gotreesitter`](https://github.com/odvcencio/gotreesitter), running the cAST split-then-merge algorithm from [arXiv 2506.15655](https://arxiv.org/html/2506.15655). Its 206 embedded grammars account for ~26 MB of the binary and are linked into **every** build — chunker choice is a runtime flag, not a build option.
 
 **TL;DR:** stay on `regex` unless you index one of the languages where treesitter measurably wins.
 
@@ -232,7 +232,7 @@ The full per-language NDCG breakdown plus the empirical findings that informed t
 | NDCG@10 on CoIR-CSN-Python (external) | (not measured; semble doesn't run this bench) | **0.8743 bm25 / 0.7839 hybrid** ([see why](#benchmarks--external-reference-coir-csn-python))†† |
 | Median tokens to recall@10 on agent queries | (not measured; semble doesn't run this bench) | **4,269 tok @ 82% recall** on semble NL queries — vs grep+Read's 189,591 tok @ 99.9% (44× cheaper at 17 pp lower recall)††† |
 | MCP server | yes | yes — drop-in compatible (same tool schemas, same wire format) |
-| Binary size | n/a (Python env) | `ken` 3.9 MB · `ken-mcp` 16 MB |
+| Binary size | n/a (Python env) | `ken` ~32 MB · `ken-mcp` ~36 MB (tree-sitter grammars dominate — see [Choosing a chunker](#choosing-a-chunker)) |
 | Requires `huggingface-cli` for model | yes | **no** — `ken download-model` fetches direct from HF (or skip and use `--mode bm25`) |
 
 † **Measured at v0.1.0 / v0.2.0 against semble's published benchmark** (63 repos, 1251 queries, semble's own `benchmarks.metrics.ndcg_at_k` + `target_rank`). Reproduce: see [`docs/BENCH.md`](docs/BENCH.md). Ablation breakdown vs semble's published raw retrieval numbers:

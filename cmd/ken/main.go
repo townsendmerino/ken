@@ -100,8 +100,9 @@ tokenizer.json, config.json) directly from HuggingFace into ~/.ken/model by
 default. No Python tooling required. Public models only; gated/private models
 still need huggingface-cli.
 
-semantic/hybrid modes need a Model2Vec model dir (default ./testdata/model);
-bm25 mode needs no model.
+semantic/hybrid modes need a Model2Vec model dir; the CLI resolves one in
+priority order: --model <DIR> → $KEN_MODEL_DIR → ~/.ken/model → ./testdata/model.
+Run 'ken download-model' to populate ~/.ken/model. bm25 mode needs no model.
 `)
 }
 
