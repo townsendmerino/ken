@@ -16,6 +16,7 @@ package main
 
 import (
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -47,10 +48,8 @@ func envEnum(name string, allowed []string, fallback string, l *leveledLogger) s
 	if raw == "" {
 		return fallback
 	}
-	for _, a := range allowed {
-		if raw == a {
-			return raw
-		}
+	if slices.Contains(allowed, raw) {
+		return raw
 	}
 	l.logf(lvlWarn, "invalid %s=%q: not in %v — using default %q", name, raw, allowed, fallback)
 	return fallback

@@ -175,7 +175,7 @@ func TestWatchedIndex_Debounce_BatchedWrites(t *testing.T) {
 	drainSwaps(swaps)
 
 	// Five rapid writes, well inside the debounce window.
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		name := filepath.Join(root, "batch_"+string(rune('a'+i))+".py")
 		if err := os.WriteFile(name, []byte("def f(): pass\n"), 0o644); err != nil {
 			t.Fatal(err)
@@ -196,7 +196,7 @@ func TestWatchedIndex_Debounce_BatchedWrites(t *testing.T) {
 
 	// Sanity: all five files should be present in the final snapshot.
 	got := wi.Load()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		name := "batch_" + string(rune('a'+i)) + ".py"
 		if !containsFile(got, name) {
 			t.Errorf("post-batch snapshot missing %s", name)
@@ -224,10 +224,8 @@ func TestWatchedIndex_ConcurrentReads_DuringWrite(t *testing.T) {
 	const readers = 10
 	const queries = 100
 
-	for r := 0; r < readers; r++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range readers {
+		wg.Go(func() {
 			for q := 0; q < queries && !stop.Load(); q++ {
 				results := wi.Search("alpha", 5)
 				for _, r := range results {
@@ -241,13 +239,13 @@ func TestWatchedIndex_ConcurrentReads_DuringWrite(t *testing.T) {
 					}
 				}
 			}
-		}()
+		})
 	}
 
 	// Writer: 5 file rewrites at 10ms intervals — within the
 	// per-iteration query bursts, so reads and snapshot swaps overlap.
 	go func() {
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			time.Sleep(10 * time.Millisecond)
 			name := filepath.Join(root, "synth_"+string(rune('a'+i))+".py")
 			_ = os.WriteFile(name, []byte("def f(): return "+string(rune('0'+i))+"\n"), 0o644)

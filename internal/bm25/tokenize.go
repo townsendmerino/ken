@@ -27,6 +27,7 @@
 package bm25
 
 import (
+	"slices"
 	"strings"
 )
 
@@ -68,7 +69,7 @@ func Tokenize(text string) []string {
 		var parts []string
 		if containsUnderscore(run) {
 			// snake_case: split on '_' (drop empties), no camel recursion.
-			for _, p := range strings.Split(compound, "_") {
+			for p := range strings.SplitSeq(compound, "_") {
 				if p != "" {
 					parts = append(parts, p)
 				}
@@ -119,12 +120,7 @@ func isLower(r rune) bool { return r >= 'a' && r <= 'z' }
 func isDigit(r rune) bool { return r >= '0' && r <= '9' }
 
 func containsUnderscore(rs []rune) bool {
-	for _, r := range rs {
-		if r == '_' {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(rs, '_')
 }
 
 // camelSplit implements semble's `_CAMEL_RE` under Python `re.findall` on a
