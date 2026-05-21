@@ -97,9 +97,23 @@ command = "/absolute/path/to/ken-mcp"
 | `KEN_MCP_DEFAULT_REPO` | (unset) | Pre-indexed source; lets tools omit the `repo` arg. |
 | `KEN_MCP_MODE` | `hybrid` | `bm25` / `semantic` / `hybrid`. Auto-downgrades to `bm25` with a stderr warning if the model dir is unreachable. |
 | `KEN_MCP_MODEL_DIR` | (unset) | Path to a Model2Vec snapshot containing `model.safetensors`. Empty ⇒ `bm25`-only. |
-| `KEN_MCP_CHUNKER` | `regex` | `regex` / `line`. |
+| `KEN_MCP_CHUNKER` | `regex` | `regex` / `treesitter` / `line`. See ["Choosing a chunker"](#choosing-a-chunker). |
 | `KEN_MCP_CACHE_SIZE` | `16` | LRU bound on the repo→Index cache. |
 | `KEN_MCP_LOG_LEVEL` | `warn` | `debug` / `info` / `warn` / `error`. All logs go to stderr; **stdout is the JSON-RPC channel** ([details](docs/DESIGN.md#hard-rule--stdoutstderr-contract)). |
+
+### Tuning ken's routing for your repo
+
+By default, `ken-mcp`'s server-side instructions tell agents to prefer ken's `search` and `find_related` tools over grep, Glob, or Read for code-related questions — semble's verbatim behavior, faithful to the drop-in claim. For many repos that default is right; for some it's too aggressive (small codebases where grep is plenty fast; refactors that need exhaustive enumeration that top-N retrieval can silently miss).
+
+If you'd rather have agents route between ken and grep deliberately, add something like the following to your repo's `CLAUDE.md`:
+
+> **Search routing — ken vs grep.** The `ken` MCP server is user-scoped (`claude mcp add ken -s user …`); not every session has it. Check the tool list before assuming.
+>
+> - **ken** — first-pass "show me the surface of X", semantic / conceptual queries ("where do we handle X?"), unfamiliar areas. Returns a ranked top-N grouped across layers (handler → store → resolver → migrations → generated → docs). ~1–2 s warm round-trip.
+> - **grep / rg** — exhaustive enumeration, pre-rename audits, every literal occurrence, known-identifier lookups, one-off literal checks. ~0.06 s and deterministic. **Use grep before any rename or refactor that must be complete** — ken is top-N and can miss matches past its result window.
+> - Don't reach for ken on a one-off literal lookup where you already know the symbol — the latency tax isn't worth it.
+
+ken's defaults stay unchanged; this is per-repo tuning, not a configuration flag.
 
 ## Tools
 
