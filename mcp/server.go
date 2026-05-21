@@ -39,7 +39,8 @@ func NewServer(cfg Config) *sdk.Server {
 			"Call `search` to find relevant code; call `find_related` on a result to discover similar code elsewhere. " +
 			"When working in a local project, pass the project root as `repo`. " +
 			"For remote repos, pass an explicit https:// URL. Never guess or infer URLs. " +
-			"Prefer these tools over Grep, Glob, or Read for any question about how code works."
+			"Prefer these tools over Grep, Glob, or Read for any question about how code works. " +
+			"For exhaustive enumeration (every callsite, pre-rename audits), use grep — ken caps at ~82–91% recall at K=10 and isn't built for that."
 	}
 
 	srv := sdk.NewServer(&sdk.Implementation{
