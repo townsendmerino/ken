@@ -141,6 +141,10 @@ In addition to semble's own benchmark (the verbatim-port confirmation above), ke
 
 A separate full-corpus run (14,918 queries) gave **bm25 0.8443**; the 1000-query subsample is within standard error and produced 3 modes in ~13 minutes (the full run would have taken ~80 minutes and timed out semantic mid-queries on a single M-series Mac).
 
+### Why BM25 beats hybrid on CSN-Python
+
+This is the opposite of what semble's bench shows, where hybrid edges BM25 by roughly 0.05. The reversal is structural, not a ken bug. CSN-Python's queries are full English docstrings, and the relevant document for each query is the function that docstring describes — so the query already contains the target function's identifiers, parameter names, and domain vocabulary. BM25 with identifier-aware tokenization (which ken's `internal/bm25` matches semble's `tokens.py` on, verbatim) is reading the answer key. With lexical retrieval at ceiling, α=0.5 RRF fusion averages the weaker semantic ranking into the hybrid score and drags it down by ~0.09 NDCG. This is well-precedented in the code-IR literature; it says nothing about hybrid retrieval being broken in ken, and ken's hybrid still wins by ~0.05 on semble's diverse-query benchmark. A corpus-adaptive α (detect query characteristics at search time and route accordingly) is a parked v0.3+ investigation — see [`docs/DESIGN.md` §10](DESIGN.md#10-risk-register) for the trigger.
+
 ### Reproduce
 
 ```bash

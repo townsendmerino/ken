@@ -227,6 +227,7 @@ The full per-language NDCG breakdown plus the empirical findings that informed t
 | Index this repo (BM25 only) | (not measured locally) | **0.06 s** (measured) |
 | Retrieval algorithm | reference implementation | verbatim port (constants and pipeline order ported from `search.py` + `ranking/*.py`) |
 | NDCG@10 on semble's benchmark | 0.854 ([semble README](https://github.com/MinishLab/semble#benchmarks)) | **0.842 hybrid** (gap 0.012, full corpus 63 repos × 1251 queries)† |
+| NDCG@10 on CoIR-CSN-Python (external) | (not measured; semble doesn't run this bench) | **0.8743 bm25 / 0.7839 hybrid** ([see why](#benchmarks--external-reference-coir-csn-python))†† |
 | MCP server | yes | yes — drop-in compatible (same tool schemas, same wire format) |
 | Binary size | n/a (Python env) | `ken` 3.9 MB · `ken-mcp` 16 MB |
 | Requires `huggingface-cli` for model | yes | yes (or skip and use `--mode bm25`) |
@@ -240,6 +241,8 @@ The full per-language NDCG breakdown plus the empirical findings that informed t
 > | **Hybrid (full ranker)** | **0.854** | **0.842** | **0.838** |
 >
 > The semantic-raw match within 0.003 isolates and validates the embedding + tokenizer + ANN port. The BM25 tokenizer was also re-aligned to a verbatim port of semble's `tokens.py` (snake-case compound preservation, ASCII-only identifier extraction, compound-first emission order). The v0.2.0 tree-sitter chunker (`--chunker=treesitter` via [`gotreesitter`](https://github.com/odvcencio/gotreesitter)) trades NDCG per-language without net movement — clear wins on Kotlin / Zig / TypeScript / Java / PHP, losses on Python / Rust / C / Lua / Scala — so the **default chunker stays regex** and treesitter is opt-in. See ["Choosing a chunker"](#choosing-a-chunker) for the per-language recommendation and [`docs/DECISIONS.md` ADR-011](docs/DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in) for the full rationale.
+
+†† CoIR-CSN-Python numbers reported separately because they tell a different story than semble's bench: on CSN, BM25 beats hybrid by ~0.09 due to docstring-to-function query overlap (see the ["Benchmarks — external reference"](#benchmarks--external-reference-coir-csn-python) section for the full breakdown). semble's bench is the verbatim-port confirmation; CoIR-CSN is the externally-reproducible anchor against published code-IR baselines.
 
 semble timings cited above are from semble's own [README "Benchmarks" section](https://github.com/MinishLab/semble#benchmarks); ken's are measured on the included `testdata/repo` polyglot fixture and on a sibling shallow clone of `/tmp/semble`. Cold-start was timed by `/usr/bin/time -p ken search testdata/repo "validate" -k 1 --mode bm25` over three trials (M2 MacBook Air, Go 1.26.3, darwin/amd64 build under Rosetta).
 
