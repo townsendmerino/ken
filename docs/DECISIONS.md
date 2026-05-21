@@ -2,7 +2,7 @@
 
 Architecture Decision Records for `ken`, in chronological order. Each entry captures the decision, the alternatives considered, and the consequences — so future readers can understand *why* the codebase is shaped the way it is, not just *what* it does. Companion to [`docs/DESIGN.md`](DESIGN.md) (the atemporal design spec) and [`docs/BENCH.md`](BENCH.md) (empirical findings).
 
-ADR statuses: **Accepted**, **Superseded** (replaced by a later ADR), **Deprecated** (no longer applies but kept for history).
+ADR statuses: **Proposed** (documenting design alternatives; no implementation decision yet), **Accepted**, **Superseded** (replaced by a later ADR), **Deprecated** (no longer applies but kept for history).
 
 | # | Decision | Status |
 |---|---|---|
@@ -18,6 +18,7 @@ ADR statuses: **Accepted**, **Superseded** (replaced by a later ADR), **Deprecat
 | [ADR-010](#adr-010-tree-sitter-via-gotreesitter-instead-of-wazerowasm) | Tree-sitter via `gotreesitter` (pivot from wazero+WASM) | Accepted |
 | [ADR-011](#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in) | Default chunker stays `regex` in v0.2.0; treesitter is opt-in | Accepted |
 | [ADR-012](#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap) | Incremental indexing via fsnotify + atomic snapshot swap | Accepted |
+| [ADR-013](#adr-013-corpus-adaptive-α--adding-a-third-query-class-branch) | Corpus-adaptive α — adding a third query-class branch | Proposed |
 
 ---
 
@@ -358,3 +359,80 @@ File changes are detected via `github.com/fsnotify/fsnotify` (pure Go, no cgo, O
 - *Memory growth bounded by edit rate.* In a 100-edit synthetic burst on `testdata/repo`, RSS grew by ~884 KB (≈9 KB/edit-batch, dominated by tombstone accumulation and BM25 postings rebuild). Within v0.3's tolerance; compaction trigger is a multi-day session — not a per-edit concern.
 
 **OnFlush feedback hook added late v0.3.** Initial v0.3 had no per-flush user-visible signal — fine for ken-mcp (agents query whenever and get fresh results) but a gap for interactive `ken index --watch` users who couldn't tell whether the watcher was alive. Added `WatchedIndex.SetOnFlush(func(msg string))` so callers wire stderr / leveled-logger output without `internal/search` knowing about either. CLI logs each flush at one line; ken-mcp routes it at info-level so warn-default runs stay quiet.
+
+---
+
+## ADR-013: Corpus-adaptive α — adding a third query-class branch
+
+**Status:** Proposed
+**Date:** 2026-05-22
+
+### Context
+
+semble's bench shows hybrid retrieval ahead of BM25 by a clear margin — semble published 0.854 hybrid vs 0.675 BM25-raw; ken measures 0.842 vs 0.624 on the same 63-repo × 1251-query corpus. The CoIR-CSN-Python external benchmark reverses this: ken BM25 0.8743 > hybrid 0.7839 > semantic 0.7405 (1000-query subsample, regex chunker). The structural cause is documented at [`docs/BENCH.md` "Why BM25 beats hybrid on CSN-Python"](BENCH.md#why-bm25-beats-hybrid-on-csn-python): CSN's queries are full English docstrings whose answer is the function the docstring describes; identifier overlap is high enough that BM25 with identifier-aware tokenization is reading the answer key, and α=0.5 RRF-fusion averages the weaker semantic ranking into the hybrid score and drags it down ~0.09 NDCG.
+
+semble's `resolveAlpha` (verbatim in [`internal/search/adaptive.go`](../internal/search/adaptive.go)) recognizes two query classes: symbol (α=0.3) and NL (α=0.5). There is no third class for "docstring-shaped NL" — long English queries whose lexical overlap with the answer doc is unusually high. A third branch with a lower α (lean harder on BM25, perhaps 0.1–0.2) is the conservative extension that would recover the CSN performance without touching the existing branches' constants. The lever exists; the question is whether to pull it, with what detection signal, and whether the classifier risk justifies the gain.
+
+### Decision sought
+
+Whether to add a third query-class branch to `resolveAlpha`, and if so, what detection signal and α value. **Explicitly out of scope**: tuning the existing 0.3 / 0.5 constants. ADR-002 protects those. The question is whether ken adds a new branch for a query class semble's classifier doesn't recognize, while leaving the existing branches mathematically identical to the verbatim port for inputs semble's classifier matches.
+
+### Alternatives considered
+
+**A. Status quo / do nothing.** Accept CoIR loss as a documented limitation; the README routing-advice section adds a one-liner suggesting `--mode bm25` for docstring-heavy corpora.
+- *If it works:* users on docstring-heavy corpora are slightly worse off out-of-box but have a one-flag escape.
+- *If it doesn't:* nobody reads the routing advice; reports of "hybrid is broken" against CSN-shaped corpora.
+- *ADR-002 position:* preserves verbatim port strictly — the reference position.
+
+**B. Per-repo offline tuning.** Expose α as a config knob / env var; users tune for their corpus.
+- *If it works:* users with labeled data get the best α for their corpus.
+- *If it doesn't:* most users don't have labeled data; ken-mcp is a black box to most agents that won't propagate config; default α=0.5 remains the out-of-box experience.
+- *ADR-002 position:* preserves the default branches verbatim; adds an override surface. Neutral, but multiplies config without improving the default.
+
+**C. Per-query classifier (hand-tuned).** Extend `adaptive.go` with a "docstring-shaped" detector — e.g. (query token count > N) AND (English word ratio > P) AND (identifier-token ratio < Q). Route matched queries to a third α (likely 0.1–0.2 to lean strongly on BM25).
+- *If it works:* zero user friction, out-of-box improvement on CSN-shaped corpora; extends the existing hand-tuned `is_symbol_query` pattern.
+- *If it doesn't:* misclassifications hurt — a concept-NL query misrouted to docstring-NL gets α=0.1, i.e. "ignore semantic, which has the answer." Threshold choice is itself a tuning knob.
+- *ADR-002 position:* extends the verbatim port — new branch, existing constants untouched. The recommended path *if* the validation gate (below) confirms the signal is real.
+
+**D. Per-query classifier (learned).** Train a small model on (query features, optimal-α) pairs.
+- *If it works:* highest generalization across query shapes we haven't named.
+- *If it doesn't:* training data needed; model weights to ship; the no-cgo constraint (ADR-001) complicates the training pipeline (inference is fine; the training loop isn't).
+- *ADR-002 position:* clearly retunes the verbatim port. Strict reading rejects.
+
+**E. Multi-armed bandit at query time.** Run hybrid with two or three α values, ensemble.
+- *If it works:* no upfront classifier; α is implicit in the ensemble.
+- *If it doesn't:* 2–3× query latency (~1.5 ms → ~3–5 ms); ensembling is itself a tuning surface.
+- *ADR-002 position:* doesn't change α values, but introduces a new orchestration layer. Soft tension.
+
+### ADR-002 tension — addressed explicitly
+
+Two framings have to be weighed:
+
+1. **"New branch, not retuning."** semble's `resolveAlpha` returns 0.3 for symbol and 0.5 for NL. A ken extension that adds a third return value for a third query class leaves both of semble's branches mathematically unchanged; inputs that match semble's classifier produce identical α values to a verbatim port. Precedent: ADR-012 extended semble's algorithm with tombstone semantics and atomic-snapshot swap without violating ADR-002, because the extensions are additive on top of the port.
+2. **"Once we tune α at all, the contract is bent."** The verbatim-port discipline is also about *the principle* that we don't apply our judgment to algorithm constants. Adding a new branch is still applying our judgment — about query classification, about the α value, about whether the bench evidence justifies the branch. Under this reading, A is the only ADR-002-consistent path; B–E are deviations.
+
+**Position:** the first reading is the right one for this ADR. ADR-002 protects against ad-hoc retuning of semble's existing constants; it does not prohibit extending the algorithm with new branches that recognize cases semble doesn't. The verbatim port stays verbatim for inputs semble's classifier matches; ken adds an additive layer for the docstring class. The discipline that matters is "no silent divergence" — and a documented ADR with a validation gate that can *kill* the proposal is the opposite of silent divergence.
+
+### Pre-implementation validation plan
+
+What we'd do BEFORE writing any classifier code (this is the gate that turns ADR-013 from Proposed → Accepted, or kills it):
+
+1. **Define a query-shape signal manually.** Pick 2–3 feature axes — probably (query length in BM25-tokens), (English-word ratio), maybe (identifier-token ratio). No training, just hand-picked thresholds.
+2. **Manually classify a 200-query sample.** Stratified across semble's bench (mixed) and CoIR-CSN-Python (docstring-heavy). Three buckets: symbol, concept-NL, docstring-NL. Inter-annotator agreement is just you eyeballing twice with a day in between to catch consistency drift.
+3. **Per-bucket α sweep.** For each bucket, run the NDCG bench at α ∈ {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7} and find the per-bucket optimum. **Decision gate:**
+   - If the optima differ by ≥ 0.1 across buckets → the lever is real; ADR-013 advances to Accepted and a follow-up prompt implements C. Recommended α value for the docstring branch is set from the sweep, not pre-committed.
+   - If they don't differ meaningfully → ADR-013 closes as "investigated, no signal; α-routing is not the right lever for this." Status changes to Deprecated.
+   - If they differ but the classifier signal is noisy enough that misclassifications would erase the wins → ADR-013 closes as "investigated, signal exists but unreliable; reopen if a better classifier signal is found." Status: Deprecated, with a note.
+
+The pre-implementation validation can run on top of the existing `bench/ndcg/` and `bench/tokens/` harnesses with one extra script (e.g. `scripts/alpha_sweep.py`) — no new test infrastructure, far less work than a full implementation.
+
+### Consequences (forecast)
+
+- **If A (do nothing) is chosen:** CSN-Python remains a documented win-for-BM25 case; README routing-advice adds a one-liner suggesting `--mode bm25` for docstring-heavy corpora. No code change.
+- **If C is implemented (post-validation gate):**
+  - One additional branch in `internal/search/adaptive.go::resolveAlpha`.
+  - CoIR-CSN-Python hybrid: target within 0.01 of BM25's 0.8743 (0.7839 → ~0.87).
+  - semble bench hybrid: within ±0.005. Conservative thresholds bias toward false negatives, leaving the legacy α=0.5 active for ambiguous queries.
+  - New failure mode: concept-NL misrouted to docstring-NL (α=0.1 means "ignore semantic, which has the answer"). Validation watches for semble-bench regressions.
+  - One CHANGELOG / README line about ken's adaptive α recognizing docstring-shaped queries.
+- **If the gate kills it:** Status changes Proposed → Deprecated; [`docs/BENCH.md`](BENCH.md#external-benchmark--coir-csn-python) updates the CSN paragraph with the no-signal finding.

@@ -10,7 +10,13 @@ with pre-built binaries.
 
 ## [Unreleased]
 
-(no changes yet)
+### Documentation
+
+- ADR-013 (Proposed): documents the design conversation around adding
+  a corpus-adaptive α router for hybrid retrieval, motivated by the
+  CoIR-CSN-Python BM25 > hybrid finding. Decision deferred pending
+  pre-implementation validation (per-bucket α sweep on a hand-labeled
+  query subset). See [`docs/DECISIONS.md` ADR-013](docs/DECISIONS.md#adr-013-corpus-adaptive-α--adding-a-third-query-class-branch).
 
 ## [0.3.0] — 2026-05-21
 
