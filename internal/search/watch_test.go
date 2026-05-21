@@ -210,6 +210,10 @@ func TestWatchedIndex_Compaction_DropsTombstones(t *testing.T) {
 // initial-snapshot chunks directly before the swap races with the
 // debouncer's tombstoneFile write (the race detector can't see
 // fsnotify's OS-mediated happens-before).
+//
+// Future test authors: don't read wi.Load().chunks directly — use
+// ResolveChunk / Search, which synchronize through atomic.Pointer.Load.
+// Commit eaa9406 has the original race this guideline came from.
 func TestWatchedIndex_Compaction_PreservesChunkContent(t *testing.T) {
 	root := makeTempRepo(t, map[string]string{
 		"a.py": "def alpha():\n    return 'a'\n",
