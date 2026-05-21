@@ -2,6 +2,8 @@
 
 **Fast hybrid code search for agents.** Pure Go, single static binary, drop-in MCP-compatible with [MinishLab/semble](https://github.com/MinishLab/semble) — same tool schemas, same output format, same install steps swapped to a Go binary.
 
+*Built collaboratively: most of the Go implementation written by Claude, with constraints, architectural decisions, and review discipline from [@townsendmerino](https://github.com/townsendmerino). The verbatim-port rule and the corpus-scale parity harness — the things that make this a faithful port instead of an approximate one — came from the human side. See [How this was built](#how-this-was-built).*
+
 [![CI](https://github.com/townsendmerino/ken/actions/workflows/ci.yml/badge.svg)](https://github.com/townsendmerino/ken/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/townsendmerino/ken.svg)](https://pkg.go.dev/github.com/townsendmerino/ken)
@@ -43,6 +45,8 @@ for _, r := range ix.Search("save model to disk", 10) {
 ```
 
 Pre-built binaries for macOS and Linux are attached to each [release](https://github.com/townsendmerino/ken/releases).
+
+The default `regex` chunker handles most cases well. If you index a lot of Kotlin / Zig / TypeScript / Java / PHP, the opt-in `treesitter` chunker (`--chunker=treesitter` / `KEN_MCP_CHUNKER=treesitter`) measurably wins for those languages — see ["Choosing a chunker"](#choosing-a-chunker) for the per-language recommendation.
 
 ## Features
 
@@ -234,6 +238,16 @@ The full risk register with explicit triggers is in [docs/DESIGN.md §10](docs/D
 - **Chroma chunker (Option B)** — broader language coverage via a token-stream lexer. Trigger: a polyglot repo where neither chunker covers a needed language. Not currently triggered.
 - **Class-body-aware Python chunking** — currently top-level only; large Django models / SQLAlchemy bases line-split through methods. Trigger: Python NDCG visibly below the other languages (not currently triggered).
 - **Incremental indexing** — today every `ken` invocation is a full walk + chunk + index from scratch; ken-mcp caches the built index in-process but does not invalidate on file changes (so a running ken-mcp serves a stale index until the LRU evicts that entry or the process restarts). True incremental indexing would patch the BM25 postings + dense matrix on file deltas instead of rebuilding. Trigger: users running ken-mcp on a repo they're actively editing report stale results, or full-rebuild latency on large corpora becomes the dominant per-query cost.
+
+## How this was built
+
+ken is a port. The retrieval algorithm is verbatim from [MinishLab/semble](https://github.com/MinishLab/semble) (Python). The Go implementation was written by Claude under a fixed set of constraints: pure Go / no cgo, algorithm constants ported verbatim never tuned, original source wins whenever Claude's reconstruction of an algorithm detail diverges from semble's live code.
+
+That last rule caught five material errors during the rerank-pipeline port (see [docs/DESIGN.md §7](docs/DESIGN.md#7-hybrid-retrieval--rerank)) — each one a confident-sounding hallucination of an algorithm detail that turned out to be wrong when checked against the Python source. The discipline of always checking is human-supplied.
+
+Benchmark numbers in the [Comparison table](#comparison-to-semble) are measured against semble's own harness using its native NDCG@10 metric, not synthesized — reproducible via [`docs/BENCH.md`](docs/BENCH.md). The 11k-input tokenizer parity test ([`scripts/parity_dump.py`](scripts/parity_dump.py) + [`internal/embed/parity_test.go`](internal/embed/parity_test.go)) was a human call — "the 18-case spot-check isn't enough" — and surfaced three real bugs the spot-check missed.
+
+The ADR-style record of every architectural decision (alternatives considered, consequences) lives in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Acknowledgments
 

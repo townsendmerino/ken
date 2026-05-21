@@ -30,7 +30,7 @@ go vet ./...                                      # must be clean
 gofmt -l cmd internal                             # must print nothing (whole tree gofmt-clean)
 go fix ./...                                      # Go 1.26 modernizers (SplitSeq, min, range-int)
 
-go run ./cmd/ken index  <path>  [--chunker=regex|line] [--mode=bm25|semantic|hybrid] [--model=DIR]
+go run ./cmd/ken index  <path>  [--chunker=regex|treesitter|line] [--mode=bm25|semantic|hybrid] [--model=DIR]
 go run ./cmd/ken search <path> <query>...  [-k N] [--chunker=...] [--mode=...] [--model=...]
 go run ./cmd/ken-mcp                               # stdio MCP server (env-configured; see MCP section)
 ```
@@ -56,7 +56,7 @@ The full embedding-parity tests in `internal/embed` **skip** unless the model is
 The pipeline (semble parity target): **walk → chunk → {BM25 lexical | Model2Vec semantic} → α-weighted RRF fuse → file-coherence + query boosts → path penalties + saturation**. The algorithm spec for each piece is in [`docs/DESIGN.md`](docs/DESIGN.md) §§2–7.
 
 - **`internal/repo`** — gitignore-respecting filesystem walk; prunes `.git`, skips binary (NUL sniff) and oversized files. The matcher is a deliberate common-subset of gitignore; full pathspec parity is a later dependency swap (`docs/DESIGN.md` §1).
-- **`internal/chunk`** — `Chunk` is the stable unit every stage depends on. Stage 1 ships only the 50-line/5-overlap fallback (`lines.go`). The runtime-selectable `Chunker` interface + registry and per-language regex chunkers are Stage 2; the fallback exists now to validate that seam early.
+- **`internal/chunk`** — `Chunk` is the stable unit every stage depends on. Three chunkers land behind a single `Chunker` interface (registered via `database/sql`-style blank imports to avoid an import cycle): `line` (universal 50-line/5-overlap fallback), `regex` (default; per-language rules for Python/Go/TypeScript/Java/Rust + line fallback), and `treesitter` (opt-in as of v0.2.0; pure-Go tree-sitter via `gotreesitter` running cAST split-then-merge — see [`internal/chunk/treesitter`](internal/chunk/treesitter) and ADR-010/011 in [`docs/DECISIONS.md`](docs/DECISIONS.md)). The byte-fidelity invariant (concat of `Chunk.Text` reproduces source) holds across all three.
 - **`internal/bm25`** — identifier-aware tokenizer (camelCase/PascalCase/ACRONYM/digit splits, plus the whole lowercased run for recall) feeding a Lucene-variant BM25 index (`k1=1.5`, `b=0.75`, non-negative IDF) — pinned to bm25s defaults so ranking can be diffed against semble's `SearchMode.BM25`.
 - **`internal/embed`** — Model2Vec inference. The safetensors blob has **three** tensors (`embeddings` F32, `mapping` I64, `weights` F64). Inference is `normalize(Σ embeddings[mapping[id]]·weights[id] / Σ weights[id])`. Two non-negotiable invariants (see `docs/DESIGN.md` §4): always index through `mapping[]`, and **accumulate in float64** (float32 silently fails ≥1−1e-5 cosine on longer inputs). Empty / all-`[UNK]` → zero vector, not NaN.
 - **`internal/ann/flat.go`** — flat brute-force cosine retriever over the dense matrix. HNSW behind this same `Hit/Query` shape later; flat is exact and fine at repo scale.
@@ -111,5 +111,5 @@ command = "/absolute/path/to/ken-mcp"
 ### Constraints that shape the code
 
 - **Pure Go, no cgo, no per-platform vendored artifacts** — this is the whole point of the port (single static cross-compiled binary). Tree-sitter, native tokenizers, etc. are off the table; pure-Go alternatives go behind interfaces.
-- **Deps land with the stage that needs them** — Stage 1 was stdlib-only; the embed normalizer pulled `golang.org/x/text`; ken-mcp pulled `go-sdk`, `go-git`, `x/sync`. HNSW and Chroma/tree-sitter chunkers are still ahead per the `docs/DESIGN.md` dependency table.
+- **Deps land with the stage that needs them** — Stage 1 was stdlib-only; the embed normalizer pulled `golang.org/x/text`; ken-mcp pulled `go-sdk`, `go-git`, `x/sync`; v0.2.0's tree-sitter chunker pulled `github.com/odvcencio/gotreesitter`. HNSW and the Chroma chunker remain documented future paths in [`docs/DESIGN.md` §10](docs/DESIGN.md#10-risk-register).
 - **Validate-against-Python before advancing** — every stage's correctness is defined as parity with semble/`StaticModel.encode()` on the same corpus, not just "looks reasonable". The tokenizer's real acceptance test (100k-input parity dump vs `transformers.AutoTokenizer`) is still owed and is the main Stage-3 risk; the 18-case `golden.json` is a spot-check, not that harness.
