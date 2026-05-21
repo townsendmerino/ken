@@ -24,6 +24,15 @@ with pre-built binaries.
 
 ### Changed
 
+- **ken-mcp tool instructions surface the recall/token tradeoff.** The
+  `Instructions` string every MCP agent reads on startup gained a
+  sentence directing exhaustive-enumeration tasks (every callsite,
+  pre-rename audits) at grep instead of ken — ken caps at ~82–91%
+  recall at K=10 and isn't built for that. Mirrors the "honest
+  tradeoff" framing already in `README.md`, grounded in the
+  token-budget bench's measured ceilings. Closes the gap where agents
+  were told "prefer ken over grep" without naming the exception.
+
 - **Model directory resolution.** The CLI now searches a priority list
   for the Model2Vec snapshot — `--model <DIR>` → `$KEN_MODEL_DIR` →
   `~/.ken/model` (canonical end-user location) → `./testdata/model`
