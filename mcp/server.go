@@ -78,7 +78,7 @@ func resolveRepo(cfg *Config, argRepo string) (string, error) {
 	if cfg.DefaultRepo != "" {
 		return cfg.DefaultRepo, nil
 	}
-	return "", fmt.Errorf("No repo specified and no default index. Pass an https:// or http:// git URL or local directory path as `repo`.")
+	return "", fmt.Errorf("no repo specified and no default index; pass an https:// or http:// git URL or local directory path as `repo`")
 }
 
 // textResult wraps a plain string as the tool's result content. semble's

@@ -153,7 +153,7 @@ func TestServer_NoRepoNoDefault_ReturnsValidationText(t *testing.T) {
 		t.Fatalf("CallTool: %v", err)
 	}
 	txt := res.Content[0].(*sdk.TextContent).Text
-	if !strings.Contains(txt, "No repo specified") {
-		t.Errorf("expected 'No repo specified' text, got: %s", txt)
+	if !strings.Contains(txt, "no repo specified") {
+		t.Errorf("expected 'no repo specified' text, got: %s", txt)
 	}
 }
