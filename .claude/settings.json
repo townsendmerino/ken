@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go version)",
+      "Bash(go doc *)",
+      "Bash(go list *)",
+      "Bash(gh run watch *)",
+      "mcp__ken__search"
+    ]
+  }
+}
