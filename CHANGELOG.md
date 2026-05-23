@@ -14,13 +14,24 @@ with pre-built binaries.
 
 ## [0.5.0] — 2026-05-25
 
-The library-API release: ken can now index any `fs.FS` — `embed.FS`,
-`fstest.MapFS`, a tarball-backed FS, a git tree object, an in-memory
-snapshot — not just a directory on disk. Unlocks two named use cases:
-agent sandboxing (`ken-mcp` over a chroot-y `fs.FS` view, no syscall-
-level escape) and offline analysis (index a tarball without unpacking).
-Prompted by an r/golang commenter on the v0.4 release post and tracked
-in [#6](https://github.com/townsendmerino/ken/issues/6).
+The library-API + monorepo-correctness release. Two changes bundled
+into one tag:
+
+1. **`fs.FS` is the canonical walker/indexer surface** — ken can now
+   index any `fs.FS` (`embed.FS`, `fstest.MapFS`, tarball-backed, git
+   tree object, in-memory snapshot) — not just a directory on disk.
+   Unlocks agent sandboxing (`ken-mcp` over a chroot-y `fs.FS` view,
+   no syscall-level escape) and offline analysis (index a tarball
+   without unpacking). Prompted by an r/golang commenter on the v0.4
+   release post; tracked in [#6](https://github.com/townsendmerino/ken/issues/6).
+
+2. **Nested `.gitignore` support** — the walker now reads `.gitignore`
+   files in every directory, not just the root, matching git's
+   behavior. Field-driven: a gobe monorepo user reported `node_modules/`
+   polluting their results because their exclusion was in per-package
+   `.gitignore` files. Tracked in [#5](https://github.com/townsendmerino/ken/issues/5).
+
+(Date is a placeholder — set on tag day.)
 
 ### Added
 
@@ -29,7 +40,19 @@ in [#6](https://github.com/townsendmerino/ken/issues/6).
   accepts any `fs.FS` implementation. Parity tests (`Walk` vs `WalkFS`,
   `FromPath` vs `FromFS`) pin that the `os.DirFS`-wrapped behavior
   matches the historical real-FS implementation byte-for-byte. Zero
-  new deps; `fs` and `testing/fstest` are stdlib.
+  new deps; `fs` and `testing/fstest` are stdlib. Closes [#6](https://github.com/townsendmerino/ken/issues/6).
+
+- **Nested `.gitignore` support.** The walker now respects `.gitignore`
+  files in every directory, not just the root, matching git's behavior:
+  outer scopes evaluate first, inner scopes last, last-match-wins
+  across the union; inner scopes can both add new ignores and
+  re-include via `!pattern`. Implemented as a per-directory scope
+  stack on top of the existing handwritten rule engine — no new
+  dependency, no swap to `github.com/sabhiram/go-gitignore` (kept as
+  a documented future option for edge-case pathspec parity inside the
+  rule engine itself; see [ADR-015](docs/DECISIONS.md#adr-015-nested-gitignore-support-via-scope-stack-on-existing-rule-engine)).
+  `Matcher` (the watch-path seam) gains the same nested awareness via
+  a one-shot tree walk at construction. Closes [#5](https://github.com/townsendmerino/ken/issues/5).
 
 ### Deprecated
 
@@ -38,6 +61,18 @@ in [#6](https://github.com/townsendmerino/ken/issues/6).
   `FromFS(os.DirFS(root), …)`). They remain functional and tested but
   are marked `// Deprecated:` in source; removal is scheduled for a
   future minor release. Pre-1.0 semver permits this.
+
+### Fixed
+
+- **`Matcher.ShouldIndex` now performs an ancestor walk** so directory-prune
+  rules (like `build/`) correctly exclude files inside them. Surfaced while
+  wiring nested `.gitignore` through the watch path: `WalkFS` had always
+  gotten this right via `fs.SkipDir`, but `Matcher` (used by `--watch`)
+  answered paths directly with no walk, so a `build/` rule was silently
+  failing to exclude `build/x.txt` when queried. Anyone running
+  `ken index --watch` against a repo with dir-only ignore rules may have
+  been bitten by this without noticing — the watcher would re-add files
+  inside ignored directories on every event.
 
 ### Note
 
@@ -49,10 +84,14 @@ in [#6](https://github.com/townsendmerino/ken/issues/6).
 - **`ken-mcp` env-var config stays path-based for v0.5.0.** An
   MCP-side `fs.FS` integration (sandboxed-FS-only mode, exposed via
   new config) is a future change tracked separately.
+- **`.gitignore` freshness during watch.** `Matcher` collects every
+  `.gitignore` once at construction. Files added, modified, or removed
+  after the watcher starts are NOT picked up — a full re-index
+  (restart `ken index`) is required. Tracked for a future release.
 
 See [ADR-014](docs/DECISIONS.md#adr-014-fsfs-as-canonical-walkerindexer-surface)
-for the alternatives considered (parallel funcs vs. canonical + deprecated)
-and the full consequences list.
+and [ADR-015](docs/DECISIONS.md#adr-015-nested-gitignore-support-via-scope-stack-on-existing-rule-engine)
+for the alternatives considered and the full consequences lists.
 
 ## [0.4.0] — 2026-05-21
 

@@ -83,7 +83,7 @@ ken/
 │   │   ├── adaptive.go      # symbol-like vs NL query classifier + resolveAlpha
 │   │   └── watch.go         # WatchedIndex: fsnotify + atomic.Pointer[Index] snapshot swap (v0.3, ADR-012)
 │   └── repo/                # source acquisition
-│       └── walk.go          # gitignore-respecting walk (pathspec equivalent); `fs.FS`-canonical as of v0.5.0 (ADR-014)
+│       └── walk.go          # gitignore-respecting walk (pathspec equivalent); `fs.FS`-canonical as of v0.5.0 (ADR-014); nested `.gitignore` honored via per-dir scope stack (ADR-015)
 ├── mcp/                     # MCP server: tool registration, repo cache, shallow clone
 │   ├── server.go
 │   ├── cache.go
@@ -113,12 +113,16 @@ ken/
 | MCP | `github.com/modelcontextprotocol/go-sdk` | Official, typed handlers, pure Go. |
 | Git | `github.com/go-git/go-git/v5` | Pure Go, no shell-out, works in containers. |
 | HNSW | `github.com/coder/hnsw` (deferred — flat `internal/ann/flat.go` for v1) | Active, pure Go, generics-based. Behind an interface so a flat index is fine for v1. |
-| Gitignore | `github.com/sabhiram/go-gitignore` (deferred — minimal in-tree matcher for v1) | Mirrors `pathspec` behavior closely. Pure Go. |
+| Gitignore | In-tree handwritten engine + per-directory scope stack (v0.5.0, ADR-015). `github.com/sabhiram/go-gitignore` remains a documented future swap for full pathspec edge-case parity inside the engine. | Mirrors `pathspec` behavior closely for the common subset (anchored, `**`, dir-only, negation) plus nested `.gitignore` semantics. Pure Go. |
 | File watching | `github.com/fsnotify/fsnotify` (v0.3) | Pure Go, no cgo, the OS backends are abstracted (inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows). Used by Kubernetes / VS Code / Hugo. v0.3's incremental indexing (`internal/search/watch.go`, ADR-012) holds one watcher per `WatchedIndex`. |
 
 ### Filesystem surface — `fs.FS` canonical (v0.5.0)
 
 As of v0.5.0, the walker and indexer are FS-agnostic: `repo.WalkFS(fs.FS, Options)` and `search.FromFS(fs.FS, Mode, …)` are the canonical entry points; `repo.Walk` and `search.FromPath` are retained as one-line deprecated wrappers around `os.DirFS(root)`. This unlocks `embed.FS`-backed indexes (agent sandboxing), `fstest.MapFS`-backed indexes (testing), and any other `fs.FS` implementation (tarballs, git tree objects, in-memory snapshots) without ken having to know about them. The watch path (`internal/search/watch.go`, `repo.Matcher`) stays real-FS-only by construction — fsnotify is real-FS-only, not architectural — so `fs.FS`-backed indexes are build-once. See [ADR-014](DECISIONS.md#adr-014-fsfs-as-canonical-walkerindexer-surface) for the decision rationale.
+
+### Nested `.gitignore` — per-directory scope stack (v0.5.0)
+
+Also as of v0.5.0, the walker honors `.gitignore` files in every directory, not just the root. `WalkFS` maintains a per-directory scope stack: at each directory visit it loads `<dir>/.gitignore` (if present) into a `scopedGitignore{dir, gi}`, and rules from outer scopes evaluate first, inner scopes last, with last-match-wins across the union. Inner scopes can both add new ignores and re-include via `!pattern`. The handwritten rule engine (`compileRule`) is unchanged — the new work is scope orchestration, not pattern rewriting. `Matcher` (used by the watch path) gains the same nested awareness via a one-shot tree walk at construction; `.gitignore` changes after construction require a full re-index. The motivating field issue ([#5](https://github.com/townsendmerino/ken/issues/5)) was monorepo `node_modules/` exclusions buried in per-package `.gitignore` files; see [ADR-015](DECISIONS.md#adr-015-nested-gitignore-support-via-scope-stack-on-existing-rule-engine) for the alternatives considered (sabhiram swap, go-git matcher).
 
 ## 2. Code chunking without cgo
 

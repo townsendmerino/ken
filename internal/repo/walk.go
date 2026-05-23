@@ -4,16 +4,18 @@
 //
 // Scope note: this is a deliberately small gitignore matcher covering the
 // common subset (comments, negation, anchored "/", dir-only "/" suffix,
-// "*"/"?"/"**" globs, basename-at-any-depth). Full pathspec parity is a
-// later-stage swap to github.com/sabhiram/go-gitignore (docs/DESIGN.md §1
-// dependency table). Only the root .gitignore is read; nested .gitignore
-// files are not yet honored.
+// "*"/"?"/"**" globs, basename-at-any-depth). Nested `.gitignore` files
+// are honored as of v0.5.0 (ADR-015) via a per-directory scope stack on
+// top of this same engine. Full pathspec parity (rare edge cases inside
+// the rule engine itself) is a documented future option to swap in
+// github.com/sabhiram/go-gitignore; see docs/DESIGN.md §1.
 package repo
 
 import (
 	"bytes"
 	"io/fs"
 	"os"
+	gopath "path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -36,8 +38,14 @@ type Options struct {
 
 // WalkFS returns repo-relative, slash-separated paths of indexable files
 // from fsys, in deterministic lexical order. Directories named ".git"
-// and anything matched by the root .gitignore are pruned; binary files
-// and files over the size cap are skipped.
+// and anything matched by an applicable .gitignore are pruned; binary
+// files and files over the size cap are skipped.
+//
+// Nested `.gitignore` files are honored (ADR-015): rules in
+// `subdir/.gitignore` are evaluated relative to `subdir/` and apply
+// only to paths inside it. Outer scopes evaluate first; inner scopes
+// can both add new ignores and re-include via `!pattern`. The union
+// is evaluated last-match-wins.
 //
 // This is the canonical entry point as of v0.5.0. The deprecated Walk
 // wraps WalkFS(os.DirFS(opts.Root), opts) for callers still using a
@@ -47,7 +55,14 @@ func WalkFS(fsys fs.FS, opts Options) ([]string, error) {
 	if maxBytes == 0 {
 		maxBytes = DefaultMaxFileBytes
 	}
-	gi := loadGitignoreFS(fsys, ".gitignore")
+
+	// Active scope stack — outer-first, inner-last. Lazily extended
+	// each time fs.WalkDir descends into a new directory; truncated on
+	// the way back out via pruneScopes at each visit.
+	var scopes []scopedGitignore
+	if gi := loadGitignoreFS(fsys, ".gitignore"); len(gi.rules) > 0 {
+		scopes = append(scopes, scopedGitignore{dir: "", gi: gi})
+	}
 
 	var files []string
 	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
@@ -59,13 +74,21 @@ func WalkFS(fsys fs.FS, opts Options) ([]string, error) {
 		}
 		// fs.WalkDir already hands back slash-separated paths relative
 		// to the FS root, so no filepath.Rel / ToSlash dance is needed.
+		scopes = pruneScopes(scopes, path)
 		if d.IsDir() {
-			if d.Name() == ".git" || gi.match(path, true) {
+			if d.Name() == ".git" || matchScopes(scopes, path, true) {
 				return fs.SkipDir
+			}
+			// Push this directory's .gitignore (if any) so its children
+			// see it. Doing the load AFTER the prune-check above is
+			// intentional: a directory's own .gitignore never applies
+			// to the directory itself, only to its contents.
+			if gi := loadGitignoreFS(fsys, gopath.Join(path, ".gitignore")); len(gi.rules) > 0 {
+				scopes = append(scopes, scopedGitignore{dir: path, gi: gi})
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() || gi.match(path, false) {
+		if !d.Type().IsRegular() || matchScopes(scopes, path, false) {
 			return nil
 		}
 		info, ierr := d.Info()
@@ -95,19 +118,27 @@ func Walk(opts Options) ([]string, error) {
 	return WalkFS(os.DirFS(opts.Root), opts)
 }
 
-// Matcher caches the per-root indexability rules (.gitignore + size cap
-// + binary heuristic) so a file watcher can re-ask "would Walk have
-// included this path?" cheaply on each fsnotify event, without
-// reloading + recompiling the gitignore on every call. v0.3 incremental
-// indexing (internal/search/watch.go) holds one Matcher per WatchedIndex.
+// Matcher caches the per-root indexability rules (every .gitignore in
+// the tree + size cap + binary heuristic) so a file watcher can re-ask
+// "would Walk have included this path?" cheaply on each fsnotify event,
+// without reloading + recompiling rules. v0.3 incremental indexing
+// (internal/search/watch.go) holds one Matcher per WatchedIndex.
+//
+// Freshness caveat: NewMatcher walks the tree once at construction time
+// to collect every .gitignore. `.gitignore` files added, modified, or
+// removed AFTER construction are NOT reflected in subsequent
+// ShouldIndex calls — a full re-index (restart `ken index`) is
+// required. Tracked for a future release; the watch path is not the
+// place to redo a tree walk on every event.
 type Matcher struct {
 	root         string
-	gi           *gitignore
+	scopes       []scopedGitignore
 	maxFileBytes int64
 }
 
-// NewMatcher loads the root .gitignore once and returns a reusable
-// filter. Same defaults as Walk(opts).
+// NewMatcher walks opts.Root once, collecting every .gitignore into a
+// scope stack, and returns a reusable filter. Same defaults as
+// Walk(opts). See ADR-015 for nested-gitignore semantics.
 func NewMatcher(opts Options) *Matcher {
 	maxBytes := opts.MaxFileBytes
 	if maxBytes == 0 {
@@ -115,17 +146,18 @@ func NewMatcher(opts Options) *Matcher {
 	}
 	return &Matcher{
 		root:         opts.Root,
-		gi:           loadGitignore(filepath.Join(opts.Root, ".gitignore")),
+		scopes:       collectGitignores(os.DirFS(opts.Root)),
 		maxFileBytes: maxBytes,
 	}
 }
 
 // ShouldIndex reports whether Walk would have included relPath
 // (slash-separated, relative to the matcher's root). Mirrors Walk's
-// rules: not under .git/, not gitignored, regular file, not binary,
-// within the size cap. A missing file (deleted since the event fired)
-// returns false — the watcher treats those as "remove from index" via
-// the event op, not via this check.
+// rules: not under .git/, not matched by any applicable .gitignore
+// scope, regular file, not binary, within the size cap. A missing
+// file (deleted since the event fired) returns false — the watcher
+// treats those as "remove from index" via the event op, not via this
+// check.
 //
 // Returns false (don't index) for any error; the watcher's filter is
 // fail-closed so a stat error doesn't accidentally trigger a reindex.
@@ -137,7 +169,19 @@ func (m *Matcher) ShouldIndex(relPath string) bool {
 	if relPath == ".git" || strings.HasPrefix(relPath, ".git/") {
 		return false
 	}
-	if m.gi.match(relPath, false) {
+	// Walk-style dir-prune simulation: ask matchScopes for each
+	// ancestor directory of relPath with isDir=true, so a dir-only
+	// rule like `node_modules/` correctly excludes files INSIDE that
+	// directory. WalkFS gets this for free via fs.SkipDir; Matcher
+	// answers paths directly with no walk, so we synthesize the same
+	// pruning here.
+	for i := strings.LastIndex(relPath, "/"); i > 0; i = strings.LastIndex(relPath[:i], "/") {
+		if matchScopes(m.scopes, relPath[:i], true) {
+			return false
+		}
+	}
+	// Then check the file itself (e.g. `*.log` non-dir rules).
+	if matchScopes(m.scopes, relPath, false) {
 		return false
 	}
 	abs := filepath.Join(m.root, filepath.FromSlash(relPath))
@@ -196,16 +240,19 @@ type rule struct {
 
 type gitignore struct{ rules []rule }
 
-func loadGitignore(path string) *gitignore {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return &gitignore{}
-	}
-	return parseGitignore(data)
+// scopedGitignore is a *gitignore plus the directory (slash-separated,
+// relative to the FS root; "" for the root .gitignore) whose patterns
+// it owns. WalkFS evaluates rules from outer scopes first, inner
+// scopes last, last-match-wins across the union of rules. See ADR-015.
+type scopedGitignore struct {
+	dir string
+	gi  *gitignore
 }
 
-// loadGitignoreFS is the fs.FS variant of loadGitignore. `name` is the
-// FS-relative path to the .gitignore file (typically just ".gitignore").
+// loadGitignoreFS reads the .gitignore at `name` (FS-relative path,
+// typically "<dir>/.gitignore" or just ".gitignore"). A missing file
+// returns an empty *gitignore — that's the common case in any
+// directory without ignore rules.
 func loadGitignoreFS(fsys fs.FS, name string) *gitignore {
 	data, err := fs.ReadFile(fsys, name)
 	if err != nil {
@@ -214,8 +261,7 @@ func loadGitignoreFS(fsys fs.FS, name string) *gitignore {
 	return parseGitignore(data)
 }
 
-// parseGitignore compiles the rules in a .gitignore body. Shared by
-// loadGitignore (real FS) and loadGitignoreFS (fs.FS).
+// parseGitignore compiles the rules in a .gitignore body.
 func parseGitignore(data []byte) *gitignore {
 	gi := &gitignore{}
 	for line := range strings.SplitSeq(string(data), "\n") {
@@ -228,6 +274,109 @@ func parseGitignore(data []byte) *gitignore {
 		}
 	}
 	return gi
+}
+
+// pruneScopes trims `scopes` to those whose dir is an ancestor of (or
+// equal to) `path`. Scopes are pushed in DFS order, so the first
+// non-applicable scope means every later scope is also non-applicable;
+// returning scopes[:i] is sufficient.
+func pruneScopes(scopes []scopedGitignore, path string) []scopedGitignore {
+	for i, s := range scopes {
+		if s.dir == "" || s.dir == path || strings.HasPrefix(path, s.dir+"/") {
+			continue
+		}
+		return scopes[:i]
+	}
+	return scopes
+}
+
+// matchScopes evaluates the rules of every scope against `path`,
+// outer-first, inner-last, last-match-wins across the union. Each
+// scope's patterns are evaluated relative to its scope.dir. Returns
+// true when the path should be ignored.
+//
+// We deliberately inline the per-rule loop here rather than calling
+// (*gitignore).match per scope: that helper resets its `ignored` state
+// at every call, so calling it per scope would lose the union
+// semantics — an outer "ignore *.log" would be silently forgotten by
+// an inner scope that has no matching rule.
+func matchScopes(scopes []scopedGitignore, path string, isDir bool) bool {
+	ignored := false
+	for _, scope := range scopes {
+		rel := relToScope(path, scope.dir)
+		if rel == "" {
+			continue
+		}
+		for _, r := range scope.gi.rules {
+			if r.dirOnly && !isDir {
+				continue
+			}
+			if r.re.MatchString(rel) {
+				ignored = !r.negate
+			}
+		}
+	}
+	return ignored
+}
+
+// relToScope returns path relative to scopeDir (slash-separated), or
+// "" if path is not strictly under scopeDir. scopeDir == "" means
+// root (every path is "under" root, so path is returned as-is).
+func relToScope(path, scopeDir string) string {
+	if scopeDir == "" {
+		return path
+	}
+	if path == scopeDir {
+		return ""
+	}
+	if !strings.HasPrefix(path, scopeDir+"/") {
+		return ""
+	}
+	return strings.TrimPrefix(path, scopeDir+"/")
+}
+
+// collectGitignores walks fsys once and returns every applicable
+// .gitignore in DFS order (outer-first, inner-last). Directories
+// pruned by an outer scope or named .git are not descended into, so
+// .gitignores buried inside ignored subtrees (e.g. inside a
+// gitignored node_modules/) are correctly excluded.
+//
+// Used by NewMatcher to take a one-shot snapshot of the tree's ignore
+// state. WalkFS does the same scope-stack management inline during its
+// own walk, so this helper is not used there.
+func collectGitignores(fsys fs.FS) []scopedGitignore {
+	var collected []scopedGitignore
+	var active []scopedGitignore // pruning state during DFS
+	if gi := loadGitignoreFS(fsys, ".gitignore"); len(gi.rules) > 0 {
+		s := scopedGitignore{dir: "", gi: gi}
+		collected = append(collected, s)
+		active = append(active, s)
+	}
+	_ = fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// Permission denied on a single subtree shouldn't fail the
+			// whole Matcher; skip and continue. Matches the watch path's
+			// existing fail-soft posture.
+			return nil
+		}
+		if path == "." {
+			return nil
+		}
+		active = pruneScopes(active, path)
+		if !d.IsDir() {
+			return nil
+		}
+		if d.Name() == ".git" || matchScopes(active, path, true) {
+			return fs.SkipDir
+		}
+		if gi := loadGitignoreFS(fsys, gopath.Join(path, ".gitignore")); len(gi.rules) > 0 {
+			s := scopedGitignore{dir: path, gi: gi}
+			collected = append(collected, s)
+			active = append(active, s)
+		}
+		return nil
+	})
+	return collected
 }
 
 func compileRule(pat string) (rule, bool) {
@@ -283,19 +432,4 @@ func compileRule(pat string) (rule, bool) {
 	}
 	r.re = re
 	return r, true
-}
-
-// match applies the rules in order; the last matching rule wins (gitignore
-// "last match" semantics). Returns true when the path should be ignored.
-func (gi *gitignore) match(rel string, isDir bool) bool {
-	ignored := false
-	for _, r := range gi.rules {
-		if r.dirOnly && !isDir {
-			continue
-		}
-		if r.re.MatchString(rel) {
-			ignored = !r.negate
-		}
-	}
-	return ignored
 }

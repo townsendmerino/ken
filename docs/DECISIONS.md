@@ -20,6 +20,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-012](#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap) | Incremental indexing via fsnotify + atomic snapshot swap | Accepted |
 | [ADR-013](#adr-013-corpus-adaptive-α--adding-a-third-query-class-branch) | Corpus-adaptive α — adding a third query-class branch | Deprecated |
 | [ADR-014](#adr-014-fsfs-as-canonical-walkerindexer-surface) | `fs.FS` as canonical walker/indexer surface | Accepted |
+| [ADR-015](#adr-015-nested-gitignore-support-via-scope-stack-on-existing-rule-engine) | Nested `.gitignore` support via scope stack on existing rule engine | Accepted |
 
 ---
 
@@ -483,3 +484,39 @@ The pre-v0.5.0 walker (`internal/repo/walk.go`) and indexer (`internal/search/in
 - **`ken-mcp` env-var config stays path-based for v0.5.0.** An MCP-side `fs.FS` integration (sandboxed-FS-only mode, exposed via a new env var or config) is a future change tracked separately.
 - **`Options.Root` is now ignored by `WalkFS`.** Kept on the struct so the deprecated `Walk(opts)` signature stays stable; documented as "used only by the deprecated wrapper".
 - **Zero new deps.** `fs` and `testing/fstest` are stdlib. Test surface gains an `fstest.MapFS` happy-path test and a `WalkFS` vs `Walk` parity test (and the equivalent pair for `FromFS` vs `FromPath`) to pin that the `os.DirFS` adapter doesn't drift from the historical real-FS behavior.
+
+---
+
+## ADR-015: Nested `.gitignore` support via scope stack on existing rule engine
+
+**Status:** Accepted
+**Date:** 2026-05-23
+
+### Context
+Field signal: a gobe user noticed `node_modules/` was polluting their ken search results in a monorepo. Their tree had no root `.gitignore`; instead, every package had its own `pkg/<name>/.gitignore` containing `node_modules/`. ken's walker — by explicit design, called out in the package doc comment since day one ("Only the root .gitignore is read; nested .gitignore files are not yet honored") — saw none of those per-package ignores and indexed every JS file under every node_modules tree. Tracking issue: [#5](https://github.com/townsendmerino/ken/issues/5).
+
+With `fs.FS` now the canonical walker surface (ADR-014), the walker is the natural place to fix this. The existing handwritten `compileRule` regex engine already handles every pattern the gobe case (and every reported case so far) needs — what was missing was per-directory orchestration: which `.gitignore` files apply to which paths, with what precedence.
+
+### Decision
+**Extend the existing handwritten rule engine with a per-directory scope stack inside `WalkFS`.** Each `.gitignore` is loaded lazily as `fs.WalkDir` descends into its directory; rules are evaluated relative to the gitignore's directory; outer scopes evaluate first, inner scopes last, last-match-wins across the union. `Matcher` (used only by the watch path) gains the same nested awareness via a one-shot tree walk at construction time.
+
+The new public/private surface:
+- `scopedGitignore{dir, gi}` — a `*gitignore` paired with the slash-separated dir (`""` for root) whose patterns it owns.
+- `pruneScopes(scopes, path)` — truncates the active scope stack to those whose `dir` is an ancestor of `path` (DFS-order guarantees this is a single `scopes[:i]` slice).
+- `matchScopes(scopes, path, isDir)` — evaluates every applicable scope's rules against path-relative-to-scope, last-match-wins across the union. The per-rule loop is **deliberately inlined** rather than calling `(*gitignore).match` per scope: that helper resets its `ignored` state at every call, so calling it per scope would lose the union semantics (an outer "ignore `*.log`" would be silently forgotten by an inner scope that has no matching rule).
+- `relToScope(path, scopeDir)` — returns path relative to scope, or `""` if path is not strictly under scopeDir.
+- `collectGitignores(fsys)` — one-shot snapshot used by `NewMatcher`; respects outer-scope pruning so it doesn't descend into gitignored subtrees.
+
+`Matcher.ShouldIndex` additionally simulates `WalkFS`'s `fs.SkipDir` behavior by asking `matchScopes` for each ancestor directory of the queried path with `isDir=true`. This fixes a pre-existing latent bug (independent of nested support): a root-level `build/` dir-only rule would historically NOT exclude `build/x.txt` when asked via `ShouldIndex` directly, because the dir-only filter skipped the rule on file paths. `WalkFS` never hit this because its dir-prune fired at the directory entry — `Matcher`, with no walk, had to synthesize the same pruning.
+
+### Alternatives considered
+- **Swap to `github.com/sabhiram/go-gitignore`** (the swap previously noted in `docs/DESIGN.md` §1 as a future option for "full pathspec parity"). Rejected — sabhiram parses a single `.gitignore` file. The per-directory orchestration (loading files, scope precedence, last-match-wins across the union) is still on us either way; sabhiram's win is edge-case pathspec parity *inside* the rule engine, not the nested behavior itself. With no field reports yet of patterns the handwritten engine actually misses, paying a new dependency for hypothetical edge-case parity isn't justified. Remains a documented future option.
+- **Use `github.com/go-git/go-git/v5`'s `plumbing/format/gitignore`.** Rejected — its matcher expects `billy.Filesystem`, the wrong abstraction for an `fs.FS`-canonical walker. An adapter would be more code than the scope-stack solution.
+- **No-op (status quo, document as a known limitation).** Implicit rejection — the gobe case is a real, reported field issue; the cost of a fix (one scope-stack pattern, ~60 LOC + tests) is well below any cost of having ken silently produce poor results on monorepos.
+
+### Consequences
+- **Closes [#5](https://github.com/townsendmerino/ken/issues/5).** The gobe scenario (per-package `node_modules/` in nested `.gitignore` files) is correctly pruned.
+- **`Matcher` freshness caveat.** `NewMatcher` collects every `.gitignore` once at construction. `.gitignore` files added, modified, or removed after the watcher starts are **not** reflected in subsequent `ShouldIndex` calls — a full re-index (restart `ken index`) is required. Documented in the `Matcher` doc comment. The watch path is not the place to redo a tree walk on every event; an explicit watch-the-`.gitignore`-files mechanism is a future change if the need arises.
+- **Pre-existing dir-only-on-files bug fixed.** `Matcher.ShouldIndex` now correctly excludes files inside dir-only-rule directories (e.g. `build/x.txt` under root `build/`). No CHANGELOG bump because the bug had no test surface and no field report; the fix lands as part of this ADR.
+- **Full pathspec parity still a documented future option.** If a real-world `.gitignore` pattern surfaces that the handwritten engine misses (e.g. character classes, certain `**` corner cases), the sabhiram swap remains the planned path. The scope-stack orchestration designed here is engine-agnostic — sabhiram would slot in as a drop-in replacement for `parseGitignore`/`(*gitignore).rules`.
+- **No new dependency.** Zero deps added; this entire change is one file edit in `internal/repo/walk.go` plus tests.

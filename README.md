@@ -47,6 +47,8 @@ Pre-built binaries for macOS and Linux are attached to each [release](https://gi
 
 As of v0.3, `ken index <path>` defaults to **watch mode** — it keeps the process alive and re-indexes files on change (2 s debounce); pass `--no-watch` for the v0.2 build-once-and-exit behavior. `ken-mcp` watches always — an agent editing the repo mid-session sees its own changes without a restart.
 
+As of v0.5.0, ken respects **nested `.gitignore` files** (per-directory), matching git's behavior: a `.gitignore` inside a subdirectory applies to paths under it, with outer scopes evaluated first and inner scopes last (last match wins). Monorepos with per-package `node_modules/` exclusions in subdirectory `.gitignore` files are correctly pruned without a root-level entry.
+
 The default `regex` chunker handles most cases well. If you index a lot of Kotlin / Zig / TypeScript / Java / PHP, the opt-in `treesitter` chunker (`--chunker=treesitter` / `KEN_MCP_CHUNKER=treesitter`) measurably wins for those languages — see ["Choosing a chunker"](#choosing-a-chunker) for the per-language recommendation.
 
 ## Features
