@@ -19,6 +19,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-011](#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in) | Default chunker stays `regex` in v0.2.0; treesitter is opt-in | Accepted |
 | [ADR-012](#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap) | Incremental indexing via fsnotify + atomic snapshot swap | Accepted |
 | [ADR-013](#adr-013-corpus-adaptive-α--adding-a-third-query-class-branch) | Corpus-adaptive α — adding a third query-class branch | Deprecated |
+| [ADR-014](#adr-014-fsfs-as-canonical-walkerindexer-surface) | `fs.FS` as canonical walker/indexer surface | Accepted |
 
 ---
 
@@ -448,3 +449,37 @@ Concretely, query `q265734` is a 12-line Python function whose docstring is `str
 With no alternative measured corpus showing the underlying phenomenon (a real "long, identifier-heavy NL query whose semantic ranking is genuinely weak"), the ADR closes as **Deprecated** without running the pre-implementation validation gate. This is a valid Proposed-ADR outcome: the validation discipline killed the proposal at the precondition step instead of the per-bucket-α-sweep step, which is cheaper and equally honest.
 
 ADR-013 may be revisited if a future NL-to-code benchmark (CodeSearchNet's original NL-query split, or a curated workflow corpus where users paste code looking for tests) provides a motivating empirical anchor that survives precondition inspection. The Alternatives / Consequences sections above remain as the record of the design conversation — they're useful for whoever picks this up later, even though no implementation will follow from *this* ADR.
+
+---
+
+## ADR-014: `fs.FS` as canonical walker/indexer surface
+
+**Status:** Accepted
+**Date:** 2026-05-23
+
+### Context
+r/golang commenter on the ken release post asked whether the walker/indexer could take an `fs.FS` so the library could index any data store — `embed.FS`, `fstest.MapFS`, a tarball-backed FS, a git tree object, an in-memory snapshot — instead of only a directory on disk. Two named use cases were real:
+
+- **Agent sandboxing.** `ken-mcp` exposes a search surface to LLM agents. If the underlying corpus is an `fs.FS` (e.g. `embed.FS`, a chroot-y view), the agent gets retrieval with no syscall-level escape path.
+- **Offline analysis.** Index a tarball, a git tree, an in-memory snapshot without unpacking to disk first.
+
+The pre-v0.5.0 walker (`internal/repo/walk.go`) and indexer (`internal/search/index.go`) called `filepath.WalkDir` + `os.ReadFile` + `os.Stat` directly. The gitignore matcher itself was already FS-agnostic; only file reads and directory traversal needed swapping. Tracking issue: [#6](https://github.com/townsendmerino/ken/issues/6).
+
+### Decision
+**Option B: `fs.FS` is the canonical surface; the real-FS entry points are kept as deprecated wrappers around `os.DirFS`.**
+
+- `repo.WalkFS(fs.FS, Options) ([]string, error)` and `search.FromFS(fs.FS, Mode, chunker, modelDir) (*Index, error)` become the canonical API.
+- `repo.Walk(opts)` and `search.FromPath(root, ...)` remain as one-line wrappers (`return WalkFS(os.DirFS(opts.Root), opts)` / `return FromFS(os.DirFS(root), ...)`) with `// Deprecated:` doc comments, scheduled for removal in a future minor release (pre-1.0 semver permits this).
+- `Matcher` and `--watch` stay real-FS-only by construction (fsnotify is real-FS-only; ADR-012's watch path doesn't need an `fs.FS` lift).
+- Private helpers (`isBinary`, `loadGitignore`) gain `FS` siblings (`isBinaryFS`, `loadGitignoreFS`); both real-FS variants stay since `Matcher.ShouldIndex` uses them.
+
+### Alternatives considered
+- **Option A: parallel funcs, both first-class.** Keep `Walk` and add `WalkFS`, both supported indefinitely. Rejected — doubles the public-API surface area forever, every future option needs to be added in two places, and the gap between which one "is the real API" decays into bit-rot. Deprecation gives the same backward compatibility for callers while keeping one canonical entry point.
+- **No-op (status quo).** Implicit rejection — the use cases (sandboxing, offline analysis) are real and the cost (one wrapper, two helper twins) is small.
+
+### Consequences
+- **One canonical entry point.** New code goes through `WalkFS` / `FromFS`; old callers keep working via the wrappers.
+- **`--watch` and `Matcher` remain real-FS-only.** Acceptable — neither sandboxing nor offline analysis needs incremental reindex. If a future use case wants `fs.FS` + watch (e.g. a polling driver over an `fs.FS` that doesn't support fsnotify), that's a separate ADR.
+- **`ken-mcp` env-var config stays path-based for v0.5.0.** An MCP-side `fs.FS` integration (sandboxed-FS-only mode, exposed via a new env var or config) is a future change tracked separately.
+- **`Options.Root` is now ignored by `WalkFS`.** Kept on the struct so the deprecated `Walk(opts)` signature stays stable; documented as "used only by the deprecated wrapper".
+- **Zero new deps.** `fs` and `testing/fstest` are stdlib. Test surface gains an `fstest.MapFS` happy-path test and a `WalkFS` vs `Walk` parity test (and the equivalent pair for `FromFS` vs `FromPath`) to pin that the `os.DirFS` adapter doesn't drift from the historical real-FS behavior.

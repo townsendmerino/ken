@@ -12,6 +12,48 @@ with pre-built binaries.
 
 (no changes yet)
 
+## [0.5.0] — 2026-05-25
+
+The library-API release: ken can now index any `fs.FS` — `embed.FS`,
+`fstest.MapFS`, a tarball-backed FS, a git tree object, an in-memory
+snapshot — not just a directory on disk. Unlocks two named use cases:
+agent sandboxing (`ken-mcp` over a chroot-y `fs.FS` view, no syscall-
+level escape) and offline analysis (index a tarball without unpacking).
+Prompted by an r/golang commenter on the v0.4 release post and tracked
+in [#6](https://github.com/townsendmerino/ken/issues/6).
+
+### Added
+
+- **`repo.WalkFS(fs.FS, Options)` and `search.FromFS(fs.FS, Mode, …)`** —
+  the canonical filesystem surface as of this release. Either one
+  accepts any `fs.FS` implementation. Parity tests (`Walk` vs `WalkFS`,
+  `FromPath` vs `FromFS`) pin that the `os.DirFS`-wrapped behavior
+  matches the historical real-FS implementation byte-for-byte. Zero
+  new deps; `fs` and `testing/fstest` are stdlib.
+
+### Deprecated
+
+- **`repo.Walk(opts)` and `search.FromPath(root, …)`** are now thin
+  one-line wrappers around their `FS` siblings (`WalkFS(os.DirFS(opts.Root), opts)` /
+  `FromFS(os.DirFS(root), …)`). They remain functional and tested but
+  are marked `// Deprecated:` in source; removal is scheduled for a
+  future minor release. Pre-1.0 semver permits this.
+
+### Note
+
+- **`--watch` (fsnotify) remains real-FS-only by construction**, so
+  `fs.FS`-backed indexes are build-once. fsnotify itself doesn't
+  abstract over `fs.FS` (the kernel APIs it wraps are real-FS-only),
+  and neither sandboxing nor offline analysis needs incremental
+  reindex. Same goes for `repo.Matcher` (used only by the watch path).
+- **`ken-mcp` env-var config stays path-based for v0.5.0.** An
+  MCP-side `fs.FS` integration (sandboxed-FS-only mode, exposed via
+  new config) is a future change tracked separately.
+
+See [ADR-014](docs/DECISIONS.md#adr-014-fsfs-as-canonical-walkerindexer-surface)
+for the alternatives considered (parallel funcs vs. canonical + deprecated)
+and the full consequences list.
+
 ## [0.4.0] — 2026-05-21
 
 The release that closes the gap between ken's pure-Go claim and its

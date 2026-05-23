@@ -24,43 +24,48 @@ import (
 // index. 2 MiB comfortably holds any hand-written source file.
 const DefaultMaxFileBytes = 2 << 20
 
-// Options configures a Walk.
+// Options configures a walk.
+//
+// Root is consumed by the deprecated Walk wrapper to construct an
+// os.DirFS; WalkFS ignores it (the fs.FS already encodes the root).
+// MaxFileBytes applies to both entry points.
 type Options struct {
-	Root         string // directory to walk
+	Root         string // used only by the deprecated Walk; ignored by WalkFS
 	MaxFileBytes int64  // 0 ⇒ DefaultMaxFileBytes
 }
 
-// Walk returns repo-relative, slash-separated paths of indexable files,
-// in deterministic lexical order. Directories named ".git" and anything
-// matched by the root .gitignore are pruned; binary files and files over
-// the size cap are skipped.
-func Walk(opts Options) ([]string, error) {
+// WalkFS returns repo-relative, slash-separated paths of indexable files
+// from fsys, in deterministic lexical order. Directories named ".git"
+// and anything matched by the root .gitignore are pruned; binary files
+// and files over the size cap are skipped.
+//
+// This is the canonical entry point as of v0.5.0. The deprecated Walk
+// wraps WalkFS(os.DirFS(opts.Root), opts) for callers still using a
+// concrete path.
+func WalkFS(fsys fs.FS, opts Options) ([]string, error) {
 	maxBytes := opts.MaxFileBytes
 	if maxBytes == 0 {
 		maxBytes = DefaultMaxFileBytes
 	}
-	gi := loadGitignore(filepath.Join(opts.Root, ".gitignore"))
+	gi := loadGitignoreFS(fsys, ".gitignore")
 
 	var files []string
-	err := filepath.WalkDir(opts.Root, func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, rerr := filepath.Rel(opts.Root, path)
-		if rerr != nil {
-			return rerr
-		}
-		rel = filepath.ToSlash(rel)
-		if rel == "." {
+		if path == "." {
 			return nil
 		}
+		// fs.WalkDir already hands back slash-separated paths relative
+		// to the FS root, so no filepath.Rel / ToSlash dance is needed.
 		if d.IsDir() {
-			if d.Name() == ".git" || gi.match(rel, true) {
+			if d.Name() == ".git" || gi.match(path, true) {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() || gi.match(rel, false) {
+		if !d.Type().IsRegular() || gi.match(path, false) {
 			return nil
 		}
 		info, ierr := d.Info()
@@ -70,16 +75,24 @@ func Walk(opts Options) ([]string, error) {
 		if info.Size() > maxBytes {
 			return nil
 		}
-		if isBinary(path) {
+		if isBinaryFS(fsys, path) {
 			return nil
 		}
-		files = append(files, rel)
+		files = append(files, path)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return files, nil
+}
+
+// Walk is the real-filesystem entry point retained for backward
+// compatibility with pre-v0.5.0 callers.
+//
+// Deprecated: use WalkFS(os.DirFS(opts.Root), opts) instead.
+func Walk(opts Options) ([]string, error) {
+	return WalkFS(os.DirFS(opts.Root), opts)
 }
 
 // Matcher caches the per-root indexability rules (.gitignore + size cap
@@ -146,10 +159,26 @@ func (m *Matcher) ShouldIndex(relPath string) bool {
 
 // isBinary reports whether the first 8 KiB of the file contains a NUL byte,
 // the same cheap heuristic git uses to classify a blob as binary.
+//
+// Retained for Matcher.ShouldIndex, which is real-FS-only by construction.
+// WalkFS uses isBinaryFS.
 func isBinary(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
 		return true // unreadable ⇒ don't index
+	}
+	defer f.Close()
+	var buf [8192]byte
+	n, _ := f.Read(buf[:])
+	return bytes.IndexByte(buf[:n], 0) >= 0
+}
+
+// isBinaryFS is the fs.FS variant of isBinary. Same 8 KiB NUL-sniff
+// heuristic, same "unreadable ⇒ don't index" fallback.
+func isBinaryFS(fsys fs.FS, path string) bool {
+	f, err := fsys.Open(path)
+	if err != nil {
+		return true
 	}
 	defer f.Close()
 	var buf [8192]byte
@@ -168,11 +197,27 @@ type rule struct {
 type gitignore struct{ rules []rule }
 
 func loadGitignore(path string) *gitignore {
-	gi := &gitignore{}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return gi
+		return &gitignore{}
 	}
+	return parseGitignore(data)
+}
+
+// loadGitignoreFS is the fs.FS variant of loadGitignore. `name` is the
+// FS-relative path to the .gitignore file (typically just ".gitignore").
+func loadGitignoreFS(fsys fs.FS, name string) *gitignore {
+	data, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		return &gitignore{}
+	}
+	return parseGitignore(data)
+}
+
+// parseGitignore compiles the rules in a .gitignore body. Shared by
+// loadGitignore (real FS) and loadGitignoreFS (fs.FS).
+func parseGitignore(data []byte) *gitignore {
+	gi := &gitignore{}
 	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimRight(line, " \r")
 		if line == "" || strings.HasPrefix(line, "#") {

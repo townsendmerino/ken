@@ -32,8 +32,8 @@ package search
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
 
 	"github.com/townsendmerino/ken/internal/ann"
 	"github.com/townsendmerino/ken/internal/bm25"
@@ -88,30 +88,53 @@ type Index struct {
 	flat   *ann.Flat          // nil for ModeBM25
 }
 
-// FromPath walks root, chunks every indexable file with the named chunker,
-// builds the BM25 index, and (for semantic/hybrid) embeds every chunk with
-// the Model2Vec model at modelDir.
+// FromFS walks fsys, chunks every indexable file with the named chunker,
+// builds the BM25 index, and (for semantic/hybrid) embeds every chunk
+// with the Model2Vec model at modelDir.
 //
-// Implementation note (v0.3): FromPath is now a thin wrapper around
-// walkAndChunk + BuildIndex. The split exists because internal/search/
+// This is the canonical entry point as of v0.5.0. Pass any fs.FS —
+// os.DirFS for a real directory, embed.FS for a baked-in corpus,
+// fstest.MapFS for tests, or any other implementation. The deprecated
+// FromPath wraps FromFS(os.DirFS(root), ...) for callers still using a
+// concrete path.
+//
+// Implementation note (v0.3): FromFS is a thin wrapper around
+// walkAndChunkFS + BuildIndex. The split exists because internal/search/
 // watch.go reuses BuildIndex to publish new snapshots after incremental
 // re-chunk / re-embed work — it shouldn't re-walk the tree just to
 // rebuild the index struct.
-func FromPath(root string, mode Mode, chunkerName, modelDir string) (*Index, error) {
-	chunks, vecs, model, err := walkAndChunk(root, mode, chunkerName, modelDir)
+func FromFS(fsys fs.FS, mode Mode, chunkerName, modelDir string) (*Index, error) {
+	chunks, vecs, model, err := walkAndChunkFS(fsys, mode, chunkerName, modelDir)
 	if err != nil {
 		return nil, err
 	}
 	return BuildIndex(chunks, vecs, mode, model), nil
 }
 
-// walkAndChunk does the corpus-bootstrapping half of FromPath: validate
-// the mode + chunker, load the model (if needed), walk root, chunk every
+// FromPath is the real-filesystem entry point retained for backward
+// compatibility with pre-v0.5.0 callers.
+//
+// Deprecated: use FromFS(os.DirFS(root), mode, chunkerName, modelDir) instead.
+func FromPath(root string, mode Mode, chunkerName, modelDir string) (*Index, error) {
+	return FromFS(os.DirFS(root), mode, chunkerName, modelDir)
+}
+
+// walkAndChunk is the real-FS-only bootstrap path retained for
+// internal/search/watch.go (fsnotify is real-FS-only by construction).
+// New code should call walkAndChunkFS directly.
+func walkAndChunk(root string, mode Mode, chunkerName, modelDir string) (
+	chunks []chunk.Chunk, vecs [][]float32, model *embed.StaticModel, err error,
+) {
+	return walkAndChunkFS(os.DirFS(root), mode, chunkerName, modelDir)
+}
+
+// walkAndChunkFS does the corpus-bootstrapping half of FromFS: validate
+// the mode + chunker, load the model (if needed), walk fsys, chunk every
 // file, embed every chunk under semantic/hybrid. Returns the raw
 // materials BuildIndex needs. Internal to v0.3's incremental indexing —
 // the watcher keeps its own copies of chunks + vecs around as the
 // mutable corpus state.
-func walkAndChunk(root string, mode Mode, chunkerName, modelDir string) (
+func walkAndChunkFS(fsys fs.FS, mode Mode, chunkerName, modelDir string) (
 	chunks []chunk.Chunk, vecs [][]float32, model *embed.StaticModel, err error,
 ) {
 	if mode != ModeBM25 && mode != ModeSemantic && mode != ModeHybrid {
@@ -131,12 +154,12 @@ func walkAndChunk(root string, mode Mode, chunkerName, modelDir string) (
 		model = m
 	}
 
-	files, err := repo.Walk(repo.Options{Root: root})
+	files, err := repo.WalkFS(fsys, repo.Options{})
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	for _, rel := range files {
-		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		data, err := fs.ReadFile(fsys, rel)
 		if err != nil {
 			return nil, nil, nil, err
 		}

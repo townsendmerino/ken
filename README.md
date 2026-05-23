@@ -178,6 +178,30 @@ gitignore-respecting walk
 
 The retrieval algorithm is a verbatim port of semble's `search.py` + `ranking/*.py`; see [docs/DESIGN.md §7](docs/DESIGN.md#7-hybrid-retrieval--rerank) for every constant, every pipeline-order subtlety, and where the original scoping reconstruction diverged from semble's live source. The Model2Vec inference path (three-tensor `safetensors` layout, the `mapping[]` indirection, the float64 precision contract that's load-bearing for ≥1−1e-5 cosine parity) is in [§4](docs/DESIGN.md#4-model2vec-inference-format).
 
+## Using ken as a library over `fs.FS`
+
+As of v0.5.0 the walker and indexer take any `fs.FS`, so ken can index an `embed.FS`, an `fstest.MapFS`, a tarball-backed FS, or any other `fs.FS` implementation — useful for agent sandboxing (no escape from the corpus) and offline analysis (no unpack-to-disk step). The `--watch` codepath stays real-FS-only.
+
+```go
+import (
+    "embed"
+
+    "github.com/townsendmerino/ken/internal/search"
+)
+
+//go:embed corpus/**
+var corpus embed.FS
+
+func main() {
+    ix, _ := search.FromFS(corpus, search.ModeBM25, "regex", "")
+    for _, r := range ix.Search("validate token", 5) {
+        // r.Chunk.File, r.Chunk.StartLine, r.Score, ...
+    }
+}
+```
+
+For test fixtures, `testing/fstest.MapFS` works the same way: `search.FromFS(fstest.MapFS{"a.go": {Data: []byte("...")}}, …)`. The legacy `search.FromPath(root, …)` is now a thin deprecated wrapper around `search.FromFS(os.DirFS(root), …)`. See [ADR-014](docs/DECISIONS.md#adr-014-fsfs-as-canonical-walkerindexer-surface) for the design rationale.
+
 ## Choosing a chunker
 
 ken ships with **two chunkers** behind the same `--chunker=` flag (CLI) / `KEN_MCP_CHUNKER=` env var (MCP):

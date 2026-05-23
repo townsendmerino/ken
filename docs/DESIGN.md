@@ -83,7 +83,7 @@ ken/
 │   │   ├── adaptive.go      # symbol-like vs NL query classifier + resolveAlpha
 │   │   └── watch.go         # WatchedIndex: fsnotify + atomic.Pointer[Index] snapshot swap (v0.3, ADR-012)
 │   └── repo/                # source acquisition
-│       └── walk.go          # gitignore-respecting walk (pathspec equivalent)
+│       └── walk.go          # gitignore-respecting walk (pathspec equivalent); `fs.FS`-canonical as of v0.5.0 (ADR-014)
 ├── mcp/                     # MCP server: tool registration, repo cache, shallow clone
 │   ├── server.go
 │   ├── cache.go
@@ -115,6 +115,10 @@ ken/
 | HNSW | `github.com/coder/hnsw` (deferred — flat `internal/ann/flat.go` for v1) | Active, pure Go, generics-based. Behind an interface so a flat index is fine for v1. |
 | Gitignore | `github.com/sabhiram/go-gitignore` (deferred — minimal in-tree matcher for v1) | Mirrors `pathspec` behavior closely. Pure Go. |
 | File watching | `github.com/fsnotify/fsnotify` (v0.3) | Pure Go, no cgo, the OS backends are abstracted (inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows). Used by Kubernetes / VS Code / Hugo. v0.3's incremental indexing (`internal/search/watch.go`, ADR-012) holds one watcher per `WatchedIndex`. |
+
+### Filesystem surface — `fs.FS` canonical (v0.5.0)
+
+As of v0.5.0, the walker and indexer are FS-agnostic: `repo.WalkFS(fs.FS, Options)` and `search.FromFS(fs.FS, Mode, …)` are the canonical entry points; `repo.Walk` and `search.FromPath` are retained as one-line deprecated wrappers around `os.DirFS(root)`. This unlocks `embed.FS`-backed indexes (agent sandboxing), `fstest.MapFS`-backed indexes (testing), and any other `fs.FS` implementation (tarballs, git tree objects, in-memory snapshots) without ken having to know about them. The watch path (`internal/search/watch.go`, `repo.Matcher`) stays real-FS-only by construction — fsnotify is real-FS-only, not architectural — so `fs.FS`-backed indexes are build-once. See [ADR-014](DECISIONS.md#adr-014-fsfs-as-canonical-walkerindexer-surface) for the decision rationale.
 
 ## 2. Code chunking without cgo
 
