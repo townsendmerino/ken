@@ -8,7 +8,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/odvcencio/gotreesitter v0.18.0
 	golang.org/x/sync v0.20.0
-	golang.org/x/text v0.36.0
+	golang.org/x/text v0.37.0
 )
 
 require (
