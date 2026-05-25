@@ -64,7 +64,7 @@ jobs:
   # on this — it always runs on both OSes and the dbintegration tests
   # are gated by the build tag, so non-DB runs skip them silently.
   test-db-integration:
-    name: ubuntu / DB integration (Postgres + SQLite + MySQL)
+    name: ubuntu / DB integration (Postgres + SQLite + MySQL + Listen)
     runs-on: ubuntu-latest
     services:
       postgres:
