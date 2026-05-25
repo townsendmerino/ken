@@ -70,7 +70,7 @@ ken's hybrid BM25 + Model2Vec retrieval is calibrated for two content types:
 
 For plain-text corpora with no code or structured documentation (novels, journals, raw transcripts), the BM25 side works fine in `--mode=bm25`, but the semantic model is code-trained — semantic ranking quality on pure literary prose is unvalidated. If that's your use case, expect BM25 mode to do most of the heavy lifting.
 
-## Indexing database schemas (v0.7.0)
+## Indexing database schemas (v0.7.0, expanded in v0.7.1)
 
 Agents working on a real codebase need schema context **alongside** the code. ken v0.7.0 indexes both. An agent answering "how do users get authenticated" gets the Go function doing auth, the SQL it executes, the `users` table definition, AND the FK relationships from `sessions.user_id` — all in one ranked result list. Design rationale in [ADR-017](docs/DECISIONS.md#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance).
 
@@ -89,7 +89,20 @@ TABLE users
   INDEX users_email_idx ON (email)
 ```
 
-Tier 1 doesn't fold migration history across files (a later `ALTER TABLE` produces its own chunk; the original `CREATE TABLE` chunk is unchanged). Agents see the union of historical state. Devs who want a single "current state" view either use Tier 2 or maintain a canonical `schema/current.sql`.
+As of **v0.7.1** (ADR-018), when ken's walker detects a directory containing numbered `.sql` migration files — Goose / dbmate / Rails-4 (`\d+_*.sql`), Flyway (`V\d+__*.sql`), or Rails-5 / Alembic (`\d{14}_*.sql`) — it **folds CREATE TABLE + later ALTER TABLE statements into a single "current state" chunk per table**. An agent asking "what columns does `users` have?" gets one denormalized chunk reflecting the final schema, not N+1 chunks (CREATE + every ALTER) it has to mentally replay.
+
+```
+-- file: migrations/0001_init.sql
+-- folded from migrations
+TABLE users
+  id          BIGSERIAL PRIMARY KEY
+  email       VARCHAR(255) NOT NULL UNIQUE
+  status      VARCHAR(16) NOT NULL DEFAULT 'active'   -- added by 0002_add_status.sql
+```
+
+Folding covers `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN ... TYPE`, `ADD CONSTRAINT`, and `DROP CONSTRAINT`. Out of scope for v0.7.1: `RENAME COLUMN` (needs name resolution across files), engine-specific DDL extensions. When an ALTER can't be folded cleanly (unknown column, type conflict, missing CREATE TABLE), ken emits **both** the original per-file ALTER chunk **and** the folded chunk for what could be resolved — the agent never sees less information than v0.7.0.
+
+Set `KEN_SQL_NO_AUTO_MIGRATIONS=1` to restore the v0.7.0 per-file behavior. Useful for operators who maintain a canonical `schema/current.sql` and don't want migration history surfaced separately.
 
 ### Tier 2 — Live Postgres introspection (`KEN_DB_DSN`)
 
@@ -158,7 +171,20 @@ Tier 2 going dark never crashes `ken-mcp`. Restart picks up a recovered DSN.
 
 ### Engine scope
 
-Postgres only for v0.7.0 via `github.com/jackc/pgx/v5` (pure Go, no cgo). MySQL (`go-sql-driver/mysql`) and SQLite (`modernc.org/sqlite`) share the same `internal/db` shape — both pure-Go, both common in dev contexts — and land in follow-on point releases (v0.7.x).
+As of **v0.7.1**, Tier 2 supports **Postgres + SQLite**. Engine routing inside `internal/db.IndexSchema` dispatches on the DSN scheme:
+
+| Scheme | Driver | Typical use |
+|---|---|---|
+| `postgres://` / `postgresql://` | `github.com/jackc/pgx/v5` (pure Go) | server-backed dev DBs |
+| `sqlite://` / `sqlite3://` | `modernc.org/sqlite` (pure Go, transpiled from C, no cgo) | Rails / Django / Phoenix / Laravel / FastAPI / embedded apps |
+
+SQLite DSN examples:
+- `sqlite:///var/data/dev.db` — absolute path (note the triple slash: scheme + empty host + absolute path).
+- `sqlite://./dev.db` — relative path, resolved against `KEN_MCP_DEFAULT_REPO`. Convenient when the SQLite file lives inside the repo (overwhelmingly common).
+
+The freshness header on SQLite chunks contains the file basename only (`sqlite@dev.db`), not the full path, so chunks don't leak local filesystem layout. The same row-sampling / periodic-refresh / SIGHUP machinery works for both engines without configuration changes.
+
+MySQL (`go-sql-driver/mysql`) lands in v0.7.2 via the same `internal/db.IndexSchema` engine-dispatch shape. `KEN_DB_SCHEMAS` / `KEN_DB_EXCLUDE_SCHEMAS` filtering arrives alongside it.
 
 ## Quickstart
 
@@ -251,9 +277,10 @@ command = "/absolute/path/to/ken-mcp"
 | `KEN_MCP_MODE` | `hybrid` | `bm25` / `semantic` / `hybrid`. Auto-downgrades to `bm25` with a stderr warning if the model dir is unreachable. |
 | `KEN_MCP_MODEL_DIR` | (unset) | Path to a Model2Vec snapshot containing `model.safetensors`. Empty ⇒ `bm25`-only. |
 | `KEN_MCP_CHUNKER` | `regex` | `regex` / `treesitter` / `line` / `markdown`. See ["Choosing a chunker"](#choosing-a-chunker). |
-| `KEN_DB_DSN` | (unset) | Postgres connection string (`postgres://...`). Enables [Tier 2 DB indexing](#tier-2--live-postgres-introspection-ken_db_dsn). Requires `KEN_MCP_DEFAULT_REPO` to be a local path. |
+| `KEN_DB_DSN` | (unset) | Database DSN. Postgres (`postgres://...` / `postgresql://...`) or SQLite (`sqlite:///abs/path.db`, `sqlite://./rel/path.db`, `sqlite3://...`) — engine routing dispatches on the scheme. Enables [Tier 2 DB indexing](#tier-2--live-postgres-introspection-ken_db_dsn). Requires `KEN_MCP_DEFAULT_REPO` to be a local path. |
 | `KEN_DB_SAMPLE_ROWS` | `0` | Rows per table to sample. **Default 0 means schema-only.** See the [PII stance](#pii-stance-documentation--sane-defaults) before enabling. |
 | `KEN_DB_REINDEX_INTERVAL` | (off) | Go duration (`5m`, `1h`). Background refresh cadence. Off by default — restart or `SIGHUP` to refresh. |
+| `KEN_SQL_NO_AUTO_MIGRATIONS` | (off) | `1` / `true` / `yes` disables v0.7.1 Tier-1 migration-history folding (restores v0.7.0 per-file behavior). Useful when you maintain a canonical `schema/current.sql` and don't want migration history surfaced as folded chunks. |
 | `KEN_MCP_CACHE_SIZE` | `16` | LRU bound on the repo→Index cache. |
 | `KEN_MCP_LOG_LEVEL` | `warn` | `debug` / `info` / `warn` / `error`. All logs go to stderr; **stdout is the JSON-RPC channel** ([details](docs/DESIGN.md#hard-rule--stdoutstderr-contract)). |
 

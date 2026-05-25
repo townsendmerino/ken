@@ -92,6 +92,9 @@ func main() {
 	modeStr := envEnum("KEN_MCP_MODE", search.ModeNames(), "hybrid", logger)
 	modelDir := envPath("KEN_MCP_MODEL_DIR", logger)
 	defaultRepo := envPathOrURL("KEN_MCP_DEFAULT_REPO", logger)
+	// v0.7.1: KEN_SQL_NO_AUTO_MIGRATIONS=1 disables Tier-1 migration
+	// folding (sql.FoldMigrations). Default is "folding enabled".
+	noAutoMigrations := envBool("KEN_SQL_NO_AUTO_MIGRATIONS", false, logger)
 
 	// modeStr is now guaranteed to be one of ModeNames(); ParseMode can
 	// never fail here. Keep the call so a future ParseMode addition
@@ -112,8 +115,8 @@ func main() {
 		modeStr = "bm25"
 		modelDir = ""
 	}
-	logger.Logf(kenmcp.LogInfo, "starting (mode=%s chunker=%s cache_size=%d default_repo=%q)",
-		modeStr, chunker, size, defaultRepo)
+	logger.Logf(kenmcp.LogInfo, "starting (mode=%s chunker=%s cache_size=%d default_repo=%q fold_migrations=%v)",
+		modeStr, chunker, size, defaultRepo, !noAutoMigrations)
 
 	// Builder: clone http(s) URLs to a temp dir; index local paths
 	// in-place. mcp.NormalizeKey hands us either a canonical URL or an
@@ -138,7 +141,11 @@ func main() {
 			dir = source
 		}
 		logger.Logf(kenmcp.LogInfo, "indexing %s (mode=%s)", dir, modeStr)
-		ix, err := search.NewWatchedIndex(dir, mode, chunker, modelDir, true)
+		fsOpts := search.FSOptions{
+			DisableFoldMigrations: noAutoMigrations,
+			LogWriter:             os.Stderr,
+		}
+		ix, err := search.NewWatchedIndexWithOptions(dir, mode, chunker, modelDir, true, fsOpts)
 		if err != nil {
 			if cleanup != nil {
 				cleanup()
@@ -272,6 +279,11 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 		// Send our own diagnostics to stderr via the kenmcp logger's
 		// underlying writer (os.Stderr always when configured by main).
 		LogWriter: os.Stderr,
+		// v0.7.1: SQLite uses this to anchor relative DSN paths like
+		// "sqlite://./dev.db" at the default repo root. Postgres ignores
+		// it. defaultRepo here is already known to be a local directory
+		// (wireDBTier2 rejects http(s) URLs earlier).
+		DefaultRepoPath: defaultRepo,
 	}
 
 	// Build-once-at-startup: this fires the initial swap. If it fails,

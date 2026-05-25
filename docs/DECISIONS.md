@@ -23,6 +23,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-015](#adr-015-nested-gitignore-support-via-scope-stack-on-existing-rule-engine) | Nested `.gitignore` support via scope stack on existing rule engine | Accepted |
 | [ADR-016](#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) | Embedded-corpus MCP build pattern via `mcp.Run` library function | Accepted |
 | [ADR-017](#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance) | Database schema indexing — two-tier (static SQL + live Postgres) with documented PII stance | Accepted |
+| [ADR-018](#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay) | SQLite engine + migration-history folding via lightweight ALTER replay | Accepted |
 
 ---
 
@@ -644,3 +645,65 @@ Engineered redaction controls (column-exclusion DSL, redaction modes, row synthe
 - **CI grows a Postgres service container** (ubuntu-only — GitHub Actions services don't run on macos-latest). The default `go test ./...` still works without one; the dbintegration tag gates the live tests and the CI yaml separates them into a second `test-db-integration` job.
 - **`mcp.Run` (v0.6.0 embedded-corpus) is unchanged.** `mcp.Options` adds no DB fields. The `mcp/` tests still pass; the embedded-corpus path has no DB code reachable from it. Future DB support there is a separate v0.8.0+ ADR.
 - **Tier 1's `.sql` structural parsing benefits `mcp.Run` too.** Lives in `internal/search` (which both binaries use), so an embedded-corpus binary that includes `.sql` files among its docs gets the structural chunks for free. Filesystem-based, not DB-based — doesn't violate the "no DB code in the embedded-corpus path" rule.
+
+---
+
+## ADR-018: SQLite engine + migration-history folding via lightweight ALTER replay
+
+**Status:** Accepted
+
+**Date:** 2026-05-25
+
+**Issue:** [townsendmerino/ken#9](https://github.com/townsendmerino/ken/issues/9)
+
+### Context
+
+[ADR-017](#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance) shipped v0.7.0 with two explicit out-of-scope items: Tier 2 supported only Postgres, and Tier 1 emitted one chunk per CREATE/ALTER statement rather than folding them into a "current state" view. Both gaps cluster on the same audience: SQLite-backed development workflows (Rails, Django, Phoenix, Laravel, FastAPI, embedded apps) are exactly where migration-driven schema management is most common, so projects that didn't get Tier 2 also got the worst per-file chunk explosion. Pairing the two pieces in one release lets the SQLite story land with the folding fix already in place.
+
+v0.7.1 closes both gaps. SQLite indexing covers the missing engine; migration folding shrinks N+1 chunks per table down to one "current state" chunk.
+
+### Decision
+
+**Two pieces shipping together in v0.7.1:**
+
+1. **SQLite engine in Tier 2.** New file `internal/db/sqlite.go` (sibling to `introspect.go`/`emit.go`/`sample.go`) implements `indexSchemaSQLite(ctx, opts, defaultRepoPath)` via `modernc.org/sqlite` — the C SQLite engine transpiled to Go, no cgo, single static binary preserved. Engine routing happens inside `IndexSchema` by parsing the DSN scheme: `postgres://` / `postgresql://` → `indexSchemaPostgres`; `sqlite://` / `sqlite3://` → `indexSchemaSQLite`. The shared `Options` + `Refresher` + `WatchedIndex.SetExtraChunks` machinery is engine-agnostic and reused unchanged.
+
+   DSN forms: `sqlite:///abs/path.db` for absolute paths (triple slash: scheme + empty host + absolute path); `sqlite://./rel/path.db` for paths relative to `KEN_MCP_DEFAULT_REPO`. The relative form is the convenient case — SQLite files usually live in-repo. Introspection uses PRAGMA queries (`table_info`, `index_list`, `index_info`, `foreign_key_list`) for structured access, producing the same `tableInfo` / `viewInfo` shape as Postgres so `emit.go`'s renderers work without engine-specific branches. The freshness header shows the file basename only (`sqlite@dev.db`), not the full path, so chunks don't leak local filesystem layout.
+
+2. **Tier-1 migration-history folding.** New file `internal/sql/fold.go` adds `IsMigrationDir(fsys, dir)` and `FoldMigrations(fsys, dir, logger)`. When `internal/search`'s walker detects a directory of numbered `.sql` files matching a recognized migration naming pattern (Goose / dbmate / Rails-4 `\d+_*.sql`, Flyway `V\d+__*.sql`, Rails-5 / Alembic `\d{14}_*.sql`), it replays the CREATE TABLE + later ALTER TABLE statements into a single "current state" chunk per table. The lightweight algorithm (parse ALTER → mutate in-memory column list → re-render) covers `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN ... TYPE` (Postgres) / `SET DATA TYPE` (ANSI), `ADD CONSTRAINT`, `DROP CONSTRAINT`.
+
+   **Partial-fold failures emit BOTH chunks.** When an ALTER can't be applied cleanly (unknown column from a RENAME elsewhere, missing CREATE TABLE for the referenced name, out-of-scope action like `RENAME COLUMN`), ken logs a warn AND keeps the original per-file ALTER chunk in the output, while still emitting the folded chunk for what could be resolved. Net: the agent sees the union; never less information than v0.7.0.
+
+   **Opt-out:** `KEN_SQL_NO_AUTO_MIGRATIONS=1` (or `true` / `yes`) restores v0.7.0 per-file behavior. Operators who maintain a canonical `schema/current.sql` and don't want migration history surfaced separately set this. Default is folding-enabled.
+
+**Validation surface added:**
+- `envDSN` becomes a scheme-allow-list (`postgres`, `postgresql`, `sqlite`, `sqlite3`) rather than postgres-specific. The pattern extends cleanly for MySQL in v0.7.2.
+- New `envBool` helper for `KEN_SQL_NO_AUTO_MIGRATIONS` validation, matching the warn-and-fallback pattern of the other env-var helpers.
+- New `TestBinary_StdoutIsCleanJSONRPC_WithSQLite` confirms `modernc.org/sqlite` stays silent on stdout when the full Tier 2 code path runs in the spawned `cmd/ken-mcp` binary. Sibling of v0.7.0's `_WithDB` test; needs no service container (SQLite is file-based).
+
+### Alternatives considered
+
+- **AST-aware migration folding** (build a full in-memory schema model and replay every DDL operation against it). Rejected for v0.7.1 on scope-discipline grounds. The AST approach would cover the entire grammar (RENAME COLUMN, complex CHECK constraint replays, engine-specific extensions) cleanly and could be the foundation for a future DDL linter. The lightweight approach covers the 80% case (ADD/DROP/ALTER COLUMN, ADD/DROP CONSTRAINT) in a couple hundred lines without parser engineering. If field signal demands the harder operations, AST is the natural next step.
+
+- **Explicit `KEN_SQL_MIGRATIONS_DIR` env var instead of auto-detect.** Rejected. Safer (no wrong guesses), but adds a config step for every project. Auto-detection with `KEN_SQL_NO_AUTO_MIGRATIONS=1` opt-out handles ~80% of projects with zero config; an explicit override can land if real-world signal calls for it.
+
+- **Wildcards in migration directory detection** (globbing across multiple subdirectories per repo, e.g. matching both `db/migrate/` and `services/x/migrations/`). Out of scope. Auto-detection handles the common case of one migrations directory per project; multi-dir setups can disable auto-detect and (in a later release) name the dirs explicitly.
+
+- **AST-aware "current schema" view that fully replaces per-file chunks.** Rejected. Removes information — the migration history itself is sometimes the right answer to "when was this column added?". The folded chunk is ADDITIVE in failure modes (BOTH chunks on partial fold); in success modes the per-file ALTER chunks aren't emitted as structural chunks but the raw `.sql` is still line-chunked and BM25-searchable. Agents that want history can grep the raw text; agents that want current state get one clean chunk.
+
+- **One engine per release (SQLite v0.7.1, then MySQL v0.7.2, then folding v0.7.3).** Rejected. Migration-driven workflows are most concentrated on SQLite — shipping the engine without the folding fix would deliver the worst experience to the audience that most needs it. Pairing them lets SQLite land with the per-file chunk explosion already addressed.
+
+- **`mcp.Run` SQLite support** (embedded-corpus binary that opens a SQLite file on first request). Deferred to v0.8.0+ via `mcp.Options.DBSource`. The embedded-corpus product story is "single static binary, no per-query egress," which a live DB connection muddles. Tier 1's migration folding DOES benefit `mcp.Run` for embedded `.sql` files (filesystem-based, no DB code reachable).
+
+- **DSN normalization** (rewrite `sqlite://./dev.db` to its absolute path inside `IndexSchema` so the rendered chunk shows the same path on every refresh). Rejected for v0.7.1. The freshness header already uses the basename only; the full path is internal. Relative paths can resolve differently if the operator moves their working dir between starts, but that's a one-line stderr warn ("file missing") rather than silent breakage.
+
+### Consequences
+
+- **New dependency: `modernc.org/sqlite`.** Pure Go, transpiled from C SQLite. Default behavior is silent on stdout (no Tracer-equivalent the way pgx has) — `TestBinary_StdoutIsCleanJSONRPC_WithSQLite` enforces this. Any future logging wiring routes through `Options.LogWriter` (stderr), never stdout. ADR-001 (no-cgo) preserved.
+- **SQLite users get Tier 2 indexing.** Rails / Django / Phoenix / Laravel / FastAPI / embedded apps — the audience the v0.7.0 Postgres-only release explicitly didn't serve. Same chunk shape, same row-sampling / refresh / SIGHUP machinery, no operator-facing differences beyond the DSN scheme.
+- **Migration-driven workflows on any engine get folded chunks.** Tier 1's folding is filesystem-based, not DB-based — Postgres / SQLite / future-MySQL Tier 2 paths all benefit because they index against the same `internal/search` walker.
+- **The engine-routing pattern is established.** MySQL in v0.7.2 follows the same shape: sibling file `internal/db/mysql.go`, DSN scheme dispatch in `IndexSchema`. The `envDSN` allow-list extends with one entry.
+- **Partial-fold failures never lose data.** The BOTH-chunks rule means agents never see less than they did under v0.7.0. The worst case is one extra chunk for the agent to disambiguate (per affected ALTER); the best case is N+1 chunks collapse to 1.
+- **CI: SQLite tests run in the existing `test-db-integration` job.** No new service container needed (SQLite is file-based). The job's name updates to reflect both engines (`ubuntu / DB integration (Postgres + SQLite)`). The default `go test ./...` job runs the SQLite stdout-clean test too (which uses a temp .db file, no env required).
+- **`mcp.Run` (v0.6.0 embedded-corpus) is unchanged.** No new `mcp.Options` fields. Tier 1's migration folding DOES apply when embedded corpora include `.sql` files in a migration directory; no operator action required.
+- **Freshness header policy for SQLite.** Basename only (`sqlite@dev.db`), never the full path. Operators who need full provenance grep stderr logs. Audited by `TestSQLiteIntegration_FreshnessHeader_BasenameOnly`.

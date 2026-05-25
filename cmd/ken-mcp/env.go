@@ -88,6 +88,29 @@ func envPathOrURL(name string, l *kenmcp.Logger) string {
 	return raw
 }
 
+// envBool parses a boolean env var. Accepted truthy values (case-
+// insensitive): "1", "true", "yes", "y", "on". Accepted falsy values:
+// "0", "false", "no", "n", "off". Empty/unset returns fallback; any
+// other value warns and returns fallback. Matches the warn-and-fallback
+// pattern the rest of this file uses.
+//
+// v0.7.1: introduced for KEN_SQL_NO_AUTO_MIGRATIONS.
+func envBool(name string, fallback bool, l *kenmcp.Logger) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	}
+	l.Logf(kenmcp.LogWarn, "invalid %s=%q: expected boolean (1/true/yes/on or 0/false/no/off) — using default %v",
+		name, raw, fallback)
+	return fallback
+}
+
 // envDuration parses a Go time.Duration env var (e.g. "5m", "1h30m").
 // Empty/unset returns fallback; invalid input warns and returns
 // fallback. Used by v0.7.0's KEN_DB_REINDEX_INTERVAL (fallback: 0 =
@@ -109,12 +132,25 @@ func envDuration(name string, fallback time.Duration, l *kenmcp.Logger) time.Dur
 	return d
 }
 
-// envDSN parses a Postgres DSN env var. Accepts the URL form
-// (postgres:// or postgresql://). Empty/unset returns ""; invalid input
-// warns and returns "" — Tier 2 stays off rather than crashing the
-// server. The libpq key=value form is NOT accepted at this layer (pgx
-// supports it, but we want a loud rejection at startup rather than a
-// silent connection-time failure later).
+// dsnAcceptedSchemes is the allow-list for KEN_DB_DSN at v0.7.1: the
+// Postgres URL forms from v0.7.0 plus the SQLite forms added in this
+// release. Engine routing inside internal/db.IndexSchema dispatches on
+// the scheme; this function only gates the env-var validation.
+var dsnAcceptedSchemes = map[string]bool{
+	"postgres":   true,
+	"postgresql": true,
+	"sqlite":     true,
+	"sqlite3":    true,
+}
+
+// envDSN parses a database DSN env var. Accepts the URL form for any
+// engine ken supports as of v0.7.1: postgres://, postgresql://,
+// sqlite://, sqlite3://. Empty/unset returns ""; invalid input warns
+// and returns "" — Tier 2 stays off rather than crashing the server.
+// The libpq key=value form is NOT accepted at this layer (pgx supports
+// it, but we want a loud rejection at startup rather than a silent
+// connection-time failure later). SQLite URLs do NOT require a host
+// (`sqlite:///abs/path.db` and `sqlite://./rel/path.db` are both valid).
 func envDSN(name string, l *kenmcp.Logger) string {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
@@ -126,11 +162,14 @@ func envDSN(name string, l *kenmcp.Logger) string {
 		return ""
 	}
 	scheme := strings.ToLower(u.Scheme)
-	if scheme != "postgres" && scheme != "postgresql" {
-		l.Logf(kenmcp.LogWarn, "invalid %s scheme %q (want postgres:// or postgresql://) — Tier 2 (DB indexing) disabled", name, u.Scheme)
+	if !dsnAcceptedSchemes[scheme] {
+		l.Logf(kenmcp.LogWarn, "invalid %s scheme %q (want postgres://, postgresql://, sqlite://, or sqlite3://) — Tier 2 (DB indexing) disabled", name, u.Scheme)
 		return ""
 	}
-	if u.Host == "" {
+	// Postgres/postgresql REQUIRE a host. SQLite uses the path component
+	// and may have an empty host (`sqlite:///abs/path` or
+	// `sqlite://./rel/path` — relative paths put the leading "." in Host).
+	if (scheme == "postgres" || scheme == "postgresql") && u.Host == "" {
 		l.Logf(kenmcp.LogWarn, "invalid %s: missing host — Tier 2 (DB indexing) disabled", name)
 		return ""
 	}

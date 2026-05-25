@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,9 +12,19 @@ import (
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	_ "modernc.org/sqlite"
 
 	kenmcp "github.com/townsendmerino/ken/mcp"
 )
+
+// sqliteOpenForTest is a tiny helper used by the SQLite stdout-clean
+// test to materialize a fixture .db file. Lives here (not in
+// internal/db/sqlite_test.go) because the stdout-clean test runs
+// without the dbintegration build tag — every checkout's `go test ./...`
+// hits it.
+func sqliteOpenForTest(path string) (*sql.DB, error) {
+	return sql.Open("sqlite", path)
+}
 
 // newCapturedLogger returns a kenmcp.Logger that writes to a buffer
 // (level=LogDebug so every call is captured). Used by envInt/envEnum
@@ -205,6 +216,49 @@ func TestEnvDuration(t *testing.T) {
 	}
 }
 
+func TestEnvBool(t *testing.T) {
+	const key = "KEN_TEST_BOOL"
+	cases := []struct {
+		name     string
+		envVal   string
+		fallback bool
+		want     bool
+		wantWarn bool
+	}{
+		{"missing returns fallback", "", true, true, false},
+		{"missing returns fallback false", "", false, false, false},
+		{"1 is true", "1", false, true, false},
+		{"true is true", "true", false, true, false},
+		{"TRUE case-insensitive", "TRUE", false, true, false},
+		{"yes is true", "yes", false, true, false},
+		{"on is true", "on", false, true, false},
+		{"0 is false", "0", true, false, false},
+		{"false is false", "false", true, false, false},
+		{"no is false", "no", true, false, false},
+		{"off is false", "off", true, false, false},
+		{"junk warns + returns fallback", "maybe", true, true, true},
+		{"empty is fallback", "", false, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.envVal == "" {
+				os.Unsetenv(key)
+			} else {
+				withEnv(t, map[string]string{key: c.envVal})
+			}
+			l, buf := newCapturedLogger()
+			got := envBool(key, c.fallback, l)
+			if got != c.want {
+				t.Errorf("envBool(%q, fallback=%v) = %v, want %v", c.envVal, c.fallback, got, c.want)
+			}
+			hasWarn := strings.Contains(buf.String(), "invalid "+key)
+			if hasWarn != c.wantWarn {
+				t.Errorf("warn captured = %v, want %v\nlog: %q", hasWarn, c.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
 func TestEnvDSN(t *testing.T) {
 	const key = "KEN_TEST_DSN"
 	cases := []struct {
@@ -218,10 +272,19 @@ func TestEnvDSN(t *testing.T) {
 		{"valid postgres://", "postgres://user:pass@host:5432/db?sslmode=disable", "postgres://user:pass@host:5432/db?sslmode=disable", false},
 		{"valid postgresql://", "postgresql://h/d", "postgresql://h/d", false},
 		{"case-insensitive scheme", "POSTGRES://h/d", "POSTGRES://h/d", false},
+		// v0.7.1: SQLite schemes accepted.
+		{"valid sqlite:// absolute path", "sqlite:///var/data/dev.db", "sqlite:///var/data/dev.db", false},
+		{"valid sqlite3:// absolute path", "sqlite3:///var/data/dev.db", "sqlite3:///var/data/dev.db", false},
+		{"valid sqlite:// relative path", "sqlite://./dev.db", "sqlite://./dev.db", false},
+		{"case-insensitive sqlite scheme", "SQLITE:///var/data/dev.db", "SQLITE:///var/data/dev.db", false},
+		// Typoed schemes / non-DB schemes fall back.
 		{"wrong scheme falls back + warns", "mysql://h/d", "", true},
+		{"typoed sqlite falls back + warns", "sqliet:///dev.db", "", true},
 		{"http scheme falls back + warns", "http://h/d", "", true},
 		{"libpq key=value form falls back + warns", "host=localhost port=5432 dbname=mydb", "", true},
-		{"missing host falls back + warns", "postgres:///d", "", true},
+		{"missing host on postgres falls back + warns", "postgres:///d", "", true},
+		// SQLite without host is fine (path-only).
+		{"sqlite without host is OK", "sqlite:///d.db", "sqlite:///d.db", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -442,5 +505,90 @@ func TestBinary_StdoutIsCleanJSONRPC_WithDB(t *testing.T) {
 	stderrStr := stderr.String()
 	if !strings.Contains(stderrStr, "Tier 2: indexed") {
 		t.Errorf("expected 'Tier 2: indexed' in stderr (proves DB code ran), got:\n%s", stderrStr)
+	}
+}
+
+// TestBinary_StdoutIsCleanJSONRPC_WithSQLite is the v0.7.1 sibling of
+// _WithDB: spawns the real ken-mcp binary with KEN_DB_DSN pointing at a
+// local SQLite file (created by this test). Confirms modernc.org/sqlite
+// doesn't write anything to stdout that would break the JSON-RPC channel.
+//
+// Unlike _WithDB this requires no external service — the SQLite file is
+// created in t.TempDir(). Auto-runs in stock CI.
+func TestBinary_StdoutIsCleanJSONRPC_WithSQLite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess MCP test in -short mode")
+	}
+
+	// Build a temp SQLite file with a small schema.
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	{
+		conn, err := sqliteOpenForTest(dbPath)
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		if _, err := conn.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE)`); err != nil {
+			t.Fatalf("create table: %v", err)
+		}
+		_ = conn.Close()
+	}
+
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "ken-mcp")
+	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
+	}
+
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(repoRoot, "testdata", "repo")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binPath)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"KEN_MCP_MODE=bm25",
+		"KEN_MCP_CHUNKER=regex",
+		"KEN_MCP_LOG_LEVEL=info",
+		"KEN_MCP_DEFAULT_REPO=" + fixture,
+		"KEN_DB_DSN=sqlite://" + dbPath,
+		"KEN_DB_SAMPLE_ROWS=2",
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-test-sqlite", Version: "0"}, nil)
+	sess, err := cli.Connect(ctx, &sdk.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("Connect (with SQLite DSN): %v\n--stderr--\n%s", err, stderr.String())
+	}
+	defer sess.Close()
+
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query": "validate_user",
+			"mode":  "bm25",
+			"top_k": 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search) with SQLite DSN: %v\n--stderr--\n%s", err, stderr.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(txt, "Search results for:") {
+		t.Errorf("search output malformed with SQLite DSN:\n%s", txt)
+	}
+
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "Tier 2: indexed") {
+		t.Errorf("expected 'Tier 2: indexed' in stderr (proves SQLite code ran), got:\n%s", stderrStr)
 	}
 }

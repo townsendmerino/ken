@@ -12,6 +12,23 @@ with pre-built binaries.
 
 (no changes yet)
 
+## [0.7.1] — 2026-05-25
+
+The "make SQLite-based dev workflows great" release. SQLite support in Tier 2 + migration-history folding in Tier 1, paired in one ship because the migration-driven workflows on SQLite are exactly where the v0.7.0 per-file chunk explosion hurt most.
+
+- **Added: SQLite engine in Tier 2.** New file `internal/db/sqlite.go` (sibling to `introspect.go`). Pure Go via `modernc.org/sqlite` — no cgo, single static binary preserved. Engine routing inside `internal/db.IndexSchema` dispatches on the DSN scheme. `KEN_DB_DSN=sqlite:///abs/path.db` or `KEN_DB_DSN=sqlite://./rel/path.db` (relative to `KEN_MCP_DEFAULT_REPO`) activates introspection. Both `sqlite://` and `sqlite3://` schemes accepted. Same chunk shape as Postgres; same `Refresher` / `SetExtraChunks` / SIGHUP machinery. Closes the engine half of [#9](https://github.com/townsendmerino/ken/issues/9). ([ADR-018](docs/DECISIONS.md#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay))
+- **Added: Tier-1 migration-history folding.** New `internal/sql.FoldMigrations` + `internal/sql.IsMigrationDir`. When `internal/search`'s walker detects a directory of numbered `.sql` files (Goose / dbmate / Rails-4 `\d+_*.sql`, Flyway `V\d+__*.sql`, Rails-5 / Alembic `\d{14}_*.sql`), it folds CREATE TABLE + later ALTER TABLE statements into a single "current state" chunk per table. Covers `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN ... TYPE`, `ADD CONSTRAINT`, `DROP CONSTRAINT`. Closes the folding half of [#9](https://github.com/townsendmerino/ken/issues/9).
+- **Added: `KEN_SQL_NO_AUTO_MIGRATIONS`** env var (`1` / `true` / `yes` to disable). Restores v0.7.0 per-file behavior for operators who maintain a canonical `schema/current.sql` and don't want migration history surfaced separately. Default: folding enabled.
+- **Added: `search.FSOptions` + `search.FromFSWithOptions` + `search.NewWatchedIndexWithOptions`.** Threading point for the migration-folding opt-out plus a logger writer for fold-skip diagnostics. The zero value matches the v0.7.0 default exactly, so existing `FromFS` / `FromPath` / `NewWatchedIndex` callers (including all the bench harnesses and CLI sub-commands) get folding transparently without source changes.
+- **Added: `TestBinary_StdoutIsCleanJSONRPC_WithSQLite`** confirms the SQLite code path keeps stdout clean for the JSON-RPC contract. Sibling of v0.7.0's `_WithDB`; runs in the default `go test ./...` (no service container, fixture .db materialized at test runtime).
+- **Added: CI matrix.** The `test-db-integration` job now runs SQLite tests alongside Postgres (same `dbintegration` build tag, no new service container needed). Renamed to `ubuntu / DB integration (Postgres + SQLite)`.
+- **Changed: `envDSN` accepted-scheme allow-list.** Now `postgres://`, `postgresql://`, `sqlite://`, `sqlite3://`. Other schemes log the existing warn-and-fallback message and disable Tier 2. Pattern extends cleanly for MySQL in v0.7.2.
+- **Changed: `db.Options` gains `DefaultRepoPath`.** Used by the SQLite engine to anchor relative DSN paths (`sqlite://./dev.db` → join(defaultRepo, "dev.db")). Postgres ignores it.
+- **Note: Partial-fold failures emit BOTH chunks.** When an ALTER can't be applied cleanly (unknown column, type conflict, missing CREATE TABLE for the referenced ALTER), ken keeps the original per-file ALTER chunk in the output AND emits a folded chunk for what could be resolved. Net: the agent sees the union; never less than v0.7.0.
+- **Note: `mcp.Run` (v0.6.0 embedded-corpus library API) is unaffected.** No DB code added. Tier 1's migration folding DOES benefit `mcp.Run` if embedded `.sql` files happen to be in a migration directory — filesystem-based, not DB-based.
+
+Backwards compatibility: stock `cmd/ken-mcp` with no DB env vars and no migration directories behaves byte-identically to v0.7.0. `TestBinary_StdoutIsCleanJSONRPC` (Postgres + the v0.7.0 stock variant) continues to pass.
+
 ## [0.7.0] — 2026-05-25
 
 The database-schema indexing release. Two tiers, both shipping together:

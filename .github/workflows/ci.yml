@@ -55,14 +55,16 @@ jobs:
       - name: go test ./...
         run: go test ./...
 
-  # v0.7.0 (ADR-017) Tier-2 integration tests: spin up Postgres and
-  # exercise internal/db against a real schema. Ubuntu-only because
-  # GitHub Actions service containers don't run on macos-latest. The
-  # default `go test ./...` job above doesn't depend on this — it
-  # always runs on both OSes and the dbintegration tests are gated by
-  # the build tag, so non-DB runs skip them silently.
+  # v0.7.0 (ADR-017) + v0.7.1 (ADR-018) Tier-2 integration tests: spin
+  # up Postgres and run the full internal/db integration suite (which
+  # also covers the SQLite file-based engine since SQLite needs no
+  # service container). Ubuntu-only because GitHub Actions service
+  # containers don't run on macos-latest. The default `go test ./...`
+  # job above doesn't depend on this — it always runs on both OSes and
+  # the dbintegration tests are gated by the build tag, so non-DB runs
+  # skip them silently.
   test-db-integration:
-    name: ubuntu / Postgres integration (v0.7.0)
+    name: ubuntu / DB integration (Postgres + SQLite)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -89,7 +91,9 @@ jobs:
           check-latest: true
           cache: true
 
-      - name: internal/db integration tests
+      # Runs both Postgres tests (need KEN_DB_TEST_DSN) and SQLite tests
+      # (no env required — temp .db file). Same -tags=dbintegration gate.
+      - name: internal/db integration tests (Postgres + SQLite)
         env:
           KEN_DB_TEST_DSN: postgres://postgres:test@127.0.0.1:5432/postgres?sslmode=disable
         run: go test -tags=dbintegration ./internal/db/
@@ -99,7 +103,15 @@ jobs:
       # leak to stdout when the full Tier-2 code path runs in the
       # spawned subprocess. This test skips cleanly when KEN_DB_TEST_DSN
       # is unset, so it only meaningfully runs in this job.
-      - name: cmd/ken-mcp stdout audit with DB
+      - name: cmd/ken-mcp stdout audit with Postgres
         env:
           KEN_DB_TEST_DSN: postgres://postgres:test@127.0.0.1:5432/postgres?sslmode=disable
         run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithDB -v
+
+      # v0.7.1: confirm modernc.org/sqlite stays silent on stdout when
+      # KEN_DB_DSN points at a SQLite file. Uses a temp .db created by
+      # the test itself; no service container needed (this also runs
+      # successfully in the default test job, but we re-run here in -v
+      # for parity with the Postgres audit).
+      - name: cmd/ken-mcp stdout audit with SQLite
+        run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithSQLite -v
