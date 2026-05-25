@@ -563,6 +563,137 @@ func TestBinary_StdoutIsCleanJSONRPC_WithDB(t *testing.T) {
 	}
 }
 
+// TestBinary_PrintListenScript_StdoutIsScript confirms the v0.8.0
+// `ken-mcp print-listen-script` subcommand emits the SQL setup script
+// to stdout (and only the script — no startup chatter, no JSON-RPC
+// preamble). The subcommand short-circuits main() before the MCP
+// server starts, so writing to stdout here is intentional and safe.
+//
+// Re-runnability: the script is idempotent (`DROP IF EXISTS` pair),
+// so a second pipe to psql doesn't error. We verify the markers that
+// must be present for the trigger to install.
+func TestBinary_PrintListenScript_StdoutIsScript(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess subcommand test in -short mode")
+	}
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "ken-mcp")
+	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(binPath, "print-listen-script")
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run print-listen-script: %v\n--stderr--\n%s", err, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("print-listen-script wrote to stderr (should be silent):\n%s", stderr.String())
+	}
+	script := stdout.String()
+	for _, want := range []string{
+		"CREATE EVENT TRIGGER ken_schema_changed_trigger",
+		"pg_notify('ken_schema_changed'",
+		"DROP EVENT TRIGGER IF EXISTS ken_schema_changed_trigger",
+		"COMMIT;",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("print-listen-script output missing %q", want)
+		}
+	}
+}
+
+// TestBinary_StdoutIsCleanJSONRPC_WithListen is the v0.8.0 sibling of
+// _WithDB / _WithSQLite / _WithMySQL: spawns the real ken-mcp binary
+// with Postgres DSN + KEN_DB_LISTEN=1 set so the listener goroutine
+// fires. Confirms the listener's dedicated pgx.Conn doesn't leak
+// anything to stdout — which would break the JSON-RPC channel.
+//
+// The listener may log "event trigger not installed" if the test
+// Postgres doesn't have it (and that's fine — we're testing stdout
+// cleanliness, not listener happy-path; that's the job of
+// internal/db/listen_integration_test.go). Either way: nothing goes
+// to stdout.
+//
+// Skipped when KEN_DB_TEST_DSN is unset; CI sets it via the
+// postgres:16-alpine service container.
+func TestBinary_StdoutIsCleanJSONRPC_WithListen(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess MCP test in -short mode")
+	}
+	dsn := os.Getenv("KEN_DB_TEST_DSN")
+	if dsn == "" {
+		t.Skip("KEN_DB_TEST_DSN not set; see internal/db/integration_test.go for setup")
+	}
+
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "ken-mcp")
+	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
+	}
+
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(repoRoot, "testdata", "repo")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binPath)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"KEN_MCP_MODE=bm25",
+		"KEN_MCP_CHUNKER=regex",
+		"KEN_MCP_LOG_LEVEL=info",
+		"KEN_MCP_DEFAULT_REPO=" + fixture,
+		"KEN_DB_DSN=" + dsn,
+		"KEN_DB_LISTEN=1",
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-test-listen", Version: "0"}, nil)
+	sess, err := cli.Connect(ctx, &sdk.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("Connect (with LISTEN env): %v\n--stderr--\n%s", err, stderr.String())
+	}
+	defer sess.Close()
+
+	// Drive a tool call so any post-startup stdout pollution surfaces.
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query": "validate_user",
+			"mode":  "bm25",
+			"top_k": 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search) with LISTEN env: %v\n--stderr--\n%s", err, stderr.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(txt, "Search results for:") {
+		t.Errorf("search output malformed with LISTEN env:\n%s", txt)
+	}
+
+	// stderr should mention the listener startup (proves the code path
+	// actually ran, not silently skipped via ErrListenNotSupported).
+	// We accept EITHER "starting LISTEN/NOTIFY listener" (initial spawn)
+	// OR a "not installed" warn (if the trigger isn't loaded into the
+	// CI DB) — both prove the listener constructor ran.
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "Tier 2: starting LISTEN") {
+		t.Errorf("expected 'Tier 2: starting LISTEN' in stderr (proves listener code ran), got:\n%s", stderrStr)
+	}
+}
+
 // TestBinary_StdoutIsCleanJSONRPC_WithMySQL is the v0.7.2 sibling of
 // _WithDB / _WithSQLite: spawns the real ken-mcp binary with a MySQL
 // DSN set via KEN_DB_MYSQL_TEST_DSN. Confirms go-sql-driver/mysql's

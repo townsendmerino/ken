@@ -22,6 +22,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"net/url"
@@ -70,7 +71,37 @@ func modelAvailable(dir string) bool {
 	return err == nil
 }
 
+// runSubcommand dispatches one-shot CLI subcommands that exit before
+// the MCP server starts. v0.8.0 introduces `print-listen-script`, the
+// first subcommand the binary exposes. Returns true if a recognized
+// subcommand ran (caller exits); false if main should proceed to the
+// MCP server path.
+//
+// Subcommands write to stdout (it's safe — we're NOT in JSON-RPC mode
+// at this point; the MCP server hasn't started). Help text goes to
+// stdout too. Errors would go to stderr but no current subcommand
+// produces them.
+func runSubcommand() bool {
+	if len(os.Args) < 2 {
+		return false
+	}
+	switch os.Args[1] {
+	case "print-listen-script":
+		// Postgres LISTEN/NOTIFY setup script. Operator runs:
+		//   ken-mcp print-listen-script | psql $KEN_DB_DSN
+		// once to install the event trigger that drives KEN_DB_LISTEN=1.
+		// See ADR-020. Idempotent — re-running the output is safe.
+		_, _ = io.WriteString(os.Stdout, db.ListenNotifyScript)
+		return true
+	}
+	return false
+}
+
 func main() {
+	if runSubcommand() {
+		return
+	}
+
 	// Bootstrap the logger at the default warn level so we can warn about
 	// a bad KEN_MCP_LOG_LEVEL itself (chicken-and-egg: we need the logger
 	// to log that the level was invalid). Then bump it once validated.
@@ -346,6 +377,39 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 			logger.Logf(kenmcp.LogWarn, "Tier 2: SIGHUP-driven refresh failed: %v", err)
 		}
 	})
+
+	// v0.8.0 Part 1 (ADR-020): Postgres LISTEN/NOTIFY push notifications.
+	// Supplements the interval ticker rather than replacing it — both run
+	// concurrently and converge on Refresher.Refresh (mutex-serialized
+	// inside Refresher, so a NOTIFY arriving mid-tick collapses safely).
+	//
+	// Non-Postgres DSNs return ErrListenNotSupported from NewListener —
+	// debug-log and skip rather than warn (KEN_DB_LISTEN=1 with a
+	// MySQL/SQLite DSN is "operator pre-set the flag for a future engine
+	// swap," not a problem to surface).
+	if envBool("KEN_DB_LISTEN", false, logger) {
+		listener, lerr := db.NewListener(opts, func(ctx context.Context) {
+			logger.Logf(kenmcp.LogInfo, "Tier 2: LISTEN notification; refreshing DB chunks")
+			if err := refresher.Refresh(ctx); err != nil {
+				logger.Logf(kenmcp.LogWarn, "Tier 2: LISTEN-driven refresh failed: %v", err)
+			}
+		})
+		switch {
+		case errors.Is(lerr, db.ErrListenNotSupported):
+			logger.Logf(kenmcp.LogDebug,
+				"KEN_DB_LISTEN=1 ignored — LISTEN/NOTIFY is Postgres-only; interval polling continues")
+		case lerr != nil:
+			logger.Logf(kenmcp.LogWarn,
+				"Tier 2: LISTEN setup failed: %v — interval polling continues", lerr)
+		default:
+			logger.Logf(kenmcp.LogInfo, "Tier 2: starting LISTEN/NOTIFY listener (Postgres)")
+			go func() {
+				if err := listener.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					logger.Logf(kenmcp.LogWarn, "Tier 2: listener exited: %v", err)
+				}
+			}()
+		}
+	}
 	return func() {} // reserved cleanup seam
 }
 
