@@ -249,6 +249,29 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 	}
 	reindex := envDuration("KEN_DB_REINDEX_INTERVAL", 0, logger)
 
+	// v0.7.2 (ADR-019) schema filtering: KEN_DB_SCHEMAS (allow-list) +
+	// KEN_DB_EXCLUDE_SCHEMAS (deny-list). When both are set the allow-
+	// list wins — log a warn here (before passing to internal/db so the
+	// library-level fallback in filterSchema is also explicit).
+	includeSchemas := envCommaList("KEN_DB_SCHEMAS")
+	excludeSchemas := envCommaList("KEN_DB_EXCLUDE_SCHEMAS")
+	if len(includeSchemas) > 0 && len(excludeSchemas) > 0 {
+		logger.Logf(kenmcp.LogWarn,
+			"KEN_DB_SCHEMAS and KEN_DB_EXCLUDE_SCHEMAS both set; allow-list wins, deny-list ignored")
+		excludeSchemas = nil
+	}
+	// SQLite is single-schema — the env vars are no-ops there. Log
+	// debug so operators who set them with a SQLite DSN see that ken
+	// noticed but isn't applying them. Use the engine-routing helper
+	// from internal/db indirectly: a `sqlite:` / `sqlite3:` scheme on
+	// the DSN means SQLite.
+	if (len(includeSchemas) > 0 || len(excludeSchemas) > 0) &&
+		(strings.HasPrefix(strings.ToLower(dsn), "sqlite:") ||
+			strings.HasPrefix(strings.ToLower(dsn), "sqlite3:")) {
+		logger.Logf(kenmcp.LogDebug,
+			"KEN_DB_SCHEMAS / KEN_DB_EXCLUDE_SCHEMAS set but DSN is SQLite — schema filtering not supported for SQLite (single-schema engine), env vars ignored")
+	}
+
 	if defaultRepo == "" {
 		logger.Logf(kenmcp.LogWarn,
 			"KEN_DB_DSN set but KEN_MCP_DEFAULT_REPO is empty — Tier 2 (DB indexing) needs "+
@@ -276,14 +299,19 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 		SampleRows:      sampleRows,
 		ReindexInterval: reindex,
 		// pgx default Tracer is nil → no protocol logging to stdout.
-		// Send our own diagnostics to stderr via the kenmcp logger's
-		// underlying writer (os.Stderr always when configured by main).
+		// go-sql-driver/mysql default logger writes to stderr — audited
+		// by TestBinary_StdoutIsCleanJSONRPC_WithMySQL. Send our own
+		// diagnostics to stderr via the kenmcp logger's underlying
+		// writer (os.Stderr always when configured by main).
 		LogWriter: os.Stderr,
 		// v0.7.1: SQLite uses this to anchor relative DSN paths like
-		// "sqlite://./dev.db" at the default repo root. Postgres ignores
-		// it. defaultRepo here is already known to be a local directory
-		// (wireDBTier2 rejects http(s) URLs earlier).
+		// "sqlite://./dev.db" at the default repo root. Postgres + MySQL
+		// ignore it. defaultRepo here is already known to be a local
+		// directory (wireDBTier2 rejects http(s) URLs earlier).
 		DefaultRepoPath: defaultRepo,
+		// v0.7.2: schema filtering (Postgres + MySQL; ignored by SQLite).
+		IncludeSchemas: includeSchemas,
+		ExcludeSchemas: excludeSchemas,
 	}
 
 	// Build-once-at-startup: this fires the initial swap. If it fails,

@@ -277,8 +277,13 @@ func TestEnvDSN(t *testing.T) {
 		{"valid sqlite3:// absolute path", "sqlite3:///var/data/dev.db", "sqlite3:///var/data/dev.db", false},
 		{"valid sqlite:// relative path", "sqlite://./dev.db", "sqlite://./dev.db", false},
 		{"case-insensitive sqlite scheme", "SQLITE:///var/data/dev.db", "SQLITE:///var/data/dev.db", false},
+		// v0.7.2: MySQL URL form + native form accepted.
+		{"valid mysql:// URL", "mysql://alice:s3cret@db.local:3306/mydb", "mysql://alice:s3cret@db.local:3306/mydb", false},
+		{"mysql:// with non-default port", "mysql://alice:s3cret@db.local:33306/mydb?parseTime=true", "mysql://alice:s3cret@db.local:33306/mydb?parseTime=true", false},
+		{"native MySQL tcp form", "alice:s3cret@tcp(db.local:3306)/mydb?parseTime=true", "alice:s3cret@tcp(db.local:3306)/mydb?parseTime=true", false},
+		{"native MySQL unix-socket form", "alice:s3cret@unix(/var/run/mysqld/mysqld.sock)/mydb", "alice:s3cret@unix(/var/run/mysqld/mysqld.sock)/mydb", false},
+		{"missing host on mysql falls back + warns", "mysql:///d", "", true},
 		// Typoed schemes / non-DB schemes fall back.
-		{"wrong scheme falls back + warns", "mysql://h/d", "", true},
 		{"typoed sqlite falls back + warns", "sqliet:///dev.db", "", true},
 		{"http scheme falls back + warns", "http://h/d", "", true},
 		{"libpq key=value form falls back + warns", "host=localhost port=5432 dbname=mydb", "", true},
@@ -340,6 +345,56 @@ func TestEnvPathOrURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEnvCommaList covers KEN_DB_SCHEMAS / KEN_DB_EXCLUDE_SCHEMAS
+// parsing: whitespace trimming, empty-element filtering, the "all
+// whitespace / nothing left" → nil rule.
+func TestEnvCommaList(t *testing.T) {
+	const key = "KEN_TEST_COMMA_LIST"
+	cases := []struct {
+		name   string
+		envVal string
+		want   []string
+	}{
+		{"missing", "", nil},
+		{"empty", "", nil},
+		{"whitespace-only", "  \t ", nil},
+		{"single value", "public", []string{"public"}},
+		{"two values", "public,billing", []string{"public", "billing"}},
+		{"whitespace around commas", " public , billing ", []string{"public", "billing"}},
+		{"trailing comma", "public,billing,", []string{"public", "billing"}},
+		{"empty element in middle", "public,,billing", []string{"public", "billing"}},
+		{"all empty (commas only)", " , , , ", nil},
+		{"three values realistic", "audit,cron,legacy", []string{"audit", "cron", "legacy"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.envVal == "" {
+				os.Unsetenv(key)
+			} else {
+				withEnv(t, map[string]string{key: c.envVal})
+			}
+			got := envCommaList(key)
+			if !equalStringSlices(got, c.want) {
+				t.Errorf("envCommaList(%q) = %v, want %v", c.envVal, got, c.want)
+			}
+		})
+	}
+}
+
+// equalStringSlices is a small local helper; nil and empty slice are
+// treated as equal (both represent "no entries").
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestBinary_StdoutIsCleanJSONRPC is the load-bearing test for the
@@ -505,6 +560,85 @@ func TestBinary_StdoutIsCleanJSONRPC_WithDB(t *testing.T) {
 	stderrStr := stderr.String()
 	if !strings.Contains(stderrStr, "Tier 2: indexed") {
 		t.Errorf("expected 'Tier 2: indexed' in stderr (proves DB code ran), got:\n%s", stderrStr)
+	}
+}
+
+// TestBinary_StdoutIsCleanJSONRPC_WithMySQL is the v0.7.2 sibling of
+// _WithDB / _WithSQLite: spawns the real ken-mcp binary with a MySQL
+// DSN set via KEN_DB_MYSQL_TEST_DSN. Confirms go-sql-driver/mysql's
+// default logger stays on stderr and never leaks to stdout — which
+// would break the JSON-RPC channel.
+//
+// Skipped when KEN_DB_MYSQL_TEST_DSN is unset. CI sets it via the
+// mysql:8 service container in .github/workflows/ci.yml.
+func TestBinary_StdoutIsCleanJSONRPC_WithMySQL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess MCP test in -short mode")
+	}
+	dsn := os.Getenv("KEN_DB_MYSQL_TEST_DSN")
+	if dsn == "" {
+		t.Skip("KEN_DB_MYSQL_TEST_DSN not set; see internal/db/mysql_integration_test.go for setup")
+	}
+
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "ken-mcp")
+	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
+	}
+
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(repoRoot, "testdata", "repo")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binPath)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"KEN_MCP_MODE=bm25",
+		"KEN_MCP_CHUNKER=regex",
+		"KEN_MCP_LOG_LEVEL=info",
+		"KEN_MCP_DEFAULT_REPO=" + fixture,
+		"KEN_DB_DSN=" + dsn,
+		"KEN_DB_SAMPLE_ROWS=2",
+		// Exercise schema filtering too — confirms both env vars feed
+		// through wireDBTier2 without disturbing the stdout contract.
+		"KEN_DB_SCHEMAS=ken_test",
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-test-mysql", Version: "0"}, nil)
+	sess, err := cli.Connect(ctx, &sdk.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("Connect (with MySQL DSN): %v\n--stderr--\n%s", err, stderr.String())
+	}
+	defer sess.Close()
+
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query": "validate_user",
+			"mode":  "bm25",
+			"top_k": 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search) with MySQL DSN: %v\n--stderr--\n%s", err, stderr.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(txt, "Search results for:") {
+		t.Errorf("search output malformed with MySQL DSN:\n%s", txt)
+	}
+
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "Tier 2: indexed") {
+		t.Errorf("expected 'Tier 2: indexed' in stderr (proves MySQL code ran), got:\n%s", stderrStr)
 	}
 }
 

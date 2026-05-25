@@ -132,29 +132,47 @@ func envDuration(name string, fallback time.Duration, l *kenmcp.Logger) time.Dur
 	return d
 }
 
-// dsnAcceptedSchemes is the allow-list for KEN_DB_DSN at v0.7.1: the
-// Postgres URL forms from v0.7.0 plus the SQLite forms added in this
-// release. Engine routing inside internal/db.IndexSchema dispatches on
-// the scheme; this function only gates the env-var validation.
+// dsnAcceptedSchemes is the allow-list for KEN_DB_DSN at v0.7.2: the
+// Postgres URL forms from v0.7.0, the SQLite forms added in v0.7.1,
+// and the MySQL URL form added in v0.7.2. The native go-sql-driver
+// MySQL DSN (user:pass@tcp(host:port)/db) is also accepted via a
+// separate substring detection — see envDSN.
 var dsnAcceptedSchemes = map[string]bool{
 	"postgres":   true,
 	"postgresql": true,
 	"sqlite":     true,
 	"sqlite3":    true,
+	"mysql":      true,
 }
 
 // envDSN parses a database DSN env var. Accepts the URL form for any
-// engine ken supports as of v0.7.1: postgres://, postgresql://,
-// sqlite://, sqlite3://. Empty/unset returns ""; invalid input warns
-// and returns "" — Tier 2 stays off rather than crashing the server.
-// The libpq key=value form is NOT accepted at this layer (pgx supports
-// it, but we want a loud rejection at startup rather than a silent
-// connection-time failure later). SQLite URLs do NOT require a host
-// (`sqlite:///abs/path.db` and `sqlite://./rel/path.db` are both valid).
+// engine ken supports as of v0.7.2: postgres://, postgresql://,
+// sqlite://, sqlite3://, mysql://. Also accepts the native go-sql-driver
+// MySQL form (user:pass@tcp(host:port)/db or @unix(/sock)/db) detected
+// by the @tcp( / @unix( substring on a string with no "://" prefix.
+//
+// Empty/unset returns ""; invalid input warns and returns "" — Tier 2
+// stays off rather than crashing the server. The libpq key=value form
+// is NOT accepted at this layer (pgx supports it, but we want a loud
+// rejection at startup rather than a silent connection-time failure
+// later). SQLite URLs do NOT require a host (`sqlite:///abs/path.db`
+// and `sqlite://./rel/path.db` are both valid).
 func envDSN(name string, l *kenmcp.Logger) string {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return raw
+	}
+	// Native MySQL form: no scheme prefix, but @tcp( or @unix( substring.
+	// Pass through if those markers are present; mysql.ParseDSN does the
+	// real validation downstream.
+	if !strings.Contains(raw, "://") {
+		if strings.Contains(raw, "@tcp(") || strings.Contains(raw, "@unix(") {
+			return raw
+		}
+		l.Logf(kenmcp.LogWarn,
+			"invalid %s: no scheme and not a native MySQL DSN (want postgres://, postgresql://, sqlite://, sqlite3://, mysql://, or user:pass@tcp(host:port)/db) — Tier 2 (DB indexing) disabled",
+			name)
+		return ""
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -163,16 +181,45 @@ func envDSN(name string, l *kenmcp.Logger) string {
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if !dsnAcceptedSchemes[scheme] {
-		l.Logf(kenmcp.LogWarn, "invalid %s scheme %q (want postgres://, postgresql://, sqlite://, or sqlite3://) — Tier 2 (DB indexing) disabled", name, u.Scheme)
+		l.Logf(kenmcp.LogWarn, "invalid %s scheme %q (want postgres://, postgresql://, sqlite://, sqlite3://, or mysql://) — Tier 2 (DB indexing) disabled", name, u.Scheme)
 		return ""
 	}
-	// Postgres/postgresql REQUIRE a host. SQLite uses the path component
-	// and may have an empty host (`sqlite:///abs/path` or
+	// Postgres/postgresql/mysql REQUIRE a host. SQLite uses the path
+	// component and may have an empty host (`sqlite:///abs/path` or
 	// `sqlite://./rel/path` — relative paths put the leading "." in Host).
-	if (scheme == "postgres" || scheme == "postgresql") && u.Host == "" {
+	if (scheme == "postgres" || scheme == "postgresql" || scheme == "mysql") && u.Host == "" {
 		l.Logf(kenmcp.LogWarn, "invalid %s: missing host — Tier 2 (DB indexing) disabled", name)
 		return ""
 	}
 	// Don't log the raw DSN itself — it usually contains a password.
 	return raw
+}
+
+// envCommaList parses a comma-separated list env var. Empty/unset
+// returns nil. Whitespace around each element is trimmed; empty
+// elements (from "a,,b" or trailing commas) are dropped silently so
+// operators can paste lists copy-and-paste-style without worrying
+// about extra whitespace.
+//
+// Used by KEN_DB_SCHEMAS and KEN_DB_EXCLUDE_SCHEMAS (v0.7.2 / ADR-019).
+// No warn path: a comma-separated list with weird whitespace is well-
+// formed by construction; non-existent schema names are NOT errors
+// per ADR-019 (operators may pre-configure for schemas that don't yet
+// exist).
+func envCommaList(name string) []string {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
