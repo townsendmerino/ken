@@ -58,6 +58,26 @@ type Options struct {
 	// MUST NOT be os.Stdout when using the default StdioTransport — see
 	// the stdout/stderr contract in cmd/ken-mcp/main.go.
 	LogWriter io.Writer
+
+	// Reindex, when non-nil, registers the v0.8.0 Part 2 reindex_db MCP
+	// tool (ADR-020). SDK authors using mcp.Run wire this via
+	// mcp/db.Setup; mcp.Run itself stays DB-free so embedded-corpus
+	// binaries that don't import mcp/db keep the v0.6.0 small-binary
+	// posture (no pgx / sqlite / mysql in the dep tree).
+	//
+	// Important caveat for v0.8.0 Part 3: when Reindex is non-nil, the
+	// reindex_db tool DOES run IndexSchema on each invocation (and the
+	// LISTEN/interval pipelines fire normally) — but the chunks
+	// captured are NOT yet unioned into the embedded-corpus search
+	// results that mcp.Run serves. Chunk integration into mcp.Run's
+	// static *search.Index is deferred to v0.9.0; ADR-020 Part 3's
+	// Consequences section documents the deferral with the rationale.
+	// The tool is still useful — it validates the DSN works, fires
+	// LISTEN handlers on schema changes, exercises the interval-ticker
+	// path, and gives operators an explicit "reindex on demand"
+	// signal — but the schema isn't searchable from within the
+	// embedded binary until the v0.9.0 follow-up lands.
+	Reindex ReindexFunc
 }
 
 // Run starts an MCP server (over the SDK's default StdioTransport)
@@ -155,7 +175,7 @@ func buildEmbeddedServer(fsys fs.FS, opts Options) (*sdk.Server, error) {
 	}
 	logger.Logf(LogInfo, "indexed %d chunks (mode=%s chunker=%s)", ix.Len(), search.ModeNames()[int(mode)], chunkerName)
 
-	return newServerForIndex(ix, logger), nil
+	return newServerForIndex(ix, logger, opts.Reindex), nil
 }
 
 // loadModel returns the Model2Vec snapshot to use, preferring ModelFS
@@ -185,7 +205,16 @@ func loadModel(opts Options) (*embed.StaticModel, string, error) {
 // argument is accepted (the wire schema stays identical to the
 // cmd/ken-mcp Cache-backed server) but ignored — logged at debug when
 // non-empty so an operator can see when an agent is mis-passing repo.
-func newServerForIndex(ix *search.Index, logger *Logger) *sdk.Server {
+//
+// v0.8.0 Part 3 (ADR-020): when reindex is non-nil, the reindex_db
+// tool is registered alongside search + find_related, matching
+// NewServer's conditional-registration pattern. SDK authors using
+// mcp.Run wire this via mcp/db.Setup; reindex stays nil for plain
+// docs-only embedded-corpus binaries. See the caveat on
+// Options.Reindex: in v0.8.0 the tool RUNS introspection but the
+// chunks aren't yet unioned into ix's search results — chunk
+// integration is v0.9.0.
+func newServerForIndex(ix *search.Index, logger *Logger, reindex ReindexFunc) *sdk.Server {
 	srv := sdk.NewServer(&sdk.Implementation{
 		Name:    "ken",
 		Version: "0",
@@ -219,6 +248,26 @@ func newServerForIndex(ix *search.Index, logger *Logger) *sdk.Server {
 		}
 		return runFindRelated(ix, args)
 	})
+
+	// v0.8.0 Part 2 + Part 3 (ADR-020): reindex_db tool. Same
+	// conditional-registration pattern as NewServer — registered ONLY
+	// when reindex is non-nil so tools/list stays honest for plain
+	// docs-only embedded-corpus binaries that don't wire mcp/db.Setup.
+	//
+	// Captures cfg via closure with just the Reindex field so the
+	// handler shape matches handleReindexDB's contract.
+	if reindex != nil {
+		cfg := &Config{Reindex: reindex}
+		sdk.AddTool(srv, &sdk.Tool{
+			Name: "reindex_db",
+			Description: "Trigger a Tier 2 database schema reindex on demand. " +
+				"Use after running a migration to refresh ken's view of the database schema before asking schema-dependent questions. " +
+				"Returns immediately with `already in progress` if another reindex is in flight (no queuing). " +
+				"Available whenever a DB is configured.",
+		}, func(ctx context.Context, _ *sdk.CallToolRequest, _ ReindexDBArgs) (*sdk.CallToolResult, any, error) {
+			return handleReindexDB(ctx, cfg)
+		})
+	}
 
 	return srv
 }
