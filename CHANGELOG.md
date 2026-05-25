@@ -27,6 +27,10 @@ The "make SQLite-based dev workflows great" release. SQLite support in Tier 2 + 
 - **Note: Partial-fold failures emit BOTH chunks.** When an ALTER can't be applied cleanly (unknown column, type conflict, missing CREATE TABLE for the referenced ALTER), ken keeps the original per-file ALTER chunk in the output AND emits a folded chunk for what could be resolved. Net: the agent sees the union; never less than v0.7.0.
 - **Note: `mcp.Run` (v0.6.0 embedded-corpus library API) is unaffected.** No DB code added. Tier 1's migration folding DOES benefit `mcp.Run` if embedded `.sql` files happen to be in a migration directory — filesystem-based, not DB-based.
 
+### New dependencies
+
+- **`modernc.org/sqlite` v1.50.1** — pure-Go SQLite driver (cgo-free, transpiled from C). Default behavior is silent — no protocol logging to stdout. Audited via `TestBinary_StdoutIsCleanJSONRPC_WithSQLite`.
+
 Backwards compatibility: stock `cmd/ken-mcp` with no DB env vars and no migration directories behaves byte-identically to v0.7.0. `TestBinary_StdoutIsCleanJSONRPC` (Postgres + the v0.7.0 stock variant) continues to pass.
 
 ## [0.7.0] — 2026-05-25
