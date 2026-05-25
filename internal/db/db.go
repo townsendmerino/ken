@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -72,6 +73,13 @@ type Options struct {
 	// cmd/ken-mcp. Tier 2 logs at "warn"-ish level: skipped tables,
 	// connection failures, sampling errors per table.
 	LogWriter io.Writer
+
+	// DefaultRepoPath (v0.7.1) is the operator's KEN_MCP_DEFAULT_REPO
+	// used by the SQLite engine to resolve relative DSN paths
+	// ("sqlite://./dev.db" → join(DefaultRepoPath, "dev.db")). Empty is
+	// fine for absolute SQLite paths and for the Postgres path (which
+	// ignores this field entirely).
+	DefaultRepoPath string
 }
 
 // validate normalizes Options for safety: clamps negative SampleRows to
@@ -92,6 +100,10 @@ func (o Options) validate() Options {
 // (Tier 2 disabled — the documented sentinel). Closes the connection
 // before return; no long-lived handle.
 //
+// As of v0.7.1 IndexSchema dispatches on the DSN scheme:
+//   - postgres:// / postgresql://  → indexSchemaPostgres (the v0.7.0 path)
+//   - sqlite://   / sqlite3://     → indexSchemaSQLite   (ADR-018)
+//
 // Per-table errors during introspection (a query failing on one weird
 // table type, for example) are logged to opts.LogWriter at warn level
 // and the table is skipped — the goal is best-effort indexing of mixed-
@@ -106,6 +118,30 @@ func IndexSchema(ctx context.Context, opts Options) ([]chunk.Chunk, error) {
 		return nil, nil
 	}
 
+	scheme := strings.ToLower(schemeOf(opts.DSN))
+	switch scheme {
+	case "postgres", "postgresql":
+		return indexSchemaPostgres(ctx, opts)
+	case "sqlite", "sqlite3":
+		return indexSchemaSQLite(ctx, opts, opts.DefaultRepoPath)
+	default:
+		return nil, fmt.Errorf("db: unsupported DSN scheme %q (want postgres://, postgresql://, sqlite://, or sqlite3://)", scheme)
+	}
+}
+
+// schemeOf returns the lowercased URL scheme from a DSN, or "" if
+// unparseable. Used by IndexSchema's engine dispatch.
+func schemeOf(dsn string) string {
+	if i := strings.Index(dsn, "://"); i > 0 {
+		return strings.ToLower(dsn[:i])
+	}
+	return ""
+}
+
+// indexSchemaPostgres is the v0.7.0 implementation lifted into its own
+// function so the dispatch above can pick between it and the SQLite
+// arm cleanly. Behavior unchanged from v0.7.0.
+func indexSchemaPostgres(ctx context.Context, opts Options) ([]chunk.Chunk, error) {
 	cfg, err := pgx.ParseConfig(opts.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("db: parse DSN: %w", err)
