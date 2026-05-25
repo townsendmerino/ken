@@ -12,6 +12,34 @@ with pre-built binaries.
 
 (no changes yet)
 
+## [0.7.2] — 2026-05-25
+
+The "complete the v0.7.x Tier-2 polish" release. MySQL engine + `KEN_DB_SCHEMAS` / `KEN_DB_EXCLUDE_SCHEMAS` schema filtering, paired in one ship because both are Tier-2 ergonomic improvements that close out the engine-completion track started in v0.7.0. After v0.7.2 the v0.7.x track is done: Postgres + SQLite + MySQL all supported, schema filtering available for the engines that need it, migration folding for Tier 1. v0.8.0 becomes the next-features release (LISTEN/NOTIFY + agent `reindex_db` tool + `mcp.Run` DB support) without engine-completion overhang.
+
+- **Added: MySQL engine in Tier 2.** New file `internal/db/mysql.go` (sibling to `introspect.go` / `sqlite.go`). Pure Go via `github.com/go-sql-driver/mysql` — no cgo, single static binary preserved. Engine routing inside `internal/db.IndexSchema` dispatches on the DSN scheme (or the `@tcp(` / `@unix(` substring for the native go-sql-driver form). Three accepted DSN forms:
+  - URL: `KEN_DB_DSN=mysql://user:pass@host:3306/db?parseTime=true`
+  - native TCP: `KEN_DB_DSN=user:pass@tcp(host:3306)/db?parseTime=true`
+  - native Unix socket: `KEN_DB_DSN=user:pass@unix(/var/run/mysqld/mysqld.sock)/db`
+
+  Compatible with MySQL 5.7+, MySQL 8.x, and MariaDB 10.x+ (MariaDB documented compatible, not first-class CI-tested). `parseTime=true` is force-set internally so DATE/DATETIME/TIMESTAMP columns render cleanly in row samples; VARCHAR / CHAR / TEXT cells (which the driver returns as `[]byte` by default, unlike pgx) are converted to strings at the scan boundary. Same chunk shape as Postgres + SQLite; same `Refresher` / `SetExtraChunks` / SIGHUP machinery. Closes the engine half of [#11](https://github.com/townsendmerino/ken/issues/11). ([ADR-019](docs/DECISIONS.md#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases))
+- **Added: `KEN_DB_SCHEMAS` allow-list + `KEN_DB_EXCLUDE_SCHEMAS` deny-list.** Comma-separated schema names for Postgres + MySQL filtering. Default exclusions (`pg_catalog`, `information_schema`, `mysql`, `performance_schema`, `sys`) always apply; user's deny-list extends, doesn't replace. Both env vars set → stderr warn and allow-list wins; deny-list ignored. SQLite ignores the env vars with a debug-level log (single-schema engine). The canonical filter source is `internal/db.filterSchema`, applied per-row in each engine's introspection path. Closes the filtering half of [#11](https://github.com/townsendmerino/ken/issues/11).
+- **Added: `db.Options.IncludeSchemas` + `db.Options.ExcludeSchemas`.** Library-level threading for the new env vars. Empty defaults; behavior matches v0.7.1 byte-for-byte when both empty.
+- **Added: `envCommaList` helper** in `cmd/ken-mcp/env.go`. Whitespace-trimming around comma-separated env values. Used by `KEN_DB_SCHEMAS` + `KEN_DB_EXCLUDE_SCHEMAS`; would extend cleanly to any future comma-list env var.
+- **Added: `TestBinary_StdoutIsCleanJSONRPC_WithMySQL`** confirms the MySQL code path keeps stdout clean for the JSON-RPC contract. Third sibling of the Postgres + SQLite variants (4 total stdout-cleanliness tests after v0.7.2). Skipped when `KEN_DB_MYSQL_TEST_DSN` is unset; CI sets it via the `mysql:8` service container.
+- **Added: CI's `test-db-integration` job extended with a `mysql:8` service container** alongside the existing `postgres:16-alpine`. The job runs all three engines' integration suites (`dbintegration` build tag); SQLite still needs no container. Renamed to `ubuntu / DB integration (Postgres + SQLite + MySQL)`.
+- **Changed: `envDSN` accepted-scheme allow-list.** Now `postgres://`, `postgresql://`, `sqlite://`, `sqlite3://`, `mysql://`, plus the native MySQL `user:pass@tcp(...)/db` or `user:pass@unix(/sock)/db` form (detected by `@tcp(` / `@unix(` substring on a string without a `://` prefix). Other inputs log the existing warn-and-fallback message and disable Tier 2.
+- **Changed: `internal/db.IndexSchema`'s engine-dispatch helper.** New `dsnEngine(dsn)` returns `"postgres"` / `"sqlite"` / `"mysql"` / `""` — handles both URL-scheme dispatch (v0.7.1's `schemeOf` shape) AND the native-form substring detection introduced for MySQL. `schemeOf` retained for diagnostic logging on the unknown-engine error path.
+- **Note: Default-exclusion schemas are inviolable in BOTH directions.** `KEN_DB_EXCLUDE_SCHEMAS=public` does NOT remove `pg_catalog` from the always-excluded list (deny-list extends, doesn't replace); `KEN_DB_SCHEMAS=pg_catalog` does NOT add `pg_catalog` back to the index (allow-list filter runs after default exclusions). Same for `mysql`, `information_schema`, `performance_schema`, `sys`. Operators who genuinely need to index system schemas should not point ken at the DB.
+- **Note: SQLite Tier 2 + Postgres Tier 2 + Tier 1 migration folding (v0.7.1) are byte-identical when the new env vars are unset.** Stock `cmd/ken-mcp` with no DB env vars behaves byte-identically to v0.7.1.
+- **Note: `mcp.Run` (v0.6.0 embedded-corpus library API) is unaffected.** No new `mcp.Options` fields. Live DB support there remains v0.8.0+.
+- **Note: Wildcards in schema filtering (e.g. `tenant_*`) are deferred.** Multi-tenant SaaS operators can fall back to explicit `KEN_DB_SCHEMAS=tenant_001,tenant_002,...` until field signal calls for wildcard syntax. See ADR-019's alternatives audit for the rationale.
+
+### New dependencies
+
+- **`github.com/go-sql-driver/mysql` v1.10.0** — standard pure-Go MySQL driver (no cgo). Package-level logger writes to stderr by audit (`log.New(os.Stderr, "[mysql] ", ...)`); no protocol logging to stdout. Audited via `TestBinary_StdoutIsCleanJSONRPC_WithMySQL`. The pgx-tracer-must-stay-nil discipline extends identically: any future wiring of `mysql.SetLogger` routes through `Options.LogWriter` (stderr), never stdout.
+
+Backwards compatibility: stock `cmd/ken-mcp` with no DB env vars behaves byte-identically to v0.7.1. All four `TestBinary_StdoutIsCleanJSONRPC*` variants (stock, Postgres, SQLite, MySQL) pass after every commit. The `envDSN` allow-list extension is additive — every v0.7.1 valid DSN continues to parse.
+
 ## [0.7.1] — 2026-05-25
 
 The "make SQLite-based dev workflows great" release. SQLite support in Tier 2 + migration-history folding in Tier 1, paired in one ship because the migration-driven workflows on SQLite are exactly where the v0.7.0 per-file chunk explosion hurt most.

@@ -24,6 +24,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-016](#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) | Embedded-corpus MCP build pattern via `mcp.Run` library function | Accepted |
 | [ADR-017](#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance) | Database schema indexing — two-tier (static SQL + live Postgres) with documented PII stance | Accepted |
 | [ADR-018](#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay) | SQLite engine + migration-history folding via lightweight ALTER replay | Accepted |
+| [ADR-019](#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) | MySQL engine + schema filtering for multi-schema dev databases | Accepted |
 
 ---
 
@@ -707,3 +708,89 @@ v0.7.1 closes both gaps. SQLite indexing covers the missing engine; migration fo
 - **CI: SQLite tests run in the existing `test-db-integration` job.** No new service container needed (SQLite is file-based). The job's name updates to reflect both engines (`ubuntu / DB integration (Postgres + SQLite)`). The default `go test ./...` job runs the SQLite stdout-clean test too (which uses a temp .db file, no env required).
 - **`mcp.Run` (v0.6.0 embedded-corpus) is unchanged.** No new `mcp.Options` fields. Tier 1's migration folding DOES apply when embedded corpora include `.sql` files in a migration directory; no operator action required.
 - **Freshness header policy for SQLite.** Basename only (`sqlite@dev.db`), never the full path. Operators who need full provenance grep stderr logs. Audited by `TestSQLiteIntegration_FreshnessHeader_BasenameOnly`.
+
+---
+
+## ADR-019: MySQL engine + schema filtering for multi-schema dev databases
+
+**Status:** Accepted
+
+**Date:** 2026-05-25
+
+**Issue:** [townsendmerino/ken#11](https://github.com/townsendmerino/ken/issues/11)
+
+### Context
+
+[ADR-017](#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance) shipped v0.7.0 with Postgres-only Tier 2 and everything-in-the-database getting indexed. [ADR-018](#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay) added SQLite and folded migrations in v0.7.1. Two follow-ons remain in the "polishes Tier 2" track:
+
+1. **MySQL.** The third common dev engine (after Postgres and SQLite) and the obvious next one after v0.7.1 established the engine-routing pattern. Rails / Django / Laravel / .NET / classic LAMP-stack workflows are all MySQL-shaped, and operators in those communities have been waiting since v0.7.0 for Tier 2 to cover them.
+
+2. **Schema filtering.** Production-cloned dev DBs accumulate noise — `audit` schemas with append-only log tables, `cron` / `queue` schemas from background-job machinery, `legacy` / `archived` schemas of deprecated tables, per-tenant schemas in multi-tenant SaaS. Today ken indexes all of them, which adds chunks the agent doesn't want and creates ranking pressure from tables the agent shouldn't suggest using.
+
+v0.7.2 pairs them because both are Tier 2 ergonomic improvements that ship cleanly together. After v0.7.2 the v0.7.x engine + Tier-2-polish track is complete: Postgres + SQLite + MySQL all supported, schema filtering available for the engines that need it, migration folding for Tier 1. v0.8.0 becomes the next-features release (LISTEN/NOTIFY for Postgres push-based change detection, agent-triggerable `reindex_db` MCP tool, `mcp.Run` DB support) without engine-completion overhang.
+
+### Decision
+
+**Two pieces shipping together in v0.7.2:**
+
+1. **MySQL engine in Tier 2.** New file `internal/db/mysql.go` (sibling to `postgres.go`-equivalent `introspect.go` / `sqlite.go`) implements `indexSchemaMySQL(ctx, opts)` via `github.com/go-sql-driver/mysql` — the standard pure-Go MySQL driver, no cgo, mature and well-maintained. Driver default logger writes to stderr by audit (`log.New(os.Stderr, "[mysql] ", ...)`); `cmd/ken-mcp` additionally reroutes the stdlib `log` package as belt-and-suspenders. `TestBinary_StdoutIsCleanJSONRPC_WithMySQL` pins the stdout-cleanliness contract — any future driver upgrade that switches to stdout would fail loudly.
+
+   **DSN forms — accept both URL and native:** `mysql://user:pass@host:3306/db?parseTime=true` (URL, canonical, matches Postgres pattern) AND `user:pass@tcp(host:3306)/db?parseTime=true` or `user:pass@unix(/sock)/db?...` (native go-sql-driver shape). The native form has no scheme prefix; `envDSN` detects it via the `@tcp(` / `@unix(` substring markers that the driver documents. Both produce the same internal `*mysql.Config` — operators paste whatever their tooling gave them. URL form is rewritten to native via a small parser in `mysqlURLToNative` before handoff to `mysql.ParseDSN`. `parseTime=true` is force-set on the config regardless of operator input, since otherwise DATE/DATETIME/TIMESTAMP columns return `[]byte` and don't render cleanly in row samples.
+
+   **Compatibility:** the same driver works against MySQL 5.7+, MySQL 8.x, and MariaDB 10.x+. CI tests against `mysql:8`; MariaDB is documented as wire-compatible without first-class CI testing.
+
+   **Introspection via `INFORMATION_SCHEMA`:** tables, columns (including `column_type` for full forms like `varchar(255)`, `extra` for AUTO_INCREMENT), primary keys + foreign keys + UNIQUE markers (`table_constraints` + `key_column_usage`), indexes (`statistics` aggregated by index_name), views (`views.view_definition`, truncated at 50 lines per the Postgres policy), stored procedures + functions (`routines` + `parameters`; signature only, no body — same policy as Postgres). Triggers fold into the parent table's chunk (same as SQLite v0.7.1; triggers are almost always table-scoped). Chunk shape identical to Postgres / SQLite modulo the engine label in the freshness header.
+
+   Engine routing in `internal/db.IndexSchema` uses a small `dsnEngine(dsn)` helper that returns `"postgres"`, `"sqlite"`, `"mysql"`, or `""`. The native MySQL form's lack of a scheme prefix is the only reason this helper exists — for v0.7.0 + v0.7.1 a simple `schemeOf` was sufficient.
+
+2. **Schema filtering via `KEN_DB_SCHEMAS` + `KEN_DB_EXCLUDE_SCHEMAS`.** New `internal/db.Options` fields `IncludeSchemas` and `ExcludeSchemas` plus a canonical `filterSchema(name, engine, opts) bool` helper. Resolution order:
+
+   1. Engine default exclusions (`pg_catalog`, `information_schema`, `mysql`, `performance_schema`, `sys`, plus the `pg_*` prefix family for Postgres temp / toast schemas) — ALWAYS rejected. Not user-controllable.
+   2. `opts.IncludeSchemas` non-empty → keep iff schema is in the list.
+   3. `opts.ExcludeSchemas` non-empty → reject iff in the list.
+   4. Otherwise → keep.
+
+   When both env vars are set, `cmd/ken-mcp` logs a stderr warn (`"KEN_DB_SCHEMAS and KEN_DB_EXCLUDE_SCHEMAS both set; allow-list wins, deny-list ignored"`) and zeros `ExcludeSchemas` before passing to `db.Options`. `filterSchema` also enforces this precedence library-side so callers bypassing `cmd/ken-mcp` get the documented behavior. Non-existent schema names in `IncludeSchemas` are NOT errors — introspection queries return zero rows for them, allowing operators to pre-configure for schemas that will exist after a migration.
+
+   Postgres and MySQL introspection paths run every schema name through `filterSchema` per-row (in table/view/function listing AND in inverse-FK annotation, so a filtered-out schema's tables never appear as `FK referenced by:` entries on kept tables). SQLite is a single-schema engine and ignores the env vars; `cmd/ken-mcp` logs a debug message when they're set with a SQLite DSN so operators see that ken noticed.
+
+**Validation surface added:**
+- `envDSN` allow-list extends from 4 schemes (v0.7.1) to 5 schemes + native MySQL form. Validation: native form requires `@tcp(` or `@unix(` substring; URL form requires a non-empty host for `postgres` / `postgresql` / `mysql` schemes (SQLite continues to allow empty host).
+- New `envCommaList` helper for the schema-list env vars. Whitespace trimmed around each element; empty elements (from `"a,,b"` or trailing commas) dropped silently — no warn path since well-formed input is the common case.
+- New `TestBinary_StdoutIsCleanJSONRPC_WithMySQL` confirms `go-sql-driver/mysql` stays silent on stdout when the full Tier 2 code path runs in the spawned `cmd/ken-mcp` binary. Third sibling of the Postgres + SQLite tests; needs the same `mysql:8` service container the integration suite uses.
+
+### Alternatives considered
+
+- **Replace default exclusions instead of extend** (operator's `KEN_DB_EXCLUDE_SCHEMAS` would replace the engine system-schema list rather than be added to it). Rejected. Operators don't know what the system schemas are. Allowing `KEN_DB_EXCLUDE_SCHEMAS=public` to also remove `pg_catalog` would silently break introspection for anyone who pastes a "schemas to exclude" list without understanding what's already excluded — and re-add the entire `mysql.user` schema (which contains credentials) to the index for any operator who pastes a deny-list of just the schemas they personally don't care about. Extending preserves the safety floor while giving operators the additive control they actually want. Future v0.7.x+ `KEN_DB_INCLUDE_SYSTEM_SCHEMAS=1` escape hatch is a one-line ADR if field signal asks for it; speculative complexity until then.
+
+- **Wildcards in v0.7.2** (e.g. `KEN_DB_SCHEMAS=tenant_*`). Rejected for v0.7.2; documented for later. Mechanism: glob syntax has many flavors (shell vs SQL-LIKE vs regex), and choosing one without field signal risks shipping the wrong one — operators will end up with subtly different syntax across the schema-filter env vars and any future `KEN_DB_INCLUDE_TABLES`-style wildcards. Multi-tenant SaaS operators can fall back to explicit `KEN_DB_SCHEMAS=tenant_001,tenant_002,...` lists as a workaround until v0.7.x+ adds wildcards informed by real usage.
+
+- **Both env vars compose as intersection** (deny-list filters subset of allow-list — keep only schemas in `IncludeSchemas` AND not in `ExcludeSchemas`). Rejected. Concrete failure mechanism: under intersection semantics, `KEN_DB_SCHEMAS=public,billing` + `KEN_DB_EXCLUDE_SCHEMAS=billing,audit` silently produces a one-schema index of just `public` — the operator's `audit` exclusion gets credit for filtering a schema that was already excluded by the allow-list, and the operator's `billing` allow-list entry gets silently overridden by the deny-list. Two lists pasted from different sources (an ops doc + a CLAUDE.md) compose into a result neither author intended, with no warning. Allow-list-wins + stderr warn surfaces the conflict at startup loudly, so the operator either fixes their config or accepts the documented precedence — the same loud-failure shape ADR-009 establishes for every other env-var conflict. If real field signal arrives that intersection is what operators actually want, ADR-020 can add a `KEN_DB_FILTER_MODE=intersection` opt-in.
+
+- **Per-table inclusion/exclusion** (`KEN_DB_INCLUDE_TABLES=users,sessions`-style filtering). Rejected. Two mechanism-level problems. **First, the FK-graph consistency tax**: filtering at the table level produces dangling references — keep `sessions` but exclude `users`, and the `sessions` chunk's `→ users(id)` arrow points at a name absent from the index, defeating the "agent sees the whole shape" thesis. Schema-level filtering avoids this because FK targets across filtered-out schemas are also filtered out via `annotateFKReferences`'s `filterSchema` pass (which already exists). Table-level filtering would need a new "rewrite dangling FKs as `→ <filtered>`" code path that no operator has asked for. **Second, the cross-engine identity problem**: a table name like `users` exists in many schemas in any multi-tenant dev DB; `KEN_DB_INCLUDE_TABLES=users` would need a schema-qualifier syntax (`tenant_001.users`) that recapitulates schema-level filtering with extra punctuation, OR match the bare name across schemas with ambiguous results. Schema-level filtering is the 80% case for production-cloned dev DBs (the audit / cron / per-tenant / legacy pattern); operators with table-level needs can either (a) move noisy tables into a `legacy` schema and filter that, or (b) accept the noise. If a real signal arrives — e.g. a multi-tenant operator who genuinely wants to index three tables out of three hundred per tenant — the right design is probably a glob-on-fully-qualified-name syntax that solves both problems together, not bare table names.
+
+- **Treating MariaDB as a separate engine** (separate `mariadb://` scheme + sibling `internal/db/mariadb.go`). Rejected. Wire-compatible via the same `go-sql-driver/mysql` driver; the `INFORMATION_SCHEMA` queries used by `indexSchemaMySQL` are standard SQL. Adds CI matrix cost (separate service container) for marginal correctness benefit. If MariaDB-specific `INFORMATION_SCHEMA` differences surface in practice (e.g. `routines.data_type` semantics diverge), file separately and consider a `mariadb://` scheme alias at that point — the engine-dispatch shape supports adding one in a few lines.
+
+- **`mcp.Run` MySQL support** (embedded-corpus binary that opens a live MySQL on first request). Deferred to v0.8.0+ via `mcp.Options.DBSource` — same scope rule as v0.7.0's Postgres and v0.7.1's SQLite deferrals. The embedded-corpus product story is "single static binary, no per-query egress," which a live DB connection muddles. Tier 1's migration folding DOES benefit `mcp.Run` for embedded `.sql` files (filesystem-based, no DB code reachable).
+
+- **Native MySQL DSN form detection by `mysql.ParseDSN` round-trip** (try to parse every input that doesn't have a `://` prefix with `mysql.ParseDSN`; accept iff it parses). Rejected. Too permissive: a random string like `host=foo` would `ParseDSN`-parse as a database name with no user, no host, and we'd disable Tier 2 only after attempting a connection at runtime. The `@tcp(` / `@unix(` substring check is the documented native-DSN marker and provides a loud rejection at startup — matching the libpq-key-value rejection from v0.7.1.
+
+### Consequences
+
+- **New dependency: `github.com/go-sql-driver/mysql` v1.10.0.** Pure Go, no cgo, mature and widely used. Default package-level logger writes to stderr via `log.New(os.Stderr, ...)`; no protocol-level logging to stdout. ADR-001 (no-cgo) preserved. The pgx-tracer-must-stay-nil discipline (`feedback_pgx_tracer` memory) extends identically — any future wiring of `mysql.SetLogger` must route through `Options.LogWriter` (stderr), never stdout.
+
+- **MySQL users get Tier 2 indexing.** Rails / Django / Laravel / .NET / classic LAMP-stack dev workflows — the audience the v0.7.0 + v0.7.1 releases explicitly didn't serve. Same chunk shape, same row-sampling / refresh / SIGHUP machinery, no operator-facing differences beyond the DSN scheme. Operators paste either URL or native DSN forms; both work.
+
+- **Operators with multi-schema dev databases get clean filtering.** Production-cloned dev DBs (audit / cron / per-tenant schemas) get a clean way to filter without losing the default-exclusion safety floor. Both env vars set → loud warn + allow-list wins, no silent intersection surprise.
+
+- **Default exclusions are inviolable.** `KEN_DB_SCHEMAS=pg_catalog` does NOT add `pg_catalog` to the index — `filterSchema` rejects it before consulting the user list. Same for `mysql`, `information_schema`, `performance_schema`, `sys`. Operators who genuinely need to index system schemas should not point ken at the DB.
+
+- **CI matrix expands by one service container.** `mysql:8` service alongside `postgres:16-alpine` in the existing `test-db-integration` job. SQLite still needs no container. The job name updates to `ubuntu / DB integration (Postgres + SQLite + MySQL)`. Adding a sixth engine in v1.x+ follows the same pattern: sibling service entry + `KEN_DB_<ENGINE>_TEST_DSN` env var + `dbintegration` test file + `_With<Engine>` stdout test.
+
+- **`envDSN` becomes a five-scheme-plus-native-form parser.** The native-form path (substring check, no scheme prefix) is the first time we accept a DSN without a `://` — it's the only engine for which the native form is widely used in operator-facing tooling. Adding a sixth engine in v1.x+ that uses URL form follows the same `dsnAcceptedSchemes` allow-list extension.
+
+- **v0.7.x track complete after this release.** Postgres + SQLite + MySQL Tier 2; migration folding for Tier 1; schema filtering for the engines that need it. v0.8.0 design starts without engine-completion overhang.
+
+- **`mcp.Run` (v0.6.0 embedded-corpus) is unchanged.** No new `mcp.Options` fields. Live DB support for `mcp.Run` is v0.8.0+ scope.
+
+- **MariaDB compatibility is documented, not first-class tested.** Operators pointing ken at MariaDB 10.x+ should hit the same code path with the same chunk shape. If `INFORMATION_SCHEMA` differences surface (likely candidate: `routines.dtd_identifier` rendering for parameterized return types), file separately and consider a per-engine variant.

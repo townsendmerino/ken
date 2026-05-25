@@ -171,20 +171,45 @@ Tier 2 going dark never crashes `ken-mcp`. Restart picks up a recovered DSN.
 
 ### Engine scope
 
-As of **v0.7.1**, Tier 2 supports **Postgres + SQLite**. Engine routing inside `internal/db.IndexSchema` dispatches on the DSN scheme:
+As of **v0.7.2**, Tier 2 supports **Postgres + SQLite + MySQL**. Engine routing inside `internal/db.IndexSchema` dispatches on the DSN scheme:
 
 | Scheme | Driver | Typical use |
 |---|---|---|
 | `postgres://` / `postgresql://` | `github.com/jackc/pgx/v5` (pure Go) | server-backed dev DBs |
 | `sqlite://` / `sqlite3://` | `modernc.org/sqlite` (pure Go, transpiled from C, no cgo) | Rails / Django / Phoenix / Laravel / FastAPI / embedded apps |
+| `mysql://` or `user:pass@tcp(host:port)/db` | `github.com/go-sql-driver/mysql` (pure Go) | MySQL 5.7+ / MySQL 8.x / MariaDB 10.x+ dev DBs (Rails, Django, Laravel, .NET, LAMP) |
 
 SQLite DSN examples:
 - `sqlite:///var/data/dev.db` — absolute path (note the triple slash: scheme + empty host + absolute path).
 - `sqlite://./dev.db` — relative path, resolved against `KEN_MCP_DEFAULT_REPO`. Convenient when the SQLite file lives inside the repo (overwhelmingly common).
 
-The freshness header on SQLite chunks contains the file basename only (`sqlite@dev.db`), not the full path, so chunks don't leak local filesystem layout. The same row-sampling / periodic-refresh / SIGHUP machinery works for both engines without configuration changes.
+MySQL DSN examples:
+- `mysql://alice:s3cret@db.local:3306/mydb?parseTime=true` — URL form (canonical, matches the Postgres pattern).
+- `alice:s3cret@tcp(db.local:3306)/mydb?parseTime=true` — native go-sql-driver form, accepted directly because that's what most .env files in the wild already contain.
+- `alice@unix(/var/run/mysqld/mysqld.sock)/mydb` — Unix-socket form.
 
-MySQL (`go-sql-driver/mysql`) lands in v0.7.2 via the same `internal/db.IndexSchema` engine-dispatch shape. `KEN_DB_SCHEMAS` / `KEN_DB_EXCLUDE_SCHEMAS` filtering arrives alongside it.
+`parseTime=true` is forced on internally if absent — without it, DATE/DATETIME/TIMESTAMP columns deserialize as `[]byte` and don't render cleanly in row samples. MariaDB is wire-compatible via the same driver and works without first-class CI testing.
+
+The freshness header omits credentials and shows the engine label only (`postgres@dev-pg.local`, `mysql@db.local`, `sqlite@dev.db`); ports are surfaced only when non-default. SQLite uses the file basename so chunks don't leak local filesystem layout. The same row-sampling / periodic-refresh / SIGHUP machinery works for all three engines without configuration changes.
+
+### Filtering indexed schemas
+
+Production-cloned dev DBs accumulate noise — audit / cron / queue / per-tenant schemas the agent shouldn't suggest using. As of **v0.7.2** two env vars filter the schema set Tier 2 indexes:
+
+- `KEN_DB_SCHEMAS` — comma-separated allow-list. Only these schemas are indexed (intersected with the engine's default exclusions, which always apply). Example: `KEN_DB_SCHEMAS=public,billing`.
+- `KEN_DB_EXCLUDE_SCHEMAS` — comma-separated deny-list. Extends (does not replace) the default exclusions. Example: `KEN_DB_EXCLUDE_SCHEMAS=audit,cron,legacy`.
+
+Resolution rules:
+- Neither set → default behavior (everything except engine system schemas). v0.7.0 / v0.7.1 byte-identical.
+- Only `KEN_DB_SCHEMAS` → index exactly those schemas (system schemas still filtered).
+- Only `KEN_DB_EXCLUDE_SCHEMAS` → index everything not in the deny-list and not in system schemas.
+- Both set → stderr warn, allow-list wins, deny-list ignored.
+
+Default exclusions are **never user-overridable**: `pg_catalog` and `information_schema` for Postgres; `information_schema`, `mysql`, `performance_schema`, `sys` for MySQL. Operators who genuinely need to index those should not point ken at the DB.
+
+SQLite is a single-schema engine and ignores both env vars (debug-level log when they're set with a SQLite DSN).
+
+Wildcards (e.g. `KEN_DB_SCHEMAS=tenant_*`) are explicitly out of scope for v0.7.2 — multi-tenant operators can fall back to the explicit form `KEN_DB_SCHEMAS=tenant_001,tenant_002,...` until field signal calls for wildcard syntax. See [ADR-019](docs/DECISIONS.md#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) for the rejected-alternatives audit trail.
 
 ## Quickstart
 
@@ -277,9 +302,11 @@ command = "/absolute/path/to/ken-mcp"
 | `KEN_MCP_MODE` | `hybrid` | `bm25` / `semantic` / `hybrid`. Auto-downgrades to `bm25` with a stderr warning if the model dir is unreachable. |
 | `KEN_MCP_MODEL_DIR` | (unset) | Path to a Model2Vec snapshot containing `model.safetensors`. Empty ⇒ `bm25`-only. |
 | `KEN_MCP_CHUNKER` | `regex` | `regex` / `treesitter` / `line` / `markdown`. See ["Choosing a chunker"](#choosing-a-chunker). |
-| `KEN_DB_DSN` | (unset) | Database DSN. Postgres (`postgres://...` / `postgresql://...`) or SQLite (`sqlite:///abs/path.db`, `sqlite://./rel/path.db`, `sqlite3://...`) — engine routing dispatches on the scheme. Enables [Tier 2 DB indexing](#tier-2--live-postgres-introspection-ken_db_dsn). Requires `KEN_MCP_DEFAULT_REPO` to be a local path. |
+| `KEN_DB_DSN` | (unset) | Database DSN. Postgres (`postgres://...` / `postgresql://...`), SQLite (`sqlite:///abs/path.db`, `sqlite://./rel/path.db`, `sqlite3://...`), or MySQL (`mysql://user:pass@host:3306/db`, native `user:pass@tcp(host:3306)/db`, or `user:pass@unix(/sock)/db`) — engine routing dispatches on the scheme (or `@tcp(`/`@unix(` for the native MySQL form). Enables [Tier 2 DB indexing](#tier-2--live-postgres-introspection-ken_db_dsn). Requires `KEN_MCP_DEFAULT_REPO` to be a local path. |
 | `KEN_DB_SAMPLE_ROWS` | `0` | Rows per table to sample. **Default 0 means schema-only.** See the [PII stance](#pii-stance-documentation--sane-defaults) before enabling. |
 | `KEN_DB_REINDEX_INTERVAL` | (off) | Go duration (`5m`, `1h`). Background refresh cadence. Off by default — restart or `SIGHUP` to refresh. |
+| `KEN_DB_SCHEMAS` | (unset) | Comma-separated allow-list of schema names (Postgres) / database names (MySQL). Example: `public,billing`. Default exclusions (`pg_catalog`, `information_schema`, `mysql`, `performance_schema`, `sys`) always still apply. SQLite ignores. See [Filtering indexed schemas](#filtering-indexed-schemas). |
+| `KEN_DB_EXCLUDE_SCHEMAS` | (unset) | Comma-separated deny-list. Extends (does not replace) the default exclusions. Example: `audit,cron,legacy`. When set alongside `KEN_DB_SCHEMAS`, the allow-list wins (stderr warn). SQLite ignores. |
 | `KEN_SQL_NO_AUTO_MIGRATIONS` | (off) | `1` / `true` / `yes` disables v0.7.1 Tier-1 migration-history folding (restores v0.7.0 per-file behavior). Useful when you maintain a canonical `schema/current.sql` and don't want migration history surfaced as folded chunks. |
 | `KEN_MCP_CACHE_SIZE` | `16` | LRU bound on the repo→Index cache. |
 | `KEN_MCP_LOG_LEVEL` | `warn` | `debug` / `info` / `warn` / `error`. All logs go to stderr; **stdout is the JSON-RPC channel** ([details](docs/DESIGN.md#hard-rule--stdoutstderr-contract)). |

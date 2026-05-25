@@ -86,6 +86,8 @@ def detect_license(dir_path: str) -> str:
             return "BSD-3-Clause" if "neither the name" in head else "BSD-2-Clause"
         if "permission to use, copy, modify" in head and "fee is hereby granted" in head:
             return "ISC"
+        if "mozilla public license" in head and "version 2.0" in head:
+            return "MPL-2.0"
     return "(unrecognized — inspect upstream)"
 
 

@@ -55,16 +55,16 @@ jobs:
       - name: go test ./...
         run: go test ./...
 
-  # v0.7.0 (ADR-017) + v0.7.1 (ADR-018) Tier-2 integration tests: spin
-  # up Postgres and run the full internal/db integration suite (which
-  # also covers the SQLite file-based engine since SQLite needs no
-  # service container). Ubuntu-only because GitHub Actions service
-  # containers don't run on macos-latest. The default `go test ./...`
-  # job above doesn't depend on this — it always runs on both OSes and
-  # the dbintegration tests are gated by the build tag, so non-DB runs
-  # skip them silently.
+  # v0.7.0 (ADR-017) + v0.7.1 (ADR-018) + v0.7.2 (ADR-019) Tier-2
+  # integration tests: spin up Postgres + MySQL and run the full
+  # internal/db integration suite (which also covers the SQLite
+  # file-based engine since SQLite needs no service container).
+  # Ubuntu-only because GitHub Actions service containers don't run on
+  # macos-latest. The default `go test ./...` job above doesn't depend
+  # on this — it always runs on both OSes and the dbintegration tests
+  # are gated by the build tag, so non-DB runs skip them silently.
   test-db-integration:
-    name: ubuntu / DB integration (Postgres + SQLite)
+    name: ubuntu / DB integration (Postgres + SQLite + MySQL)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -82,6 +82,21 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_DATABASE: postgres
+        ports:
+          - 3306:3306
+        # mysqladmin ping is the documented healthcheck for the
+        # official image; --silent suppresses the connection-refused
+        # noise during startup. Healthy-then-green gates the test step.
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -uroot -ptest --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v6
       - name: Set up Go
@@ -91,11 +106,14 @@ jobs:
           check-latest: true
           cache: true
 
-      # Runs both Postgres tests (need KEN_DB_TEST_DSN) and SQLite tests
-      # (no env required — temp .db file). Same -tags=dbintegration gate.
-      - name: internal/db integration tests (Postgres + SQLite)
+      # Runs Postgres tests (need KEN_DB_TEST_DSN), SQLite tests (no
+      # env — temp .db file), and MySQL tests (need KEN_DB_MYSQL_TEST_DSN).
+      # Same -tags=dbintegration gate; per-test file checks the relevant
+      # env var and skips if absent.
+      - name: internal/db integration tests (Postgres + SQLite + MySQL)
         env:
           KEN_DB_TEST_DSN: postgres://postgres:test@127.0.0.1:5432/postgres?sslmode=disable
+          KEN_DB_MYSQL_TEST_DSN: root:test@tcp(127.0.0.1:3306)/?parseTime=true&multiStatements=true
         run: go test -tags=dbintegration ./internal/db/
 
       # Also exercise the cmd/ken-mcp DB-variant stdout-cleanliness test
@@ -115,3 +133,17 @@ jobs:
       # for parity with the Postgres audit).
       - name: cmd/ken-mcp stdout audit with SQLite
         run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithSQLite -v
+
+      # v0.7.2: confirm go-sql-driver/mysql stays silent on stdout when
+      # KEN_DB_DSN points at a MySQL instance. The mysql:8 service
+      # container is the same one the integration suite uses; this test
+      # additionally drives a full MCP session through CommandTransport.
+      # Pre-creates the ken_test database so wireDBTier2's MySQL
+      # introspection path has something to talk to.
+      - name: prepare ken_test database (MySQL)
+        run: |
+          mysql -h 127.0.0.1 -uroot -ptest -e 'CREATE DATABASE IF NOT EXISTS ken_test;'
+      - name: cmd/ken-mcp stdout audit with MySQL
+        env:
+          KEN_DB_MYSQL_TEST_DSN: root:test@tcp(127.0.0.1:3306)/ken_test?parseTime=true
+        run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithMySQL -v
