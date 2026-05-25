@@ -535,6 +535,6 @@ ken stands on MinishLab's shoulders. The retrieval algorithm, the model, the ent
 
 ## License
 
-ken is [MIT-licensed](LICENSE). It bundles attribution for the redistributed model weights and their upstream lineage in [`NOTICE`](NOTICE), and a generated list of Go-module dependency licenses in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md). Every link in the provenance chain is permissive (MIT ∪ Apache-2.0); see [docs/DESIGN.md §6](docs/DESIGN.md#6-license--attribution-chain).
+ken is [MIT-licensed](LICENSE). It bundles attribution for the redistributed model weights and their upstream lineage in [`NOTICE`](NOTICE), and a generated list of Go-module dependency licenses in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md). Every link in the provenance chain is permissive (MIT, Apache-2.0, and MPL-2.0 — the MPL-2.0 entry (`go-sql-driver/mysql` v1.10.0, added in v0.7.2) is file-level copyleft only and is safe to redistribute when used as an unmodified library); see [docs/DESIGN.md §6](docs/DESIGN.md#6-license--attribution-chain).
 
 For contributors: see [`CLAUDE.md`](CLAUDE.md) for build / test / formatting conventions and the project's invariants (precision contract, stdout/stderr contract).

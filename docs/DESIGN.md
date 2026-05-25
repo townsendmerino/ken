@@ -479,15 +479,15 @@ Verified license chain:
 | ↳ distilled from `nomic-ai/CodeRankEmbed` | MIT | Nomic AI |
 | ↳↳ based on `snowflake-arctic-embed-m-long` | Apache-2.0 | Snowflake |
 
-Every link in the provenance chain is permissive and MIT-compatible (MIT ∪ Apache-2.0). ken is MIT-licensed and redistributes the weights freely.
+Every link in the model-weight provenance chain above is permissive and MIT-compatible (MIT ∪ Apache-2.0). ken is MIT-licensed and redistributes the weights freely. The Go-module dependency surface (listed in [`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md)) adds a third permissive license family — **MPL-2.0** — via `github.com/go-sql-driver/mysql` v1.10.0 (added in v0.7.2 for Tier 2 MySQL support; see [ADR-019](DECISIONS.md#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases)). MPL-2.0 is file-level copyleft, not viral: it requires modifications to MPL-licensed source files to remain under MPL-2.0, but does not extend to code that merely imports or links to the library. ken consumes `go-sql-driver/mysql` as an unmodified upstream module, so redistribution within ken's binaries is unencumbered.
 
-**Attribution required.** MIT requires attribution preservation; Apache-2.0 has NOTICE-propagation expectations. The repo ships:
+**Attribution required.** MIT requires attribution preservation; Apache-2.0 has NOTICE-propagation expectations; MPL-2.0 requires the upstream license text to ship with any redistributed source. The repo ships:
 
 - `LICENSE` — ken's MIT license
 - `NOTICE` — attribution for redistributed weights:
   - `potion-code-16M` (MIT, © Minish Lab)
   - Upstream `snowflake-arctic-embed-m-long` (Apache-2.0, © Snowflake)
-- `THIRD_PARTY_LICENSES.md` — generated from Go module deps (e.g., via `go-licenses report`)
+- `THIRD_PARTY_LICENSES.md` — generated listing of every Go-module dep + its license (regenerate via `scripts/gen_third_party_licenses.py`). The MPL-2.0 entry (`go-sql-driver/mysql`) is satisfied here: the upstream module's `LICENSE` file ships with the module via `go mod`, and the generated table preserves the SPDX identifier.
 
 If model weights ship embedded in the binary (via `go:embed`), the NOTICE must too — bake it in alongside or expose via `ken license` / `ken --notice`. The HF repo for `potion-code-16M` has no standalone LICENSE file; the MIT grant is in the model-card metadata only, so the attribution is written by hand rather than copied.
 
