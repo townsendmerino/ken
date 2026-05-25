@@ -12,6 +12,145 @@ with pre-built binaries.
 
 (no changes yet)
 
+## [0.7.0] — 2026-05-25
+
+The database-schema indexing release. Two tiers, both shipping together:
+
+1. **Tier 1 — Static SQL parsing.** ken now parses `.sql` files in the
+   corpus (`CREATE TABLE` / `INDEX` / `VIEW`, `ALTER TABLE`) and emits
+   one denormalized "for retrieval" chunk per database object. Activates
+   automatically when `.sql` files are present. No opt-in, no new env
+   var; the structural chunks are additive to the regular file
+   chunking, so existing BM25 hits on raw SQL still work.
+2. **Tier 2 — Live Postgres introspection.** When `KEN_DB_DSN` is set,
+   ken introspects via `information_schema` / `pg_catalog` and emits
+   one chunk per table / view / index / function. Every chunk carries
+   a freshness header (`-- indexed at <UTC> from postgres@<host>`); no
+   credentials in chunk text. Postgres only for v0.7.0; MySQL +
+   SQLite are planned. Closes [#8](https://github.com/townsendmerino/ken/issues/8).
+
+Design rationale, alternatives considered (column-exclusion DSL,
+per-call introspection, LISTEN/NOTIFY, agent-triggerable reindex tool),
+and the PII stance are in
+[ADR-017](docs/DECISIONS.md#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance).
+
+### Added
+
+- **`internal/sql` package** — pure-Go parser for the DDL subset above.
+  Statement splitter is aware of line/block/nested comments,
+  single/double quotes, Postgres dollar-quoting (`$$ ... $$` and
+  `$tag$ ... $tag$`), and paren depth. Wired into `internal/search`'s
+  chunk dispatch so the build-once path (`FromFS`) and the watch path
+  (`WatchedIndex.appendFile`) both emit structural SQL chunks for
+  `.sql` files. 14 unit-test scenarios pin every shape including
+  malformed statements, dollar-quoting, multi-comma column lists, and
+  empty/DML-only files. Exports `IsSQLFile(path) bool` and
+  `ParseFile(path, content, logger) ([]chunk.Chunk, error)`.
+
+- **`internal/db` package** — Postgres introspection via
+  `github.com/jackc/pgx/v5`. `IndexSchema(ctx, opts) ([]chunk.Chunk, error)`
+  is the build-once entry; `Refresher` (with `Run(ctx)` periodic + `Refresh(ctx)`
+  manual) orchestrates the three reindex layers. Internal serialization
+  via mutex makes concurrent triggers safe to spam. Chunk emission
+  shares the denormalized "for retrieval" shape with Tier 1 (header
+  line + `TABLE name` + columns + indexes + `FK referenced by:` reverse
+  navigation + optional sample rows). Three integration tests gated
+  by build tag `dbintegration` and `KEN_DB_TEST_DSN` env var.
+
+- **`WatchedIndex.SetExtraChunks(chunks)`** in `internal/search` — the
+  composition seam Tier 2 uses to inject DB chunks into the published
+  Index without disturbing the FS chunks the fsnotify watch path
+  manages. The published snapshot is always FS-chunks ∪ extras; both
+  sources update it via the same ADR-012 atomic-swap path. Calling
+  with `nil` clears the extras ("DB unreachable, keep serving FS").
+
+- **`KEN_DB_DSN`** env var — Postgres connection string. Empty (default)
+  keeps Tier 2 off. Format must be parseable URL (`postgres://` or
+  `postgresql://`). Invalid scheme / missing host / unparseable form
+  logs a stderr warning and disables Tier 2 rather than crashing.
+
+- **`KEN_DB_SAMPLE_ROWS`** env var — rows-per-table to sample (default
+  0 = schema only). When > 0, ken pulls N rows per table deterministically
+  (`ORDER BY` first PK column; fallback `ORDER BY 1`) and appends them
+  to the table's chunk. Long cells truncated at 80 chars with `…`.
+
+  > Intended for development databases. Do not point this at production
+  > data — sample rows are sent to the agent as part of search results
+  > and thus to your LLM provider. See the README and ADR-017 for the
+  > PII stance.
+
+- **`KEN_DB_REINDEX_INTERVAL`** env var — Go duration string (e.g.
+  `5m`, `1h`) for periodic DB refresh. Empty/zero (default) means no
+  periodic polling — refresh only at startup or via `SIGHUP`. Tick-time
+  failures log a warn and don't kill the goroutine.
+
+- **`SIGHUP` handler** in `cmd/ken-mcp` (unix-only; no-op on Windows).
+  Each `SIGHUP` triggers `Refresher.Refresh`, which rebuilds the DB
+  chunks and atomically swaps them in. Standard `migrate-up` ergonomics:
+  ```
+  migrate-up:
+      psql -f migrations/$$NEXT.sql
+      kill -HUP $$(pgrep ken-mcp)
+  ```
+
+- **New env helpers** in `cmd/ken-mcp/env.go`: `envDuration` (parses Go
+  duration strings) and `envDSN` (validates `postgres://` URL form
+  without logging the raw DSN). Both follow the existing ADR-009
+  warn-and-fallback pattern; 17 new env-helper subtests pin the
+  behavior.
+
+- **CI Postgres service container** — a new `test-db-integration` job
+  on `ubuntu-latest` spins up `postgres:16-alpine` and runs the
+  dbintegration tests plus `TestBinary_StdoutIsCleanJSONRPC_WithDB`
+  against it. macos-latest runs the default `go test ./...` which
+  skips the dbintegration tests cleanly via the build tag.
+
+### Changed
+
+- **`internal/search/index.go`** and **`internal/search/watch.go`** now
+  route every `.sql` file through `sql.ParseFile` in addition to the
+  configured chunker via the new `chunkOneFile` helper. The structural
+  chunks join the index alongside the line-chunked file bytes; both
+  forms are queryable.
+
+- **`internal/search/WatchedIndex`** gains an `extraChunks` slot
+  alongside `chunks` for orchestrator-injected non-FS chunks. The
+  published Index is built from `chunks ∪ extraChunks` on every flush;
+  `compactCorpus` only touches `chunks` so DB extras survive
+  fsnotify-driven snapshot republishes.
+
+- **`cmd/ken-mcp` startup** gains the conditional `wireDBTier2` block.
+  Behavior with no `KEN_DB_DSN` set is byte-identical to v0.6.0; the
+  existing `TestBinary_StdoutIsCleanJSONRPC` test confirms this and a
+  new `TestBinary_StdoutIsCleanJSONRPC_WithDB` test confirms the full
+  Tier-2 code path (DSN parse → connect → IndexSchema → SetExtraChunks
+  → Refresher → SIGHUP handler) doesn't leak anything to stdout when
+  enabled.
+
+### Dependencies
+
+- **`github.com/jackc/pgx/v5` v5.9.2** — pure-Go Postgres driver. Default
+  `Tracer` is nil; no protocol logging to stdout.
+
+### Notes
+
+- **`mcp.Run` (v0.6.0 embedded-corpus library API) is unaffected.** DB
+  support there is planned for v0.8.0+ via `mcp.Options.DBSource` or
+  similar; no `mcp.Options` changes in v0.7.0. Tier 1's static SQL
+  parsing DOES benefit `mcp.Run` because it lives at the
+  `internal/search` layer — filesystem-based, not DB-based.
+- **PII stance is documentation + sane defaults.** Schema-only is the
+  default. The opt-in sampling env var is unambiguous. Freshness
+  metadata in every chunk surfaces provenance. No engineered redaction
+  controls — operators who need those should not point ken at the DB.
+- **DB chunks attach to the default repo only.** `KEN_DB_DSN` requires
+  `KEN_MCP_DEFAULT_REPO` (and that the default repo is a local path,
+  not an http(s) URL). When unset, Tier 2 logs a warn and stays off.
+- **Migration-history folding is out of scope** for v0.7.0. CREATE
+  TABLE + later ALTER TABLE statements across files emit separate
+  chunks; agents see the union of historical state. Documented in
+  ADR-017 alternatives as a future refinement.
+
 ## [0.6.0] — 2026-05-24
 
 The embedded-corpus release. The library form of ken-mcp lands: SDK

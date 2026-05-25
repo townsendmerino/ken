@@ -24,11 +24,13 @@ import (
 	"context"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -40,6 +42,7 @@ import (
 	// code-search use case but explicitly skipped by cmd/ken-mcp-docs.
 	_ "github.com/townsendmerino/ken/internal/chunk/markdown"
 	_ "github.com/townsendmerino/ken/internal/chunk/treesitter"
+	"github.com/townsendmerino/ken/internal/db"
 	"github.com/townsendmerino/ken/internal/search"
 	kenmcp "github.com/townsendmerino/ken/mcp"
 )
@@ -164,10 +167,25 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// v0.7.0 (ADR-017) Tier-2 wiring: when KEN_DB_DSN is set, introspect
+	// the configured database and union its chunks into the default
+	// repo's index. Schema-only by default; opt-in row sampling via
+	// KEN_DB_SAMPLE_ROWS; periodic refresh via KEN_DB_REINDEX_INTERVAL;
+	// manual refresh via SIGHUP. DB chunks attach to the default repo
+	// specifically — multi-repo searches (no default) get FS-only.
+	//
+	// Returns nil cleanup when Tier 2 isn't configured or initial
+	// connection fails (the latter logs warn and continues with FS-only
+	// rather than crashing startup).
+	dbCleanup := wireDBTier2(ctx, logger, cache, defaultRepo)
+
 	// Signal-driven cleanup: when the agent disconnects (Ctrl-C or pipe
 	// close), drop temp clone directories so we don't leak disk.
 	go func() {
 		<-ctx.Done()
+		if dbCleanup != nil {
+			dbCleanup()
+		}
 		cache.Close()
 	}()
 
@@ -180,4 +198,136 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+// wireDBTier2 wires the v0.7.0 Tier-2 database introspection path. No-op
+// when KEN_DB_DSN is unset. Otherwise:
+//
+//  1. Validates DSN + reads KEN_DB_SAMPLE_ROWS + KEN_DB_REINDEX_INTERVAL.
+//  2. Pre-builds the defaultRepo WatchedIndex via the cache (so we
+//     have a concrete swap target before Refresher needs one).
+//  3. Runs db.IndexSchema once at startup; pushes the chunks via
+//     wix.SetExtraChunks.
+//  4. If KEN_DB_REINDEX_INTERVAL > 0, spawns refresher.Run(ctx) in a
+//     goroutine for periodic refresh.
+//  5. Installs SIGHUP handler (unix-only via watchSIGHUP) that calls
+//     refresher.Refresh on each signal.
+//
+// Returns a cleanup func to call before the cache closes; nil if Tier 2
+// wasn't enabled or initial setup failed. Cleanup is currently a no-op
+// (the Refresher exits when ctx cancels naturally) but reserved as a
+// future seam.
+//
+// Failure modes — all non-fatal (FS-only mode continues, server keeps
+// running):
+//   - DSN unset: silent no-op.
+//   - DSN invalid (envDSN returns ""): warning already logged.
+//   - DefaultRepo unset: warning, Tier 2 stays off ("DB chunks must
+//     attach to a known repo").
+//   - DefaultRepo is an http(s) URL: warning, Tier 2 stays off (eager
+//     pre-build would shell out to git, which is too heavy for startup).
+//   - Initial cache.Get fails: warning, Tier 2 stays off.
+//   - Initial db.IndexSchema fails: warning, Tier 2 stays off (no
+//     refresher started — agents shouldn't get stale empty chunks if
+//     the DB was never reachable).
+func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache, defaultRepo string) func() {
+	dsn := envDSN("KEN_DB_DSN", logger)
+	if dsn == "" {
+		return nil
+	}
+	sampleRows := envInt("KEN_DB_SAMPLE_ROWS", 0, logger)
+	if sampleRows < 0 {
+		logger.Logf(kenmcp.LogWarn, "KEN_DB_SAMPLE_ROWS=%d: must be non-negative — using 0", sampleRows)
+		sampleRows = 0
+	}
+	reindex := envDuration("KEN_DB_REINDEX_INTERVAL", 0, logger)
+
+	if defaultRepo == "" {
+		logger.Logf(kenmcp.LogWarn,
+			"KEN_DB_DSN set but KEN_MCP_DEFAULT_REPO is empty — Tier 2 (DB indexing) needs "+
+				"a default repo to attach DB chunks to; disabling Tier 2")
+		return nil
+	}
+	if strings.HasPrefix(defaultRepo, "http://") || strings.HasPrefix(defaultRepo, "https://") {
+		logger.Logf(kenmcp.LogWarn,
+			"KEN_DB_DSN set but KEN_MCP_DEFAULT_REPO=%q is an http(s) URL — Tier 2 only "+
+				"attaches to local-path repos (URL repos would require shelling out to git "+
+				"during startup); disabling Tier 2", defaultRepo)
+		return nil
+	}
+
+	// Pre-warm the default repo's WatchedIndex. This is what makes DB
+	// chunks land in the snapshot the agent's first search returns.
+	wix, err := cache.Get(ctx, defaultRepo)
+	if err != nil {
+		logger.Logf(kenmcp.LogWarn, "Tier 2: cannot pre-build default repo %q: %v — disabling Tier 2", defaultRepo, err)
+		return nil
+	}
+
+	opts := db.Options{
+		DSN:             dsn,
+		SampleRows:      sampleRows,
+		ReindexInterval: reindex,
+		// pgx default Tracer is nil → no protocol logging to stdout.
+		// Send our own diagnostics to stderr via the kenmcp logger's
+		// underlying writer (os.Stderr always when configured by main).
+		LogWriter: os.Stderr,
+	}
+
+	// Build-once-at-startup: this fires the initial swap. If it fails,
+	// log + skip Refresher construction.
+	logger.Logf(kenmcp.LogInfo, "Tier 2: introspecting %s (sample_rows=%d reindex=%s)",
+		redactDSN(dsn), sampleRows, durOrOff(reindex))
+	initial, err := db.IndexSchema(ctx, opts)
+	if err != nil {
+		logger.Logf(kenmcp.LogWarn, "Tier 2: initial IndexSchema failed: %v — disabling Tier 2", err)
+		return nil
+	}
+	wix.SetExtraChunks(initial)
+	logger.Logf(kenmcp.LogInfo, "Tier 2: indexed %d DB chunks into %q", len(initial), defaultRepo)
+
+	// Build Refresher for SIGHUP-driven and (optionally) periodic refresh.
+	refresher, err := db.NewRefresher(opts, wix.SetExtraChunks)
+	if err != nil {
+		logger.Logf(kenmcp.LogWarn, "Tier 2: NewRefresher: %v — manual SIGHUP refresh disabled", err)
+		return nil
+	}
+
+	if reindex > 0 {
+		go func() {
+			if err := refresher.Run(ctx); err != nil && err != context.Canceled {
+				logger.Logf(kenmcp.LogWarn, "Tier 2: periodic refresher exit: %v", err)
+			}
+		}()
+	}
+	watchSIGHUP(ctx, func() {
+		logger.Logf(kenmcp.LogInfo, "Tier 2: SIGHUP received; refreshing DB chunks")
+		if err := refresher.Refresh(ctx); err != nil {
+			logger.Logf(kenmcp.LogWarn, "Tier 2: SIGHUP-driven refresh failed: %v", err)
+		}
+	})
+	return func() {} // reserved cleanup seam
+}
+
+// redactDSN returns a DSN with the userinfo (and therefore the password)
+// stripped, suitable for logging. "postgres://alice:s3cret@h/db" →
+// "postgres://h/db". Best-effort: on URL-parse failure, returns
+// "<redacted>" rather than risking the original.
+func redactDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "<redacted>"
+	}
+	u.User = nil
+	return u.String()
+}
+
+// durOrOff renders a Go duration for log output, but renders the zero
+// value as "off" so operators see "reindex=off" rather than
+// "reindex=0s" in the startup line.
+func durOrOff(d time.Duration) string {
+	if d <= 0 {
+		return "off"
+	}
+	return d.String()
 }

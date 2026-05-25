@@ -54,3 +54,52 @@ jobs:
       # opt-in for the same reason and is not run in CI.
       - name: go test ./...
         run: go test ./...
+
+  # v0.7.0 (ADR-017) Tier-2 integration tests: spin up Postgres and
+  # exercise internal/db against a real schema. Ubuntu-only because
+  # GitHub Actions service containers don't run on macos-latest. The
+  # default `go test ./...` job above doesn't depend on this — it
+  # always runs on both OSes and the dbintegration tests are gated by
+  # the build tag, so non-DB runs skip them silently.
+  test-db-integration:
+    name: ubuntu / Postgres integration (v0.7.0)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        # postgres:16-alpine ships with pg_isready; the service waits
+        # for the healthcheck to go green before the test step runs.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: internal/db integration tests
+        env:
+          KEN_DB_TEST_DSN: postgres://postgres:test@127.0.0.1:5432/postgres?sslmode=disable
+        run: go test -tags=dbintegration ./internal/db/
+
+      # Also exercise the cmd/ken-mcp DB-variant stdout-cleanliness test
+      # against the live Postgres — confirms pgx + the Refresher don't
+      # leak to stdout when the full Tier-2 code path runs in the
+      # spawned subprocess. This test skips cleanly when KEN_DB_TEST_DSN
+      # is unset, so it only meaningfully runs in this job.
+      - name: cmd/ken-mcp stdout audit with DB
+        env:
+          KEN_DB_TEST_DSN: postgres://postgres:test@127.0.0.1:5432/postgres?sslmode=disable
+        run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithDB -v

@@ -70,6 +70,96 @@ ken's hybrid BM25 + Model2Vec retrieval is calibrated for two content types:
 
 For plain-text corpora with no code or structured documentation (novels, journals, raw transcripts), the BM25 side works fine in `--mode=bm25`, but the semantic model is code-trained — semantic ranking quality on pure literary prose is unvalidated. If that's your use case, expect BM25 mode to do most of the heavy lifting.
 
+## Indexing database schemas (v0.7.0)
+
+Agents working on a real codebase need schema context **alongside** the code. ken v0.7.0 indexes both. An agent answering "how do users get authenticated" gets the Go function doing auth, the SQL it executes, the `users` table definition, AND the FK relationships from `sessions.user_id` — all in one ranked result list. Design rationale in [ADR-017](docs/DECISIONS.md#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance).
+
+### Tier 1 — Static `.sql` parsing (automatic)
+
+When ken's walker sees `.sql` files in the corpus, it parses each `CREATE TABLE` / `INDEX` / `VIEW` / `ALTER TABLE` and emits one structural chunk per object alongside the raw line-chunked file. No env var, no opt-in. Migration files in `migrations/` are now first-class retrieval units:
+
+```
+-- file: migrations/001_users.sql
+TABLE users
+  id          BIGSERIAL PRIMARY KEY
+  email       VARCHAR(255) NOT NULL UNIQUE
+  role        VARCHAR(32)  NOT NULL DEFAULT 'guest'
+  created_at  TIMESTAMP    NOT NULL DEFAULT NOW()
+
+  INDEX users_email_idx ON (email)
+```
+
+Tier 1 doesn't fold migration history across files (a later `ALTER TABLE` produces its own chunk; the original `CREATE TABLE` chunk is unchanged). Agents see the union of historical state. Devs who want a single "current state" view either use Tier 2 or maintain a canonical `schema/current.sql`.
+
+### Tier 2 — Live Postgres introspection (`KEN_DB_DSN`)
+
+When `KEN_DB_DSN` is set, ken connects to the live database, introspects via `information_schema` / `pg_catalog`, and emits one chunk per table / view / index / function. Every chunk carries a freshness header naming the engine + host (never credentials):
+
+```
+-- indexed at 2026-08-15T14:23Z from postgres@dev-pg.local
+TABLE users
+  id          bigint        PK
+  email       varchar(255)  NOT NULL UNIQUE
+  role        varchar(32)   NOT NULL DEFAULT 'guest'
+  created_at  timestamp     NOT NULL DEFAULT now()
+
+  INDEX users_email_idx ON (email)
+  FK referenced by: sessions(user_id), audit_log(actor_id)
+```
+
+`KEN_DB_DSN` must be the URL form (`postgres://user:pass@host:port/db?sslmode=...`). Tier 2 requires `KEN_MCP_DEFAULT_REPO` to be set to a local path — DB chunks attach to that repo's index. Multi-repo searches (no default) get FS-only.
+
+### PII stance: documentation + sane defaults
+
+> **This is intended for development databases. Do not point this at production data — sample rows are sent to your LLM provider as part of search results.** ken does NOT ship column-exclusion DSLs, redaction modes, or row-synthesis controls. If you can't trust the database with the LLM, don't connect ken to it.
+
+The defaults are conservative:
+- **Schema-only is the default.** `KEN_DB_SAMPLE_ROWS=0` (unset) means no row data is read.
+- **The opt-in is unambiguous.** `KEN_DB_SAMPLE_ROWS=N` reads as "rows you're choosing to expose."
+- **Every chunk carries provenance.** The freshness header surfaces `postgres@dev-pg.local` in agent output, so reviewers see where the data came from.
+
+### Row sampling (opt-in)
+
+`KEN_DB_SAMPLE_ROWS=3` appends 3 deterministically-ordered rows per table to that table's chunk:
+
+```
+  Sample rows (3 of ~12,847):
+    (1,   alice@example.com, admin,  2024-01-15)
+    (47,  bob@example.com,   member, 2024-03-22)
+    (203, claire@example.com,guest,  2025-11-08)
+```
+
+Rows are ordered by the first PK column (fallback `ORDER BY 1` for tables without PK) so successive reindexes produce identical content. Long cells truncate at 80 chars with `…`.
+
+### Three reindex layers
+
+1. **Build-once-at-startup (default).** When `ken-mcp` starts, it introspects once and never refreshes. Restart to pick up schema changes. No background goroutines, no polling cost.
+2. **Periodic.** `KEN_DB_REINDEX_INTERVAL=5m` enables a background ticker that re-introspects on the configured cadence (Go duration string: `5m`, `1h`, etc.). Failures log a warn and skip that tick; agents tolerate stale schema better than no schema.
+3. **Manual via SIGHUP.** Standard Unix convention. Useful with migrate-up workflows:
+
+   ```makefile
+   migrate-up:
+       psql -f migrations/$(NEXT).sql
+       kill -HUP $$(pgrep ken-mcp)
+   ```
+
+   The Refresher's mutex serializes concurrent triggers, so SIGHUP is safe to spam. No-op on Windows.
+
+### Failure modes (all non-fatal)
+
+- DSN unset → silent no-op (FS-only).
+- DSN invalid → stderr warn, FS-only.
+- `KEN_MCP_DEFAULT_REPO` unset or http(s) URL → stderr warn, Tier 2 stays off.
+- Initial connect / introspection fails → stderr warn, Tier 2 stays off but FS-only server keeps running.
+- Periodic tick fails → stderr warn, skip tick, retry next interval.
+- SIGHUP refresh fails → stderr warn, previous chunks remain in the snapshot.
+
+Tier 2 going dark never crashes `ken-mcp`. Restart picks up a recovered DSN.
+
+### Engine scope
+
+Postgres only for v0.7.0 via `github.com/jackc/pgx/v5` (pure Go, no cgo). MySQL (`go-sql-driver/mysql`) and SQLite (`modernc.org/sqlite`) share the same `internal/db` shape — both pure-Go, both common in dev contexts — and land in follow-on point releases (v0.7.x).
+
 ## Quickstart
 
 ```bash
@@ -161,6 +251,9 @@ command = "/absolute/path/to/ken-mcp"
 | `KEN_MCP_MODE` | `hybrid` | `bm25` / `semantic` / `hybrid`. Auto-downgrades to `bm25` with a stderr warning if the model dir is unreachable. |
 | `KEN_MCP_MODEL_DIR` | (unset) | Path to a Model2Vec snapshot containing `model.safetensors`. Empty ⇒ `bm25`-only. |
 | `KEN_MCP_CHUNKER` | `regex` | `regex` / `treesitter` / `line` / `markdown`. See ["Choosing a chunker"](#choosing-a-chunker). |
+| `KEN_DB_DSN` | (unset) | Postgres connection string (`postgres://...`). Enables [Tier 2 DB indexing](#tier-2--live-postgres-introspection-ken_db_dsn). Requires `KEN_MCP_DEFAULT_REPO` to be a local path. |
+| `KEN_DB_SAMPLE_ROWS` | `0` | Rows per table to sample. **Default 0 means schema-only.** See the [PII stance](#pii-stance-documentation--sane-defaults) before enabling. |
+| `KEN_DB_REINDEX_INTERVAL` | (off) | Go duration (`5m`, `1h`). Background refresh cadence. Off by default — restart or `SIGHUP` to refresh. |
 | `KEN_MCP_CACHE_SIZE` | `16` | LRU bound on the repo→Index cache. |
 | `KEN_MCP_LOG_LEVEL` | `warn` | `debug` / `info` / `warn` / `error`. All logs go to stderr; **stdout is the JSON-RPC channel** ([details](docs/DESIGN.md#hard-rule--stdoutstderr-contract)). |
 

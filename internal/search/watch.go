@@ -60,13 +60,25 @@ type WatchedIndex struct {
 	// backing slices; those stay intact (and readable, with tombstones
 	// filtered on every read path) until GC reclaims them.
 	//
-	// Held under corpusMu, but ONLY the debouncer touches them — the
-	// mutex is defensive against future code that might grow a second
-	// writer. Readers never take it.
+	// Held under corpusMu. As of v0.7.0 there are TWO writers: the
+	// debouncer goroutine (touching chunks/vecs from fsnotify events)
+	// and any caller of SetExtraChunks (typically the db.Refresher
+	// from cmd/ken-mcp updating the Tier-2 DB chunks). The published
+	// Index is always built from chunks ∪ extraChunks so a flush from
+	// either trigger publishes a consistent unioned snapshot.
 	corpusMu sync.Mutex
 	chunks   []chunk.Chunk
 	vecs     [][]float32
 	model    *embed.StaticModel
+
+	// v0.7.0 (ADR-017): "extra" chunks injected by the orchestrator
+	// from non-FS sources — currently database introspection via
+	// internal/db.Refresher. These survive fsnotify-driven flushes
+	// (never tombstoned by file removes) and are themselves replaced
+	// wholesale by SetExtraChunks. extraVecs is the parallel
+	// embedding slice when running in semantic/hybrid mode.
+	extraChunks []chunk.Chunk
+	extraVecs   [][]float32
 
 	// Filter shared with the debouncer: which fsnotify events
 	// correspond to files ken would index.
@@ -130,7 +142,7 @@ func newWatchedIndexWithDebounce(root string, mode Mode, chunkerName, modelDir s
 		done:        make(chan struct{}),
 		debounce:    debounce,
 	}
-	wi.ix.Store(BuildIndex(chunks, vecs, mode, model))
+	wi.ix.Store(wi.buildUnionedIndexLocked())
 
 	if !watch {
 		close(wi.done)
@@ -333,10 +345,66 @@ func (w *WatchedIndex) flush(batch map[string]fsnotify.Op) {
 	}
 
 	compacted := w.compactCorpus()
-	newIx := BuildIndex(w.chunks, w.vecs, w.mode, w.model)
+	newIx := w.buildUnionedIndexLocked()
 	w.ix.Store(newIx)
 	w.notifySwap()
-	w.notifyFlush(len(w.chunks), len(batch), compacted, time.Since(start))
+	w.notifyFlush(len(w.chunks)+len(w.extraChunks), len(batch), compacted, time.Since(start))
+}
+
+// buildUnionedIndexLocked constructs the published Index from the union
+// of FS chunks (w.chunks/w.vecs) and the orchestrator-injected extra
+// chunks (w.extraChunks/w.extraVecs). Caller MUST hold corpusMu.
+//
+// The concatenation order is "FS first, extras second" so a chunk's
+// index inside the published Index is stable for FS chunks across
+// snapshot republishes that only changed the extras — important for
+// any reader holding chunk indices across calls (none currently, but
+// the invariant is cheap to preserve).
+func (w *WatchedIndex) buildUnionedIndexLocked() *Index {
+	if len(w.extraChunks) == 0 {
+		return BuildIndex(w.chunks, w.vecs, w.mode, w.model)
+	}
+	merged := make([]chunk.Chunk, 0, len(w.chunks)+len(w.extraChunks))
+	merged = append(merged, w.chunks...)
+	merged = append(merged, w.extraChunks...)
+	var mergedVecs [][]float32
+	if w.vecs != nil || w.extraVecs != nil {
+		mergedVecs = make([][]float32, 0, len(w.vecs)+len(w.extraVecs))
+		mergedVecs = append(mergedVecs, w.vecs...)
+		mergedVecs = append(mergedVecs, w.extraVecs...)
+	}
+	return BuildIndex(merged, mergedVecs, w.mode, w.model)
+}
+
+// SetExtraChunks replaces the orchestrator-injected extra chunks and
+// publishes a new snapshot. Called by cmd/ken-mcp's db.Refresher swap
+// callback whenever Tier-2 DB introspection produces a fresh chunk set.
+//
+// Calling with chunks==nil (or empty) is the canonical "DB unreachable,
+// clear the DB chunks" path — the swap callback always fires so the
+// published snapshot reflects the latest known state from each source.
+//
+// Goroutine-safe: serialized via corpusMu against the debouncer's flush
+// path. Embedding (when model != nil) happens inside the lock; for
+// large DB snapshots this can block fsnotify flushes briefly. That's
+// acceptable — DB refreshes are infrequent (startup, periodic ≥1m,
+// SIGHUP) and embedding cost is bounded by chunk count.
+func (w *WatchedIndex) SetExtraChunks(chunks []chunk.Chunk) {
+	w.corpusMu.Lock()
+	defer w.corpusMu.Unlock()
+
+	w.extraChunks = chunks
+	if w.model != nil && len(chunks) > 0 {
+		vecs := make([][]float32, len(chunks))
+		for i, c := range chunks {
+			vecs[i] = w.model.Encode(c.Text)
+		}
+		w.extraVecs = vecs
+	} else {
+		w.extraVecs = nil
+	}
+	w.ix.Store(w.buildUnionedIndexLocked())
+	w.notifySwap()
 }
 
 // compactCorpus drops tombstoned chunks (and their parallel vecs slots)
@@ -453,7 +521,7 @@ func (w *WatchedIndex) appendFile(rel string) {
 	if err != nil {
 		return
 	}
-	cs, err := chunk.ChunkFile(w.chunkerName, rel, data, chunk.DefaultChunkSize)
+	cs, err := chunkOneFile(w.chunkerName, rel, data)
 	if err != nil {
 		return
 	}

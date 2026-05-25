@@ -15,9 +15,11 @@ package main
 // the stdout/stderr contract from main.go: stdout is JSON-RPC only.
 
 import (
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	kenmcp "github.com/townsendmerino/ken/mcp"
 )
@@ -83,5 +85,55 @@ func envPathOrURL(name string, l *kenmcp.Logger) string {
 	if err != nil || !st.IsDir() {
 		l.Logf(kenmcp.LogWarn, "%s=%q: not a directory or http(s) URL — value kept; per-request lookups may fail", name, raw)
 	}
+	return raw
+}
+
+// envDuration parses a Go time.Duration env var (e.g. "5m", "1h30m").
+// Empty/unset returns fallback; invalid input warns and returns
+// fallback. Used by v0.7.0's KEN_DB_REINDEX_INTERVAL (fallback: 0 =
+// disabled, no periodic reindex).
+func envDuration(name string, fallback time.Duration, l *kenmcp.Logger) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		l.Logf(kenmcp.LogWarn, "invalid %s=%q: %v — using default %s", name, raw, err, fallback)
+		return fallback
+	}
+	if d < 0 {
+		l.Logf(kenmcp.LogWarn, "invalid %s=%q: must be non-negative — using default %s", name, raw, fallback)
+		return fallback
+	}
+	return d
+}
+
+// envDSN parses a Postgres DSN env var. Accepts the URL form
+// (postgres:// or postgresql://). Empty/unset returns ""; invalid input
+// warns and returns "" — Tier 2 stays off rather than crashing the
+// server. The libpq key=value form is NOT accepted at this layer (pgx
+// supports it, but we want a loud rejection at startup rather than a
+// silent connection-time failure later).
+func envDSN(name string, l *kenmcp.Logger) string {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		l.Logf(kenmcp.LogWarn, "invalid %s: %v — Tier 2 (DB indexing) disabled", name, err)
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "postgres" && scheme != "postgresql" {
+		l.Logf(kenmcp.LogWarn, "invalid %s scheme %q (want postgres:// or postgresql://) — Tier 2 (DB indexing) disabled", name, u.Scheme)
+		return ""
+	}
+	if u.Host == "" {
+		l.Logf(kenmcp.LogWarn, "invalid %s: missing host — Tier 2 (DB indexing) disabled", name)
+		return ""
+	}
+	// Don't log the raw DSN itself — it usually contains a password.
 	return raw
 }

@@ -22,6 +22,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-014](#adr-014-fsfs-as-canonical-walkerindexer-surface) | `fs.FS` as canonical walker/indexer surface | Accepted |
 | [ADR-015](#adr-015-nested-gitignore-support-via-scope-stack-on-existing-rule-engine) | Nested `.gitignore` support via scope stack on existing rule engine | Accepted |
 | [ADR-016](#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) | Embedded-corpus MCP build pattern via `mcp.Run` library function | Accepted |
+| [ADR-017](#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance) | Database schema indexing — two-tier (static SQL + live Postgres) with documented PII stance | Accepted |
 
 ---
 
@@ -579,3 +580,67 @@ Three supporting changes land alongside the new package:
 - **The leveled logger (`mcp.Logger`, `mcp.LogLevel`, etc.) was moved from `cmd/ken-mcp/main.go` to the `mcp` package** as part of giving `mcp.Run` somewhere to send its diagnostics. `cmd/ken-mcp/env.go` now uses `kenmcp.Logger` and `kenmcp.ValidateEnum`; the env-var-helper test surface is unchanged.
 - **Multi-corpus stays an open option for v0.7+.** If field reports surface (the "SDK + examples + tutorials bundled" case is the most likely shape), `mcp.RunMulti(ctx, map[string]fs.FS, opts)` or an `Options.Corpora` variant is the natural extension. The current single-corpus shape doesn't paint us into a corner.
 - **No new third-party dependencies.** Everything lands in pure Go via `io/fs`, `embed`, the existing `go-sdk` MCP package, and the existing chunker / search / embed plumbing.
+
+---
+
+## ADR-017: Database schema indexing — two-tier (static SQL + live Postgres) with documented PII stance
+
+**Status:** Accepted
+**Date:** 2026-05-25
+
+### Context
+
+Agents working on a real codebase need schema context alongside code. An agent answering "how do users get authenticated" should retrieve, in one ranked result list, the Go function doing auth, the SQL queries it executes, the `users` table definition, and the FK relationships from `sessions.user_id`. Without ken, that's three separate tool calls — code search + DB connector schema lookup + (sometimes) query log inspection — and the results aren't co-ranked.
+
+ken's differentiator vs. standalone Postgres-MCP connectors that give live state but don't rank with code: ken's hybrid BM25 + semantic ranking treats every retrievable unit as homogeneous text, so schema chunks compete with code chunks in the same scoring function. Tracking issue: [#8](https://github.com/townsendmerino/ken/issues/8).
+
+v0.6.0 (ADR-016) established "ken indexes docs alongside code"; v0.7.0 extends to "ken indexes the context developers actually use — code, docs, schemas."
+
+### Decision
+
+**Two tiers, both shipping in v0.7.0:**
+
+1. **Tier 1 — Static SQL parsing.** New `internal/sql` package parses `.sql` files in the corpus (CREATE TABLE / INDEX / VIEW, ALTER TABLE) and emits one denormalized "for retrieval" chunk per object. Activates automatically when `.sql` files are present; no opt-in. The structural chunks are ADDITIVE to whatever chunker is configured (so `.sql` files are still line-chunked too — agents can hit either form). Wired in `internal/search/chunkOneFile`, so both `cmd/ken-mcp`'s watch path and `mcp.Run`'s build-once path benefit.
+
+2. **Tier 2 — Live Postgres introspection.** New `internal/db` package connects to `KEN_DB_DSN`, introspects via `pg_catalog` / `information_schema`, emits one chunk per table / view / index / function with a freshness header (`-- indexed at <UTC> from postgres@<host>`). Opt-in row sampling via `KEN_DB_SAMPLE_ROWS=N` (default 0 = schema-only). Three reindex layers: build-once-at-startup (default), periodic via `KEN_DB_REINDEX_INTERVAL`, manual via `SIGHUP` (unix-only; no-op on Windows). All three reuse ADR-012's atomic snapshot-swap machinery via the new `WatchedIndex.SetExtraChunks` method.
+
+**Postgres only for v0.7.0.** Via `github.com/jackc/pgx/v5` — mature pure-Go driver, default `Tracer` is nil so no stdout-pollution risk, fits ADR-001's no-cgo discipline. MySQL (`github.com/go-sql-driver/mysql`) and SQLite (`modernc.org/sqlite`) share the same `internal/db` shape and land in follow-on point releases.
+
+**DB chunks attach to the default repo's index, not multi-repo.** `KEN_DB_DSN` requires `KEN_MCP_DEFAULT_REPO` to be set and to be a local path (not an http(s) URL). When DSN is set but no default repo is configured, Tier 2 logs a warn and stays off — multi-repo searches (where each agent call names its own repo) don't have a clear semantics for "which repo should DB chunks attach to," and forcing operators to pick a default for DB integration is cleaner than guessing.
+
+**PII stance: documentation + sane defaults, not engineered controls.**
+- Schema-only is the default (`KEN_DB_SAMPLE_ROWS=0` ships unset).
+- The opt-in env var name is unambiguous (`KEN_DB_SAMPLE_ROWS` reads as "rows you're choosing to expose").
+- Every Tier-2 chunk carries a freshness header naming the engine + host but never credentials, so agent output naturally surfaces provenance.
+- The README's DB section opens with a prominent callout: "intended for development databases. Do not point this at production data; sample rows will be visible to agents and thus to your LLM provider."
+
+Engineered redaction controls (column-exclusion DSL, redaction modes, row synthesis) are NOT shipping. Operators who need those should not point ken at the DB.
+
+### Alternatives considered
+
+- **Column-exclusion DSL / redaction modes / row synthesis.** Rejected. Complexity tax for a single concern (PII), false sense of security (operators trust the controls instead of avoiding the integration entirely), inconsistent with ken's "small surface area" ethos. If you can't trust the database with the LLM, don't connect ken to it — there is no middle ground we can land safely.
+
+- **One engine at a time across releases (Postgres v0.7.0, MySQL v0.7.1, SQLite v0.7.2).** Accepted. Scope discipline: one engine landing cleanly with full introspection + sampling + reindex layers + integration tests + CI service container > three half-baked. The `internal/db` package shape doesn't bake in Postgres-specifics outside `introspect.go` queries; adding MySQL means a sibling file with the equivalent SHOW/INFORMATION_SCHEMA queries.
+
+- **Per-call DB introspection (lazy).** Rejected. Would tie tool-call latency to DB roundtrip + introspection cost; the agent's query result has to wait for the DB to respond on EVERY search. Build-once + atomic-snapshot-swap is consistent with the rest of ken (fsnotify-driven for FS, ticker-driven for DB).
+
+- **LISTEN/NOTIFY for push-based change detection.** Deferred to v0.8.0. Requires DB-side event triggers and engine-specific wire-up. The three reindex layers we landed (startup + periodic + SIGHUP) cover the practical workflows (migrate-up + `kill -HUP $(pgrep ken-mcp)`); LISTEN/NOTIFY is the next ergonomic step but not the difference between "works" and "doesn't."
+
+- **Agent-triggerable `reindex_db` MCP tool.** Deferred to v0.8.0. The tool needs rate-limiting / cooldown / opt-in toggle so an over-eager agent doesn't hammer the DB on every loop iteration. Better to wait for field signal on how agents actually use DB integration before designing the tool surface.
+
+- **`mcp.Run` (embedded-corpus) DB support.** Deferred to v0.8.0+. Embedded-corpus binaries are static-by-construction; live DB connections don't obviously fit the "single static binary, no per-query egress" product story. If a use case materializes (e.g. an SDK author wanting to ship docs + a connection to their dev DB), `mcp.Options.DBSource` is the natural extension.
+
+- **DB chunks shared across all repos** (one DB → many WatchedIndexes). Rejected. The composition gets ambiguous: agents searching repo A would see DB chunks irrelevant to that repo, and the snapshot-swap path would have to broadcast to every cache entry. The "default repo gets DB chunks; other repos don't" rule is the simplest semantics that's also the one most operators want (the default repo IS their working tree).
+
+- **Migration-history folding** (assembling current state from CREATE TABLE + later ALTER TABLE across files). Out of scope for v0.7.0. Each statement becomes its own chunk; agents see the union of historical state. Devs who want a single "current state" view either use Tier 2 or maintain a canonical `schema/current.sql`. Documented future refinement.
+
+### Consequences
+
+- **New dependency: `github.com/jackc/pgx/v5`.** Pure Go, no cgo. Default Tracer is nil — no protocol logging to stdout, so the JSON-RPC stdout contract holds. `TestBinary_StdoutIsCleanJSONRPC_WithDB` enforces this by spawning `cmd/ken-mcp` with all `KEN_DB_*` env vars set and driving a real MCP session.
+- **`cmd/ken-mcp` startup gains a conditional DB code path.** No-op when `KEN_DB_DSN` is unset (the existing `TestBinary_StdoutIsCleanJSONRPC` test confirms byte-identical v0.6.0 behavior). When set, the path pre-builds the default repo's `WatchedIndex`, runs an initial `db.IndexSchema`, and (optionally) spawns a periodic `Refresher.Run` + installs a SIGHUP handler. All failure modes are non-fatal — Tier 2 going dark is logged and the server continues with FS-only.
+- **PII responsibility lives with operators.** README is explicit; freshness metadata in every chunk surfaces "this came from postgres@dev-pg" naturally in agent output. Schema-only is the default everyone sees on first launch.
+- **Three reindex triggers share one atomic-swap path.** `WatchedIndex.SetExtraChunks` is the seam — both `db.Refresher` (periodic + SIGHUP) and the startup one-shot call it. No new snapshot-state machinery; ADR-012's invariants (reader sees a complete snapshot, writer publishes via atomic pointer) extend cleanly.
+- **Tier 1 doesn't fold migration history across files.** Documented and intentional. Each statement is its own chunk; agents see the historical mutation as a retrievable unit, not as a synthesized "current state."
+- **CI grows a Postgres service container** (ubuntu-only — GitHub Actions services don't run on macos-latest). The default `go test ./...` still works without one; the dbintegration tag gates the live tests and the CI yaml separates them into a second `test-db-integration` job.
+- **`mcp.Run` (v0.6.0 embedded-corpus) is unchanged.** `mcp.Options` adds no DB fields. The `mcp/` tests still pass; the embedded-corpus path has no DB code reachable from it. Future DB support there is a separate v0.8.0+ ADR.
+- **Tier 1's `.sql` structural parsing benefits `mcp.Run` too.** Lives in `internal/search` (which both binaries use), so an embedded-corpus binary that includes `.sql` files among its docs gets the structural chunks for free. Filesystem-based, not DB-based — doesn't violate the "no DB code in the embedded-corpus path" rule.

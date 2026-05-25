@@ -166,6 +166,83 @@ func TestEnvPath(t *testing.T) {
 	})
 }
 
+func TestEnvDuration(t *testing.T) {
+	const key = "KEN_TEST_DURATION"
+	cases := []struct {
+		name     string
+		envVal   string
+		fallback time.Duration
+		want     time.Duration
+		wantWarn bool
+	}{
+		{"missing", "", 0, 0, false},
+		{"empty", "", 5 * time.Minute, 5 * time.Minute, false},
+		{"valid 5m", "5m", 0, 5 * time.Minute, false},
+		{"valid 1h30m", "1h30m", 0, 90 * time.Minute, false},
+		{"zero is valid", "0s", time.Minute, 0, false},
+		{"invalid string falls back + warns", "soonish", time.Minute, time.Minute, true},
+		{"trailing junk falls back + warns", "5mblah", time.Minute, time.Minute, true},
+		{"whitespace-only is missing", "  \t", time.Minute, time.Minute, false},
+		{"negative falls back + warns", "-5m", time.Minute, time.Minute, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.envVal == "" {
+				os.Unsetenv(key)
+			} else {
+				withEnv(t, map[string]string{key: c.envVal})
+			}
+			l, buf := newCapturedLogger()
+			got := envDuration(key, c.fallback, l)
+			if got != c.want {
+				t.Errorf("envDuration(%q, %s) = %s, want %s", c.envVal, c.fallback, got, c.want)
+			}
+			hasWarn := strings.Contains(buf.String(), "invalid "+key)
+			if hasWarn != c.wantWarn {
+				t.Errorf("warn captured = %v, want %v\nlog: %q", hasWarn, c.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
+func TestEnvDSN(t *testing.T) {
+	const key = "KEN_TEST_DSN"
+	cases := []struct {
+		name     string
+		envVal   string
+		want     string
+		wantWarn bool
+	}{
+		{"missing", "", "", false},
+		{"empty", "", "", false},
+		{"valid postgres://", "postgres://user:pass@host:5432/db?sslmode=disable", "postgres://user:pass@host:5432/db?sslmode=disable", false},
+		{"valid postgresql://", "postgresql://h/d", "postgresql://h/d", false},
+		{"case-insensitive scheme", "POSTGRES://h/d", "POSTGRES://h/d", false},
+		{"wrong scheme falls back + warns", "mysql://h/d", "", true},
+		{"http scheme falls back + warns", "http://h/d", "", true},
+		{"libpq key=value form falls back + warns", "host=localhost port=5432 dbname=mydb", "", true},
+		{"missing host falls back + warns", "postgres:///d", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.envVal == "" {
+				os.Unsetenv(key)
+			} else {
+				withEnv(t, map[string]string{key: c.envVal})
+			}
+			l, buf := newCapturedLogger()
+			got := envDSN(key, l)
+			if got != c.want {
+				t.Errorf("envDSN(%q) = %q, want %q", c.envVal, got, c.want)
+			}
+			hasWarn := strings.Contains(buf.String(), "invalid "+key)
+			if hasWarn != c.wantWarn {
+				t.Errorf("warn captured = %v, want %v\nlog: %q", hasWarn, c.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
 func TestEnvPathOrURL(t *testing.T) {
 	const key = "KEN_TEST_PATH_OR_URL"
 	dir := t.TempDir()
@@ -282,5 +359,88 @@ func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 		if !strings.Contains(txt, want) {
 			t.Errorf("search output missing %q\n--- got ---\n%s", want, txt)
 		}
+	}
+}
+
+// TestBinary_StdoutIsCleanJSONRPC_WithDB is the v0.7.0 variant: same
+// load-bearing stdout-cleanliness check, but with all KEN_DB_* env vars
+// set so the Tier-2 code path (DB introspection, Refresher, SIGHUP
+// handler) fires in the spawned binary. If pgx or anything in the DB
+// path writes to stdout, CommandTransport can't parse the JSON-RPC
+// response and this test fails loudly.
+//
+// Skipped when KEN_DB_TEST_DSN is unset (contributors without Postgres
+// run `go test ./...` and this skips silently).
+func TestBinary_StdoutIsCleanJSONRPC_WithDB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess MCP test in -short mode")
+	}
+	dsn := os.Getenv("KEN_DB_TEST_DSN")
+	if dsn == "" {
+		t.Skip("KEN_DB_TEST_DSN not set; see internal/db/integration_test.go for setup")
+	}
+
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "ken-mcp")
+	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
+	}
+
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(repoRoot, "testdata", "repo")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binPath)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"KEN_MCP_MODE=bm25",
+		"KEN_MCP_CHUNKER=regex",
+		"KEN_MCP_LOG_LEVEL=info", // verbose to catch any accidental stdout writes
+		"KEN_MCP_DEFAULT_REPO=" + fixture,
+		"KEN_DB_DSN=" + dsn,
+		"KEN_DB_SAMPLE_ROWS=3",
+		"KEN_DB_REINDEX_INTERVAL=30s",
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-test-db", Version: "0"}, nil)
+	sess, err := cli.Connect(ctx, &sdk.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("Connect (with DB env): %v\n--stderr--\n%s", err, stderr.String())
+	}
+	defer sess.Close()
+
+	// Drive a tool call to make sure the JSON-RPC roundtrip is clean
+	// even after the DB startup chatter (Tier-2 init logs to stderr,
+	// which is fine — we only care about stdout).
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query": "validate_user",
+			"mode":  "bm25",
+			"top_k": 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search) with DB env: %v\n--stderr--\n%s", err, stderr.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(txt, "Search results for:") {
+		t.Errorf("search output malformed with DB env:\n%s", txt)
+	}
+
+	// stderr should mention the Tier 2 wiring (so we know the code path
+	// actually ran, not silently skipped).
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "Tier 2: indexed") {
+		t.Errorf("expected 'Tier 2: indexed' in stderr (proves DB code ran), got:\n%s", stderrStr)
 	}
 }
