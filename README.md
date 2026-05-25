@@ -251,6 +251,63 @@ Agents can refresh ken's view of the database schema on demand by calling the `r
 
 See [ADR-020 Part 2](docs/DECISIONS.md#part-2-agent-callable-reindex-via-reindex_db-mcp-tool-v080-part-2) for the alternatives considered (cooldown, queue, async-return, env-var-disable, auto-call-from-search all rejected with mechanism-level failure modes).
 
+### Embedded DB support for SDK authors (v0.8.0 Part 3, opt-in)
+
+SDK authors using [`mcp.Run`](#using-ken-in-your-own-mcp-server-mcprun) (the v0.6.0 embedded-corpus entrypoint) can wire Tier 2 DB support — schema introspection, optional LISTEN/NOTIFY, optional interval reindex, and the `reindex_db` MCP tool — via the new opt-in `mcp/db` package:
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "os"
+    "time"
+
+    "github.com/townsendmerino/ken/mcp"
+    mcpdb "github.com/townsendmerino/ken/mcp/db"
+)
+
+func main() {
+    ctx := context.Background()
+
+    // Opt-in: only SDK authors who want DB support import mcp/db.
+    reindex, cleanup, err := mcpdb.Setup(ctx, mcpdb.Config{
+        DSN:             os.Getenv("MY_DB_DSN"),
+        SampleRows:      0,
+        ReindexInterval: 5 * time.Minute,
+        EnableListen:    true, // requires one-time `mcpdb.ListenNotifyScript | psql $DSN` setup
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    if cleanup != nil {
+        defer cleanup()
+    }
+
+    if err := mcp.Run(ctx, myEmbeddedDocsCorpus, mcp.Options{
+        Mode:        "hybrid",
+        ChunkerName: "markdown",
+        Reindex:     reindex, // nil-safe: nil → reindex_db tool NOT registered
+    }); err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+**v0.6.0 binary-size contract preserved.** SDK authors who DON'T import `mcp/db` get a binary identical in dep-tree shape to v0.7.2's `mcp.Run` use case — no pgx, no SQLite, no MySQL driver, no `internal/db` in the link graph. The opt-in package boundary is enforced at CI time by `TestBinary_MCPPackageStaysDBFree`, which shells out to `go list -deps github.com/townsendmerino/ken/mcp` and fails if any DB driver path appears.
+
+**SDK authors who want `print-listen-script`** in their own CLI can grab the embedded SQL script from `mcpdb.ListenNotifyScript` (a re-export of `internal/db.ListenNotifyScript`) without depending on the `internal/` package:
+
+```go
+if len(os.Args) > 1 && os.Args[1] == "print-listen-script" {
+    _, _ = io.WriteString(os.Stdout, mcpdb.ListenNotifyScript)
+    return
+}
+```
+
+**Caveat: chunk integration into `mcp.Run`'s embedded search is deferred to v0.9.0.** In v0.8.0 Part 3, calling `reindex_db` from an agent against an `mcp.Run + mcp/db.Setup` binary runs the introspection (validates the DSN, captures freshness, fires LISTEN handlers, exercises the interval-ticker path) and returns the standard `Reindexed in Nms.` response — but the chunks `IndexSchema` produces are NOT yet unioned into the embedded `*search.Index` that `mcp.Run` serves. SDK authors who need live DB chunks in their search results today should use `cmd/ken-mcp` directly (which uses `*WatchedIndex.SetExtraChunks`); the `mcp.Run` chunk integration lands in v0.9.0. See [ADR-020 Part 3](docs/DECISIONS.md#part-3-opt-in-mcpdb-package-preserving-v060-binary-size-contract-v080-part-3) for the full rationale + the v0.9.0 follow-up plan.
+
 ## Quickstart
 
 ```bash

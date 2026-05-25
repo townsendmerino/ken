@@ -25,7 +25,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-017](#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance) | Database schema indexing — two-tier (static SQL + live Postgres) with documented PII stance | Accepted |
 | [ADR-018](#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay) | SQLite engine + migration-history folding via lightweight ALTER replay | Accepted |
 | [ADR-019](#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) | MySQL engine + schema filtering for multi-schema dev databases | Accepted |
-| [ADR-020](#adr-020-listennotify-push-based-schema-change-detection-v080-part-1) | LISTEN/NOTIFY push-based schema change detection + `reindex_db` MCP tool + (forthcoming) `mcp.Run` DB support (v0.8.0) | Accepted |
+| [ADR-020](#adr-020-listennotify-push-based-schema-change-detection-v080-part-1) | LISTEN/NOTIFY push-based schema change detection + `reindex_db` MCP tool + opt-in `mcp/db` package for SDK authors (v0.8.0) | Accepted |
 
 ---
 
@@ -800,7 +800,7 @@ v0.7.2 pairs them because both are Tier 2 ergonomic improvements that ship clean
 
 ## ADR-020: LISTEN/NOTIFY push-based schema change detection (v0.8.0 Part 1)
 
-**Status:** Accepted (Parts 1 and 2; Part 3 lands in follow-on commits within v0.8.0)
+**Status:** Accepted (Parts 1, 2, and 3 all shipped; v0.8.0 ready to tag)
 
 **Date:** 2026-05-25
 
@@ -919,3 +919,70 @@ v0.8.0 is the "operator-control-loop" release; this ADR's section covers Part 1 
 - **No new dependencies.** Part 2 is pure-Go stdlib additions (`sync.Mutex.TryLock` exists since Go 1.18); no new modules in `go.mod`.
 
 - **Backwards compatibility:** stock `cmd/ken-mcp` with `KEN_DB_DSN` unset is byte-identical to v0.7.2 + v0.8.0 Part 1. All six stdout-cleanliness variants pass; all existing integration tests still pass; the v0.8.0 Part 1 listener path is unchanged (still uses `Refresh`, not `TryRefresh`).
+
+### Part 3: opt-in `mcp/db` package preserving v0.6.0 binary-size contract (v0.8.0 Part 3)
+
+**Date:** 2026-05-25
+
+### Decision (Part 3)
+
+**A new opt-in `mcp/db` package — separate import path from `mcp` — that lets SDK authors using `mcp.Run` (the v0.6.0 embedded-corpus entrypoint) wire Tier 2 DB support without forcing every `mcp.Run` user to pay the DB driver binary-size cost.**
+
+1. **New `mcp/db` package** (import path: `github.com/townsendmerino/ken/mcp/db`, package name: `mcpdb`). Exposes `Config` struct (mirrors the v0.7.x env-var surface from `cmd/ken-mcp`), `Setup(ctx, cfg) → (mcp.ReindexFunc, func(), error)`, and `ListenNotifyScript` (re-export of `internal/db.ListenNotifyScript`). The package name `mcpdb` avoids collision with `internal/db` in any file that imports both for testing.
+
+2. **`mcp` package stays DB-free.** Zero new imports in `mcp`. The Part 2 `mcp.ReindexFunc` callback type from `mcp/server.go` is the seam; Part 3 adds an `mcp.Options.Reindex ReindexFunc` field (zero-cost — same type, just a new field on `Options`) and conditional `reindex_db` tool registration in `newServerForIndex`. No DB driver, no `internal/db` import. The v0.6.0 binary-size contract is preserved by construction.
+
+3. **`internal/db.SetupTier2` extraction** — the pure-Tier-2-mechanics lifecycle (initial IndexSchema + Refresher construction + interval ticker + LISTEN/NOTIFY listener + cleanup) extracted into a shared helper. Both `cmd/ken-mcp/wireDBTier2` (env-var driven) and `mcp/db.Setup` (config-struct driven) call it; the CLI- and SDK-specific concerns (env-var parsing, SIGHUP, swap-target wiring, logger interface) stay in their respective callers. One source of truth, two surfaces.
+
+4. **Empty-DSN safety net.** `Setup(ctx, Config{DSN: ""})` returns `(nil, nil, nil)` — not an error. SDK authors with conditional DB configuration (`if os.Getenv("MY_DB_DSN") != "" { ... }`) can call `Setup` unconditionally and let nil DSN gate the behavior. The returned nil `ReindexFunc` propagates through `mcp.Options.Reindex` to a nil cfg.Reindex inside `mcp.Run`'s `newServerForIndex`, which skips `reindex_db` tool registration.
+
+5. **`mcp/db.ListenNotifyScript` re-exports `internal/db.ListenNotifyScript`.** SDK authors building their own CLI binary can expose a `print-listen-script` subcommand without depending on `internal/db` directly — the re-export honors the `internal/` boundary while giving SDK authors a stable public API surface for the script bytes.
+
+6. **Chunk visibility into `mcp.Run`'s static `*search.Index` is deferred to v0.9.0.** In v0.8.0 Part 3, `mcp/db.Setup` runs introspection on each refresh and the `reindex_db` tool returns the standard `Reindexed in Nms.` response — but the chunks `IndexSchema` produces are NOT yet unioned into the embedded `*search.Index` that `mcp.Run` serves. The Setup's swap callback logs a deferral message via the operator's `LogWriter` so SDK authors / operators see the limitation at runtime. Rationale + the v0.9.0 path are in the Consequences section below.
+
+7. **Binary-size invariant enforced by Go test.** `TestBinary_MCPPackageStaysDBFree` in `mcp/binary_contract_test.go` shells out to `go list -deps github.com/townsendmerino/ken/mcp` and asserts none of `github.com/jackc/pgx`, `modernc.org/sqlite`, `github.com/go-sql-driver/mysql`, or `github.com/townsendmerino/ken/internal/db` appear in the transitive dep set. Sibling test asserts `mcp/db` DOES bring those deps (catches a future refactor that accidentally detaches the opt-in package from the implementation). Both run in the default `go test ./...` invocation; CI catches a contract violation before merging.
+
+### Alternatives considered (Part 3)
+
+- **Single-import API: `mcp.Options.DBSource *DBSource` in the `mcp` package itself.** Rejected. The `mcp` package would import `internal/db`, which transitively pulls pgx + modernc.org/sqlite + go-sql-driver/mysql into every binary that uses `mcp.Run`. Go's linker can't dead-code-eliminate a referenced package even behind a nil check at the call site, and the SQL drivers register via `init()` so they bloat the binary unconditionally. Concrete impact: SDK authors building docs-only embedded-corpus binaries (the v0.6.0 use case) would see ~10MB+ binary bloat for code they don't run. The package-split design preserves the binary-size contract at the cost of one extra import line and one extra function call for DB-using SDK authors — the right trade. Verified via `TestBinary_MCPPackageStaysDBFree`.
+
+- **Blank-import provider registration (the `database/sql` pattern: `import _ "github.com/lib/pq"`).** Rejected. The pattern is genuinely clever for SQL driver registration but loses static type checking — SDK authors who forget the blank import get a runtime "DB support not registered" error instead of a compile-time signal. The explicit-helper pattern (`mcpdb.Setup(cfg)`) keeps everything statically typed: missing import means missing symbol means compile error. SDK authors grep-friendly; `mcpdb.Setup` is a clear API call. Concrete failure prevented: a copy-pasted SDK example without the blank import that compiles and runs but silently lacks DB support.
+
+- **Build tag (`-tags mcpdb` for the opt-in).** Rejected. Cross-cutting build tags are surprising for SDK authors who follow standard `go build ./...` invocations — they'd get the "wrong" behavior (no DB) without an obvious signal in the source. Build tags are right for "test-only" code (`-tags integration`) or "OS-specific" code (`//go:build linux`); they're wrong for "opt-in feature" gating where the SDK author's import-time choice should be the activation signal. Concrete failure prevented: an SDK author copies the README's Setup example, runs `go build`, and gets a "symbol not defined" error because they didn't pass `-tags mcpdb`.
+
+- **Require SDK author to construct `*internal/db.Refresher` directly and pass it in.** Rejected. Leaks the `internal/db` package boundary into the public API. Go's `internal/` convention exists precisely so the package's surface can change without breaking external callers; making it the public seam invalidates that protection — a future v0.8.x change to `internal/db.Refresher`'s shape would break every SDK author. The `mcp/db.Setup` helper owns the public surface; `internal/db` stays internal and can evolve freely.
+
+- **Per-engine sub-packages (`mcp/db/postgres`, `mcp/db/mysql`, `mcp/db/sqlite`).** Deferred. Engines aren't separable today — `Refresher` is engine-agnostic via the `dsnEngine` dispatch in `internal/db.IndexSchema`, and SDK authors who want all three engines would be back to ~10MB+ binary cost anyway. Splitting `mcp/db` into three sub-packages would multiply the API surface (3× `Config`, 3× `Setup`) without obvious benefit. Concrete failure prevented: SDK authors confused about which sub-package to import when they don't know in advance whether their operators' DSN will be Postgres / MySQL / SQLite. If a future release adds an engine with substantially different setup requirements (e.g. a streaming-only engine with no INFORMATION_SCHEMA equivalent), revisit the sub-package split then.
+
+- **Hybrid: `mcp.Options.DBSource *DBSource` as a convenience wrapper that internally calls `mcp/db.Setup`.** Rejected. Two paths to document, two surfaces SDK authors choose between, and the convenience path STILL requires `mcp` to import `mcp/db` (which imports `internal/db`) — defeating the entire binary-size purpose. The package-split design has a single SDK author surface; the cost is one import + one function call. Operator confusion would also increase: which path is "official"? When do you use which?
+
+### Consequences (Part 3)
+
+- **v0.6.0 binary-size contract preserved.** `mcp` package's transitive dep tree is unchanged across the v0.6.0 → v0.8.0 arc — same imports, same drivers, same binary size for SDK authors building docs-only embedded-corpus binaries. The contract is enforced by `TestBinary_MCPPackageStaysDBFree`; a future commit accidentally adding a DB import to `mcp/` fails CI before merging.
+
+- **One additional import + one function call** is the SDK author cost for DB-using `mcp.Run` deployments. Documented in the README's "Indexing database schemas → Embedded DB support" subsection with the canonical example.
+
+- **All three v0.8.0 parts converge on one implementation.** The `internal/db.SetupTier2` extraction makes the convergence load-bearing: same Refresher + TryRefresh + reindex_db + LISTEN/NOTIFY path serves both `cmd/ken-mcp` (env-var-driven CLI) and `mcp.Run` SDK authors (config-struct-driven). One source of truth for Tier-2 lifecycle behavior; two thin wrappers for the surface-specific concerns.
+
+- **`mcp/db.Setup` is the single SDK author seam for Tier 2.** Interval ticker, LISTEN/NOTIFY listener, reindex_db tool registration via the returned `ReindexFunc`, cleanup lifecycle — all flow through it. SDK authors don't see `Refresher`, `Listener`, or any `internal/db` type directly.
+
+- **`mcp/db.ListenNotifyScript` re-exports `internal/db.ListenNotifyScript`** so SDK authors can build their own `print-listen-script` CLI subcommand without depending on `internal/db` directly. Matches the pattern `cmd/ken-mcp` established in Part 1 — same script content, exposed through whichever public API the caller is at.
+
+- **Chunk visibility into `mcp.Run`'s static `*search.Index` is deferred to v0.9.0.** Concrete state in v0.8.0:
+  - `Setup` runs initial IndexSchema synchronously and Refresher fires on interval / LISTEN / reindex_db.
+  - The Refresher's swap callback receives the chunks. In `cmd/ken-mcp` the callback is `WatchedIndex.SetExtraChunks` (chunks land in the searchable snapshot); in `mcp/db.Setup` the callback logs `"mcp/db: reindex captured N DB chunks (chunk-into-Index integration deferred to v0.9.0)"` via the operator's `LogWriter`.
+  - The `reindex_db` tool returns the standard `Reindexed in Nms.` response — the agent gets the same wire format whether running against `cmd/ken-mcp` or an `mcp.Run + mcp/db.Setup` binary, even though the chunks aren't yet searchable in the latter.
+
+  **Why deferred:** chunk integration into a static `*search.Index` requires either (a) adding a `SetExtraChunks` mechanism to `*Index` (which needs to hold a model reference for embedding extras, a moderate refactor of `internal/search`), or (b) switching `mcp.Run` to use `*WatchedIndex` internally (which would pull `fsnotify` into the `mcp` package's dep tree, violating the v0.6.0 binary-size contract). v0.9.0 will pick path (a) — surface as `*search.Index.SetExtraChunks` + a `Config.Swap` callback in `mcp/db`, defaulting to log-only — when the supporting `internal/search` refactor lands. The Part 3 deliverable is the API surface + Tier 2 side effects + the `reindex_db` tool; chunk visibility is its own follow-up.
+
+- **`cmd/ken-mcp` refactored to use `SetupTier2`.** The `wireDBTier2` function shrunk by ~50 lines as the interval-ticker + listener wiring moved into `SetupTier2`. SIGHUP wiring stays in `cmd/ken-mcp` (it's a CLI concern, not an SDK concern). Backwards compatibility verified: same env vars, same log lines (the `Tier 2: indexed N DB chunks into %q` line is preserved by composing it via the caller's `onSwap` wrapper).
+
+- **Stdout-cleanliness contract extends to the SDK author path.** `mcp/db/run_integration_test.go`'s `TestRun_WithMCPDBReindex_Binary` is the seventh stdout-cleanliness audit in spirit (sixth in name; the sixth slot is Part 2's `_WithReindexDB`). The test builds the mini-binary at `mcp/db/testdata/embedded-with-db/main.go`, spawns it via `sdk.CommandTransport`, and drives a real `reindex_db` call — if anything in the `mcp.Run + mcp/db.Setup` code path writes to stdout, the JSON-RPC roundtrip fails and the test fails loudly.
+
+- **9 new tests across 3 packages.** `internal/db/setup_test.go` (6 SetupTier2 unit tests), `mcp/db/setup_test.go` (7 unit tests for Setup, Config validation, and ListenNotifyScript re-export), `mcp/db/run_integration_test.go` (2 binary integration tests covering the SDK-author path with-DSN + without-DSN), `mcp/binary_contract_test.go` (2 binary-size invariant tests). Plus 1 new mini-binary at `mcp/db/testdata/embedded-with-db/main.go` (~80 lines including comments) — the canonical SDK author example, used as the test subject.
+
+- **No new dependencies.** Part 3 is pure-Go internal refactoring + new package; `mcp/db` brings in `internal/db` which already had pgx + modernc.org/sqlite + go-sql-driver/mysql at v0.7.2. No `go.mod` changes.
+
+- **Backwards compatibility:** stock `cmd/ken-mcp` behaves byte-identically to v0.8.0 Part 2; `mcp.Run` with `opts.Reindex == nil` (the v0.6.0 → v0.7.2 default) behaves byte-identically to v0.7.2's `mcp.Run`. All six stdout-cleanliness variants from Parts 1 + 2 pass; the new mcp/db binary tests are additive.
+
+- **v0.8.0 ready to tag.** Parts 1 (LISTEN/NOTIFY), 2 (reindex_db tool), and 3 (mcp/db package) all shipped on branch `v0.8.0-listen`; the three reindex-trigger sources + agent-callable refresh + SDK-author opt-in package compose into the "operator-control-loop" release narrative.
