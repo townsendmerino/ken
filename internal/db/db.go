@@ -80,6 +80,23 @@ type Options struct {
 	// fine for absolute SQLite paths and for the Postgres path (which
 	// ignores this field entirely).
 	DefaultRepoPath string
+
+	// IncludeSchemas (v0.7.2) is the allow-list of schema names from
+	// KEN_DB_SCHEMAS. Empty means "no allow-list filter; index everything
+	// except the engine's default exclusions and ExcludeSchemas". Default
+	// exclusions (pg_catalog, information_schema, mysql, performance_schema,
+	// sys) are ALWAYS applied regardless of this field — operators who
+	// genuinely need to index system schemas should not point ken at the DB.
+	//
+	// SQLite is single-schema and ignores this field; cmd/ken-mcp logs a
+	// debug-level message when the env var is set with a SQLite DSN.
+	IncludeSchemas []string
+
+	// ExcludeSchemas (v0.7.2) is the deny-list from KEN_DB_EXCLUDE_SCHEMAS.
+	// Extends (does not replace) the engine's default exclusion list.
+	// When IncludeSchemas is non-empty, the allow-list wins and this is
+	// ignored — cmd/ken-mcp warns at startup when both are set.
+	ExcludeSchemas []string
 }
 
 // validate normalizes Options for safety: clamps negative SampleRows to

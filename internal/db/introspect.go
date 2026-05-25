@@ -84,8 +84,13 @@ type functionInfo struct {
 // which logs and continues with Tier 1 only). Per-row data issues are
 // tolerated — if pg_indexes contains a row we can't parse, we skip it
 // and continue rather than failing the whole introspection.
+//
+// v0.7.2: rows are filtered through filterSchema(name, "postgres", opts)
+// so KEN_DB_SCHEMAS / KEN_DB_EXCLUDE_SCHEMAS are respected. The annotate
+// queries below don't need their own filter — they look up tables in
+// the map populated here, and filtered-away tables simply aren't found.
 func introspect(ctx context.Context, conn *pgx.Conn, opts Options) (*schemaSnapshot, error) {
-	tables, err := queryTablesAndColumns(ctx, conn)
+	tables, err := queryTablesAndColumns(ctx, conn, opts)
 	if err != nil {
 		return nil, fmt.Errorf("queryTablesAndColumns: %w", err)
 	}
@@ -95,7 +100,7 @@ func introspect(ctx context.Context, conn *pgx.Conn, opts Options) (*schemaSnaps
 	if err := annotateIndexes(ctx, conn, tables); err != nil {
 		return nil, fmt.Errorf("annotateIndexes: %w", err)
 	}
-	if err := annotateFKReferences(ctx, conn, tables); err != nil {
+	if err := annotateFKReferences(ctx, conn, tables, opts); err != nil {
 		return nil, fmt.Errorf("annotateFKReferences: %w", err)
 	}
 
@@ -106,11 +111,11 @@ func introspect(ctx context.Context, conn *pgx.Conn, opts Options) (*schemaSnaps
 	}
 	sortTables(tableList)
 
-	views, err := queryViews(ctx, conn)
+	views, err := queryViews(ctx, conn, opts)
 	if err != nil {
 		return nil, fmt.Errorf("queryViews: %w", err)
 	}
-	functions, err := queryFunctions(ctx, conn)
+	functions, err := queryFunctions(ctx, conn, opts)
 	if err != nil {
 		return nil, fmt.Errorf("queryFunctions: %w", err)
 	}
@@ -131,11 +136,13 @@ func introspect(ctx context.Context, conn *pgx.Conn, opts Options) (*schemaSnaps
 
 // queryTablesAndColumns lists every user table and its columns in one
 // pass. The schema-exclusion filter is the canonical "skip Postgres
-// internals" set.
+// internals" set; v0.7.2's KEN_DB_SCHEMAS / KEN_DB_EXCLUDE_SCHEMAS are
+// applied per-row via filterSchema so the SQL stays simple (one
+// canonical filter source instead of dynamic IN-list parameterization).
 //
 // Returns a map keyed by "schema.name" for O(1) annotation by the
 // follow-on queries (which join back to tables by their natural keys).
-func queryTablesAndColumns(ctx context.Context, conn *pgx.Conn) (map[string]*tableInfo, error) {
+func queryTablesAndColumns(ctx context.Context, conn *pgx.Conn, opts Options) (map[string]*tableInfo, error) {
 	const q = `
 SELECT
     t.table_schema,
@@ -175,6 +182,9 @@ ORDER BY t.table_schema, t.table_name, c.ordinal_position;
 		var defaultExpr *string
 		if err := rows.Scan(&schema, &name, &colName, &dataType, &notNull, &defaultExpr); err != nil {
 			return nil, err
+		}
+		if !filterSchema(schema, "postgres", opts) {
+			continue
 		}
 		key := schema + "." + name
 		t, ok := out[key]
@@ -333,7 +343,14 @@ WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
 // "this table is FK-referenced BY <other>(col)" relationships, the
 // inverse of what annotateConstraints captured per-column. Surfacing
 // both directions is the prompt's stated requirement.
-func annotateFKReferences(ctx context.Context, conn *pgx.Conn, tables map[string]*tableInfo) error {
+//
+// v0.7.2: skips inverse-FK entries from filtered-away schemas so the
+// "FK referenced by:" rendered list never names a schema the operator
+// explicitly excluded via KEN_DB_SCHEMAS / KEN_DB_EXCLUDE_SCHEMAS. The
+// referenced-side filter is already enforced by table-map membership
+// (tables map only contains schemas that passed filterSchema), so we
+// only need to filter the from-side here.
+func annotateFKReferences(ctx context.Context, conn *pgx.Conn, tables map[string]*tableInfo, opts Options) error {
 	const q = `
 SELECT
     ccu.table_schema  AS ref_schema,
@@ -365,6 +382,9 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
 		if !ok {
 			continue
 		}
+		if !filterSchema(fromSchema, "postgres", opts) {
+			continue
+		}
 		t.fkReferenced = append(t.fkReferenced, fkRef{
 			fromSchema: fromSchema,
 			fromTable:  fromTable,
@@ -376,7 +396,8 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
 
 // queryViews lists every user view with its definition. The definition
 // may be long (analytics CTEs etc.); the renderer truncates if needed.
-func queryViews(ctx context.Context, conn *pgx.Conn) ([]viewInfo, error) {
+// v0.7.2: respects opts.IncludeSchemas / ExcludeSchemas via filterSchema.
+func queryViews(ctx context.Context, conn *pgx.Conn, opts Options) ([]viewInfo, error) {
 	const q = `
 SELECT
     table_schema,
@@ -399,6 +420,9 @@ ORDER BY table_schema, table_name;
 		if err := rows.Scan(&v.schema, &v.name, &def); err != nil {
 			return nil, err
 		}
+		if !filterSchema(v.schema, "postgres", opts) {
+			continue
+		}
 		if def != nil {
 			v.definition = *def
 		}
@@ -412,7 +436,8 @@ ORDER BY table_schema, table_name;
 // function bodies vary wildly in language (PL/pgSQL, SQL, C-callable,
 // Python via plpython3u) and the signature is the high-signal indexing
 // target. Body indexing is a v0.x+ refinement.
-func queryFunctions(ctx context.Context, conn *pgx.Conn) ([]functionInfo, error) {
+// v0.7.2: respects opts.IncludeSchemas / ExcludeSchemas via filterSchema.
+func queryFunctions(ctx context.Context, conn *pgx.Conn, opts Options) ([]functionInfo, error) {
 	const q = `
 SELECT
     n.nspname AS schema,
@@ -439,6 +464,9 @@ ORDER BY n.nspname, p.proname;
 		var result *string
 		if err := rows.Scan(&f.schema, &f.name, &f.argSig, &result); err != nil {
 			return nil, err
+		}
+		if !filterSchema(f.schema, "postgres", opts) {
+			continue
 		}
 		// Wrap args in parens for the rendered signature.
 		f.argSig = "(" + f.argSig + ")"
