@@ -15,6 +15,11 @@ import (
 	"syscall"
 	"time"
 
+	// Side-effect imports: register every chunker the CLI exposes.
+	// internal/search blank-imports "regex" (the default); the optional
+	// chunkers are listed here so the binary always exposes them.
+	_ "github.com/townsendmerino/ken/internal/chunk/markdown"
+	_ "github.com/townsendmerino/ken/internal/chunk/treesitter"
 	"github.com/townsendmerino/ken/internal/modelfetch"
 	"github.com/townsendmerino/ken/internal/search"
 )

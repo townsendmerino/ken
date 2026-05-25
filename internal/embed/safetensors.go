@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"unsafe"
 )
@@ -66,6 +67,26 @@ func OpenSafetensors(path string) (*SafetensorsFile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read safetensors: %w", err)
 	}
+	return parseSafetensors(data)
+}
+
+// OpenSafetensorsFromFS reads a safetensors file from fsys at name and
+// parses its header. Same semantics as OpenSafetensors but takes an fs.FS
+// so callers can serve the model out of an //go:embed embed.FS, a
+// fstest.MapFS, or any other fs.FS implementation.
+func OpenSafetensorsFromFS(fsys fs.FS, name string) (*SafetensorsFile, error) {
+	data, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		return nil, fmt.Errorf("read safetensors: %w", err)
+	}
+	return parseSafetensors(data)
+}
+
+// parseSafetensors is the shared safetensors-bytes parser used by both
+// OpenSafetensors and OpenSafetensorsFromFS. Takes ownership of data — the
+// returned SafetensorsFile retains a reference (the unsafe-slice tensor
+// data aliases into it).
+func parseSafetensors(data []byte) (*SafetensorsFile, error) {
 	if len(data) < 8 {
 		return nil, errors.New("safetensors: file too short for header length prefix")
 	}

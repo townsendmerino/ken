@@ -3,8 +3,9 @@ package embed
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
+	"path"
 )
 
 // StaticModel is a Model2Vec static-embedding model. Goroutine-safe for
@@ -29,23 +30,33 @@ type modelConfig struct {
 	VocabularyQuantization int    `json:"vocabulary_quantization"`
 }
 
-// Load reads a Model2Vec model from a directory containing
+// LoadFromFS reads a Model2Vec model from fsys, rooted at dir. fsys must contain
 //
-//	tokenizer.json
-//	config.json
-//	model.safetensors
+//	<dir>/tokenizer.json
+//	<dir>/config.json
+//	<dir>/model.safetensors
 //
-// (the standard HF layout for Model2Vec models). The directory is typically
-// a Hugging Face snapshot for `minishlab/potion-code-16M` or another
-// compatible model.
-func Load(modelDir string) (*StaticModel, error) {
-	tok, err := LoadTokenizer(filepath.Join(modelDir, "tokenizer.json"))
+// (the standard HF layout for Model2Vec models — typically a Hugging Face
+// snapshot for minishlab/potion-code-16M or another compatible model).
+//
+// Typical call shapes:
+//
+//	LoadFromFS(os.DirFS("/path/to/model"), ".")     // load from a directory
+//	LoadFromFS(embedFS, "model")                    // load from //go:embed model/*
+//	LoadFromFS(mapFS, ".")                          // load from a fstest.MapFS
+//
+// Paths inside fsys follow the fs.FS slash convention (use the path
+// package, not path/filepath). LoadFromFS is the canonical entry point;
+// Load is a thin deprecated wrapper.
+func LoadFromFS(fsys fs.FS, dir string) (*StaticModel, error) {
+	join := func(name string) string { return path.Join(dir, name) }
+
+	tok, err := LoadTokenizerFromFS(fsys, join("tokenizer.json"))
 	if err != nil {
 		return nil, fmt.Errorf("load tokenizer: %w", err)
 	}
 
-	cfgPath := filepath.Join(modelDir, "config.json")
-	cfgBytes, err := os.ReadFile(cfgPath)
+	cfgBytes, err := fs.ReadFile(fsys, join("config.json"))
 	if err != nil {
 		return nil, fmt.Errorf("read config.json: %w", err)
 	}
@@ -57,7 +68,7 @@ func Load(modelDir string) (*StaticModel, error) {
 		return nil, fmt.Errorf("unsupported embedding_dtype %q (only float32 supported)", cfg.EmbeddingDType)
 	}
 
-	st, err := OpenSafetensors(filepath.Join(modelDir, "model.safetensors"))
+	st, err := OpenSafetensorsFromFS(fsys, join("model.safetensors"))
 	if err != nil {
 		return nil, fmt.Errorf("open safetensors: %w", err)
 	}
@@ -115,6 +126,15 @@ func Load(modelDir string) (*StaticModel, error) {
 		normalize:  cfg.Normalize,
 		st:         st,
 	}, nil
+}
+
+// Load reads a Model2Vec model from a directory containing tokenizer.json,
+// config.json, and model.safetensors.
+//
+// Deprecated: use LoadFromFS(os.DirFS(modelDir), ".") instead. Load is kept
+// as a thin wrapper for callers that haven't migrated yet (v0.6.0+).
+func Load(modelDir string) (*StaticModel, error) {
+	return LoadFromFS(os.DirFS(modelDir), ".")
 }
 
 // VocabSize reports the embedding-table vocabulary size.

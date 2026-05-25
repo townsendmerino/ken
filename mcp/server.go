@@ -92,8 +92,33 @@ func handleSearch(ctx context.Context, cfg *Config, args SearchArgs) (*sdk.CallT
 	if err != nil {
 		return textResult(err.Error()), nil, nil
 	}
-	// Validate / default the mode arg. An unknown mode is a user-input
-	// error → return as text rather than an MCP-protocol error.
+	wi, err := cfg.Cache.Get(ctx, source)
+	if err != nil {
+		return textResult(fmt.Sprintf("Failed to index %q: %s", source, err.Error())), nil, nil
+	}
+	return runSearch(wi.Load(), args)
+}
+
+func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
+	if args.FilePath == "" || args.Line <= 0 {
+		return textResult("file_path is required and line must be ≥ 1."), nil, nil
+	}
+	source, err := resolveRepo(cfg, args.Repo)
+	if err != nil {
+		return textResult(err.Error()), nil, nil
+	}
+	wi, err := cfg.Cache.Get(ctx, source)
+	if err != nil {
+		return textResult(fmt.Sprintf("Failed to index %q: %s", source, err.Error())), nil, nil
+	}
+	return runFindRelated(wi.Load(), args)
+}
+
+// runSearch executes a search against a resolved Index — independent of
+// how the Index was selected (Cache lookup, fixed single-corpus, etc.).
+// Shared between handleSearch (Cache-backed NewServer) and the
+// embedded-corpus tool handlers built by mcp.Run.
+func runSearch(ix *search.Index, args SearchArgs) (*sdk.CallToolResult, any, error) {
 	modeStr := args.Mode
 	if modeStr == "" {
 		modeStr = "hybrid"
@@ -105,11 +130,6 @@ func handleSearch(ctx context.Context, cfg *Config, args SearchArgs) (*sdk.CallT
 	if topK <= 0 {
 		topK = DefaultTopK
 	}
-
-	ix, err := cfg.Cache.Get(ctx, source)
-	if err != nil {
-		return textResult(fmt.Sprintf("Failed to index %q: %s", source, err.Error())), nil, nil
-	}
 	results := ix.Search(args.Query, topK)
 	if len(results) == 0 {
 		return textResult("No results found."), nil, nil
@@ -118,22 +138,12 @@ func handleSearch(ctx context.Context, cfg *Config, args SearchArgs) (*sdk.CallT
 	return textResult(FormatResults(header, results)), nil, nil
 }
 
-func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
-	if args.FilePath == "" || args.Line <= 0 {
-		return textResult("file_path is required and line must be ≥ 1."), nil, nil
-	}
-	source, err := resolveRepo(cfg, args.Repo)
-	if err != nil {
-		return textResult(err.Error()), nil, nil
-	}
+// runFindRelated executes a find_related against a resolved Index. The
+// caller has already validated args.FilePath and args.Line.
+func runFindRelated(ix *search.Index, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
 	topK := args.TopK
 	if topK <= 0 {
 		topK = DefaultTopK
-	}
-
-	ix, err := cfg.Cache.Get(ctx, source)
-	if err != nil {
-		return textResult(fmt.Sprintf("Failed to index %q: %s", source, err.Error())), nil, nil
 	}
 	results, err := ix.FindRelated(args.FilePath, args.Line, topK)
 	if err != nil {

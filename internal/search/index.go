@@ -38,8 +38,14 @@ import (
 	"github.com/townsendmerino/ken/internal/ann"
 	"github.com/townsendmerino/ken/internal/bm25"
 	"github.com/townsendmerino/ken/internal/chunk"
-	_ "github.com/townsendmerino/ken/internal/chunk/regex"      // registers the "regex" chunker
-	_ "github.com/townsendmerino/ken/internal/chunk/treesitter" // registers the "treesitter" chunker
+	_ "github.com/townsendmerino/ken/internal/chunk/regex" // registers the default "regex" chunker
+	// NOTE: treesitter and markdown are NOT blank-imported here. Binaries
+	// that want them must blank-import them explicitly — e.g. cmd/ken-mcp
+	// and cmd/ken-mcp-docs do, but the embedded-corpus demo binary
+	// (cmd/ken-mcp-docs) deliberately skips treesitter to keep its
+	// gotreesitter/grammars 19MB blob bundle out of the binary. The
+	// chunker registry is the seam: side-effect imports happen at the
+	// binary's main package, not in this shared library layer.
 	"github.com/townsendmerino/ken/internal/embed"
 	"github.com/townsendmerino/ken/internal/repo"
 )
@@ -128,21 +134,14 @@ func walkAndChunk(root string, mode Mode, chunkerName, modelDir string) (
 	return walkAndChunkFS(os.DirFS(root), mode, chunkerName, modelDir)
 }
 
-// walkAndChunkFS does the corpus-bootstrapping half of FromFS: validate
-// the mode + chunker, load the model (if needed), walk fsys, chunk every
-// file, embed every chunk under semantic/hybrid. Returns the raw
-// materials BuildIndex needs. Internal to v0.3's incremental indexing —
-// the watcher keeps its own copies of chunks + vecs around as the
-// mutable corpus state.
+// walkAndChunkFS resolves modelDir to an *embed.StaticModel (when the mode
+// needs one) and delegates the actual walk+chunk+embed pass to
+// walkAndChunkFSWithModel. Kept for callers that resolve the model path
+// at index-build time (the in-tree path-based entry points and the
+// watcher).
 func walkAndChunkFS(fsys fs.FS, mode Mode, chunkerName, modelDir string) (
 	chunks []chunk.Chunk, vecs [][]float32, model *embed.StaticModel, err error,
 ) {
-	if mode != ModeBM25 && mode != ModeSemantic && mode != ModeHybrid {
-		return nil, nil, nil, fmt.Errorf("search: unknown mode %d", mode)
-	}
-	if _, err := chunk.Get(chunkerName); err != nil {
-		return nil, nil, nil, err
-	}
 	if mode.needsModel() {
 		if modelDir == "" {
 			return nil, nil, nil, fmt.Errorf("search: mode requires an embedding model — pass --model <dir>, run `ken download-model`, or use --mode=bm25")
@@ -152,6 +151,32 @@ func walkAndChunkFS(fsys fs.FS, mode Mode, chunkerName, modelDir string) (
 			return nil, nil, nil, fmt.Errorf("search: model not found at %s: %w — run `ken download-model --to %s` to fetch it, or use --mode=bm25", modelDir, err, modelDir)
 		}
 		model = m
+	}
+	return walkAndChunkFSWithModel(fsys, mode, chunkerName, model)
+}
+
+// walkAndChunkFSWithModel does the actual corpus-bootstrapping work:
+// validate the mode + chunker, walk fsys, chunk every file, embed every
+// chunk under semantic/hybrid using the caller-supplied model. The model
+// arg may be nil iff mode is ModeBM25. Returns the raw materials
+// BuildIndex needs (chunks slice, parallel vecs slice, and the model
+// passed through unchanged for the watcher's incremental-embed loop).
+//
+// This is the shared backbone between walkAndChunkFS (model loaded from
+// a directory path) and FromFSWithModel (model supplied directly by the
+// caller — the mcp.Run embedded-corpus path where the model comes from a
+// caller's //go:embed fs.FS).
+func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel) (
+	chunks []chunk.Chunk, vecs [][]float32, returnedModel *embed.StaticModel, err error,
+) {
+	if mode != ModeBM25 && mode != ModeSemantic && mode != ModeHybrid {
+		return nil, nil, nil, fmt.Errorf("search: unknown mode %d", mode)
+	}
+	if _, err := chunk.Get(chunkerName); err != nil {
+		return nil, nil, nil, err
+	}
+	if mode.needsModel() && model == nil {
+		return nil, nil, nil, fmt.Errorf("search: mode requires an embedding model but model is nil")
 	}
 
 	files, err := repo.WalkFS(fsys, repo.Options{})
@@ -175,6 +200,22 @@ func walkAndChunkFS(fsys fs.FS, mode Mode, chunkerName, modelDir string) (
 		}
 	}
 	return chunks, vecs, model, nil
+}
+
+// FromFSWithModel is FromFS with the model supplied directly rather than
+// loaded from a directory path. Same return shape; chunkerName is one of
+// the registered chunker names (see internal/chunk.Names). model may be
+// nil iff mode == ModeBM25.
+//
+// This is the entry point for callers that bake the model into their
+// binary via //go:embed and load it via embed.LoadFromFS — typically the
+// mcp.Run library API serving an embedded-corpus MCP server.
+func FromFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel) (*Index, error) {
+	chunks, vecs, m, err := walkAndChunkFSWithModel(fsys, mode, chunkerName, model)
+	if err != nil {
+		return nil, err
+	}
+	return BuildIndex(chunks, vecs, mode, m), nil
 }
 
 // BuildIndex assembles a snapshot *Index from a chunks slice and (for

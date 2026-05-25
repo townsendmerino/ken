@@ -35,6 +35,10 @@ import (
 	"testing"
 	"time"
 
+	// Side-effect import: register the treesitter chunker so this
+	// bench can exercise it. As of v0.6.0 internal/search no longer
+	// transitively pulls in optional chunkers.
+	_ "github.com/townsendmerino/ken/internal/chunk/treesitter"
 	"github.com/townsendmerino/ken/internal/search"
 )
 

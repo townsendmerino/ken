@@ -3,6 +3,7 @@ package embed
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"sort"
 	"strings"
@@ -62,12 +63,29 @@ type tokenizerJSON struct {
 	} `json:"model"`
 }
 
-// LoadTokenizer parses an HF tokenizer.json file.
+// LoadTokenizer parses an HF tokenizer.json file from disk.
 func LoadTokenizer(path string) (*Tokenizer, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read tokenizer.json: %w", err)
 	}
+	return parseTokenizer(data)
+}
+
+// LoadTokenizerFromFS parses an HF tokenizer.json file out of fsys at name.
+// Same semantics as LoadTokenizer; takes an fs.FS for embed.FS / fstest.MapFS
+// callers.
+func LoadTokenizerFromFS(fsys fs.FS, name string) (*Tokenizer, error) {
+	data, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		return nil, fmt.Errorf("read tokenizer.json: %w", err)
+	}
+	return parseTokenizer(data)
+}
+
+// parseTokenizer is the shared tokenizer.json parser used by LoadTokenizer
+// and LoadTokenizerFromFS.
+func parseTokenizer(data []byte) (*Tokenizer, error) {
 	var raw tokenizerJSON
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parse tokenizer.json: %w", err)

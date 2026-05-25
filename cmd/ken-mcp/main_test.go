@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,14 +11,16 @@ import (
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	kenmcp "github.com/townsendmerino/ken/mcp"
 )
 
-// newCapturedLogger returns a leveledLogger that writes to a buffer
-// (level=lvlDebug so every call is captured). Used by envInt/envEnum
+// newCapturedLogger returns a kenmcp.Logger that writes to a buffer
+// (level=LogDebug so every call is captured). Used by envInt/envEnum
 // tests to assert that bad input produces the documented warn message.
-func newCapturedLogger() (*leveledLogger, *bytes.Buffer) {
+func newCapturedLogger() (*kenmcp.Logger, *bytes.Buffer) {
 	buf := &bytes.Buffer{}
-	return &leveledLogger{level: lvlDebug, l: log.New(buf, "", 0)}, buf
+	return kenmcp.NewLogger(buf, kenmcp.LogDebug), buf
 }
 
 // withEnv temporarily sets env vars for the duration of the test. Each
