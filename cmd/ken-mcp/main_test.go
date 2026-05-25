@@ -685,12 +685,20 @@ func TestBinary_StdoutIsCleanJSONRPC_WithListen(t *testing.T) {
 
 	// stderr should mention the listener startup (proves the code path
 	// actually ran, not silently skipped via ErrListenNotSupported).
-	// We accept EITHER "starting LISTEN/NOTIFY listener" (initial spawn)
-	// OR a "not installed" warn (if the trigger isn't loaded into the
-	// CI DB) — both prove the listener constructor ran.
+	// v0.8.0 Part 3 refactor: SetupTier2 owns the listener-start
+	// path now (the old "Tier 2: starting LISTEN/NOTIFY listener"
+	// log line was inside the old wireDBTier2 body that's been
+	// folded into SetupTier2). The CLI-side log line that proves
+	// the listener code ran is the "KEN_DB_LISTEN=1" announcement
+	// emitted in wireDBTier2 just before calling SetupTier2 with
+	// enableListen=true. We accept either that line OR the
+	// listener's own "active on channel" line (which fires once the
+	// listener goroutine inside SetupTier2 connects + LISTENs).
 	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, "Tier 2: starting LISTEN") {
-		t.Errorf("expected 'Tier 2: starting LISTEN' in stderr (proves listener code ran), got:\n%s", stderrStr)
+	listenerPathRan := strings.Contains(stderrStr, "KEN_DB_LISTEN=1") ||
+		strings.Contains(stderrStr, "active on channel")
+	if !listenerPathRan {
+		t.Errorf("expected a listener-path indicator ('KEN_DB_LISTEN=1' or 'active on channel') in stderr (proves listener code ran), got:\n%s", stderrStr)
 	}
 }
 

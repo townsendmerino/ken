@@ -359,72 +359,36 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 		ExcludeSchemas: excludeSchemas,
 	}
 
-	// Build-once-at-startup: this fires the initial swap. If it fails,
-	// log + skip Refresher construction.
+	// v0.8.0 Part 3 (ADR-020): SetupTier2 is the shared lifecycle
+	// orchestration extracted into internal/db so both cmd/ken-mcp and
+	// mcp/db.Setup use the same code path. The onSwap wrapper composes
+	// wix.SetExtraChunks with cmd/ken-mcp's preferred "Tier 2: indexed
+	// N chunks" log line — SetupTier2 itself doesn't write that line so
+	// the SDK author path can use its own logging.
+	onSwap := func(chunks []chunk.Chunk) {
+		wix.SetExtraChunks(chunks)
+		logger.Logf(kenmcp.LogInfo, "Tier 2: indexed %d DB chunks into %q", len(chunks), defaultRepo)
+	}
 	logger.Logf(kenmcp.LogInfo, "Tier 2: introspecting %s (sample_rows=%d reindex=%s)",
 		redactDSN(dsn), sampleRows, durOrOff(reindex))
-	initial, err := db.IndexSchema(ctx, opts)
-	if err != nil {
-		logger.Logf(kenmcp.LogWarn, "Tier 2: initial IndexSchema failed: %v — disabling Tier 2", err)
-		return nil, nil
+	enableListen := envBool("KEN_DB_LISTEN", false, logger)
+	if enableListen {
+		logger.Logf(kenmcp.LogInfo, "Tier 2: KEN_DB_LISTEN=1 (Postgres LISTEN/NOTIFY)")
 	}
-	wix.SetExtraChunks(initial)
-	logger.Logf(kenmcp.LogInfo, "Tier 2: indexed %d DB chunks into %q", len(initial), defaultRepo)
-
-	// Build Refresher for SIGHUP-driven and (optionally) periodic refresh.
-	refresher, err := db.NewRefresher(opts, wix.SetExtraChunks)
+	refresher, cleanup, err := db.SetupTier2(ctx, opts, enableListen, onSwap)
 	if err != nil {
-		logger.Logf(kenmcp.LogWarn, "Tier 2: NewRefresher: %v — manual SIGHUP refresh disabled", err)
+		logger.Logf(kenmcp.LogWarn, "Tier 2: SetupTier2 failed: %v — disabling Tier 2", err)
 		return nil, nil
 	}
 
-	if reindex > 0 {
-		go func() {
-			if err := refresher.Run(ctx); err != nil && err != context.Canceled {
-				logger.Logf(kenmcp.LogWarn, "Tier 2: periodic refresher exit: %v", err)
-			}
-		}()
-	}
+	// SIGHUP wiring stays in cmd/ken-mcp — CLI concern, not in SetupTier2.
 	watchSIGHUP(ctx, func() {
 		logger.Logf(kenmcp.LogInfo, "Tier 2: SIGHUP received; refreshing DB chunks")
 		if err := refresher.Refresh(ctx); err != nil {
 			logger.Logf(kenmcp.LogWarn, "Tier 2: SIGHUP-driven refresh failed: %v", err)
 		}
 	})
-
-	// v0.8.0 Part 1 (ADR-020): Postgres LISTEN/NOTIFY push notifications.
-	// Supplements the interval ticker rather than replacing it — both run
-	// concurrently and converge on Refresher.Refresh (mutex-serialized
-	// inside Refresher, so a NOTIFY arriving mid-tick collapses safely).
-	//
-	// Non-Postgres DSNs return ErrListenNotSupported from NewListener —
-	// debug-log and skip rather than warn (KEN_DB_LISTEN=1 with a
-	// MySQL/SQLite DSN is "operator pre-set the flag for a future engine
-	// swap," not a problem to surface).
-	if envBool("KEN_DB_LISTEN", false, logger) {
-		listener, lerr := db.NewListener(opts, func(ctx context.Context) {
-			logger.Logf(kenmcp.LogInfo, "Tier 2: LISTEN notification; refreshing DB chunks")
-			if err := refresher.Refresh(ctx); err != nil {
-				logger.Logf(kenmcp.LogWarn, "Tier 2: LISTEN-driven refresh failed: %v", err)
-			}
-		})
-		switch {
-		case errors.Is(lerr, db.ErrListenNotSupported):
-			logger.Logf(kenmcp.LogDebug,
-				"KEN_DB_LISTEN=1 ignored — LISTEN/NOTIFY is Postgres-only; interval polling continues")
-		case lerr != nil:
-			logger.Logf(kenmcp.LogWarn,
-				"Tier 2: LISTEN setup failed: %v — interval polling continues", lerr)
-		default:
-			logger.Logf(kenmcp.LogInfo, "Tier 2: starting LISTEN/NOTIFY listener (Postgres)")
-			go func() {
-				if err := listener.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-					logger.Logf(kenmcp.LogWarn, "Tier 2: listener exited: %v", err)
-				}
-			}()
-		}
-	}
-	return refresher, func() {} // reserved cleanup seam
+	return refresher, cleanup
 }
 
 // reindexCallback bridges *db.Refresher's TryRefresh into the
