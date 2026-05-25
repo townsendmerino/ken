@@ -32,8 +32,11 @@ package search
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
+	"path"
+	"sort"
 
 	"github.com/townsendmerino/ken/internal/ann"
 	"github.com/townsendmerino/ken/internal/bm25"
@@ -50,6 +53,28 @@ import (
 	"github.com/townsendmerino/ken/internal/repo"
 	"github.com/townsendmerino/ken/internal/sql"
 )
+
+// FSOptions configures the FromFSWithOptions / NewWatchedIndexWithOptions
+// entry points added in v0.7.1. The zero value is the stock behavior for
+// every existing caller: migration folding ENABLED, log discarded.
+// Existing wrappers (FromFS, FromPath, FromFSWithModel, NewWatchedIndex)
+// pass the zero value, so v0.7.0 callers get folding transparently.
+type FSOptions struct {
+	// DisableFoldMigrations turns off v0.7.1 Tier-1 migration-history
+	// folding (sql.FoldMigrations). When true, .sql files in directories
+	// matching a recognized migration naming pattern are chunked the
+	// v0.7.0 way (one per-file ALTER chunk per statement) instead of
+	// folded into one chunk per table.
+	//
+	// Inverted name so the zero value is "folding enabled" — matches the
+	// semantic default the prompt requires.
+	DisableFoldMigrations bool
+
+	// LogWriter receives the per-statement skip warnings from
+	// sql.FoldMigrations. nil discards. Wired by cmd/ken-mcp from its
+	// leveled logger's stderr writer.
+	LogWriter io.Writer
+}
 
 // Mode selects the retrieval strategy.
 type Mode int
@@ -105,13 +130,25 @@ type Index struct {
 // FromPath wraps FromFS(os.DirFS(root), ...) for callers still using a
 // concrete path.
 //
+// As of v0.7.1 FromFS enables Tier-1 migration-history folding by
+// default. Operators who want the v0.7.0 per-file behavior should call
+// FromFSWithOptions with FSOptions.DisableFoldMigrations = true.
+//
 // Implementation note (v0.3): FromFS is a thin wrapper around
 // walkAndChunkFS + BuildIndex. The split exists because internal/search/
 // watch.go reuses BuildIndex to publish new snapshots after incremental
 // re-chunk / re-embed work — it shouldn't re-walk the tree just to
 // rebuild the index struct.
 func FromFS(fsys fs.FS, mode Mode, chunkerName, modelDir string) (*Index, error) {
-	chunks, vecs, model, err := walkAndChunkFS(fsys, mode, chunkerName, modelDir)
+	return FromFSWithOptions(fsys, mode, chunkerName, modelDir, FSOptions{})
+}
+
+// FromFSWithOptions is FromFS plus the v0.7.1 FSOptions knob — currently
+// only the migration-folding opt-out. The zero value of FSOptions
+// matches the FromFS default exactly, so callers that don't care can
+// keep using FromFS.
+func FromFSWithOptions(fsys fs.FS, mode Mode, chunkerName, modelDir string, opts FSOptions) (*Index, error) {
+	chunks, vecs, model, _, err := walkAndChunkFS(fsys, mode, chunkerName, modelDir, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -128,11 +165,14 @@ func FromPath(root string, mode Mode, chunkerName, modelDir string) (*Index, err
 
 // walkAndChunk is the real-FS-only bootstrap path retained for
 // internal/search/watch.go (fsnotify is real-FS-only by construction).
-// New code should call walkAndChunkFS directly.
-func walkAndChunk(root string, mode Mode, chunkerName, modelDir string) (
-	chunks []chunk.Chunk, vecs [][]float32, model *embed.StaticModel, err error,
+// New code should call walkAndChunkFS directly. The migDirs return is
+// the set of directories the migration-folding pass treated as a
+// migration chain — WatchedIndex carries this forward so fsnotify-driven
+// flushes know which dirs to re-fold.
+func walkAndChunk(root string, mode Mode, chunkerName, modelDir string, opts FSOptions) (
+	chunks []chunk.Chunk, vecs [][]float32, model *embed.StaticModel, migDirs map[string]bool, err error,
 ) {
-	return walkAndChunkFS(os.DirFS(root), mode, chunkerName, modelDir)
+	return walkAndChunkFS(os.DirFS(root), mode, chunkerName, modelDir, opts)
 }
 
 // walkAndChunkFS resolves modelDir to an *embed.StaticModel (when the mode
@@ -140,20 +180,21 @@ func walkAndChunk(root string, mode Mode, chunkerName, modelDir string) (
 // walkAndChunkFSWithModel. Kept for callers that resolve the model path
 // at index-build time (the in-tree path-based entry points and the
 // watcher).
-func walkAndChunkFS(fsys fs.FS, mode Mode, chunkerName, modelDir string) (
-	chunks []chunk.Chunk, vecs [][]float32, model *embed.StaticModel, err error,
+func walkAndChunkFS(fsys fs.FS, mode Mode, chunkerName, modelDir string, opts FSOptions) (
+	chunks []chunk.Chunk, vecs [][]float32, model *embed.StaticModel, migDirs map[string]bool, err error,
 ) {
 	if mode.needsModel() {
 		if modelDir == "" {
-			return nil, nil, nil, fmt.Errorf("search: mode requires an embedding model — pass --model <dir>, run `ken download-model`, or use --mode=bm25")
+			return nil, nil, nil, nil, fmt.Errorf("search: mode requires an embedding model — pass --model <dir>, run `ken download-model`, or use --mode=bm25")
 		}
 		m, err := embed.Load(modelDir)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("search: model not found at %s: %w — run `ken download-model --to %s` to fetch it, or use --mode=bm25", modelDir, err, modelDir)
+			return nil, nil, nil, nil, fmt.Errorf("search: model not found at %s: %w — run `ken download-model --to %s` to fetch it, or use --mode=bm25", modelDir, err, modelDir)
 		}
 		model = m
 	}
-	return walkAndChunkFSWithModel(fsys, mode, chunkerName, model)
+	chunks, vecs, returnedModel, migDirs, err := walkAndChunkFSWithModel(fsys, mode, chunkerName, model, opts)
+	return chunks, vecs, returnedModel, migDirs, err
 }
 
 // walkAndChunkFSWithModel does the actual corpus-bootstrapping work:
@@ -161,37 +202,62 @@ func walkAndChunkFS(fsys fs.FS, mode Mode, chunkerName, modelDir string) (
 // chunk under semantic/hybrid using the caller-supplied model. The model
 // arg may be nil iff mode is ModeBM25. Returns the raw materials
 // BuildIndex needs (chunks slice, parallel vecs slice, and the model
-// passed through unchanged for the watcher's incremental-embed loop).
+// passed through unchanged for the watcher's incremental-embed loop)
+// plus the migration-directory set the folding pass discovered (used by
+// the WatchedIndex to re-fold on file change).
 //
 // This is the shared backbone between walkAndChunkFS (model loaded from
 // a directory path) and FromFSWithModel (model supplied directly by the
 // caller — the mcp.Run embedded-corpus path where the model comes from a
 // caller's //go:embed fs.FS).
-func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel) (
-	chunks []chunk.Chunk, vecs [][]float32, returnedModel *embed.StaticModel, err error,
+func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel, opts FSOptions) (
+	chunks []chunk.Chunk, vecs [][]float32, returnedModel *embed.StaticModel, migDirs map[string]bool, err error,
 ) {
 	if mode != ModeBM25 && mode != ModeSemantic && mode != ModeHybrid {
-		return nil, nil, nil, fmt.Errorf("search: unknown mode %d", mode)
+		return nil, nil, nil, nil, fmt.Errorf("search: unknown mode %d", mode)
 	}
 	if _, err := chunk.Get(chunkerName); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if mode.needsModel() && model == nil {
-		return nil, nil, nil, fmt.Errorf("search: mode requires an embedding model but model is nil")
+		return nil, nil, nil, nil, fmt.Errorf("search: mode requires an embedding model but model is nil")
 	}
 
 	files, err := repo.WalkFS(fsys, repo.Options{})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
+
+	// Pre-classify migration dirs so the per-file path can skip SQL
+	// structural chunking for files in those dirs (we re-fold them
+	// holistically in the post-walk pass).
+	migDirs = map[string]bool{}
+	if !opts.DisableFoldMigrations {
+		seen := map[string]bool{}
+		for _, rel := range files {
+			if !sql.IsSQLFile(rel) {
+				continue
+			}
+			d := path.Dir(rel)
+			if seen[d] {
+				continue
+			}
+			seen[d] = true
+			if sql.IsMigrationDir(fsys, d) {
+				migDirs[d] = true
+			}
+		}
+	}
+
 	for _, rel := range files {
 		data, err := fs.ReadFile(fsys, rel)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
-		cs, err := chunkOneFile(chunkerName, rel, data)
+		skipSQLStructural := migDirs[path.Dir(rel)]
+		cs, err := chunkOneFile(chunkerName, rel, data, skipSQLStructural)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		for _, c := range cs {
 			chunks = append(chunks, c)
@@ -200,7 +266,35 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 			}
 		}
 	}
-	return chunks, vecs, model, nil
+
+	// Migration-folding pass: deterministic order over the discovered
+	// dirs so the produced chunk order is stable across runs.
+	if len(migDirs) > 0 {
+		dirs := make([]string, 0, len(migDirs))
+		for d := range migDirs {
+			dirs = append(dirs, d)
+		}
+		sort.Strings(dirs)
+		for _, d := range dirs {
+			folded, ferr := sql.FoldMigrations(fsys, d, opts.LogWriter)
+			if ferr != nil {
+				// Don't fail the build — log via the writer if available
+				// and fall back to the per-file behavior (already emitted
+				// since skipSQLStructural was set for these files).
+				if opts.LogWriter != nil {
+					fmt.Fprintf(opts.LogWriter, "search: FoldMigrations(%q): %v\n", d, ferr)
+				}
+				continue
+			}
+			for _, c := range folded {
+				chunks = append(chunks, c)
+				if model != nil {
+					vecs = append(vecs, model.Encode(c.Text))
+				}
+			}
+		}
+	}
+	return chunks, vecs, model, migDirs, nil
 }
 
 // chunkOneFile is the single point both the build-once path
@@ -216,12 +310,17 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 // constraint shape. SQL-parser warnings (skipped malformed statements)
 // are currently discarded — the BM25 path catches them via the original
 // file text. If operators ask to surface them, route a logger here.
-func chunkOneFile(chunkerName, rel string, data []byte) ([]chunk.Chunk, error) {
+//
+// v0.7.1: skipSQLStructural=true is passed by the orchestrator when the
+// file lives in a migration directory; the structural chunks are produced
+// once for the whole directory by sql.FoldMigrations rather than per-file,
+// avoiding redundant N+1 chunks (CREATE + many ALTERs).
+func chunkOneFile(chunkerName, rel string, data []byte, skipSQLStructural bool) ([]chunk.Chunk, error) {
 	cs, err := chunk.ChunkFile(chunkerName, rel, data, chunk.DefaultChunkSize)
 	if err != nil {
 		return nil, err
 	}
-	if sql.IsSQLFile(rel) {
+	if !skipSQLStructural && sql.IsSQLFile(rel) {
 		extras, perr := sql.ParseFile(rel, data, nil) // nil logger → discard
 		if perr == nil {
 			cs = append(cs, extras...)
@@ -242,8 +341,12 @@ func chunkOneFile(chunkerName, rel string, data []byte) ([]chunk.Chunk, error) {
 // This is the entry point for callers that bake the model into their
 // binary via //go:embed and load it via embed.LoadFromFS — typically the
 // mcp.Run library API serving an embedded-corpus MCP server.
+//
+// v0.7.1: migration folding is enabled by default. mcp.Run callers whose
+// embedded corpora include numbered .sql files in the same directory get
+// folded chunks automatically — no API change required.
 func FromFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel) (*Index, error) {
-	chunks, vecs, m, err := walkAndChunkFSWithModel(fsys, mode, chunkerName, model)
+	chunks, vecs, m, _, err := walkAndChunkFSWithModel(fsys, mode, chunkerName, model, FSOptions{})
 	if err != nil {
 		return nil, err
 	}

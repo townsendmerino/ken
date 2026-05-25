@@ -3,9 +3,12 @@ package search
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,6 +18,7 @@ import (
 	"github.com/townsendmerino/ken/internal/chunk"
 	"github.com/townsendmerino/ken/internal/embed"
 	"github.com/townsendmerino/ken/internal/repo"
+	"github.com/townsendmerino/ken/internal/sql"
 )
 
 // WatchDebounce is the fixed delay between the first dirty event and
@@ -106,6 +110,18 @@ type WatchedIndex struct {
 
 	// Debounce delay; overridable for tests. Defaults to WatchDebounce.
 	debounce time.Duration
+
+	// v0.7.1: FSOptions snapshot from construction. Carries
+	// DisableFoldMigrations + LogWriter so the watch path's re-fold can
+	// match the build-time semantics exactly.
+	fsOpts FSOptions
+
+	// v0.7.1: set of directories the build-time pass classified as
+	// migration directories. Read under corpusMu; written only on
+	// construction and on re-fold (when a new migration dir is detected
+	// or an existing one no longer qualifies). On a flush touching any
+	// file in one of these dirs, the WHOLE dir is re-folded.
+	migrationDirs map[string]bool
 }
 
 // NewWatchedIndex builds the initial snapshot via FromPath, then (if
@@ -114,33 +130,46 @@ type WatchedIndex struct {
 // never publishes a new snapshot — equivalent to v0.2 behavior, no
 // watcher goroutine, no fsnotify state.
 //
+// As of v0.7.1 NewWatchedIndex enables Tier-1 migration-history folding
+// by default. Callers that want the v0.7.0 per-file behavior should use
+// NewWatchedIndexWithOptions with FSOptions.DisableFoldMigrations=true.
+//
 // Close() is safe to call regardless of `watch` and is idempotent.
 // Uses the package-level WatchDebounce constant; tests override it
 // via newWatchedIndexForTest below.
 func NewWatchedIndex(root string, mode Mode, chunkerName, modelDir string, watch bool) (*WatchedIndex, error) {
-	return newWatchedIndexWithDebounce(root, mode, chunkerName, modelDir, watch, WatchDebounce)
+	return newWatchedIndexWithDebounce(root, mode, chunkerName, modelDir, watch, WatchDebounce, FSOptions{})
+}
+
+// NewWatchedIndexWithOptions is NewWatchedIndex plus the FSOptions knob
+// added in v0.7.1 (currently the migration-folding opt-out). The zero
+// value of FSOptions matches NewWatchedIndex exactly.
+func NewWatchedIndexWithOptions(root string, mode Mode, chunkerName, modelDir string, watch bool, opts FSOptions) (*WatchedIndex, error) {
+	return newWatchedIndexWithDebounce(root, mode, chunkerName, modelDir, watch, WatchDebounce, opts)
 }
 
 // newWatchedIndexWithDebounce is the test-friendly constructor. The
 // debounce is captured into wi.debounce BEFORE the watcher goroutine
 // starts reading it, eliminating the race we'd have if tests set
 // wi.debounce post-construction.
-func newWatchedIndexWithDebounce(root string, mode Mode, chunkerName, modelDir string, watch bool, debounce time.Duration) (*WatchedIndex, error) {
-	chunks, vecs, model, err := walkAndChunk(root, mode, chunkerName, modelDir)
+func newWatchedIndexWithDebounce(root string, mode Mode, chunkerName, modelDir string, watch bool, debounce time.Duration, opts FSOptions) (*WatchedIndex, error) {
+	chunks, vecs, model, migDirs, err := walkAndChunk(root, mode, chunkerName, modelDir, opts)
 	if err != nil {
 		return nil, err
 	}
 	wi := &WatchedIndex{
-		root:        root,
-		mode:        mode,
-		chunkerName: chunkerName,
-		modelDir:    modelDir,
-		chunks:      chunks,
-		vecs:        vecs,
-		model:       model,
-		matcher:     repo.NewMatcher(repo.Options{Root: root}),
-		done:        make(chan struct{}),
-		debounce:    debounce,
+		root:          root,
+		mode:          mode,
+		chunkerName:   chunkerName,
+		modelDir:      modelDir,
+		chunks:        chunks,
+		vecs:          vecs,
+		model:         model,
+		matcher:       repo.NewMatcher(repo.Options{Root: root}),
+		done:          make(chan struct{}),
+		debounce:      debounce,
+		fsOpts:        opts,
+		migrationDirs: migDirs,
 	}
 	wi.ix.Store(wi.buildUnionedIndexLocked())
 
@@ -333,7 +362,15 @@ func (w *WatchedIndex) flush(batch map[string]fsnotify.Op) {
 	w.corpusMu.Lock()
 	defer w.corpusMu.Unlock()
 
+	// Migration dirs touched by this batch; we'll re-fold them in one
+	// pass after per-file tombstone/append, so an ALTER added in one
+	// migration file shows up in the folded chunk for the whole dir.
+	touchedMigDirs := map[string]bool{}
+
 	for rel, op := range batch {
+		if w.migrationDirs[path.Dir(rel)] {
+			touchedMigDirs[path.Dir(rel)] = true
+		}
 		if op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 			w.tombstoneFile(rel)
 			continue
@@ -344,11 +381,66 @@ func (w *WatchedIndex) flush(batch map[string]fsnotify.Op) {
 		w.appendFile(rel)
 	}
 
+	// Re-fold every touched migration dir. Tombstone the dir's folded
+	// chunks first (those live in the chunks slice with File pointing at
+	// one of the dir's source files); then re-walk the dir on disk via
+	// sql.FoldMigrations and append the fresh folded chunks.
+	for d := range touchedMigDirs {
+		w.tombstoneFoldedChunksForDir(d)
+		w.refoldMigrationDir(d)
+	}
+
 	compacted := w.compactCorpus()
 	newIx := w.buildUnionedIndexLocked()
 	w.ix.Store(newIx)
 	w.notifySwap()
 	w.notifyFlush(len(w.chunks)+len(w.extraChunks), len(batch), compacted, time.Since(start))
+}
+
+// tombstoneFoldedChunksForDir marks every chunk whose File lives inside
+// migration directory `dir` AND whose Text identifies it as a folded
+// chunk ("-- folded from migrations" marker emitted by
+// renderFoldedTableChunk). Caller holds corpusMu.
+//
+// We can't tombstone every chunk in dir indiscriminately: line-chunked
+// raw .sql content for files in the dir is owned by per-file appendFile
+// and has already been re-emitted by the caller's per-file tombstone +
+// re-append. Only the folded chunks need this dir-wide refresh.
+func (w *WatchedIndex) tombstoneFoldedChunksForDir(dir string) {
+	const marker = "-- folded from migrations"
+	for i := range w.chunks {
+		if w.chunks[i].Tombstoned {
+			continue
+		}
+		if path.Dir(w.chunks[i].File) != dir {
+			continue
+		}
+		if strings.Contains(w.chunks[i].Text, marker) {
+			w.chunks[i].Tombstoned = true
+		}
+	}
+}
+
+// refoldMigrationDir re-runs sql.FoldMigrations against the migration
+// directory `dir` on disk and appends the resulting chunks. Caller
+// holds corpusMu. Read errors / fold errors are logged via the FSOptions
+// LogWriter (nil discards) and the dir keeps the previously-tombstoned
+// folded chunks invalidated — net: the snapshot reflects "best effort"
+// with no stale folded chunk surviving the flush.
+func (w *WatchedIndex) refoldMigrationDir(dir string) {
+	folded, err := sql.FoldMigrations(os.DirFS(w.root), dir, w.fsOpts.LogWriter)
+	if err != nil {
+		if w.fsOpts.LogWriter != nil {
+			fmt.Fprintf(w.fsOpts.LogWriter, "search: WatchedIndex.refoldMigrationDir(%q): %v\n", dir, err)
+		}
+		return
+	}
+	for _, c := range folded {
+		w.chunks = append(w.chunks, c)
+		if w.model != nil {
+			w.vecs = append(w.vecs, w.model.Encode(c.Text))
+		}
+	}
 }
 
 // buildUnionedIndexLocked constructs the published Index from the union
@@ -515,13 +607,19 @@ func (w *WatchedIndex) tombstoneFile(rel string) {
 // file may have been deleted again; we already tombstoned the old
 // chunks, so falling through to "no new chunks" is the correct outcome.
 // Caller holds corpusMu.
+//
+// v0.7.1: when rel lives in a migration directory, the SQL structural
+// chunks are produced by the post-pass refoldMigrationDir rather than
+// per-file — so skipSQLStructural is set to true here. Line-chunked
+// raw text still flows through chunk.ChunkFile.
 func (w *WatchedIndex) appendFile(rel string) {
 	abs := filepath.Join(w.root, filepath.FromSlash(rel))
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		return
 	}
-	cs, err := chunkOneFile(w.chunkerName, rel, data)
+	skipSQLStructural := w.migrationDirs[path.Dir(rel)]
+	cs, err := chunkOneFile(w.chunkerName, rel, data, skipSQLStructural)
 	if err != nil {
 		return
 	}
