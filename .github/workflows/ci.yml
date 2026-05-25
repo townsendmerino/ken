@@ -106,11 +106,24 @@ jobs:
           check-latest: true
           cache: true
 
+      # v0.8.0 (ADR-020): install the LISTEN/NOTIFY event trigger so
+      # internal/db/listen_integration_test.go can exercise the happy-path,
+      # debounce, missing-trigger, and reconnect scenarios. The script is
+      # idempotent (DROP IF EXISTS + CREATE), so re-running across jobs
+      # is safe; the missing-trigger test drops it itself before testing.
+      - name: Install ken LISTEN/NOTIFY event trigger
+        env:
+          PGPASSWORD: test
+        run: |
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f internal/db/scripts/postgres_listen_notify.sql
+
       # Runs Postgres tests (need KEN_DB_TEST_DSN), SQLite tests (no
       # env — temp .db file), and MySQL tests (need KEN_DB_MYSQL_TEST_DSN).
       # Same -tags=dbintegration gate; per-test file checks the relevant
-      # env var and skips if absent.
-      - name: internal/db integration tests (Postgres + SQLite + MySQL)
+      # env var and skips if absent. v0.8.0: also runs the four listener
+      # integration tests against the trigger installed above.
+      - name: internal/db integration tests (Postgres + SQLite + MySQL + Listen)
         env:
           KEN_DB_TEST_DSN: postgres://postgres:test@127.0.0.1:5432/postgres?sslmode=disable
           KEN_DB_MYSQL_TEST_DSN: root:test@tcp(127.0.0.1:3306)/?parseTime=true&multiStatements=true
@@ -147,3 +160,12 @@ jobs:
         env:
           KEN_DB_MYSQL_TEST_DSN: root:test@tcp(127.0.0.1:3306)/ken_test?parseTime=true
         run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithMySQL -v
+
+      # v0.8.0 (ADR-020): confirm the listener's dedicated pgx.Conn
+      # doesn't leak anything to stdout when KEN_DB_LISTEN=1 fires the
+      # listener goroutine. The trigger was installed in the earlier
+      # "Install ken LISTEN/NOTIFY event trigger" step.
+      - name: cmd/ken-mcp stdout audit with LISTEN/NOTIFY
+        env:
+          KEN_DB_TEST_DSN: postgres://postgres:test@127.0.0.1:5432/postgres?sslmode=disable
+        run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithListen -v

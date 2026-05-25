@@ -25,6 +25,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-017](#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance) | Database schema indexing — two-tier (static SQL + live Postgres) with documented PII stance | Accepted |
 | [ADR-018](#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay) | SQLite engine + migration-history folding via lightweight ALTER replay | Accepted |
 | [ADR-019](#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) | MySQL engine + schema filtering for multi-schema dev databases | Accepted |
+| [ADR-020](#adr-020-listennotify-push-based-schema-change-detection-v080-part-1) | LISTEN/NOTIFY push-based schema change detection (v0.8.0 Part 1) | Accepted |
 
 ---
 
@@ -794,3 +795,73 @@ v0.7.2 pairs them because both are Tier 2 ergonomic improvements that ship clean
 - **`mcp.Run` (v0.6.0 embedded-corpus) is unchanged.** No new `mcp.Options` fields. Live DB support for `mcp.Run` is v0.8.0+ scope.
 
 - **MariaDB compatibility is documented, not first-class tested.** Operators pointing ken at MariaDB 10.x+ should hit the same code path with the same chunk shape. If `INFORMATION_SCHEMA` differences surface (likely candidate: `routines.dtd_identifier` rendering for parameterized return types), file separately and consider a per-engine variant.
+
+---
+
+## ADR-020: LISTEN/NOTIFY push-based schema change detection (v0.8.0 Part 1)
+
+**Status:** Accepted (Part 1 only — Parts 2 and 3 land in follow-on commits within v0.8.0)
+
+**Date:** 2026-05-25
+
+**Issue:** [townsendmerino/ken#12](https://github.com/townsendmerino/ken/issues/12)
+
+### Context
+
+[ADR-017](#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance) shipped Tier 2's three reindex layers in v0.7.0 — startup-once, periodic via `KEN_DB_REINDEX_INTERVAL`, and manual via SIGHUP — all of which are pull-based. Long-lived deployments waiting for the next interval tick see stale schemas in the meantime. Operators running an active migration cycle and then asking an agent "does this match the schema?" hit the window between the migration committing and the next tick firing, where the agent's view is the pre-migration shape.
+
+Postgres has native push notifications via `LISTEN` / `NOTIFY` + event triggers (since 9.3). We should use them.
+
+v0.8.0 is the "operator-control-loop" release; this ADR's section covers Part 1 (LISTEN/NOTIFY). The other two v0.8.0 features — an agent-callable `reindex_db` MCP tool, and `mcp.Run` DB support via `Options.DBSource` — extend this ADR in their own sections in follow-on commits.
+
+### Decision
+
+**Postgres-only LISTEN/NOTIFY push notifications, supplementing the interval ticker.**
+
+1. **Operator-provided SQL setup script.** ken does NOT modify the operator's database without explicit consent. The setup is a one-time `ken-mcp print-listen-script | psql $KEN_DB_DSN` that installs a single schema-level event trigger (`ken_schema_changed_trigger`) firing `pg_notify('ken_schema_changed', ...)` on tracked DDL (`CREATE / ALTER / DROP` for `TABLE`, `INDEX`, `VIEW`, `MATERIALIZED VIEW`, `FUNCTION`, `TRIGGER`, `TYPE`). The script is embedded into the binary via `//go:embed scripts/postgres_listen_notify.sql` so it's versioned with the release; idempotent via `DROP IF EXISTS` + `CREATE` so re-running is safe.
+
+2. **Single schema-level event trigger.** Postgres event triggers fire on `ddl_command_end`; one trigger covers the entire database for the lifetime of the install. No per-table setup, no maintenance burden when new tables are added. The trigger's plpgsql function walks `pg_event_trigger_ddl_commands()` and emits one `NOTIFY` per object — informational only; the listener doesn't parse the payload (always re-introspects everything on any notify).
+
+3. **`internal/db.Listener` type with dedicated pgx connection.** Listener uses `pgx.Connect` to open a single dedicated `*pgx.Conn` separate from the introspection path. A long-running `WaitForNotification` call must not tie up a connection that `IndexSchema` needs.
+
+4. **Activation via `KEN_DB_LISTEN=1`.** Default off — operators who haven't run the setup script shouldn't accidentally activate the listener and hit the confusing "trigger missing" warn. `envBool` validation; non-Postgres DSNs return `ErrListenNotSupported` from `NewListener` and `cmd/ken-mcp` debug-logs and skips (per the v0.7.2 "SQLite ignores schema filtering" pattern).
+
+5. **Supplements `KEN_DB_REINDEX_INTERVAL`, doesn't replace.** Both can run concurrently. The `Refresher`'s internal mutex serializes refreshes, so a NOTIFY arriving mid-tick collapses cleanly. Interval polling continues as defense-in-depth backstop catching missed notifications (network partition, reconnect window).
+
+6. **Exponential-backoff reconnect (100ms → 30s cap).** On any connection-level error, log a warn naming the error + the next backoff interval, sleep, and reconnect. Backoff resets on a successful "LISTEN active" — so a flaky network that disconnects mid-loop every minute doesn't drift to 30s waits. The reconnect re-runs the trigger-existence check (handles DB-restore-from-backup-without-trigger and operator-dropped-trigger scenarios).
+
+7. **Setup-not-run handling.** Trigger-existence check via `SELECT EXISTS(SELECT 1 FROM pg_event_trigger WHERE evtname = 'ken_schema_changed_trigger')`. If missing, log the warn once per (re)connect attempt (NOT in a hot loop) naming the exact fix command, then idle until ctx done. Operators see the warn at startup, fix it, and on the next reconnect (which fires when the connection eventually drops for any reason) listening resumes.
+
+8. **50ms debounce window.** First notification in a burst starts a 50ms drain window; additional notifications arriving within the window are collapsed into the same refresh. A migration file with `CREATE TABLE foo; CREATE INDEX foo_idx ON foo(email); ALTER TABLE foo ADD COLUMN ...` fires three notifications in fast succession; debouncing produces one refresh, halving DB load for no observable agent-side latency change.
+
+### Alternatives considered
+
+- **Auto-install the event trigger on first connect.** Rejected. ken would modify the operator's DB without explicit consent — same loud-failure-over-silent-success principle ADR-009 establishes for env-var validation. Operators should know what's being installed in their DB; the `print-listen-script` subcommand makes it scriptable + reviewable + auditable (the operator can read the script before piping to psql, version-control the install in their migrations dir, or apply it via their own migration tooling). The friction of one extra command is the right trade for the "ken doesn't surprise you" posture.
+
+- **Per-table opt-in via `KEN_DB_LISTEN_TABLES=users,sessions`.** Rejected. Requires per-table state we don't maintain — we re-introspect everything on any notify, so per-table opt-in would only affect which tables can FIRE notifications, not which are indexed. A user querying "what about the audit table?" after a migration would get stale data because the listener filtered the audit table's NOTIFY out. The single schema-level trigger is the right scope for our refresh strategy.
+
+- **Replace `KEN_DB_REINDEX_INTERVAL` entirely.** Rejected. NOTIFY connections can drop silently — network partition, server restart with brief window before reconnect, mid-NOTIFY connection abort during a deploy. Without interval polling as defense-in-depth, an undetected silent drop produces unbounded stale-schema windows ("ken hasn't refreshed since the listener died last Tuesday"). Interval polling at e.g. 5m is a small cost; pairing it with LISTEN/NOTIFY gives the operator best-of-both: ~100ms latency in the happy path + bounded staleness in the failure path.
+
+- **No debouncing — refresh on every notification.** Rejected. A real-world migration file with `CREATE TABLE foo; CREATE INDEX ...; ALTER TABLE ...` emits three notifications within ~10ms. Without debouncing we'd run three full introspection passes in ~100ms (each refresh's `IndexSchema` does a network round-trip to query `information_schema.*`), doubling+ DB load for no observable agent-side benefit. The 50ms window is short enough that "live during agent conversation" feels instant and long enough to coalesce the typical migration-file burst.
+
+- **Faked MySQL LISTEN via polling triggers.** Rejected. MySQL has no native push notification mechanism (it has triggers, but they fire only on row-level events, not DDL; even if you wrote a row-level trigger on a "schema_changes_log" table that operators were supposed to populate manually, you'd be re-implementing event triggers in user space with worse ergonomics). The right path for MySQL operators is `KEN_DB_REINDEX_INTERVAL` — and they already have it. Adding a half-baked MySQL "listen" emulation would be more confusing than the honest "Postgres only; MySQL users use interval polling" doc note.
+
+- **Debounce window as a tunable env var (`KEN_DB_LISTEN_DEBOUNCE=100ms`).** Deferred. 50ms is a reasonable default; if real-world workloads need different (e.g. an operator with a multi-stage migration pipeline that batches 200 DDLs across 30 seconds), file separately. Speculative complexity until field signal arrives.
+
+- **Parse the NOTIFY payload to do per-object incremental refresh** (only re-introspect the named table). Rejected for v0.8.0. The IndexSchema pass is already cheap (~hundreds of ms on typical dev DBs); the engineering complexity of per-object incremental indexing — keeping track of which chunks correspond to which object, handling cross-object dependencies like FK arrows, atomic-swap correctness when only some objects changed — is large. The payload is parsed for diagnostics (logged at debug level) but not for refresh routing. Revisit if a real-world DB scales to thousands of tables where full refresh becomes noticeable.
+
+### Consequences
+
+- **Postgres dev workflows with active migration cycles see ~100ms schema-change-to-refresh latency** instead of waiting up to `KEN_DB_REINDEX_INTERVAL`. "I just ran the migration, please check this query" works without an interval-tick wait.
+
+- **One-time setup friction.** Operators must run the setup script once. The friction is the right trade for the consent posture; the README's "Indexing database schemas" section calls out the command prominently.
+
+- **New dedicated pgx connection per ken-mcp process when `KEN_DB_LISTEN=1`.** Postgres handles thousands of idle LISTEN connections easily; the resource cost is negligible. The connection is isolated from the introspection path so a stuck `WaitForNotification` can't starve `IndexSchema`.
+
+- **Stdout-cleanliness discipline extends to the listener's connection.** Audited via `TestBinary_StdoutIsCleanJSONRPC_WithListen` (fifth sibling of the stock / Postgres / SQLite / MySQL stdout tests). The pgx-tracer-must-stay-nil rule from the `feedback_pgx_tracer` memory applies identically — listener's `pgx.Connect` defaults Tracer to nil; any future wiring routes through `Options.LogWriter` (stderr), never stdout.
+
+- **Single event trigger covers future tables for free.** Adding `tenant_005` schema after install needs no per-tenant re-install — the trigger fires on any tracked DDL anywhere in the database.
+
+- **Engine-routing pattern preserved.** MySQL and SQLite go through the same `dsnEngine` check; `NewListener` returns `ErrListenNotSupported` for them and `cmd/ken-mcp` debug-logs + skips. Adding a future engine that DOES support push notifications follows the same shape: a new `Listener` variant with engine-specific connection + watch loop, dispatch in `NewListener`.
+
+- **Three reindex triggers converge on one entry point.** Interval ticker, SIGHUP handler, and LISTEN listener all call `Refresher.Refresh(ctx)`. The Refresher's mutex serializes — no concurrent IndexSchema calls, no swap-callback races. v0.8.0's `reindex_db` MCP tool (Part 2) will be the fourth trigger source on the same path.

@@ -12,6 +12,31 @@ with pre-built binaries.
 
 (no changes yet)
 
+## [0.8.0] — UNRELEASED
+
+The operator-control-loop release. Three features round out the database-integration story started in v0.7.0 — push-based schema change detection, agent-initiated reindex, and DB support in `mcp.Run`. This entry covers **Part 1 (LISTEN/NOTIFY)** as it ships; Parts 2 (`reindex_db` MCP tool) and 3 (`mcp.Run` DB support) land in follow-on commits within v0.8.0. **The v0.8.0 tag will not drop until all three parts have shipped — Part 1 lands on `main` first, with Parts 2 + 3 appended to this same entry as their commits land.**
+
+**Engine scope (Part 1):** Postgres only. MySQL and SQLite log debug + no-op; their operators should continue using `KEN_DB_REINDEX_INTERVAL`.
+
+### Added (Part 1: LISTEN/NOTIFY push notifications)
+
+- **Postgres LISTEN/NOTIFY push-based schema change detection** (operator-provided event trigger; ken does NOT modify your database without explicit consent — run the script once). Activate with `KEN_DB_LISTEN=1` after the one-time setup: `ken-mcp print-listen-script | psql $KEN_DB_DSN`. Schema changes now propagate to ken's index within ~100ms instead of waiting for the next `KEN_DB_REINDEX_INTERVAL` tick. Closes Part 1 of [#12](https://github.com/townsendmerino/ken/issues/12). ([ADR-020](docs/DECISIONS.md#adr-020-listennotify-push-based-schema-change-detection-v080-part-1))
+- **`KEN_DB_LISTEN`** env var (`1` / `true` / `yes` activates; default off). Validated via the existing `envBool` helper. Non-Postgres DSNs log debug and silently no-op — MySQL and SQLite have no equivalent push mechanism; interval polling continues to work for them.
+- **`ken-mcp print-listen-script`** CLI subcommand — emits the SQL setup script to stdout, embedded into the binary via `//go:embed` (so it's versioned with the release). Script installs a single schema-level event trigger (`ken_schema_changed_trigger`) that fires `pg_notify('ken_schema_changed', ...)` on tracked DDL (`CREATE / ALTER / DROP` for `TABLE`, `INDEX`, `VIEW`, `MATERIALIZED VIEW`, `FUNCTION`, `TRIGGER`, `TYPE`). Idempotent (`DROP IF EXISTS` + `CREATE`); safe to re-run.
+- **`internal/db.Listener` type** — dedicated `pgx.Conn` separate from the introspection pool (so a long `WaitForNotification` call doesn't tie up the connection introspection needs). Exponential-backoff reconnect (100ms → 30s cap), reset on each successful re-LISTEN. Debounced notification handling (50ms window coalesces bursts into one refresh). Trigger-existence check on every (re)connect; missing trigger logs a clear warn naming the fix command and idles until the next reconnect.
+- **`internal/db.ErrListenNotSupported`** — sentinel error returned by `NewListener` for non-Postgres DSNs; `cmd/ken-mcp` distinguishes this from real connection failures (debug-and-skip vs warn-and-retry).
+- **`TestBinary_StdoutIsCleanJSONRPC_WithListen`** — fifth stdout-cleanliness variant (sibling of stock / Postgres / SQLite / MySQL). Confirms the listener's dedicated pgx connection doesn't leak to stdout.
+- **`TestBinary_PrintListenScript_StdoutIsScript`** — confirms the subcommand short-circuits cleanly before the MCP server starts and emits only the SQL script (no startup chatter, no stderr leakage).
+- **`internal/db/listen_integration_test.go`** (dbintegration build tag) — four scenarios against live Postgres: happy path (DDL → notification within ~200ms), debounce (multi-statement transaction → exactly one onNotify call), missing trigger (warn lines + no panic + idle), reconnect (backend killed → exponential backoff → re-LISTEN → fresh DDL observed).
+- **CI extension.** The `test-db-integration` job now installs the event trigger via `psql -f` before running Postgres integration tests, and adds a `cmd/ken-mcp stdout audit with LISTEN/NOTIFY` step that pins the fifth stdout-cleanliness variant.
+
+### Notes (Part 1)
+
+- LISTEN/NOTIFY **supplements** `KEN_DB_REINDEX_INTERVAL` rather than replacing it. Both can be active; interval polling continues as defense-in-depth backstop in case the NOTIFY connection drops silently (network partition, brief reconnect window). The `Refresher`'s internal mutex serializes — a NOTIFY arriving mid-tick collapses cleanly.
+- **Engine scope: Postgres only.** MySQL has no native push notifications; SQLite is in-process by design. `KEN_DB_LISTEN=1` with a non-Postgres DSN logs debug + no-op, consistent with the v0.7.2 "SQLite ignores schema filtering" pattern.
+- **Setup is mandatory.** Without running the script, the listener logs a clear warn (`event trigger "ken_schema_changed_trigger" is not installed. Run: ken-mcp print-listen-script | psql $KEN_DB_DSN`) and idles. `KEN_DB_REINDEX_INTERVAL` continues to work; the listener will catch up on the next reconnect once the operator runs the script.
+- **Backwards compatibility:** stock `cmd/ken-mcp` with `KEN_DB_LISTEN` unset behaves byte-identically to v0.7.2. All five stdout-cleanliness variants pass after every commit. Parts 2 and 3 (forthcoming) add additive surface only; no v0.7.x or v0.8.0 Part 1 behavior changes.
+
 ## [0.7.2] — 2026-05-25
 
 The "complete the v0.7.x Tier-2 polish" release. MySQL engine + `KEN_DB_SCHEMAS` / `KEN_DB_EXCLUDE_SCHEMAS` schema filtering, paired in one ship because both are Tier-2 ergonomic improvements that close out the engine-completion track started in v0.7.0. After v0.7.2 the v0.7.x track is done: Postgres + SQLite + MySQL all supported, schema filtering available for the engines that need it, migration folding for Tier 1. v0.8.0 becomes the next-features release (LISTEN/NOTIFY + agent `reindex_db` tool + `mcp.Run` DB support) without engine-completion overhang.

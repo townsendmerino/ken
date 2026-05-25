@@ -211,6 +211,29 @@ SQLite is a single-schema engine and ignores both env vars (debug-level log when
 
 Wildcards (e.g. `KEN_DB_SCHEMAS=tenant_*`) are explicitly out of scope for v0.7.2 — multi-tenant operators can fall back to the explicit form `KEN_DB_SCHEMAS=tenant_001,tenant_002,...` until field signal calls for wildcard syntax. See [ADR-019](docs/DECISIONS.md#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) for the rejected-alternatives audit trail.
 
+### LISTEN/NOTIFY push notifications (v0.8.0, Postgres only)
+
+The v0.7.x reindex layers (startup + `KEN_DB_REINDEX_INTERVAL` + SIGHUP) are pull-based — operators waiting for the next interval tick see stale schemas in the meantime. As of **v0.8.0**, Postgres deployments can opt into push-based change detection: schema changes propagate to ken's index within ~100ms instead of waiting for the next tick.
+
+**One-time setup.** ken does NOT modify your database without explicit consent. Run the embedded SQL script once:
+
+```bash
+ken-mcp print-listen-script | psql $KEN_DB_DSN
+```
+
+This installs a single schema-level event trigger (`ken_schema_changed_trigger`) that fires on tracked DDL (`CREATE / ALTER / DROP TABLE`, `INDEX`, `VIEW`, `MATERIALIZED VIEW`, `FUNCTION`, `TRIGGER`, `TYPE`) and emits a `pg_notify('ken_schema_changed', ...)`. The script is idempotent (`DROP IF EXISTS` + `CREATE`); re-running is safe.
+
+**Activate.** Set `KEN_DB_LISTEN=1` (or `true` / `yes`) on the ken-mcp process. The listener uses a dedicated pgx connection separate from the introspection pool, so a long `WaitForNotification` call doesn't tie up the connection introspection needs.
+
+**Failure modes** (all non-fatal; interval polling continues regardless):
+- Event trigger not installed → clear warn naming the fix command (`ken-mcp print-listen-script | psql $KEN_DB_DSN`); listener idles until the next reconnect re-checks.
+- Connection drops (network partition, server restart) → exponential-backoff reconnect (100ms → 30s cap), reset on each successful reconnect.
+- Non-Postgres DSN → debug log + no-op (MySQL and SQLite have no equivalent push mechanism).
+
+**Recommendation: use alongside `KEN_DB_REINDEX_INTERVAL`, not instead.** NOTIFY connections can drop silently (network partition, brief reconnect window); interval polling acts as defense-in-depth backstop that catches missed notifications without operator intervention. Both can run simultaneously; the `Refresher`'s internal mutex serializes concurrent refreshes so a NOTIFY arriving mid-tick collapses cleanly.
+
+See [ADR-020](docs/DECISIONS.md#adr-020-listennotify-push-based-schema-change-detection-v080-part-1) for the alternatives considered (auto-install rejected; per-table opt-in rejected; replace-interval rejected; no-debouncing rejected; faked-MySQL rejected).
+
 ## Quickstart
 
 ```bash
@@ -305,6 +328,7 @@ command = "/absolute/path/to/ken-mcp"
 | `KEN_DB_DSN` | (unset) | Database DSN. Postgres (`postgres://...` / `postgresql://...`), SQLite (`sqlite:///abs/path.db`, `sqlite://./rel/path.db`, `sqlite3://...`), or MySQL (`mysql://user:pass@host:3306/db`, native `user:pass@tcp(host:3306)/db`, or `user:pass@unix(/sock)/db`) — engine routing dispatches on the scheme (or `@tcp(`/`@unix(` for the native MySQL form). Enables [Tier 2 DB indexing](#tier-2--live-postgres-introspection-ken_db_dsn). Requires `KEN_MCP_DEFAULT_REPO` to be a local path. |
 | `KEN_DB_SAMPLE_ROWS` | `0` | Rows per table to sample. **Default 0 means schema-only.** See the [PII stance](#pii-stance-documentation--sane-defaults) before enabling. |
 | `KEN_DB_REINDEX_INTERVAL` | (off) | Go duration (`5m`, `1h`). Background refresh cadence. Off by default — restart or `SIGHUP` to refresh. |
+| `KEN_DB_LISTEN` | `0` | `1` / `true` / `yes` activates Postgres LISTEN/NOTIFY push notifications (v0.8.0). Requires the one-time setup script: `ken-mcp print-listen-script \| psql $KEN_DB_DSN`. Non-Postgres DSNs log debug + no-op. See [LISTEN/NOTIFY push notifications](#listennotify-push-notifications-v080-postgres-only). |
 | `KEN_DB_SCHEMAS` | (unset) | Comma-separated allow-list of schema names (Postgres) / database names (MySQL). Example: `public,billing`. Default exclusions (`pg_catalog`, `information_schema`, `mysql`, `performance_schema`, `sys`) always still apply. SQLite ignores. See [Filtering indexed schemas](#filtering-indexed-schemas). |
 | `KEN_DB_EXCLUDE_SCHEMAS` | (unset) | Comma-separated deny-list. Extends (does not replace) the default exclusions. Example: `audit,cron,legacy`. When set alongside `KEN_DB_SCHEMAS`, the allow-list wins (stderr warn). SQLite ignores. |
 | `KEN_SQL_NO_AUTO_MIGRATIONS` | (off) | `1` / `true` / `yes` disables v0.7.1 Tier-1 migration-history folding (restores v0.7.0 per-file behavior). Useful when you maintain a canonical `schema/current.sql` and don't want migration history surfaced as folded chunks. |
