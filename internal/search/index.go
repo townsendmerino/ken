@@ -48,6 +48,7 @@ import (
 	// binary's main package, not in this shared library layer.
 	"github.com/townsendmerino/ken/internal/embed"
 	"github.com/townsendmerino/ken/internal/repo"
+	"github.com/townsendmerino/ken/internal/sql"
 )
 
 // Mode selects the retrieval strategy.
@@ -188,7 +189,7 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		cs, err := chunk.ChunkFile(chunkerName, rel, data, chunk.DefaultChunkSize)
+		cs, err := chunkOneFile(chunkerName, rel, data)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -200,6 +201,37 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 		}
 	}
 	return chunks, vecs, model, nil
+}
+
+// chunkOneFile is the single point both the build-once path
+// (walkAndChunkFSWithModel) and the watch path (WatchedIndex.appendFile)
+// route file-bytes through, so .sql files get both the regular chunker
+// output AND v0.7.0 Tier 1's structural per-table chunks (ADR-017).
+//
+// Decision: the structural chunks are ADDITIVE — the .sql file is still
+// routed through whatever chunker is configured (line for .sql in the
+// stock binary), so BM25 still surfaces the original byte slice for
+// raw-text queries; the structural chunks are extra retrieval units
+// agents can hit when their query matches a column name + type +
+// constraint shape. SQL-parser warnings (skipped malformed statements)
+// are currently discarded — the BM25 path catches them via the original
+// file text. If operators ask to surface them, route a logger here.
+func chunkOneFile(chunkerName, rel string, data []byte) ([]chunk.Chunk, error) {
+	cs, err := chunk.ChunkFile(chunkerName, rel, data, chunk.DefaultChunkSize)
+	if err != nil {
+		return nil, err
+	}
+	if sql.IsSQLFile(rel) {
+		extras, perr := sql.ParseFile(rel, data, nil) // nil logger → discard
+		if perr == nil {
+			cs = append(cs, extras...)
+		}
+		// Parse errors from ParseFile are file-level (already best-effort
+		// at statement level). Silently drop — the BM25 index of the raw
+		// file text still surfaces the content; we just don't get the
+		// structural per-object chunks for this file.
+	}
+	return cs, nil
 }
 
 // FromFSWithModel is FromFS with the model supplied directly rather than
