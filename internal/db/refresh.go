@@ -76,6 +76,14 @@ func (r *Refresher) Run(ctx context.Context) error {
 	}
 }
 
+// ErrReindexInProgress is the sentinel returned by TryRefresh when
+// another refresh (interval ticker, SIGHUP, LISTEN/NOTIFY listener,
+// or a prior TryRefresh) is currently holding the Refresher's mutex.
+// Callers (the v0.8.0 reindex_db MCP tool, ADR-020 Part 2) inspect
+// this via errors.Is so they can surface a recoverable "already in
+// progress" signal to the agent instead of queuing.
+var ErrReindexInProgress = errors.New("db: reindex already in progress")
+
 // Refresh triggers an immediate IndexSchema rebuild and swap. Safe to
 // call concurrently with Run (or other Refresh callers) — the mutex
 // serializes so at most one refresh is in flight at any time.
@@ -83,10 +91,44 @@ func (r *Refresher) Run(ctx context.Context) error {
 // Returns the underlying IndexSchema error if any, so the caller can
 // log differentiate transient-vs-fatal at its discretion. The chunks
 // are still swapped on success.
+//
+// Used by the four BLOCKING trigger sources (startup, KEN_DB_REINDEX_INTERVAL
+// ticker, SIGHUP handler, LISTEN/NOTIFY listener) — for those, queuing
+// behind an in-flight refresh is correct: a tick or NOTIFY arriving
+// mid-refresh should fire its own refresh once the current one ends,
+// not skip silently. The v0.8.0 reindex_db MCP tool uses TryRefresh
+// instead — see its docstring.
 func (r *Refresher) Refresh(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.doRefresh(ctx)
+}
 
+// TryRefresh attempts to acquire the Refresher mutex without blocking.
+// Returns ErrReindexInProgress if another refresh is already in flight;
+// otherwise behaves identically to Refresh. The v0.8.0 reindex_db MCP
+// tool (ADR-020 Part 2) uses this so an agent hammering the tool sees
+// an explicit "already in progress" signal it can adapt to, instead of
+// queuing requests behind a long-running refresh.
+//
+// The blocking trigger sources (interval/SIGHUP/LISTEN/startup) keep
+// using Refresh — their semantics genuinely want to serialize, not
+// skip. TryRefresh is specifically for the agent-callable path where
+// fail-fast is friendlier than block-and-wait.
+func (r *Refresher) TryRefresh(ctx context.Context) error {
+	if !r.mu.TryLock() {
+		return ErrReindexInProgress
+	}
+	defer r.mu.Unlock()
+	return r.doRefresh(ctx)
+}
+
+// doRefresh is the mutex-held body shared by Refresh and TryRefresh.
+// Callers MUST hold r.mu before invoking. Splitting this out keeps
+// the two entry points exactly 1:1 in their introspection + swap
+// semantics — TryRefresh differs from Refresh only in its lock
+// acquisition strategy.
+func (r *Refresher) doRefresh(ctx context.Context) error {
 	chunks, err := IndexSchema(ctx, r.opts)
 	if err != nil {
 		return fmt.Errorf("Refresh: %w", err)
