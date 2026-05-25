@@ -117,9 +117,10 @@ func (o Options) validate() Options {
 // (Tier 2 disabled — the documented sentinel). Closes the connection
 // before return; no long-lived handle.
 //
-// As of v0.7.1 IndexSchema dispatches on the DSN scheme:
+// As of v0.7.2 IndexSchema dispatches on the DSN scheme:
 //   - postgres:// / postgresql://  → indexSchemaPostgres (the v0.7.0 path)
 //   - sqlite://   / sqlite3://     → indexSchemaSQLite   (ADR-018)
+//   - mysql:// or native @tcp/@unix → indexSchemaMySQL   (ADR-019)
 //
 // Per-table errors during introspection (a query failing on one weird
 // table type, for example) are logged to opts.LogWriter at warn level
@@ -135,14 +136,15 @@ func IndexSchema(ctx context.Context, opts Options) ([]chunk.Chunk, error) {
 		return nil, nil
 	}
 
-	scheme := strings.ToLower(schemeOf(opts.DSN))
-	switch scheme {
-	case "postgres", "postgresql":
+	switch dsnEngine(opts.DSN) {
+	case "postgres":
 		return indexSchemaPostgres(ctx, opts)
-	case "sqlite", "sqlite3":
+	case "sqlite":
 		return indexSchemaSQLite(ctx, opts, opts.DefaultRepoPath)
+	case "mysql":
+		return indexSchemaMySQL(ctx, opts)
 	default:
-		return nil, fmt.Errorf("db: unsupported DSN scheme %q (want postgres://, postgresql://, sqlite://, or sqlite3://)", scheme)
+		return nil, fmt.Errorf("db: unsupported DSN scheme %q (want postgres://, postgresql://, sqlite://, sqlite3://, mysql://, or native MySQL user:pass@tcp(...)/db form)", schemeOf(opts.DSN))
 	}
 }
 
@@ -151,6 +153,34 @@ func IndexSchema(ctx context.Context, opts Options) ([]chunk.Chunk, error) {
 func schemeOf(dsn string) string {
 	if i := strings.Index(dsn, "://"); i > 0 {
 		return strings.ToLower(dsn[:i])
+	}
+	return ""
+}
+
+// dsnEngine maps a DSN to the engine family used by IndexSchema:
+//   - "postgres" for postgres:// / postgresql://
+//   - "sqlite"   for sqlite://   / sqlite3://
+//   - "mysql"    for mysql://    or the native go-sql-driver form
+//     (user:pass@tcp(host:port)/db or @unix(/sock)/db) which has no
+//     URL scheme prefix
+//   - ""         for anything else
+//
+// The native MySQL DSN form is detected by absence of "://" and presence
+// of an "@tcp(" or "@unix(" substring — the canonical markers in the
+// driver's documented format.
+func dsnEngine(dsn string) string {
+	switch strings.ToLower(schemeOf(dsn)) {
+	case "postgres", "postgresql":
+		return "postgres"
+	case "sqlite", "sqlite3":
+		return "sqlite"
+	case "mysql":
+		return "mysql"
+	case "":
+		// No "://" prefix — could be the native MySQL DSN.
+		if strings.Contains(dsn, "@tcp(") || strings.Contains(dsn, "@unix(") {
+			return "mysql"
+		}
 	}
 	return ""
 }
