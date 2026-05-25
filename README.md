@@ -61,6 +61,15 @@ func main() {
 
 For multi-repo code search with live file-watching, use [`cmd/ken-mcp`](cmd/ken-mcp/) directly (below) — the two modes coexist by design.
 
+## What ken indexes well
+
+ken's hybrid BM25 + Model2Vec retrieval is calibrated for two content types:
+
+- **Source code** — Python, Go, TypeScript, Java, Rust have language-aware chunking via the regex chunker (default) or the optional tree-sitter chunker. Other languages fall back to the line chunker.
+- **Documentation** — markdown files (`.md`, `.mdx`, `.markdown`) chunk on heading boundaries, keep code blocks / tables / lists atomic, and handle YAML/TOML frontmatter. Mixed corpora (code + docs in one repo) work out of the box — each file routes to the right chunker by extension.
+
+For plain-text corpora with no code or structured documentation (novels, journals, raw transcripts), the BM25 side works fine in `--mode=bm25`, but the semantic model is code-trained — semantic ranking quality on pure literary prose is unvalidated. If that's your use case, expect BM25 mode to do most of the heavy lifting.
+
 ## Quickstart
 
 ```bash
