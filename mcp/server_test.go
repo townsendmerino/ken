@@ -55,8 +55,12 @@ func TestServer_ListsBothTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
+	// Default fixture wires Reindex=nil → reindex_db is NOT registered,
+	// so the agent sees only the two v0.6.0 tools. v0.8.0 Part 2 keeps
+	// tools/list honest by hiding tools that would return "no DB" 100%
+	// of the time.
 	if len(res.Tools) != 2 {
-		t.Fatalf("got %d tools, want 2", len(res.Tools))
+		t.Fatalf("got %d tools, want 2 (Reindex unset → reindex_db not registered)", len(res.Tools))
 	}
 	got := map[string]bool{}
 	for _, tl := range res.Tools {
@@ -66,6 +70,9 @@ func TestServer_ListsBothTools(t *testing.T) {
 		if !got[want] {
 			t.Errorf("missing tool %q (have %v)", want, got)
 		}
+	}
+	if got["reindex_db"] {
+		t.Errorf("reindex_db should NOT be listed when Config.Reindex is nil")
 	}
 }
 
@@ -124,6 +131,164 @@ func TestServer_FindRelated_NeedsSemanticMode(t *testing.T) {
 		t.Errorf("expected BM25-mode error text, got:\n%s", txt.Text)
 	}
 }
+
+// newReindexServerClient is the server fixture for v0.8.0 Part 2
+// reindex_db tests. Same shape as newInMemoryServerClient but with a
+// caller-supplied ReindexFunc so each test can control the result the
+// tool's handler observes (success / in-progress / error).
+func newReindexServerClient(t *testing.T, reindex ReindexFunc) (context.Context, *sdk.ClientSession, func()) {
+	t.Helper()
+	ix, err := search.NewWatchedIndex("../testdata/repo", search.ModeBM25, "regex", "", false)
+	if err != nil {
+		t.Fatalf("NewWatchedIndex: %v", err)
+	}
+	cache := NewCache(4, func(context.Context, string) (*search.WatchedIndex, func(), error) {
+		return ix, nil, nil
+	})
+	srv := NewServer(Config{Cache: cache, DefaultRepo: "../testdata/repo", Reindex: reindex})
+
+	clientT, serverT := sdk.NewInMemoryTransports()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	srvDone := make(chan error, 1)
+	go func() { srvDone <- srv.Run(ctx, serverT) }()
+
+	cli := sdk.NewClient(&sdk.Implementation{Name: "test", Version: "0"}, nil)
+	sess, err := cli.Connect(ctx, clientT, nil)
+	if err != nil {
+		cancel()
+		t.Fatalf("client.Connect: %v", err)
+	}
+	cleanup := func() {
+		_ = sess.Close()
+		cancel()
+		<-srvDone
+		cache.Close()
+	}
+	return ctx, sess, cleanup
+}
+
+// TestReindexDBTool_Registered confirms that when Config.Reindex is
+// non-nil, the tool appears in tools/list alongside search +
+// find_related.
+func TestReindexDBTool_Registered(t *testing.T) {
+	ctx, sess, cleanup := newReindexServerClient(t, func(context.Context) ReindexResult {
+		return ReindexResult{Elapsed: 5 * time.Millisecond}
+	})
+	defer cleanup()
+
+	res, err := sess.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	got := map[string]bool{}
+	for _, tl := range res.Tools {
+		got[tl.Name] = true
+	}
+	for _, want := range []string{"search", "find_related", "reindex_db"} {
+		if !got[want] {
+			t.Errorf("missing tool %q (have %v)", want, got)
+		}
+	}
+}
+
+// TestReindexDBTool_NoDB confirms that with Config.Reindex unset the
+// tool is NOT registered (we don't want a tool that returns "no DB"
+// 100% of the time). Sibling assertion to the updated
+// TestServer_ListsBothTools above; kept separate so its name surfaces
+// the no-DB behavior explicitly in -v output.
+func TestReindexDBTool_NoDB(t *testing.T) {
+	ctx, sess, cleanup := newInMemoryServerClient(t) // Reindex=nil
+	defer cleanup()
+
+	res, err := sess.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	for _, tl := range res.Tools {
+		if tl.Name == "reindex_db" {
+			t.Fatalf("reindex_db must not be registered when Config.Reindex is nil")
+		}
+	}
+	// Calling the tool by name should also error at the protocol layer
+	// (tool not found), but the SDK's behavior for an unknown tool name
+	// is not part of ken's wire contract — the ListTools check above is
+	// the load-bearing assertion.
+}
+
+// TestReindexDBTool_Success verifies the success path renders the
+// "Reindexed in Nms" text response and passes elapsed-ms through from
+// the callback.
+func TestReindexDBTool_Success(t *testing.T) {
+	const elapsed = 142 * time.Millisecond
+	ctx, sess, cleanup := newReindexServerClient(t, func(context.Context) ReindexResult {
+		return ReindexResult{Elapsed: elapsed}
+	})
+	defer cleanup()
+
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name:      "reindex_db",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(reindex_db): %v", err)
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(txt, "Reindexed in 142ms") {
+		t.Errorf("expected 'Reindexed in 142ms', got: %s", txt)
+	}
+}
+
+// TestReindexDBTool_InProgress: when the callback signals InProgress,
+// the agent-facing response is the documented "already in progress"
+// text — no timing data leaked, no error markers.
+func TestReindexDBTool_InProgress(t *testing.T) {
+	ctx, sess, cleanup := newReindexServerClient(t, func(context.Context) ReindexResult {
+		return ReindexResult{InProgress: true}
+	})
+	defer cleanup()
+
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name:      "reindex_db",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(reindex_db): %v", err)
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(txt, "Reindex already in progress") {
+		t.Errorf("expected 'Reindex already in progress' text, got: %s", txt)
+	}
+}
+
+// TestReindexDBTool_Error: when the callback returns Err, the agent-
+// facing response includes the error text verbatim. We don't try to
+// classify the error (transient vs fatal) — that's the agent's call.
+func TestReindexDBTool_Error(t *testing.T) {
+	const errText = "introspection query failed: connection refused"
+	ctx, sess, cleanup := newReindexServerClient(t, func(context.Context) ReindexResult {
+		return ReindexResult{Err: &mockError{errText}}
+	})
+	defer cleanup()
+
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name:      "reindex_db",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(reindex_db): %v", err)
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(txt, "Reindex failed:") {
+		t.Errorf("expected 'Reindex failed:' prefix, got: %s", txt)
+	}
+	if !strings.Contains(txt, errText) {
+		t.Errorf("expected verbatim error text, got: %s", txt)
+	}
+}
+
+type mockError struct{ msg string }
+
+func (e *mockError) Error() string { return e.msg }
 
 func TestServer_NoRepoNoDefault_ReturnsValidationText(t *testing.T) {
 	// Build a server WITHOUT a default repo. Tools should reject a call

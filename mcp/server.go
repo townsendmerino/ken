@@ -3,11 +3,46 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/townsendmerino/ken/internal/search"
 )
+
+// ReindexFunc is the callback the v0.8.0 reindex_db MCP tool invokes
+// (ADR-020 Part 2). Returns a ReindexResult; the handler inspects
+// InProgress, Elapsed, and Err to choose the agent-facing message.
+//
+// cmd/ken-mcp wires a closure that calls *db.Refresher.TryRefresh and
+// translates db.ErrReindexInProgress into ReindexResult{InProgress:true};
+// mcp.Run's Part 3 DBSource path provides its own closure. The
+// result-struct shape keeps the mcp package free of internal/db
+// imports, so there's no error-sentinel coupling across package
+// boundaries.
+type ReindexFunc func(ctx context.Context) ReindexResult
+
+// ReindexResult is the outcome of one reindex attempt. Exactly one of
+// InProgress=true, Err!=nil, or "everything else (success)" is the
+// agent-facing case; the handler picks the message based on that.
+type ReindexResult struct {
+	// InProgress is true if another refresh is currently holding the
+	// Refresher's mutex (interval ticker, SIGHUP, LISTEN/NOTIFY
+	// listener, or a prior reindex_db call). The handler reports
+	// "already in progress" without waiting. NEVER set true when
+	// Err is also non-nil — they're mutually exclusive.
+	InProgress bool
+
+	// Elapsed is wall-clock duration of the refresh, measured by the
+	// callback wrapper. Surfaced to the agent so it can reason about
+	// whether to retry-on-stale or trust the freshness.
+	Elapsed time.Duration
+
+	// Err is non-nil on real failure (connection error, query failure).
+	// InProgress is false in this case; the handler reports the error
+	// text verbatim so the agent can decide whether to surface or retry.
+	Err error
+}
 
 // Config is the wiring for a ken-mcp server. Defaults applied by
 // NewServer for any zero value.
@@ -19,6 +54,15 @@ type Config struct {
 	Instructions  string      // server-instructions string; default mirrors semble's
 	ServerName    string      // default "ken"
 	ServerVersion string      // default "0"
+
+	// Reindex, when non-nil, registers the v0.8.0 reindex_db MCP tool
+	// (ADR-020 Part 2). cmd/ken-mcp wires a closure that delegates to
+	// *db.Refresher.TryRefresh and translates db.ErrReindexInProgress
+	// into ReindexResult{InProgress:true}; mcp.Run's Part 3 DBSource
+	// path will wire its own closure. nil = tool not registered (the
+	// agent's tools/list won't show reindex_db at all when no DB is
+	// configured, which keeps the tool surface honest).
+	Reindex ReindexFunc
 }
 
 // NewServer returns an MCP server with `search` and `find_related`
@@ -66,7 +110,48 @@ func NewServer(cfg Config) *sdk.Server {
 		return handleFindRelated(ctx, &cfg, args)
 	})
 
+	// v0.8.0 Part 2 (ADR-020): reindex_db tool. Registered ONLY when
+	// a Reindex callback is wired — keeps tools/list honest (an agent
+	// shouldn't see a tool that returns "no DB" 100% of the time).
+	if cfg.Reindex != nil {
+		sdk.AddTool(srv, &sdk.Tool{
+			Name: "reindex_db",
+			Description: "Trigger a Tier 2 database schema reindex on demand. " +
+				"Use after running a migration to refresh ken's view of the database schema before asking schema-dependent questions. " +
+				"Returns immediately with `already in progress` if another reindex is in flight (no queuing). " +
+				"Available whenever a DB is configured.",
+		}, func(ctx context.Context, _ *sdk.CallToolRequest, _ ReindexDBArgs) (*sdk.CallToolResult, any, error) {
+			return handleReindexDB(ctx, &cfg)
+		})
+	}
+
 	return srv
+}
+
+// handleReindexDB invokes the configured Reindex callback and renders
+// the result as a text response matching semble's plain-text MCP wire
+// format. Four shapes:
+//
+//   - Reindex unset → "DB indexing not configured…" (defense-in-depth;
+//     NewServer only registers the tool when Reindex is non-nil, but
+//     a future code path that calls this handler directly should fail
+//     safe).
+//   - InProgress → "Reindex already in progress; nothing to do."
+//   - Err != nil → "Reindex failed: <err>"
+//   - success → "Reindexed in 123ms."
+func handleReindexDB(ctx context.Context, cfg *Config) (*sdk.CallToolResult, any, error) {
+	if cfg.Reindex == nil {
+		return textResult("DB indexing is not configured (KEN_DB_DSN is unset); nothing to reindex."), nil, nil
+	}
+	res := cfg.Reindex(ctx)
+	switch {
+	case res.InProgress:
+		return textResult("Reindex already in progress; nothing to do."), nil, nil
+	case res.Err != nil:
+		return textResult(fmt.Sprintf("Reindex failed: %s", res.Err.Error())), nil, nil
+	default:
+		return textResult(fmt.Sprintf("Reindexed in %dms.", res.Elapsed.Milliseconds())), nil, nil
+	}
 }
 
 // resolveRepo picks the index source: explicit args.Repo wins, else the

@@ -694,6 +694,99 @@ func TestBinary_StdoutIsCleanJSONRPC_WithListen(t *testing.T) {
 	}
 }
 
+// TestBinary_StdoutIsCleanJSONRPC_WithReindexDB is the v0.8.0 Part 2
+// sibling of _WithDB / _WithListen. Spawns ken-mcp with KEN_DB_DSN
+// set, then drives a `reindex_db` tool call through sdk.CommandTransport
+// — the existing _WithDB test only calls `search`, so the reindex_db
+// tool's full code path (registration, handler, callback into the
+// Refresher) wasn't audited for stdout cleanliness until this test.
+//
+// The new code path doesn't obviously introduce stdout writes
+// (handler uses the same textResult shim search/find_related use; the
+// reindexCallback in main.go is just errors.Is + time.Now + a
+// closure), so this test is defense-in-depth — it would catch a
+// future regression where, say, someone adds a log.Print to the
+// callback without thinking about which writer it goes to.
+//
+// Skipped when KEN_DB_TEST_DSN is unset; CI sets it via the
+// postgres:16-alpine service container.
+func TestBinary_StdoutIsCleanJSONRPC_WithReindexDB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess MCP test in -short mode")
+	}
+	dsn := os.Getenv("KEN_DB_TEST_DSN")
+	if dsn == "" {
+		t.Skip("KEN_DB_TEST_DSN not set; see internal/db/integration_test.go for setup")
+	}
+
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "ken-mcp")
+	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
+	}
+
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(repoRoot, "testdata", "repo")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binPath)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"KEN_MCP_MODE=bm25",
+		"KEN_MCP_CHUNKER=regex",
+		"KEN_MCP_LOG_LEVEL=info",
+		"KEN_MCP_DEFAULT_REPO=" + fixture,
+		"KEN_DB_DSN=" + dsn,
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-test-reindex", Version: "0"}, nil)
+	sess, err := cli.Connect(ctx, &sdk.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("Connect (with reindex_db env): %v\n--stderr--\n%s", err, stderr.String())
+	}
+	defer sess.Close()
+
+	// reindex_db should appear in the tools/list response (proves the
+	// Reindex callback was wired into Config — without it, the tool
+	// isn't registered).
+	tl, err := sess.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v\n--stderr--\n%s", err, stderr.String())
+	}
+	have := map[string]bool{}
+	for _, t := range tl.Tools {
+		have[t.Name] = true
+	}
+	if !have["reindex_db"] {
+		t.Fatalf("reindex_db not in tools/list (have %v); Config.Reindex wasn't wired",
+			have)
+	}
+
+	// Call the tool. Successful response shape: "Reindexed in Nms."
+	// (or "Reindex already in progress" if the startup IndexSchema is
+	// still holding the mutex — either case is stdout-clean).
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name:      "reindex_db",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(reindex_db): %v\n--stderr--\n%s", err, stderr.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(txt, "Reindexed in") && !strings.Contains(txt, "Reindex already in progress") {
+		t.Errorf("unexpected reindex_db response: %s", txt)
+	}
+}
+
 // TestBinary_StdoutIsCleanJSONRPC_WithMySQL is the v0.7.2 sibling of
 // _WithDB / _WithSQLite: spawns the real ken-mcp binary with a MySQL
 // DSN set via KEN_DB_MYSQL_TEST_DSN. Confirms go-sql-driver/mysql's

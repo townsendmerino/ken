@@ -195,12 +195,6 @@ func main() {
 	}
 
 	cache := kenmcp.NewCache(size, builder)
-	srv := kenmcp.NewServer(kenmcp.Config{
-		Cache:       cache,
-		DefaultRepo: defaultRepo,
-		Mode:        mode,
-		Chunker:     chunker,
-	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -212,10 +206,28 @@ func main() {
 	// manual refresh via SIGHUP. DB chunks attach to the default repo
 	// specifically — multi-repo searches (no default) get FS-only.
 	//
-	// Returns nil cleanup when Tier 2 isn't configured or initial
-	// connection fails (the latter logs warn and continues with FS-only
-	// rather than crashing startup).
-	dbCleanup := wireDBTier2(ctx, logger, cache, defaultRepo)
+	// v0.8.0 Part 2 (ADR-020): wireDBTier2 also returns the *db.Refresher
+	// (or nil) so NewServer can register the reindex_db tool. We run
+	// wireDBTier2 BEFORE NewServer specifically for this — otherwise
+	// the Refresher wouldn't exist at tool-registration time.
+	//
+	// Returns (nil refresher, nil cleanup) when Tier 2 isn't configured
+	// or initial connection fails (the latter logs warn and continues
+	// with FS-only rather than crashing startup).
+	refresher, dbCleanup := wireDBTier2(ctx, logger, cache, defaultRepo)
+
+	srv := kenmcp.NewServer(kenmcp.Config{
+		Cache:       cache,
+		DefaultRepo: defaultRepo,
+		Mode:        mode,
+		Chunker:     chunker,
+		// v0.8.0 Part 2 (ADR-020): bridge db.ErrReindexInProgress into
+		// mcp.ReindexResult{InProgress: true} so the mcp package
+		// doesn't need to import internal/db. nil refresher → nil
+		// callback → reindex_db tool NOT registered (tools/list stays
+		// honest for FS-only deployments).
+		Reindex: reindexCallback(refresher),
+	})
 
 	// Signal-driven cleanup: when the agent disconnects (Ctrl-C or pipe
 	// close), drop temp clone directories so we don't leak disk.
@@ -251,8 +263,10 @@ func main() {
 //  5. Installs SIGHUP handler (unix-only via watchSIGHUP) that calls
 //     refresher.Refresh on each signal.
 //
-// Returns a cleanup func to call before the cache closes; nil if Tier 2
-// wasn't enabled or initial setup failed. Cleanup is currently a no-op
+// Returns the *db.Refresher (or nil if Tier 2 wasn't enabled / initial
+// setup failed) plus a cleanup func. The Refresher is forwarded to
+// NewServer's Config.Reindex so the v0.8.0 reindex_db MCP tool
+// (ADR-020 Part 2) can call TryRefresh. Cleanup is currently a no-op
 // (the Refresher exits when ctx cancels naturally) but reserved as a
 // future seam.
 //
@@ -268,10 +282,10 @@ func main() {
 //   - Initial db.IndexSchema fails: warning, Tier 2 stays off (no
 //     refresher started — agents shouldn't get stale empty chunks if
 //     the DB was never reachable).
-func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache, defaultRepo string) func() {
+func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache, defaultRepo string) (*db.Refresher, func()) {
 	dsn := envDSN("KEN_DB_DSN", logger)
 	if dsn == "" {
-		return nil
+		return nil, nil
 	}
 	sampleRows := envInt("KEN_DB_SAMPLE_ROWS", 0, logger)
 	if sampleRows < 0 {
@@ -307,14 +321,14 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 		logger.Logf(kenmcp.LogWarn,
 			"KEN_DB_DSN set but KEN_MCP_DEFAULT_REPO is empty — Tier 2 (DB indexing) needs "+
 				"a default repo to attach DB chunks to; disabling Tier 2")
-		return nil
+		return nil, nil
 	}
 	if strings.HasPrefix(defaultRepo, "http://") || strings.HasPrefix(defaultRepo, "https://") {
 		logger.Logf(kenmcp.LogWarn,
 			"KEN_DB_DSN set but KEN_MCP_DEFAULT_REPO=%q is an http(s) URL — Tier 2 only "+
 				"attaches to local-path repos (URL repos would require shelling out to git "+
 				"during startup); disabling Tier 2", defaultRepo)
-		return nil
+		return nil, nil
 	}
 
 	// Pre-warm the default repo's WatchedIndex. This is what makes DB
@@ -322,7 +336,7 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 	wix, err := cache.Get(ctx, defaultRepo)
 	if err != nil {
 		logger.Logf(kenmcp.LogWarn, "Tier 2: cannot pre-build default repo %q: %v — disabling Tier 2", defaultRepo, err)
-		return nil
+		return nil, nil
 	}
 
 	opts := db.Options{
@@ -352,7 +366,7 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 	initial, err := db.IndexSchema(ctx, opts)
 	if err != nil {
 		logger.Logf(kenmcp.LogWarn, "Tier 2: initial IndexSchema failed: %v — disabling Tier 2", err)
-		return nil
+		return nil, nil
 	}
 	wix.SetExtraChunks(initial)
 	logger.Logf(kenmcp.LogInfo, "Tier 2: indexed %d DB chunks into %q", len(initial), defaultRepo)
@@ -361,7 +375,7 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 	refresher, err := db.NewRefresher(opts, wix.SetExtraChunks)
 	if err != nil {
 		logger.Logf(kenmcp.LogWarn, "Tier 2: NewRefresher: %v — manual SIGHUP refresh disabled", err)
-		return nil
+		return nil, nil
 	}
 
 	if reindex > 0 {
@@ -410,7 +424,37 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 			}()
 		}
 	}
-	return func() {} // reserved cleanup seam
+	return refresher, func() {} // reserved cleanup seam
+}
+
+// reindexCallback bridges *db.Refresher's TryRefresh into the
+// mcp.ReindexFunc shape NewServer expects. The bridge translates
+// db.ErrReindexInProgress into ReindexResult{InProgress: true} so the
+// mcp package itself doesn't need to import internal/db. Returns nil
+// when refresher is nil (no DB configured) so NewServer skips
+// reindex_db tool registration entirely — tools/list stays honest
+// for FS-only deployments.
+//
+// Time measurement is wall-clock around the TryRefresh call. The
+// InProgress path returns Elapsed=0 because no work happened on this
+// invocation; the handler renders the in-progress message without
+// surfacing timing.
+func reindexCallback(refresher *db.Refresher) kenmcp.ReindexFunc {
+	if refresher == nil {
+		return nil
+	}
+	return func(ctx context.Context) kenmcp.ReindexResult {
+		start := time.Now()
+		err := refresher.TryRefresh(ctx)
+		switch {
+		case errors.Is(err, db.ErrReindexInProgress):
+			return kenmcp.ReindexResult{InProgress: true}
+		case err != nil:
+			return kenmcp.ReindexResult{Err: err}
+		default:
+			return kenmcp.ReindexResult{Elapsed: time.Since(start)}
+		}
+	}
 }
 
 // redactDSN returns a DSN with the userinfo (and therefore the password)

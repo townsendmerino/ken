@@ -43,6 +43,14 @@ type FindRelatedArgs struct {
 	TopK     int    `json:"top_k,omitempty" jsonschema:"Number of similar chunks to return."`
 }
 
+// ReindexDBArgs is the argument schema for the v0.8.0 reindex_db tool.
+// Argument-free by design (ADR-020 Part 2) — operates on the
+// process-configured KEN_DB_DSN. Future v0.8.x+ refinements (async
+// return, per-engine selectors) can extend this struct; for v0.8.0
+// it's deliberately empty so the agent invokes the tool with no
+// parameters.
+type ReindexDBArgs struct{}
+
 // FormatResults mirrors semble utils._format_results: a header, then each
 // result as a numbered, fenced code block with score=X.XXX. Returning a
 // preformatted string keeps wire compatibility with semble — agents see
