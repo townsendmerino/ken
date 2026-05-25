@@ -25,7 +25,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-017](#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance) | Database schema indexing — two-tier (static SQL + live Postgres) with documented PII stance | Accepted |
 | [ADR-018](#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay) | SQLite engine + migration-history folding via lightweight ALTER replay | Accepted |
 | [ADR-019](#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) | MySQL engine + schema filtering for multi-schema dev databases | Accepted |
-| [ADR-020](#adr-020-listennotify-push-based-schema-change-detection-v080-part-1) | LISTEN/NOTIFY push-based schema change detection (v0.8.0 Part 1) | Accepted |
+| [ADR-020](#adr-020-listennotify-push-based-schema-change-detection-v080-part-1) | LISTEN/NOTIFY push-based schema change detection + `reindex_db` MCP tool + (forthcoming) `mcp.Run` DB support (v0.8.0) | Accepted |
 
 ---
 
@@ -800,7 +800,7 @@ v0.7.2 pairs them because both are Tier 2 ergonomic improvements that ship clean
 
 ## ADR-020: LISTEN/NOTIFY push-based schema change detection (v0.8.0 Part 1)
 
-**Status:** Accepted (Part 1 only — Parts 2 and 3 land in follow-on commits within v0.8.0)
+**Status:** Accepted (Parts 1 and 2; Part 3 lands in follow-on commits within v0.8.0)
 
 **Date:** 2026-05-25
 
@@ -865,3 +865,57 @@ v0.8.0 is the "operator-control-loop" release; this ADR's section covers Part 1 
 - **Engine-routing pattern preserved.** MySQL and SQLite go through the same `dsnEngine` check; `NewListener` returns `ErrListenNotSupported` for them and `cmd/ken-mcp` debug-logs + skips. Adding a future engine that DOES support push notifications follows the same shape: a new `Listener` variant with engine-specific connection + watch loop, dispatch in `NewListener`.
 
 - **Three reindex triggers converge on one entry point.** Interval ticker, SIGHUP handler, and LISTEN listener all call `Refresher.Refresh(ctx)`. The Refresher's mutex serializes — no concurrent IndexSchema calls, no swap-callback races. v0.8.0's `reindex_db` MCP tool (Part 2) will be the fourth trigger source on the same path.
+
+### Part 2: agent-callable reindex via `reindex_db` MCP tool (v0.8.0 Part 2)
+
+**Date:** 2026-05-25
+
+### Decision (Part 2)
+
+**Agent-callable reindex via a new `reindex_db` MCP tool. The tool calls `Refresher.TryRefresh(ctx)` — fail-fast on contention via `sync.Mutex.TryLock`, not block-and-wait.**
+
+1. **New `Refresher.TryRefresh(ctx) error` method** in `internal/db`. Uses `r.mu.TryLock()`; returns `ErrReindexInProgress` (new exported sentinel) if the mutex is held; otherwise behaves identically to `Refresh`. Refactor splits the shared body into an unexported `doRefresh(ctx)` so `Refresh` and `TryRefresh` differ ONLY in lock-acquisition strategy.
+
+2. **Five trigger sources, one entry point.** Startup (one-shot in `wireDBTier2`), `KEN_DB_REINDEX_INTERVAL` ticker, SIGHUP, LISTEN/NOTIFY listener — all four call `Refresh` (blocking on mutex; their semantics genuinely want to serialize, not skip). The fifth, `reindex_db`, calls `TryRefresh` — agent-callable, fail-fast.
+
+3. **No new env vars.** The tool is registered automatically whenever `KEN_DB_DSN` is set (more precisely: whenever `wireDBTier2` returns a non-nil `*db.Refresher`). When no DB is configured, the tool is NOT registered — `tools/list` won't show it, keeping the agent's tool surface honest. Operators who want to disable the tool unset `KEN_DB_DSN` (no DB tier at all) or run a separate ken-mcp process.
+
+4. **`mcp.ReindexFunc` callback shape.** New `mcp.Config.Reindex ReindexFunc` field. `cmd/ken-mcp` wires a closure that calls `*db.Refresher.TryRefresh` and translates `db.ErrReindexInProgress` into `ReindexResult{InProgress: true}`. The result-struct shape (rather than an error sentinel) keeps the `mcp` package free of `internal/db` imports — Part 3's `mcp.Run` DBSource will reuse the same callback shape with its own implementation.
+
+5. **`cmd/ken-mcp/main.go` order change.** `wireDBTier2` now runs BEFORE `NewServer` (instead of after) and returns the `*db.Refresher` so it can be wired into the server's Config at construction time. The five other args / env vars / behaviors are unchanged; only the call order moved.
+
+6. **Plain-text response shape, matching `search` / `find_related`.** Three message templates — `Reindexed in Nms.` (success), `Reindex already in progress; nothing to do.` (contention), `Reindex failed: <err>` (real failure). semble's MCP wire format is plain text, not structured JSON; we match.
+
+7. **Argument-free for v0.8.0.** `ReindexDBArgs` is an empty struct. Async return / per-engine selectors / repo selectors are deferred per the alternatives below — adding them later is additive (extending the args struct without breaking the wire format).
+
+### Alternatives considered (Part 2)
+
+- **Time-based cooldown (`KEN_DB_REINDEX_MIN_INTERVAL=10s` or similar) instead of an in-flight lock.** Rejected. A cooldown either drops calls during the cooldown window or queues them; both produce a worse agent experience than the honest "already in progress" signal. Concrete failure: an agent running `reindex_db` in a poll-then-search loop hits a 10s cooldown and either (a) silently sees stale results during the wait (the agent thinks the refresh ran), or (b) gets queued calls landing 10s + queue-depth seconds later (the agent thinks "refreshed" was instant). The in-flight lock is fundamentally different from a cooldown — it ONLY blocks during an actual in-flight refresh, which is itself rate-limited by the natural cost of `IndexSchema` (~hundreds of ms for typical dev DBs). Agents that hammer the tool see a recoverable, named signal they can adapt to.
+
+- **Queue reindex requests during in-flight refresh.** Rejected. Queue depth is unbounded by design (an agent in a loop could submit hundreds of calls in seconds), and bounding it just shifts the rate-limit problem to "what happens at the cap?" Returning `Reindex already in progress` short-circuits the entire queue-management surface — the agent decides whether to retry, back off, or ignore. Concrete failure mode prevented: an agent that calls `reindex_db` in a tight loop while watching for a column to appear would queue thousands of refresh requests in seconds; each refresh then runs against a slightly different DB state, the swap callback fires thousands of times, and the agent's "next search" sees the same intermediate state regardless. Fail-fast makes the agent's loop self-rate-limit on the recoverable signal.
+
+- **Async return + poll (`reindex_db` returns `task_id`; separate `reindex_status` tool to poll).** Rejected for v0.8.0. Concrete cost: two MCP tools instead of one, two round-trips per reindex (call + poll), agent-side state machine for polling and retry. Concrete benefit: agent doesn't block during refresh. The typical refresh is <500ms on dev-scale DBs — blocking the agent for that long is acceptable in exchange for the simpler protocol. If a real-world DB has >5s reindex times where async matters, the right path is incremental refresh (per ADR-020 Part 1's deferred payload-parsing-for-incremental-refresh alternative), not async return — async just papers over slow refresh with worse UX.
+
+- **Env var to disable the tool (`KEN_DB_DISABLE_REINDEX_TOOL=1`).** Deferred. Operators who don't want agents triggering reindexes today have two paths: unset `KEN_DB_DSN` entirely (drops the whole Tier 2 surface), or run a separate ken-mcp process for agents that need reindex separate from agents that shouldn't. If a real-world deployment surfaces a "partial DB exposure" need (agents can read schema but not refresh), a `KEN_MCP_REINDEX_DB_TOOL=0` env var is a cheap follow-on — but speculative complexity until field signal arrives.
+
+- **Auto-call `reindex_db` from inside `search` / `find_related` when the query mentions DDL-shaped keywords.** Rejected. Heuristic-based auto-refresh fires on false positives — an agent asking `search "find the CREATE TABLE statement for users"` wants the existing chunk where that statement is recorded (in a migration file), NOT a refresh of the live DB schema. Concrete failure: a refresh inside what the agent thinks is a read-only query adds 100-500ms of unexpected latency, possibly breaks the agent's timeout budget, and surprises the agent's user with stderr "Tier 2: reindexed" lines they didn't expect. Explicit-tool-invocation keeps refresh under the agent's deliberate control.
+
+- **Have `reindex_db` BLOCK on the mutex instead of fail-fast.** Rejected. Concrete failure: an agent calls `reindex_db` while a long-running refresh is in flight (e.g. a Postgres DB with hundreds of tables where introspection takes 30s). Block-and-wait means the agent's tool call hangs for 30s before returning a result, very likely tripping the agent's per-tool timeout and surfacing as "tool failed" — worse than the honest `Reindex already in progress; nothing to do.` (the response matches the actual tool wording — the in-flight refresh lands soon; the agent should proceed with its next `search` / `find_related` read rather than retrying `reindex_db` in a loop). Fail-fast lets the agent make an informed choice (proceed with the upcoming-fresh data, ignore, or surface to user).
+
+### Consequences (Part 2)
+
+- **Five trigger sources now converge on the Refresher** (was three at v0.7.0, four after Part 1, five after Part 2): startup, interval ticker, SIGHUP, LISTEN/NOTIFY listener, and `reindex_db` MCP tool. The first four call `Refresh(ctx)` (blocking on mutex); the fifth calls `TryRefresh(ctx)` (mutex.TryLock; `ErrReindexInProgress` on contention). The Refresher's internal serialization is unchanged from v0.7.0 — `TryRefresh` is a thin wrapper over `r.mu.TryLock + doRefresh`.
+
+- **Agents that hammer `reindex_db` in tight loops see `already in progress` responses** — a recoverable signal the agent (or its author) can adapt to. No silent queueing, no unbounded memory growth, no hidden rate-limit semantics. The agent's planner chooses between back-off-and-retry, ignore-and-proceed-with-stale-data, or surface-to-user. Bugs in agent code (poll-then-search loops without sleep) become loud at the rate-limit signal level rather than silently producing inconsistent results.
+
+- **`mcp.Run` (v0.6.0 embedded-corpus) does not yet support live DB**, so `reindex_db` is not exposed in embedded-corpus deployments built via `mcp.Run`. Part 3 of v0.8.0 lifts this limitation by adding `mcp.Options.DBSource` — the same `ReindexFunc` callback shape Part 2 introduced will be the seam.
+
+- **`mcp` package stays free of `internal/db` imports.** `Config.Reindex` is typed as `ReindexFunc` (a function returning `ReindexResult`), not `*db.Refresher` or an interface backed by sentinel-error matching. cmd/ken-mcp does the small bridging closure (`reindexCallback`). This preserves the layering invariant that `mcp` is the user-facing library API and `internal/db` is the concrete Tier 2 implementation — neither imports the other directly.
+
+- **Tool surface scales honestly with operator capability.** When `KEN_DB_DSN` is unset, `reindex_db` is not in `tools/list` at all. Agents that haven't been told ken has a DB don't see a tool that would always return "no DB" — they simply see two tools (`search`, `find_related`) instead of three.
+
+- **Stdout-cleanliness count rises to six.** `TestBinary_StdoutIsCleanJSONRPC_WithReindexDB` drives a real `reindex_db` tool call through `sdk.CommandTransport` against postgres:16-alpine; the existing five tests only call `search`. Defense-in-depth against a future regression where someone adds a `log.Print` to the reindex callback without thinking about which writer it goes to.
+
+- **No new dependencies.** Part 2 is pure-Go stdlib additions (`sync.Mutex.TryLock` exists since Go 1.18); no new modules in `go.mod`.
+
+- **Backwards compatibility:** stock `cmd/ken-mcp` with `KEN_DB_DSN` unset is byte-identical to v0.7.2 + v0.8.0 Part 1. All six stdout-cleanliness variants pass; all existing integration tests still pass; the v0.8.0 Part 1 listener path is unchanged (still uses `Refresh`, not `TryRefresh`).

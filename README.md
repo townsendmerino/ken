@@ -234,6 +234,23 @@ This installs a single schema-level event trigger (`ken_schema_changed_trigger`)
 
 See [ADR-020](docs/DECISIONS.md#adr-020-listennotify-push-based-schema-change-detection-v080-part-1) for the alternatives considered (auto-install rejected; per-table opt-in rejected; replace-interval rejected; no-debouncing rejected; faked-MySQL rejected).
 
+### Agent-triggered reindex (`reindex_db` tool, v0.8.0 Part 2)
+
+Agents can refresh ken's view of the database schema on demand by calling the `reindex_db` MCP tool. Useful after the agent has run a migration, or before asking a schema-dependent question:
+
+> **User:** "I just ran migration 042 that adds the `email_verified` column to `users`. Does the schema reflect that?"
+> **Agent:** *(calls `reindex_db`)* → *(calls `search "users table"`)* → returns the post-migration schema.
+
+**Always available** when `KEN_DB_DSN` is set; no env var to enable. When no DB is configured, the tool is not registered at all (the agent's `tools/list` shows only `search` and `find_related`).
+
+**Engine-agnostic.** Works for Postgres, MySQL, and SQLite — the tool is a thin wrapper around the same `Refresher` that drives `KEN_DB_REINDEX_INTERVAL`, SIGHUP, and (Postgres) LISTEN/NOTIFY.
+
+**Fail-fast on contention.** If a reindex is already in flight (LISTEN burst, interval tick, SIGHUP, or prior `reindex_db` call), the tool returns `Reindex already in progress; nothing to do.` immediately rather than queuing. The agent can retry, back off, or proceed with stale data based on its workflow — no silent queueing, no unbounded memory growth, no time-based cooldown env vars.
+
+**Pairs with LISTEN/NOTIFY and `KEN_DB_REINDEX_INTERVAL`.** Push notifications cover Postgres deployments with the trigger installed; interval polling covers MySQL / SQLite and the LISTEN-not-set-up Postgres case; `reindex_db` covers the case where the agent itself caused the schema change and knows it needs to refresh.
+
+See [ADR-020 Part 2](docs/DECISIONS.md#part-2-agent-callable-reindex-via-reindex_db-mcp-tool-v080-part-2) for the alternatives considered (cooldown, queue, async-return, env-var-disable, auto-call-from-search all rejected with mechanism-level failure modes).
+
 ## Quickstart
 
 ```bash

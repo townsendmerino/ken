@@ -14,7 +14,7 @@ with pre-built binaries.
 
 ## [0.8.0] — UNRELEASED
 
-The operator-control-loop release. Three features round out the database-integration story started in v0.7.0 — push-based schema change detection, agent-initiated reindex, and DB support in `mcp.Run`. This entry covers **Part 1 (LISTEN/NOTIFY)** as it ships; Parts 2 (`reindex_db` MCP tool) and 3 (`mcp.Run` DB support) land in follow-on commits within v0.8.0. **The v0.8.0 tag will not drop until all three parts have shipped — Part 1 lands on `main` first, with Parts 2 + 3 appended to this same entry as their commits land.**
+The operator-control-loop release. Three features round out the database-integration story started in v0.7.0 — push-based schema change detection, agent-initiated reindex, and DB support in `mcp.Run`. Parts 1 (LISTEN/NOTIFY) and 2 (`reindex_db` MCP tool) have shipped on this entry; **Part 3 (`mcp.Run` DB support via `Options.DBSource`) is the only piece remaining before v0.8.0 tags.**
 
 **Engine scope (Part 1):** Postgres only. MySQL and SQLite log debug + no-op; their operators should continue using `KEN_DB_REINDEX_INTERVAL`.
 
@@ -36,6 +36,29 @@ The operator-control-loop release. Three features round out the database-integra
 - **Engine scope: Postgres only.** MySQL has no native push notifications; SQLite is in-process by design. `KEN_DB_LISTEN=1` with a non-Postgres DSN logs debug + no-op, consistent with the v0.7.2 "SQLite ignores schema filtering" pattern.
 - **Setup is mandatory.** Without running the script, the listener logs a clear warn (`event trigger "ken_schema_changed_trigger" is not installed. Run: ken-mcp print-listen-script | psql $KEN_DB_DSN`) and idles. `KEN_DB_REINDEX_INTERVAL` continues to work; the listener will catch up on the next reconnect once the operator runs the script.
 - **Backwards compatibility:** stock `cmd/ken-mcp` with `KEN_DB_LISTEN` unset behaves byte-identically to v0.7.2. All five stdout-cleanliness variants pass after every commit. Parts 2 and 3 (forthcoming) add additive surface only; no v0.7.x or v0.8.0 Part 1 behavior changes.
+
+**Engine scope (Part 2):** all three engines (Postgres, MySQL, SQLite). The `reindex_db` tool is engine-agnostic — it's a thin wrapper around `Refresher.TryRefresh`. Available whenever `KEN_DB_DSN` is configured.
+
+### Added (Part 2: `reindex_db` MCP tool)
+
+- **`reindex_db` MCP tool** (operator-zero-config; the tool registers automatically when `KEN_DB_DSN` is set). Agents call it to refresh ken's view of the database schema mid-conversation — typically after running a migration through psql, an ORM CLI, or a separate MCP server. Returns `Reindexed in Nms.` on success, `Reindex already in progress; nothing to do.` if another refresh holds the Refresher mutex (interval ticker, SIGHUP, LISTEN/NOTIFY listener, or a prior `reindex_db` call), or `Reindex failed: <err>` on connection / introspection failure. Closes Part 2 of [#12](https://github.com/townsendmerino/ken/issues/12). ([ADR-020 Part 2](docs/DECISIONS.md#part-2-agent-callable-reindex-via-reindex_db-mcp-tool-v080-part-2))
+- **`internal/db.Refresher.TryRefresh`** + **`internal/db.ErrReindexInProgress`** sentinel — the fail-fast variant of `Refresh`. Uses `sync.Mutex.TryLock` so a concurrent caller sees the in-flight signal immediately instead of queuing. The existing four trigger sources (startup / `KEN_DB_REINDEX_INTERVAL` ticker / SIGHUP / LISTEN/NOTIFY listener) keep using `Refresh` — their semantics genuinely want to serialize, not skip. `TryRefresh` is specifically the fifth, agent-callable path. `Refresh` and `TryRefresh` share an internal `doRefresh` body so the introspection + swap semantics stay exactly 1:1.
+- **`mcp.ReindexFunc` + `mcp.ReindexResult`** — callback shape `NewServer` uses to register `reindex_db`. Returns `ReindexResult{InProgress, Elapsed, Err}`. The result-struct shape (rather than an error sentinel) keeps the `mcp` package free of `internal/db` imports — `cmd/ken-mcp` bridges `db.ErrReindexInProgress` into `ReindexResult{InProgress: true}` via a small closure. The same callback shape will be the seam for Part 3's `mcp.Run` DBSource path.
+- **`cmd/ken-mcp` rearrangement.** `wireDBTier2` now runs BEFORE `NewServer` and returns the `*db.Refresher` so the tool can be registered with the configured Reindexer. When `wireDBTier2` returns nil (no DSN, http(s) default repo, connect failure, etc.), `reindexCallback` returns nil too and `NewServer` skips `reindex_db` registration entirely — tools/list stays honest for FS-only deployments.
+- **`mcp.ReindexDBArgs`** — argument-free struct (the tool takes no parameters in v0.8.0 by design). Future v0.8.x+ refinements (async return, per-engine selectors, repo selector) can extend this struct without breaking the wire format.
+- **5 new unit/tool tests + 2 integration tests + sixth stdout-cleanliness variant.**
+  - `TestRefresher_TryRefresh_NoContention` / `_InFlightReturnsError` / `_ReleasesOnError` (internal/db unit tests, no DB needed — use an empty SQLite temp file).
+  - `TestReindexDBTool_Registered` / `_NoDB` / `_Success` / `_InProgress` / `_Error` (mcp package tool tests with caller-supplied `ReindexFunc`).
+  - `TestReindexDB_IntegrationE2E` + `TestReindexDB_IntegrationInProgress` (live Postgres via `dbintegration` build tag — CREATE → reindex → assert chunk present, then ALTER → reindex → assert new column present; in-flight test fires a concurrent TryRefresh against a slow Refresh).
+  - `TestBinary_StdoutIsCleanJSONRPC_WithReindexDB` (sixth sibling of the stdout-cleanliness suite — drives a `reindex_db` tool call through `sdk.CommandTransport` to catch any tool-registration-related stdout leak the existing five tests miss).
+
+### Notes (Part 2)
+
+- **Fail-fast on contention, not queueing.** A concurrent `reindex_db` call during an in-flight refresh (interval tick, LISTEN burst, SIGHUP, prior tool call) returns `Reindex already in progress; nothing to do.` immediately — the agent decides whether to retry, back off, or proceed with stale data. No time-based cooldown env vars; the natural cost of one in-flight refresh IS the rate limit. See ADR-020 Part 2 for the alternatives rejected (cooldown / queue / async-return / per-tool-disable env var / auto-call-from-search heuristic).
+- **No new env vars.** The tool is registered whenever `KEN_DB_DSN` is set; not registered otherwise. Operators who want to disable the tool unset `KEN_DB_DSN` (no DB tier at all) or run a separate ken-mcp process for agents that need reindex separate from agents that shouldn't have it.
+- **Five trigger sources now converge on `Refresher`.** Startup (once via `wireDBTier2`), `KEN_DB_REINDEX_INTERVAL` ticker, SIGHUP, LISTEN/NOTIFY listener (Part 1), and `reindex_db` tool. The first four call `Refresh(ctx)` (blocking on mutex); the fifth calls `TryRefresh(ctx)` (mutex.TryLock; returns `ErrReindexInProgress` on contention). Internal serialization is unchanged from v0.7.0.
+- **`mcp.Run` does not yet support live DB.** Embedded-corpus binaries built via `mcp.Run` (v0.6.0) get no `reindex_db` tool — Part 3 of v0.8.0 lifts this by adding `mcp.Options.DBSource`.
+- **Backwards compatibility:** stock `cmd/ken-mcp` with `KEN_DB_DSN` unset behaves byte-identically to v0.7.2 + v0.8.0 Part 1. `reindex_db` simply isn't in the tools list. All six stdout-cleanliness variants pass.
 
 ## [0.7.2] — 2026-05-25
 
