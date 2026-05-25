@@ -2,6 +2,14 @@
 /ken
 /ken-mcp
 /dist/
+/bin/
+
+# v0.6.0 embedded-corpus demo (cmd/ken-mcp-docs): the model + docs are
+# staged into the binary's directory at build time by scripts/build-docs-mcp.sh
+# so //go:embed can pick them up (embed paths can't traverse ../). Both are
+# regenerated on every build; never committed.
+/cmd/ken-mcp-docs/model/
+/cmd/ken-mcp-docs/docs/
 
 # Model artifacts — large, downloaded per-machine, never committed
 testdata/model/

@@ -11,6 +11,56 @@
 
 ken is a Go port of semble. The retrieval algorithm is ported verbatim from semble's `search.py` + `ranking/*.py`; ken adds two things on top: **runtime properties** (single-binary distribution, no Python interpreter import on cold start, no GIL on the indexing pipeline) and **measured agent-input efficiency** (~44× fewer tokens than grep+Read at recall@10 on semble's diverse-query benchmark; at corpus scale — CoIR-CSN-Python's 280K files — corpus-wide grep is functionally impossible and ken's 1,296-token result is the only workable path). The honest tradeoff: ken's recall caps at 82–91% vs grep's ~99%, so exhaustive enumeration (refactors, pre-rename audits) still belongs to grep — but for "find the chunk that answers this," ken wins by 1–2 orders of magnitude on tokens. Full table in [`docs/BENCH.md`](docs/BENCH.md#token-budget-recall--agent-side-efficiency). If you already use semble in your agent, you can swap to ken-mcp without re-prompting; the wire format is the same string semble emits.
 
+## Embedded-corpus build pattern (v0.6.0)
+
+The library form of ken-mcp lets SDK authors ship docs as a **single static MCP server binary**. Write ~20 lines of `main.go`, `//go:embed` your `docs/` and the Model2Vec model, `go build` — push a binary to a GitHub release. Users `brew install`, add one line to their agent config, and their coding agent has high-quality local retrieval over your SDK's docs. No backend, no vector DB to operate, no network egress per query, no "is the cache stale" question — the binary IS the corpus, version-pinned by build artifact.
+
+```go
+package main
+
+import (
+    "context"
+    "embed"
+    "io/fs"
+    "log"
+    "os"
+
+    "github.com/townsendmerino/ken/mcp"
+
+    _ "github.com/townsendmerino/ken/internal/chunk/markdown"
+)
+
+//go:embed docs/*.md
+var docsFS embed.FS
+
+//go:embed model/tokenizer.json model/config.json model/model.safetensors
+var modelFS embed.FS
+
+func main() {
+    docsSub, _  := fs.Sub(docsFS, "docs")
+    modelSub, _ := fs.Sub(modelFS, "model")
+    if err := mcp.Run(context.Background(), docsSub, mcp.Options{
+        Mode:        "hybrid",
+        ChunkerName: "markdown",
+        ModelFS:     modelSub,
+        LogWriter:   os.Stderr,
+    }); err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+[`cmd/ken-mcp-docs/`](cmd/ken-mcp-docs/) is the canonical worked example — it bakes ken's own [`docs/*.md`](docs/) and the Model2Vec model into a 74 MB static binary built via [`scripts/build-docs-mcp.sh`](scripts/build-docs-mcp.sh). Design and rationale: [ADR-016](docs/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function).
+
+### Why this is interesting
+
+- **Zero-infrastructure distribution.** No backend, no vector DB, no per-query cloud calls. The binary IS the corpus.
+- **Version-pinned by build artifact.** The corpus and the model and the search algorithm all ship together. There is no "stale index" question — to update, rebuild and re-release.
+- **Agent sandboxing by construction.** The embedded-corpus build has no path-resolution code, so there is no path-traversal escape path. The corpus is structurally sealed; an agent cannot pivot from "search the docs" to "read the host's secrets."
+- **Air-gapped friendly.** All queries answered locally, no network egress. For enterprise / restricted-egress environments this is the difference between "we can use this" and "we can't."
+
+For multi-repo code search with live file-watching, use [`cmd/ken-mcp`](cmd/ken-mcp/) directly (below) — the two modes coexist by design.
+
 ## Quickstart
 
 ```bash
@@ -101,7 +151,7 @@ command = "/absolute/path/to/ken-mcp"
 | `KEN_MCP_DEFAULT_REPO` | (unset) | Pre-indexed source; lets tools omit the `repo` arg. |
 | `KEN_MCP_MODE` | `hybrid` | `bm25` / `semantic` / `hybrid`. Auto-downgrades to `bm25` with a stderr warning if the model dir is unreachable. |
 | `KEN_MCP_MODEL_DIR` | (unset) | Path to a Model2Vec snapshot containing `model.safetensors`. Empty ⇒ `bm25`-only. |
-| `KEN_MCP_CHUNKER` | `regex` | `regex` / `treesitter` / `line`. See ["Choosing a chunker"](#choosing-a-chunker). |
+| `KEN_MCP_CHUNKER` | `regex` | `regex` / `treesitter` / `line` / `markdown`. See ["Choosing a chunker"](#choosing-a-chunker). |
 | `KEN_MCP_CACHE_SIZE` | `16` | LRU bound on the repo→Index cache. |
 | `KEN_MCP_LOG_LEVEL` | `warn` | `debug` / `info` / `warn` / `error`. All logs go to stderr; **stdout is the JSON-RPC channel** ([details](docs/DESIGN.md#hard-rule--stdoutstderr-contract)). |
 

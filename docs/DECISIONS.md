@@ -21,6 +21,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-013](#adr-013-corpus-adaptive-α--adding-a-third-query-class-branch) | Corpus-adaptive α — adding a third query-class branch | Deprecated |
 | [ADR-014](#adr-014-fsfs-as-canonical-walkerindexer-surface) | `fs.FS` as canonical walker/indexer surface | Accepted |
 | [ADR-015](#adr-015-nested-gitignore-support-via-scope-stack-on-existing-rule-engine) | Nested `.gitignore` support via scope stack on existing rule engine | Accepted |
+| [ADR-016](#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) | Embedded-corpus MCP build pattern via `mcp.Run` library function | Accepted |
 
 ---
 
@@ -520,3 +521,59 @@ The new public/private surface:
 - **Pre-existing dir-only-on-files bug fixed.** `Matcher.ShouldIndex` now correctly excludes files inside dir-only-rule directories (e.g. `build/x.txt` under root `build/`). No CHANGELOG bump because the bug had no test surface and no field report; the fix lands as part of this ADR.
 - **Full pathspec parity still a documented future option.** If a real-world `.gitignore` pattern surfaces that the handwritten engine misses (e.g. character classes, certain `**` corner cases), the sabhiram swap remains the planned path. The scope-stack orchestration designed here is engine-agnostic — sabhiram would slot in as a drop-in replacement for `parseGitignore`/`(*gitignore).rules`.
 - **No new dependency.** Zero deps added; this entire change is one file edit in `internal/repo/walk.go` plus tests.
+
+---
+
+## ADR-016: Embedded-corpus MCP build pattern via `mcp.Run` library function
+
+**Status:** Accepted
+**Date:** 2026-05-24
+
+### Context
+
+v0.5.0 (ADR-014) made `fs.FS` the canonical filesystem surface at ken's library layer — `repo.WalkFS`, `search.FromFS`, `embed.FS` and `fstest.MapFS` corpora all work. But the shipping MCP server (`cmd/ken-mcp`) still resolves agents' `repo` argument to a real path via `os.DirFS(path)` and indexes that, optionally cloning http(s) URLs to `$TMPDIR` first. The library affordance for agent-sandboxed retrieval and zero-infrastructure distribution exists; the product affordance — "an SDK author runs `go build` and ships a single static binary that serves search/find_related over their docs corpus, no model download, no per-query network egress" — does not.
+
+Tracking issue: [#7](https://github.com/townsendmerino/ken/issues/7). Three downstream properties drove the framing:
+
+- **Zero-infrastructure distribution.** `go install`, push a binary, users add one line to their MCP config. No backend, no vector DB, no "is the cache stale" question — the binary IS the corpus, version-pinned by build artifact.
+- **Agent sandboxing by construction.** No path resolution code exists in the embedded-corpus build → no path-traversal escape is possible. The corpus is structurally sealed.
+- **Air-gapped / restricted-egress dev environments.** All queries answered locally. For enterprise users this is the difference between "we can use this" and "we can't."
+
+### Decision
+
+Add a new public package, `github.com/townsendmerino/ken/mcp`, exposing **`Run(ctx context.Context, fsys fs.FS, opts Options) error`** as a **purely additive** library API for the embedded-corpus build pattern. `cmd/ken-mcp` retains its multi-repo / per-call URL-clone / file-watching behavior unchanged — the two modes coexist by design.
+
+The two-mode framing:
+- **Code search (`cmd/ken-mcp`).** Multi-repo, per-call path/URL resolution, fsnotify-driven live re-indexing (ADR-012), LRU cache + singleflight dedup. The agent's `repo` argument is honored. Existing behavior, env vars, tool surface, watch mode all preserved.
+- **Docs serving (`mcp.Run`).** Single fixed corpus rooted at the caller-supplied `fs.FS`, model loaded from `Options.ModelFS` (typical use: `//go:embed model/*`) or `Options.ModelDir`, no watch (the corpus is static-by-construction at `Run` time), no cache. The agent's `repo` argument is accepted (wire schema unchanged so agents work) but logged-and-ignored.
+
+Three supporting changes land alongside the new package:
+
+1. **`embed.LoadFromFS(fs.FS, dir) (*StaticModel, error)`** — canonical entry point for model loading. The path-based `embed.Load(modelDir)` becomes a deprecated wrapper around `LoadFromFS(os.DirFS(modelDir), ".")`. Enables `Options.ModelFS` to load a Model2Vec snapshot baked into a binary via `//go:embed`.
+2. **`internal/chunk/markdown` package** — a handwritten pure-Go scanner. Heading-aware boundaries (ATX + setext), atomic fenced-code / tables / lists, frontmatter (YAML `---` and TOML `+++`), byte-fidelity preserved. Registers as `"markdown"` in the chunker registry. Auto-falls back to the line chunker for non-markdown files in mixed-content corpora.
+3. **Side-effect chunker imports move to binaries.** Previously `internal/search/index.go` blank-imported both `regex` and `treesitter`, which meant any package transitively importing `search` pulled in `gotreesitter/grammars` (a single `embed.FS` containing 19 MB of grammar blobs). Now `internal/search` only blank-imports `regex` (the default); `cmd/ken` and `cmd/ken-mcp` add `treesitter` and `markdown` explicitly. `cmd/ken-mcp-docs` blank-imports only `markdown`, so the docs binary doesn't carry the grammar bundle.
+
+`cmd/ken-mcp-docs` is the canonical worked example: ~20 lines of `main.go`, gated by build tag `embed_corpus` (so a fresh clone — where `cmd/ken-mcp-docs/{model,docs}/` don't yet exist — still builds cleanly via `go build ./...`), staged + built via `scripts/build-docs-mcp.sh`.
+
+### Alternatives considered
+
+- **Shim path: refactor `cmd/ken-mcp` to be a thin wrapper around `mcp.Run`, dropping its multi-repo / per-call-URL-clone / watch / LRU-cache machinery.** Rejected. Would silently drop live watch behavior (real feature loss — agents lose visibility into mid-session file edits, ADR-012's whole purpose), force every existing `ken-mcp` deployment to migrate config or accept regressions, and replace a working dual-purpose binary with two binaries that together cover the same ground. The additive framing is also more honest: code search wants runtime flexibility + watch; docs serving wants embedded + sandboxed. They're different products living in the same library — better named separately than papered over.
+
+- **Multi-corpus `mcp.Run(ctx, map[string]fs.FS, opts)`.** Rejected for v0.6.0: no field signal, complicates `Options` + tool semantics (the agent's `repo` arg would need to be honored as a key lookup, undoing the sandboxing-by-construction story), reversible (can add a `mcp.RunMulti` variant non-breakingly in v0.7+ if signal materializes), and hurts the marketing pitch ("a single corpus per binary" is the sharp one-liner). The rare "SDK + examples + changelog all bundled" case has an escape hatch: put everything in one `fs.FS` and accept un-scoped ranking.
+
+- **Per-language treesitter sub-packages (the prompt's original §4).** Rejected as infeasible. `gotreesitter/grammars` embeds **all 17 grammar blobs** in a single package via `//go:embed grammar_blobs/*.bin`. The Go linker cannot dead-code-eliminate `embed.FS` payloads, so splitting our `internal/chunk/treesitter` wrapper into per-language sub-packages would still pull in the full 19 MB regardless of which sub-packages a binary imported. The binary-size win the prompt wanted lands instead via the chunker-registration refactor (item 3 above): the docs binary simply doesn't import `treesitter` at all. Per-language splitting would only pay off if `gotreesitter` itself were restructured upstream — out of scope, documented here for the next person tempted to retry it.
+
+- **Goldmark (or other CommonMark parser) for the markdown chunker.** Rejected. A ~100 KB compiled dependency for what a ~150-line handwritten scanner handles. CommonMark/GFM edge cases (HTML blocks, footnotes, link-reference definitions, def-lists) are renderer concerns, not chunking concerns — when our scanner misses them they degrade gracefully to text lines and either flow into the current section or trigger a paragraph split. Documented as a future swap if real-world markdown surfaces patterns the handwritten scanner mis-handles. Keeping the chunker handwritten preserves ADR-001's no-cgo / minimal-deps discipline.
+
+- **CLI flag for embedded-corpus mode (`ken serve-embedded ...`).** Rejected as a category error: `mcp.Run` is the library form of an MCP server, not a search command. There is no "embedded mode" of the `ken` CLI — the CLI's job is to index real directories. The embedded-corpus pattern is for SDK authors writing their own `package main`, which then `go build`s into a redistributable binary.
+
+### Consequences
+
+- **`mcp.Run` is purely additive — no breaking changes.** Stock `cmd/ken-mcp` behaves byte-identically to v0.5.0: same env vars, same tool surface (`search` + `find_related` with the same arg schemas and the same semble-format output strings), same watch mode, same multi-repo path/URL resolution. `TestBinary_StdoutIsCleanJSONRPC` enforces the stdout-clean contract across both build paths.
+- **`cmd/ken-mcp-docs` is 74 MB total** (build measured 2026-05-24). Stock `cmd/ken-mcp` is 42 MB; the docs binary trades ~17 MB savings from skipping the treesitter grammar bundle for the 62 MB of embedded model + 144 KB of embedded docs. The prompt's ~30-60 MB target was aspirational and didn't account for the Model2Vec snapshot's actual size (62 MB for `potion-code-16M`); shipping smaller would require a different / smaller model, tracked separately. For comparison context: a Docker image with the same capabilities would be larger by 100s of MB, and an Electron-wrapped equivalent would be larger by GBs.
+- **SDK authors can ship docs as single-binary MCP servers.** The product story (`go build` → `brew install acme-docs-mcp` → users add one line to their agent config) works end-to-end as of v0.6.0. The integration smoke test (`cmd/ken-mcp-docs/main_test.go`, build tag `integration`) demonstrates the loop: build via the script, exec the binary, query via `sdk.CommandTransport`, get back hits from `docs/DESIGN.md` for a "Model2Vec embedding" query.
+- **Markdown chunker improves docs retrieval quality vs the line chunker.** Heading-bounded sections + atomic code/tables/lists give the embedding model and BM25 cleaner units than 50-line windows. Quantifying the NDCG@10 improvement on a real docs corpus is a follow-up; for now the test suite (12 scenarios + byte-fidelity assertion per scenario) pins the structural correctness.
+- **Code duplication between `cmd/ken-mcp` and `mcp.Run` is minimal.** Both share `internal/` infrastructure (search, embed, chunk, repo) and the tool handlers themselves (`runSearch` / `runFindRelated` in `mcp/server.go` are called from both the Cache-backed `handleSearch` / `handleFindRelated` and the embedded-corpus `newServerForIndex`). The divergence is just lifecycle/startup logic (~300 LOC).
+- **The leveled logger (`mcp.Logger`, `mcp.LogLevel`, etc.) was moved from `cmd/ken-mcp/main.go` to the `mcp` package** as part of giving `mcp.Run` somewhere to send its diagnostics. `cmd/ken-mcp/env.go` now uses `kenmcp.Logger` and `kenmcp.ValidateEnum`; the env-var-helper test surface is unchanged.
+- **Multi-corpus stays an open option for v0.7+.** If field reports surface (the "SDK + examples + tutorials bundled" case is the most likely shape), `mcp.RunMulti(ctx, map[string]fs.FS, opts)` or an `Options.Corpora` variant is the natural extension. The current single-corpus shape doesn't paint us into a corner.
+- **No new third-party dependencies.** Everything lands in pure Go via `io/fs`, `embed`, the existing `go-sdk` MCP package, and the existing chunker / search / embed plumbing.

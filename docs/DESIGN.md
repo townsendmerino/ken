@@ -107,7 +107,7 @@ ken/
 
 | Need | Choice | Why |
 |---|---|---|
-| Code chunking | **Hand-rolled per-language regex (Option C) behind a `Chunker` interface, v1 default.** Chroma (B) and WASM tree-sitter (A) ship as alternatives in later versions, selectable via `--chunker=...`. | All three live in `internal/chunk/`; see §2. |
+| Code chunking | **Hand-rolled per-language regex (Option C) behind a `Chunker` interface, v1 default.** Chroma (B) and WASM tree-sitter (A) ship as alternatives in later versions, selectable via `--chunker=...`. As of v0.6.0, a `markdown` chunker is also registered for documentation corpora. | All four live in `internal/chunk/` (`line`, `regex`, `treesitter`, `markdown`); see §2. |
 | Safetensors | **Hand-rolled reader in `internal/embed/safetensors.go`.** | The format is an 8-byte length + JSON header + raw bytes; ken only ever reads 3 static tensors and wants an `mmap`'d zero-copy view (see §4). A dependency can't give that without fighting its abstraction. ~80 LOC, no external dep. |
 | Tokenizer | **Hand-rolled WordPiece in `internal/embed/tokenize.go`.** | No external tokenizer dep. ~400 LOC. Parity-tested against `transformers.AutoTokenizer`. See §3. |
 | MCP | `github.com/modelcontextprotocol/go-sdk` | Official, typed handlers, pure Go. |
@@ -123,6 +123,22 @@ As of v0.5.0, the walker and indexer are FS-agnostic: `repo.WalkFS(fs.FS, Option
 ### Nested `.gitignore` — per-directory scope stack (v0.5.0)
 
 Also as of v0.5.0, the walker honors `.gitignore` files in every directory, not just the root. `WalkFS` maintains a per-directory scope stack: at each directory visit it loads `<dir>/.gitignore` (if present) into a `scopedGitignore{dir, gi}`, and rules from outer scopes evaluate first, inner scopes last, with last-match-wins across the union. Inner scopes can both add new ignores and re-include via `!pattern`. The handwritten rule engine (`compileRule`) is unchanged — the new work is scope orchestration, not pattern rewriting. `Matcher` (used by the watch path) gains the same nested awareness via a one-shot tree walk at construction; `.gitignore` changes after construction require a full re-index. The motivating field issue ([#5](https://github.com/townsendmerino/ken/issues/5)) was monorepo `node_modules/` exclusions buried in per-package `.gitignore` files; see [ADR-015](DECISIONS.md#adr-015-nested-gitignore-support-via-scope-stack-on-existing-rule-engine) for the alternatives considered (sabhiram swap, go-git matcher).
+
+### Embedded-corpus MCP — `mcp.Run` library function (v0.6.0)
+
+v0.6.0 introduces a second way to run ken's MCP server: as a **library function** that serves a single fixed `fs.FS` corpus, intended for SDK authors who want to ship their docs as a single static binary via `//go:embed`. The new package is `github.com/townsendmerino/ken/mcp` (the same package that already housed the `Cache`-backed multi-repo server logic); the new entry point is `mcp.Run(ctx, fsys, opts) error`.
+
+Two modes now coexist by design:
+
+- **Code search (`cmd/ken-mcp`).** Multi-repo, per-call path/URL resolution, fsnotify-driven live re-indexing (ADR-012), LRU cache + singleflight dedup. The agent's `repo` argument is honored. Unchanged from v0.5.0.
+- **Docs serving (`mcp.Run`).** Single fixed corpus rooted at `fsys`, model loaded from `Options.ModelFS` (typically `//go:embed model/*`) or `Options.ModelDir`, no watch (the corpus is static-by-construction at `Run` time), no cache. The agent's `repo` argument is accepted (wire-format compatibility with semble) but logged-and-ignored.
+
+Tool wire format and arg schemas are identical between modes, so agents trained against one work against the other. The leveled logger and validation helpers (`mcp.Logger`, `mcp.ValidateEnum`) moved out of `cmd/ken-mcp` into the `mcp` package so both paths share one logger type; `cmd/ken-mcp/env.go`'s helpers now wrap `mcp.ValidateEnum` with an `os.Getenv` lookup. The canonical worked example is [`cmd/ken-mcp-docs/`](../cmd/ken-mcp-docs/) — a ~20-line `main.go` that bakes ken's own docs + the Model2Vec model into a 74 MB single static binary, built via [`scripts/build-docs-mcp.sh`](../scripts/build-docs-mcp.sh). See [ADR-016](DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) for the rationale, alternatives considered, and the "why not per-language treesitter sub-packages" finding.
+
+Supporting changes that landed alongside `mcp.Run`:
+- `embed.LoadFromFS(fs.FS, dir) (*StaticModel, error)` — canonical model-loading entry; `embed.Load(modelDir)` is now a deprecated wrapper.
+- `internal/chunk/markdown` — heading-aware chunker for documentation corpora (heading-bounded sections, atomic fenced-code / tables / lists, frontmatter handling, byte-fidelity preserved). Registered as `"markdown"` in the chunker registry.
+- Chunker side-effect registration moved out of `internal/search` into the binaries that want each optional chunker. `internal/search` keeps the `regex` (universal default) blank-import; `cmd/ken` and `cmd/ken-mcp` add `treesitter` + `markdown`; `cmd/ken-mcp-docs` adds only `markdown`. This is what keeps the 19 MB `gotreesitter/grammars` blob bundle out of the docs binary.
 
 ## 2. Code chunking without cgo
 

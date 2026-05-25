@@ -12,6 +12,98 @@ with pre-built binaries.
 
 (no changes yet)
 
+## [0.6.0] — 2026-05-24
+
+The embedded-corpus release. The library form of ken-mcp lands: SDK
+authors can `//go:embed` their docs + the Model2Vec model and ship a
+single static MCP server binary with high-quality local retrieval, no
+backend, no per-query network egress, and structural agent sandboxing
+(no path resolution → no path-traversal escape). Closes
+[#7](https://github.com/townsendmerino/ken/issues/7); design rationale
+in [ADR-016](docs/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function).
+
+The stock `cmd/ken-mcp` binary is **unchanged**: same env vars, same
+tool surface, same watch mode, same multi-repo path/URL resolution.
+v0.6.0 is purely additive — the new pattern coexists with the existing one
+rather than replacing it.
+
+### Added
+
+- **`github.com/townsendmerino/ken/mcp.Run(ctx, fsys, opts) error`** —
+  public library API for the embedded-corpus build pattern. Serves
+  `search` and `find_related` over a single fixed `fs.FS` corpus,
+  blocking until ctx is canceled or the client closes the transport.
+  Tool wire format and arg schemas are identical to `cmd/ken-mcp`'s,
+  so agents trained against semble's or ken's MCP server work
+  unchanged. `Options.ModelFS` lets the Model2Vec snapshot live in an
+  `fs.FS` (typically `//go:embed model/*`) rather than on disk;
+  `Options.ModelDir` is the path-based alternative. Typoed enum
+  values (`Mode`, `ChunkerName`, `LogLevel`) log a stderr warning and
+  fall back to documented defaults — same ADR-009 contract `cmd/ken-mcp`
+  uses for env vars.
+- **`cmd/ken-mcp-docs`** — worked example: a 20-line `main.go` baking
+  ken's own `docs/*.md` and the Model2Vec model into a single static
+  74 MB binary. Builds via `scripts/build-docs-mcp.sh` (which stages
+  the model + docs into the package's directory then runs `go build
+  -tags=embed_corpus`). Gated by the `embed_corpus` build tag so a
+  fresh clone — where the embed dirs don't yet exist — still builds
+  cleanly via `go build ./...`.
+- **`internal/chunk/markdown` chunker** — heading-aware boundaries
+  (ATX + setext), atomic fenced-code / tables / lists, frontmatter
+  handling (YAML `---` and TOML `+++`), byte-fidelity preserved.
+  Registers as `"markdown"` in the chunker registry. Auto-falls back
+  to the line chunker for non-markdown files in mixed-content corpora.
+  No new third-party deps — handwritten pure-Go scanner.
+- **`embed.LoadFromFS(fs.FS, dir) (*StaticModel, error)`** — canonical
+  entry point for loading a Model2Vec snapshot from any `fs.FS`. Same
+  for the helpers it composes: `LoadTokenizerFromFS` and
+  `OpenSafetensorsFromFS`. The disk-path counterparts (`Load`,
+  `LoadTokenizer`, `OpenSafetensors`) become thin wrappers — `Load`
+  is now formally deprecated, the others remain useful for callers
+  reading individual files.
+- **`internal/search.FromFSWithModel(fsys, mode, chunkerName, model)`** —
+  index-build entry point that takes a pre-loaded model (rather than
+  resolving a `modelDir` internally). Used by `mcp.Run` so the model
+  can come from `Options.ModelFS` instead of a path.
+- **`mcp.Logger`, `mcp.LogLevel`, `mcp.ParseLogLevel`, `mcp.LogLevelNames`,
+  `mcp.ValidateEnum`** — the leveled logger and validation helper
+  moved out of `cmd/ken-mcp` into the `mcp` package so both the
+  Cache-backed server and `mcp.Run` share one logger type. Stdout is
+  never written from any of these — the JSON-RPC contract is enforced.
+
+### Changed
+
+- **Side-effect chunker imports moved to binaries.** Previously
+  `internal/search/index.go` blank-imported both `regex` and
+  `treesitter`, which meant any program transitively importing
+  `search` pulled in `gotreesitter/grammars` and its 19 MB
+  `//go:embed grammar_blobs/*.bin` payload — the Go linker cannot
+  dead-code-eliminate `embed.FS` contents. `internal/search` now only
+  blank-imports `regex` (the universal default); `cmd/ken` and
+  `cmd/ken-mcp` add `treesitter` and `markdown` explicitly. The stock
+  binaries' chunker availability is unchanged. `cmd/ken-mcp-docs`
+  imports only `markdown`, which is how the 19 MB grammar bundle
+  stays out of it.
+- **`cmd/ken-mcp` uses `mcp.Logger`** instead of its old internal
+  `leveledLogger`. Visible log format is unchanged. `env.go`'s
+  `envEnum` is now a thin wrapper around `mcp.ValidateEnum` so the
+  validation message format stays consistent between env-var and
+  Options-field validation.
+
+### Deprecated
+
+- **`embed.Load(modelDir)`** — use `LoadFromFS(os.DirFS(modelDir), ".")`
+  instead. The wrapper still works; will be removed in a future minor
+  release (pre-1.0 semver permits this).
+
+### Binary sizes (built 2026-05-24, darwin/arm64)
+
+| Binary | Size | Notes |
+|---|---|---|
+| `bin/ken` | 36 MB | CLI; includes all chunkers |
+| `bin/ken-mcp` | 42 MB | Stock MCP server; includes all chunkers + 19 MB grammar bundle |
+| `bin/ken-mcp-docs` | 74 MB | Demo embedded-corpus server; no grammar bundle but +62 MB embedded model + 144 KB embedded docs |
+
 ## [0.5.0] — 2026-05-25
 
 The library-API + monorepo-correctness release. Two changes bundled
