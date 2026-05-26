@@ -31,19 +31,23 @@ import (
 func cmdBuildIndex(args []string) int {
 	// Output path is mandatory (no sane default — overwrites are a
 	// destructive default in this category). Extract before
-	// commonFlags so positional order doesn't matter.
+	// commonFlags so positional order doesn't matter. Try -o first,
+	// then fall back to --output as a long alias.
 	args, output, err := extractFlag(args, "o", "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
 	if output == "" {
-		// Also accept --output as a long alias.
 		args, output, err = extractFlag(args, "output", "")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 			return 2
 		}
+	}
+	if output == "" {
+		fmt.Fprintln(os.Stderr, "ken: -o <output_path> is required")
+		return 2
 	}
 	rest, chunker, modeStr, model, err := commonFlags(args)
 	if err != nil {
@@ -56,10 +60,6 @@ func cmdBuildIndex(args []string) int {
 		return 2
 	}
 	corpusDir := rest[0]
-	if output == "" {
-		fmt.Fprintln(os.Stderr, "ken: -o <output_path> is required")
-		return 2
-	}
 
 	// Validate corpus dir exists + is a directory before doing any
 	// expensive work. os.DirFS on a missing path is lazy and the

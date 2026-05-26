@@ -255,7 +255,17 @@ func serializeIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, chunkerNa
 
 	// --- Chunks section ---
 	var chunksBody bytes.Buffer
-	for _, c := range chunks {
+	for i, c := range chunks {
+		// L4 (defensive bound): line numbers are 1-based per the
+		// chunk.Chunk contract; negative inputs would round-trip
+		// as 0xFFFFFFFF and deserialize as -1 on 32-bit / 4294967295
+		// on 64-bit (cross-arch asymmetry). In practice every
+		// chunker emits StartLine ≥ 1, but reject upstream to keep
+		// the on-disk format unambiguous.
+		if c.StartLine < 0 || c.EndLine < 0 {
+			return nil, fmt.Errorf("search: serializeIndex: chunk[%d] has negative line numbers (StartLine=%d EndLine=%d)",
+				i, c.StartLine, c.EndLine)
+		}
 		writeLPString(&chunksBody, c.File)
 		writeU32(&chunksBody, uint32(c.StartLine))
 		writeU32(&chunksBody, uint32(c.EndLine))
@@ -299,6 +309,14 @@ func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
 	}
 
 	// --- CRC trailer ---
+	// CRC32 IEEE detects bit-flip / truncation. It is NOT a MAC and
+	// provides zero tamper resistance — an attacker who controls
+	// the bytes also controls the trailer. v0.8.3's threat model is
+	// SDK authors embedding their own bytes via //go:embed corpus
+	// (trusted producer); if ken ever acquires a path that loads
+	// serialized indices from an untrusted source (e.g. a future
+	// "download a pre-built index" feature), this check must be
+	// supplemented or replaced with a real MAC or signature.
 	bodyEnd := len(data) - 4
 	gotCRC := binary.LittleEndian.Uint32(data[bodyEnd:])
 	wantCRC := crc32.ChecksumIEEE(data[:bodyEnd])

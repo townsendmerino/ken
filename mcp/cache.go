@@ -70,11 +70,19 @@ var scpishURL = regexp.MustCompile(`^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:.+`)
 
 // NormalizeKey canonicalizes a user-supplied repo string into a cache
 // key. https/http URLs keep their scheme but get lowercased host + a
-// trailing ".git" and "/" stripped; other URL schemes (ssh://, git://,
-// SCP-form) are rejected with an error, matching semble/mcp.py's
-// http(s)-only guard. Anything else is treated as a local path and
-// resolved to an absolute path (existence is not checked here; defer to
-// the Builder).
+// trailing ".git" and "/" stripped; other URL-shaped inputs (anything
+// containing "://" or matching SCP-form `user@host:path`) are
+// rejected with an error, matching semble/mcp.py's http(s)-only
+// guard. Inputs with no `://` are treated as local paths and
+// resolved to an absolute path (existence is not checked here;
+// defer to the Builder).
+//
+// L1 hardening: previously this was an allow-list-then-default-to-
+// local-path pattern, which meant `file:///etc`, `ftp://host/`, or
+// any other unknown scheme silently degraded to a local-path resolve
+// (producing a junky absolute path that confused the Builder error).
+// The scheme allow-list is now the security boundary: anything URL-
+// shaped that isn't https/http is rejected with a typed error.
 func NormalizeKey(source string) (string, bool, error) {
 	src := strings.TrimSpace(source)
 	if src == "" {
@@ -93,11 +101,14 @@ func NormalizeKey(source string) (string, bool, error) {
 		u.Path = p
 		u.Fragment, u.RawQuery = "", ""
 		return u.String(), true, nil
-	case strings.HasPrefix(lower, "ssh://"),
-		strings.HasPrefix(lower, "git://"),
-		strings.HasPrefix(lower, "git+ssh://"),
-		scpishURL.MatchString(src):
+	case strings.Contains(src, "://"):
+		// Any URL-shaped input with a non-http(s) scheme — ssh://,
+		// git://, git+ssh://, file://, ftp://, anything else — is
+		// rejected. Tighter than the prior named-scheme allow-list:
+		// unknown schemes no longer fall through to filepath.Abs.
 		return "", true, fmt.Errorf("repo: only https://, http://, or local paths are accepted (got %q)", src)
+	case scpishURL.MatchString(src):
+		return "", true, fmt.Errorf("repo: SCP-form git URLs are not accepted (got %q); use https://", src)
 	default:
 		abs, err := filepath.Abs(src)
 		if err != nil {

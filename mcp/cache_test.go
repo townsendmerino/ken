@@ -150,4 +150,20 @@ func TestNormalizeKey(t *testing.T) {
 	if err != nil || isURL || !strings.HasSuffix(got, rel) {
 		t.Errorf("local normalize: got=%q isURL=%v err=%v", got, isURL, err)
 	}
+
+	// L1 hardening: any URL-shaped input with a non-http(s) scheme
+	// is rejected (not silently degraded to filepath.Abs of the
+	// junky string). The scheme allow-list is the security
+	// boundary; previously file:// / ftp:// fell through to
+	// filepath.Abs and produced a confusing local-path error.
+	for _, badURL := range []string{
+		"file:///etc/passwd",
+		"ftp://example.com/path",
+		"gopher://example.com/",
+		"customscheme://anything",
+	} {
+		if _, _, err := NormalizeKey(badURL); err == nil {
+			t.Errorf("URL with non-http(s) scheme should be rejected: %q", badURL)
+		}
+	}
 }

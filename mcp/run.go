@@ -370,6 +370,7 @@ func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db D
 	}, &sdk.ServerOptions{
 		Instructions: "Instant code search over a fixed embedded corpus. " +
 			"Call `search` to find relevant content; call `find_related` on a result to discover similar passages. " +
+			"ken is relevance-optimized; fall back to your native grep / file-search tool for refactors, renames, or any operation that must be exhaustive — grep gives 100% recall on literal matches; ken returns a ranked top-N and can miss matches past its result window. " +
 			"The `repo` argument is accepted for wire compatibility with semble's MCP server but is ignored — the corpus is fixed at server startup.",
 	})
 

@@ -46,6 +46,17 @@ const envAllowPrivateClone = "KEN_ALLOW_PRIVATE_CLONE_TARGETS"
 // metadata or internal endpoint by literal IP or by a hostname that
 // resolves to one). Operators with a legitimate internal git host
 // can opt out via the documented env var.
+//
+// L3 (documented limitation): there is no max-bytes / max-objects cap
+// on the clone. A malicious host can serve a huge or pathological
+// pack file; the only timeout in play is the MCP request ctx. If
+// this becomes a real problem in production, the fix is a custom
+// http.Transport wrapping the go-git client with a bounded-body
+// reader — deferred until a deployment scenario justifies the
+// per-platform complexity. Mitigation in the meantime: enforce
+// reasonable ctx timeouts at the MCP layer, run ken-mcp in a
+// network-bandwidth-limited container if the input source is
+// untrusted.
 func CloneShallow(ctx context.Context, urlStr string) (string, func(), error) {
 	if !privateCloneAllowed() {
 		if err := guardCloneTarget(urlStr); err != nil {
