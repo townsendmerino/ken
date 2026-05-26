@@ -41,12 +41,13 @@ type cacheEntry struct {
 // Concurrent uncached requests for the same key dedupe via singleflight,
 // and entries are LRU-evicted at the configured bound.
 type Cache struct {
-	mu    sync.Mutex
-	max   int
-	ll    *list.List // front = most recently used
-	items map[string]*list.Element
-	build Builder
-	sf    singleflight.Group
+	mu     sync.Mutex
+	max    int
+	ll     *list.List // front = most recently used
+	items  map[string]*list.Element
+	build  Builder
+	sf     singleflight.Group
+	closed bool // M8: set under mu by Close(); checked by builders to avoid use-after-close
 }
 
 // NewCache creates a cache bound to max entries (≤0 ⇒ DefaultCacheSize).
@@ -131,6 +132,10 @@ func (c *Cache) Get(ctx context.Context, source string) (*search.WatchedIndex, e
 	}
 
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("repo: cache is closed")
+	}
 	if e, ok := c.items[key]; ok {
 		c.ll.MoveToFront(e)
 		ix := e.Value.(*cacheEntry).ix
@@ -146,6 +151,17 @@ func (c *Cache) Get(ctx context.Context, source string) (*search.WatchedIndex, e
 		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		// M8: a Close() that fired while build was in flight has
+		// already drained the map. Don't repopulate it — the just-
+		// built watcher + cleanup get reaped right here so they
+		// don't outlive the cache.
+		if c.closed {
+			_ = ix.Close()
+			if cleanup != nil {
+				cleanup()
+			}
+			return nil, fmt.Errorf("repo: cache is closed")
+		}
 		// Re-check in case another sf turn populated it (cheap; sf
 		// coalesces same-key calls but being defensive is harmless).
 		// If we lost the race, close the just-built watcher AND run
@@ -183,9 +199,17 @@ func (c *Cache) Get(ctx context.Context, source string) (*search.WatchedIndex, e
 // Close releases every cached entry. Stops the watcher goroutine for
 // each (wix.Close()) and runs the user-supplied cleanup (rm -rf for
 // temp clones). Safe to call multiple times.
+//
+// M8: sets c.closed under c.mu before draining the map. Concurrent
+// Get() calls whose singleflight build is in flight observe the
+// flag once they re-acquire the lock and reap the just-built
+// watcher rather than repopulating the now-cleared map. This
+// avoids a use-after-close where a stale entry survives past
+// Close() and outlives the cache's intent.
 func (c *Cache) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.closed = true
 	for e := c.ll.Front(); e != nil; e = e.Next() {
 		ent := e.Value.(*cacheEntry)
 		_ = ent.ix.Close()

@@ -110,6 +110,66 @@ func TestCache_KeySeparationURLvsLocalPath(t *testing.T) {
 	}
 }
 
+// TestCache_CloseDuringBuild_ReapsStraggler pins the M8 fix: if
+// Close() fires while a Get's singleflight build is in flight, the
+// just-built watcher + cleanup are reaped under the cache's lock
+// rather than being repopulated into the cleared map. Pre-fix, the
+// builder's lock-then-write path ran AFTER Close drained the map,
+// produced a stale entry, and outlived the cache's intent.
+func TestCache_CloseDuringBuild_ReapsStraggler(t *testing.T) {
+	releaseBuild := make(chan struct{})
+	closeFired := make(chan struct{})
+	var builtCleanups atomic.Int64
+	b := func(ctx context.Context, _ string) (*search.WatchedIndex, func(), error) {
+		<-releaseBuild // hold until Close() has run
+		dir := t.TempDir()
+		ix, _ := search.NewWatchedIndex(dir, search.ModeBM25, "line", "", true)
+		// Cleanup func incremented if invoked — the test asserts it
+		// fires (proving the straggler-reap path ran) AND that no
+		// stale entry remains in the cache.
+		cleanup := func() { builtCleanups.Add(1) }
+		return ix, cleanup, nil
+	}
+	c := NewCache(8, b)
+	path := t.TempDir()
+
+	getErr := make(chan error, 1)
+	go func() {
+		_, err := c.Get(context.Background(), path)
+		getErr <- err
+	}()
+
+	// Wait for the Get goroutine to be inside the singleflight call
+	// (heuristic: small sleep). Then call Close — under the prior
+	// implementation, Close would block until the singleflight
+	// builder returned + populated the map.
+	time.Sleep(50 * time.Millisecond)
+	go func() {
+		c.Close()
+		close(closeFired)
+	}()
+
+	// Release the builder; the lock-then-check now sees c.closed and
+	// reaps instead of repopulating.
+	time.Sleep(50 * time.Millisecond)
+	close(releaseBuild)
+
+	<-closeFired
+	if err := <-getErr; err == nil {
+		t.Error("Get during Close should have returned an error (cache closed)")
+	}
+	if got := builtCleanups.Load(); got != 1 {
+		t.Errorf("cleanup invocations = %d, want 1 (straggler must be reaped)", got)
+	}
+	if got := c.Len(); got != 0 {
+		t.Errorf("Len after Close = %d, want 0 (no stragglers should remain)", got)
+	}
+	// Subsequent Get must also fail (cache stays closed).
+	if _, err := c.Get(context.Background(), path); err == nil {
+		t.Error("Get after Close should fail")
+	}
+}
+
 func TestCache_LRUEvictionRunsCleanup(t *testing.T) {
 	build, builds, cleanups := makeFakeBuilder(t)
 	c := NewCache(2, build) // bound = 2
