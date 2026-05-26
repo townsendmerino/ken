@@ -10,6 +10,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/odvcencio/gotreesitter v0.18.0
 	github.com/pkoukk/tiktoken-go v0.1.8
+	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/text v0.37.0
 	modernc.org/sqlite v1.50.1
