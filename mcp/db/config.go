@@ -25,19 +25,19 @@
 //	if err != nil { log.Fatal(err) }
 //	defer cleanup()
 //
-//	mcp.Run(ctx, corpus, mcp.Options{Reindex: reindex, ...})
+//	mcp.Run(ctx, corpus, mcp.Options{DB: refresher, ...})
 //
-// ── v0.8.0 Part 3 caveat: chunk visibility deferred ─────────────────
-// In v0.8.0, Setup runs introspection on each refresh (validates the
-// DSN, captures freshness, fires LISTEN handlers, exercises the
-// interval-ticker path) and the reindex_db tool returns the standard
-// "Reindexed in Nms." response. HOWEVER: the chunks IndexSchema
-// produces are NOT yet unioned into the embedded *search.Index that
-// mcp.Run serves. Chunk integration into the static Index requires a
-// SetExtraChunks-style mechanism on *search.Index that isn't yet
-// implemented (cmd/ken-mcp uses *search.WatchedIndex.SetExtraChunks,
-// which doesn't generalize to mcp.Run's fs.FS-rooted static Index).
-// Chunk integration is deferred to v0.9.0. See ADR-020 Part 3.
+// ── Chunk integration is end-to-end (v0.8.0 Part 3 addendum) ────────
+// Setup returns a *Refresher; passing it as mcp.Options.DB causes
+// mcp.Run to call Refresher.Start internally with an onExtras
+// callback that rebuilds the embedded *search.Index via
+// WithExtraChunks + atomic-pointer Store. DB chunks captured by the
+// initial introspection, interval ticker, LISTEN/NOTIFY, or
+// agent-callable reindex_db become searchable in the next agent
+// search/find_related call. cmd/ken-mcp continues to use
+// *WatchedIndex.SetExtraChunks for its fsnotify-rooted path; the
+// SDK author + CLI surfaces converge on the same Refresher semantics.
+// See ADR-020 Part 3.
 //
 // ── Engine routing ──────────────────────────────────────────────────
 // Same shape as cmd/ken-mcp: DSN scheme dispatch through

@@ -272,7 +272,7 @@ func main() {
     ctx := context.Background()
 
     // Opt-in: only SDK authors who want DB support import mcp/db.
-    reindex, cleanup, err := mcpdb.Setup(ctx, mcpdb.Config{
+    refresher, err := mcpdb.Setup(ctx, mcpdb.Config{
         DSN:             os.Getenv("MY_DB_DSN"),
         SampleRows:      0,
         ReindexInterval: 5 * time.Minute,
@@ -281,14 +281,15 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    if cleanup != nil {
-        defer cleanup()
-    }
 
+    // refresher is nil when MY_DB_DSN is unset → opts.DB stays nil →
+    // reindex_db tool NOT registered (the v0.6.0 docs-only behavior).
+    // When non-nil, mcp.Run calls refresher.Start internally and
+    // defers the returned cleanup.
     if err := mcp.Run(ctx, myEmbeddedDocsCorpus, mcp.Options{
         Mode:        "hybrid",
         ChunkerName: "markdown",
-        Reindex:     reindex, // nil-safe: nil → reindex_db tool NOT registered
+        DB:          refresher, // *mcpdb.Refresher satisfies mcp.DBIntegration
     }); err != nil {
         log.Fatal(err)
     }
@@ -306,7 +307,7 @@ if len(os.Args) > 1 && os.Args[1] == "print-listen-script" {
 }
 ```
 
-**Caveat: chunk integration into `mcp.Run`'s embedded search is deferred to v0.9.0.** In v0.8.0 Part 3, calling `reindex_db` from an agent against an `mcp.Run + mcp/db.Setup` binary runs the introspection (validates the DSN, captures freshness, fires LISTEN handlers, exercises the interval-ticker path) and returns the standard `Reindexed in Nms.` response — but the chunks `IndexSchema` produces are NOT yet unioned into the embedded `*search.Index` that `mcp.Run` serves. SDK authors who need live DB chunks in their search results today should use `cmd/ken-mcp` directly (which uses `*WatchedIndex.SetExtraChunks`); the `mcp.Run` chunk integration lands in v0.9.0. See [ADR-020 Part 3](docs/DECISIONS.md#part-3-opt-in-mcpdb-package-preserving-v060-binary-size-contract-v080-part-3) for the full rationale + the v0.9.0 follow-up plan.
+**Chunk integration is end-to-end.** Calling `reindex_db` from an agent against an `mcp.Run + mcp/db.Setup` binary runs the introspection AND makes the new DB chunks searchable in the agent's next `search` / `find_related` call. The pipeline: `mcp.Run` wraps the embedded `*search.Index` in `atomic.Pointer[search.Index]`; `mcp/db.Refresher.Start` (called by `mcp.Run` on startup) wires the swap callback to `*search.Index.WithExtraChunks` + atomic-pointer store; each refresh rebuilds against the original corpus + the latest DB chunks. `cmd/ken-mcp` continues to use `*WatchedIndex.SetExtraChunks` for its fsnotify-rooted path; the SDK-author + CLI surfaces converge on the same `Refresher` + `reindex_db` semantics. See [ADR-020 Part 3](docs/DECISIONS.md#part-3-opt-in-mcpdb-package-preserving-v060-binary-size-contract-v080-part-3) for the full design + the rejected alternatives.
 
 ## Quickstart
 
