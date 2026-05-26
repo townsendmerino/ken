@@ -118,6 +118,19 @@ type Index struct {
 	bm     *bm25.Index
 	model  *embed.StaticModel // nil for ModeBM25
 	flat   *ann.Flat          // nil for ModeBM25
+
+	// vecs is the per-chunk embedding slice BuildIndex received,
+	// retained so WithExtraChunks can rebuild a new Index over
+	// (chunks ∪ extras) without re-encoding the original corpus.
+	// nil for ModeBM25 (no embeddings) or when the caller passed nil
+	// vecs at build time. Same length as chunks when non-nil.
+	//
+	// v0.8.0 Part 3 addendum (ADR-020): retained for the WithExtraChunks
+	// rebuild path that powers mcp.Run's Tier-2 chunk integration.
+	// Unused by cmd/ken-mcp (which uses WatchedIndex.SetExtraChunks via
+	// the cache pre-warm path, where the WatchedIndex holds its own
+	// vecs slice).
+	vecs [][]float32
 }
 
 // FromFS walks fsys, chunks every indexable file with the named chunker,
@@ -375,11 +388,69 @@ func BuildIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, model *embed.
 		}
 		docs[i] = bm25.Tokenize(c.Text)
 	}
-	ix := &Index{mode: mode, chunks: chunks, bm: bm25.Build(docs), model: model}
+	ix := &Index{mode: mode, chunks: chunks, bm: bm25.Build(docs), model: model, vecs: vecs}
 	if model != nil {
 		ix.flat = ann.New(vecs)
 	}
 	return ix
+}
+
+// WithExtraChunks returns a new *Index containing the receiver's chunks
+// UNION the provided extras. The receiver is unchanged (immutable
+// pre-existing snapshot, important for callers that may hold a
+// reference); the returned Index is freshly built over the merged set.
+//
+// Used by v0.8.0 Part 3 addendum (ADR-020) for mcp.Run's Tier-2 chunk
+// integration: when mcp/db.Refresher's Start callback fires with new
+// DB chunks, mcp.Run calls ix.WithExtraChunks(extras) and atomic-
+// stores the result for subsequent search handlers to read.
+//
+// Semantic / hybrid mode: extras are encoded via the retained model
+// reference (model is held on *Index since build time). BM25 index
+// is rebuilt over the merged docs so token-frequency stats reflect
+// the combined corpus.
+//
+// BM25 mode (no model): BM25 index is rebuilt over (chunks ∪ extras)
+// tokens; no embedding work happens. The flat ANN index stays nil.
+//
+// extras==nil or len(extras)==0 returns a freshly-built Index
+// equivalent to the receiver (no-op semantically, but a new pointer).
+// The "replace, not accumulate" rule applies: each call rebuilds
+// against the receiver's original chunks plus the SUPPLIED extras —
+// previous extras (from a prior WithExtraChunks call) are not retained.
+//
+// Goroutine-safety: callers may invoke WithExtraChunks on the same
+// receiver concurrently (the receiver is immutable). The atomic-swap
+// of the resulting pointer is the caller's responsibility (mcp.Run
+// uses atomic.Pointer[Index] for this).
+func (ix *Index) WithExtraChunks(extras []chunk.Chunk) *Index {
+	if len(extras) == 0 {
+		// No-op: rebuild from the receiver's state. Returns a fresh
+		// pointer (not ix itself) so callers can always treat the
+		// return value as a new snapshot to atomic-store.
+		return BuildIndex(ix.chunks, ix.vecs, ix.mode, ix.model)
+	}
+
+	merged := make([]chunk.Chunk, 0, len(ix.chunks)+len(extras))
+	merged = append(merged, ix.chunks...)
+	merged = append(merged, extras...)
+
+	var mergedVecs [][]float32
+	if ix.model != nil {
+		// Semantic / hybrid: encode extras via the retained model.
+		// ix.vecs may be nil (BM25 mode promoted to semantic via a
+		// build path that omitted vecs); guard for that.
+		extraVecs := make([][]float32, len(extras))
+		for i, c := range extras {
+			extraVecs[i] = ix.model.Encode(c.Text)
+		}
+		mergedVecs = make([][]float32, 0, len(ix.vecs)+len(extras))
+		mergedVecs = append(mergedVecs, ix.vecs...)
+		mergedVecs = append(mergedVecs, extraVecs...)
+	}
+	// ModeBM25 path: mergedVecs stays nil; BuildIndex builds BM25 only.
+
+	return BuildIndex(merged, mergedVecs, ix.mode, ix.model)
 }
 
 // Len is the number of indexed chunks.
