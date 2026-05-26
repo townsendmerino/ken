@@ -42,6 +42,17 @@ The v0.6.0 single-static-binary contract is preserved: pre-built indices live in
 - **Existing dep tree unchanged.** Custom binary serialization uses `encoding/binary`, `hash/crc32`, and the existing `io/fs` plumbing. No new third-party deps.
 - **v0.6.0 single-static-binary contract preserved.** Pre-built indices live inside the SDK author's `//go:embed corpus`, not as sidecar assets. The `cmd/ken-mcp-docs` worked example continues to be a single 74 MB binary.
 
+### Calibration amendment (post-v0.8.3 audit; supersedes the v0.8.2 entry below)
+
+A post-v0.8.3 re-measurement against `gotreesitter` v0.18.0 (cross-checked against v0.19.1) found that the v0.8.2 stale-claim entry below got one figure wrong. **The v0.8.2 line "DESIGN.md §1's '19 MB' grammar-bundle size updated to '~26 MB'" conflated two distinct quantities.** The actual figures, with units of measurement made explicit:
+
+- **On-disk grammar bundle: ~19 MB** (20,011,313 bytes; 206 `*.bin` files in `gotreesitter/grammars/grammar_blobs/`). Stable across v0.18.0 and v0.19.1 — did NOT grow from ~19 MB to ~26 MB despite the grammar count growth from 17 to ~206.
+- **Linked-binary cost when treesitter is imported: ~26 MB** (`cmd/ken-mcp` darwin/arm64: 55,712,704 B with the blank import vs 28,726,752 B without — delta 26,985,952 B). Includes the embed payload + parser runtime + symbol bookkeeping.
+
+v0.8.2's amendment merged both into one number. The v0.8.3 sweep corrected the three in-code comments (`cmd/ken-mcp/main.go`, `cmd/ken-mcp-docs/main.go`, `internal/search/index.go`), DESIGN.md §1, and added the [calibration-amendment block to ADR-023](docs/DECISIONS.md#calibration-amendment-post-v083-audit). This CHANGELOG note completes the sweep by amending the v0.8.2 entry (the original source of the conflation) without overwriting its body — same amend-don't-overwrite discipline that v0.8.2 itself applied to v0.6.0.
+
+**Canonical figures going forward**: ~19 MB on-disk grammar bundle, ~26 MB binary cost when treesitter is imported. See ADR-023's calibration amendment for the full audit trail.
+
 ## [0.8.2] — 2026-05-25
 
 **Investigation outcome release.** v0.8.2 ships no new features. v0.8.x's calibration-release discipline applied to [#16](https://github.com/townsendmerino/ken/issues/16) (selective tree-sitter grammar embedding for smaller binaries): we investigated whether `gotreesitter`'s package shape permits per-language binary-size reduction via source-file build tags, found that the embed layer's monolithic `//go:embed grammar_blobs/*.bin` glob defeats the approach at the v0.18.0 layout, documented the finding honestly, named the specific upstream change that would unblock the feature, and closed #16 as wontfix-without-upstream-cooperation. The 74 MB `cmd/ken-mcp-docs` binary measured in [ADR-016](docs/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) stays 74 MB after v0.8.2.

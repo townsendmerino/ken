@@ -613,7 +613,7 @@ The full per-language NDCG breakdown plus the empirical findings that informed t
 | NDCG@10 on CoIR-CSN-Python (external) | (not measured; semble doesn't run this bench) | **0.8743 bm25 / 0.7839 hybrid** ([see why](#benchmarks--external-reference-coir-csn-python))†† |
 | Median tokens to recall@10 on agent queries | (not measured; semble doesn't run this bench) | **4,269 tok @ 82% recall** on semble NL queries — vs grep+Read's 189,591 tok @ 99.9% (44× cheaper at 17 pp lower recall)††† |
 | MCP server | yes | yes — drop-in compatible (same tool schemas, same wire format) |
-| Binary size | n/a (Python env) | `ken` ~32 MB · `ken-mcp` ~36 MB (tree-sitter grammars dominate — see [Choosing a chunker](#choosing-a-chunker)) |
+| Binary size | n/a (Python env) | `ken` ~36 MB · `ken-mcp` ~54 MB (treesitter grammars + parser runtime ~26 MB; DB drivers + Model2Vec runtime + standard-library bookkeeping the rest; measured darwin/arm64 at v0.8.3 — see [Choosing a chunker](#choosing-a-chunker) and [ADR-023's calibration amendment](docs/DECISIONS.md#calibration-amendment-post-v083-audit)) |
 | Requires `huggingface-cli` for model | yes | **no** — `ken download-model` fetches direct from HF (or skip and use `--mode bm25`) |
 
 † **Measured at v0.1.0 / v0.2.0 against semble's published benchmark** (63 repos, 1251 queries, semble's own `benchmarks.metrics.ndcg_at_k` + `target_rank`). Reproduce: see [`docs/BENCH.md`](docs/BENCH.md). Ablation breakdown vs semble's published raw retrieval numbers:
