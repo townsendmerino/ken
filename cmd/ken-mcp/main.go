@@ -391,10 +391,37 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 }
 
 // redactDSN returns a DSN with the userinfo (and therefore the password)
-// stripped, suitable for logging. "postgres://alice:s3cret@h/db" →
-// "postgres://h/db". Best-effort: on URL-parse failure, returns
-// "<redacted>" rather than risking the original.
+// stripped, suitable for logging.
+//
+// Three accepted DSN shapes (matching what `envDSN` lets through):
+//
+//  1. URL form with scheme + userinfo:
+//     "postgres://alice:s3cret@h/db" → "postgres://h/db"
+//     "mysql://alice:s3cret@tcp(h:3306)/db" → "mysql://tcp(h:3306)/db"
+//  2. Native go-sql-driver/mysql form (no scheme):
+//     "alice:s3cret@tcp(h:3306)/db" → "tcp(h:3306)/db"
+//     "alice:s3cret@unix(/sock)/db" → "unix(/sock)/db"
+//  3. SQLite (no userinfo to redact):
+//     "sqlite:///path.db" → "sqlite:///path.db" (unchanged)
+//
+// M1 fix: the native MySQL form has no `://` so `url.Parse` interpreted
+// it as a scheme-less URL with `Opaque="pass@tcp(...)/db"` and `u.User`
+// nil — clearing `u.User` did nothing and the password survived in the
+// startup log. The form is detected here explicitly: any input that
+// (a) contains '@' AND (b) doesn't contain `://` is treated as a native
+// driver DSN whose userinfo prefix gets stripped.
+//
+// On URL-parse failure for the scheme'd case, returns "<redacted>"
+// rather than risking the original.
 func redactDSN(dsn string) string {
+	// Native driver DSN (no scheme): strip everything up to and
+	// including the first '@'.
+	if !strings.Contains(dsn, "://") {
+		if idx := strings.Index(dsn, "@"); idx >= 0 {
+			return dsn[idx+1:]
+		}
+		return dsn // no userinfo to redact
+	}
 	u, err := url.Parse(dsn)
 	if err != nil {
 		return "<redacted>"
