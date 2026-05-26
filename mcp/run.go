@@ -259,9 +259,9 @@ func buildEmbeddedIndex(fsys fs.FS, opts Options) (*search.Index, *Logger, error
 	//   2. fsys/.ken/index.bin (convention-over-configuration)
 	// Either source's failure is non-fatal: the lazy fallback ensures
 	// the binary always works even if the pre-built bytes go bad.
-	if ix := tryLoadPrebuilt(fsys, opts, mode, chunkerName, model, logger); ix != nil {
-		logger.Logf(LogInfo, "loaded pre-built index (%d chunks, mode=%s chunker=%s)",
-			ix.Len(), search.ModeNames()[int(mode)], chunkerName)
+	if ix, src := tryLoadPrebuilt(fsys, opts, mode, chunkerName, model, logger); ix != nil {
+		logger.Logf(LogInfo, "loaded pre-built index from %s (%d chunks, mode=%s chunker=%s)",
+			src, ix.Len(), search.ModeNames()[int(mode)], chunkerName)
 		return ix, logger, nil
 	}
 
@@ -275,16 +275,23 @@ func buildEmbeddedIndex(fsys fs.FS, opts Options) (*search.Index, *Logger, error
 }
 
 // tryLoadPrebuilt attempts the v0.8.3 pre-built-index path. Returns
-// the loaded *Index on success, or nil on any failure (corrupt, version
-// mismatch, mode/chunker mismatch, missing file). All non-"missing
-// file" failures are logged at warn so operators can see why the
-// optimization was skipped; the missing-file case is silent (the
-// pre-built path is opt-in).
+// the loaded *Index + a human-readable src tag on success, or
+// (nil, "") on any failure (corrupt, version mismatch, mode/chunker
+// mismatch, missing file). All non-"missing file" failures are
+// logged at warn so operators can see why the optimization was
+// skipped; the missing-file case is silent (the pre-built path is
+// opt-in).
+//
+// The src tag distinguishes the explicit-override vs auto-discovery
+// path — "Options.PrebuiltIndex" vs ".ken/index.bin (auto-discovered)".
+// buildEmbeddedIndex threads it into the success info log so
+// operators (and tests, per M5 of the post-v0.8.3 bug review) can
+// see which path actually fired.
 //
 // Explicit Options.PrebuiltIndex wins over the .ken/index.bin
-// convention; if both are present and explicit is set, the convention
-// file is never consulted.
-func tryLoadPrebuilt(fsys fs.FS, opts Options, mode search.Mode, chunkerName string, model *embed.StaticModel, logger *Logger) *search.Index {
+// convention; if both are present and explicit is set, the
+// convention file is never consulted.
+func tryLoadPrebuilt(fsys fs.FS, opts Options, mode search.Mode, chunkerName string, model *embed.StaticModel, logger *Logger) (*search.Index, string) {
 	var (
 		data []byte
 		src  string
@@ -301,7 +308,7 @@ func tryLoadPrebuilt(fsys fs.FS, opts Options, mode search.Mode, chunkerName str
 			if !errors.Is(err, fs.ErrNotExist) {
 				logger.Logf(LogDebug, "no pre-built index at %s: %v", prebuiltIndexPath, err)
 			}
-			return nil
+			return nil, ""
 		}
 		data = b
 		src = fmt.Sprintf("%s (auto-discovered)", prebuiltIndexPath)
@@ -317,9 +324,9 @@ func tryLoadPrebuilt(fsys fs.FS, opts Options, mode search.Mode, chunkerName str
 		logger.Logf(LogWarn,
 			"failed to load pre-built index from %s (%v); falling back to build-from-corpus. "+
 				"Re-run `ken build-index` to refresh.", src, err)
-		return nil
+		return nil, ""
 	}
-	return ix
+	return ix, src
 }
 
 // loadModel returns the Model2Vec snapshot to use, preferring ModelFS
