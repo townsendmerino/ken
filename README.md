@@ -100,7 +100,11 @@ TABLE users
   status      VARCHAR(16) NOT NULL DEFAULT 'active'   -- added by 0002_add_status.sql
 ```
 
-Folding covers `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN ... TYPE`, `ADD CONSTRAINT`, and `DROP CONSTRAINT`. Out of scope for v0.7.1: `RENAME COLUMN` (needs name resolution across files), engine-specific DDL extensions. When an ALTER can't be folded cleanly (unknown column, type conflict, missing CREATE TABLE), ken emits **both** the original per-file ALTER chunk **and** the folded chunk for what could be resolved — the agent never sees less information than v0.7.0.
+Folding covers `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN ... TYPE`, `ADD CONSTRAINT`, `DROP CONSTRAINT`, and — as of **v0.8.1 Part C** ([ADR-022](docs/DECISIONS.md#adr-022-rename-column--rename-constraint-folding-via-eager-application-v081-part-c), closes [#14](https://github.com/townsendmerino/ken/issues/14)) — **`RENAME COLUMN` and `RENAME CONSTRAINT`**. RENAME is applied eagerly during replay: a `RENAME COLUMN old TO new` mutates the in-flight folded table so subsequent ALTERs see the post-rename state, and this-table column references inside constraint definitions (PK / UNIQUE / FK source-side / CHECK) get rewritten via a word-boundary regex scoped to the first parenthesized group. Cross-table FK target-side column references (the `REFERENCES other(remote)` portion) are NOT propagated — that's cross-table dependency requiring migration-DAG analysis and remains out of scope. Operators using MySQL's `CHANGE old new TYPE` syntax (rename + retype in one statement) see the BOTH-chunks fallback below.
+
+**RENAME folding is a Tier-1 chunk-content fidelity improvement, NOT a search-ranking improvement.** ken's hybrid retrieval recall@10 numbers ([`docs/BENCH.md`](docs/BENCH.md)) measure a different system — they're about whether the right chunk surfaces in the top-10 results, not about whether the chunk contains post-rename column names. v0.8.1 Part C closes the latter gap without affecting the former.
+
+When an ALTER can't be folded cleanly (unknown column, type conflict, missing CREATE TABLE, RENAME of a column that doesn't exist, anonymous constraint with no name to match), ken emits **both** the original per-file ALTER chunk **and** the folded chunk for what could be resolved — the agent never sees less information than v0.7.0.
 
 Set `KEN_SQL_NO_AUTO_MIGRATIONS=1` to restore the v0.7.0 per-file behavior. Useful for operators who maintain a canonical `schema/current.sql` and don't want migration history surfaced separately.
 

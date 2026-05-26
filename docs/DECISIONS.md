@@ -23,10 +23,11 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-015](#adr-015-nested-gitignore-support-via-scope-stack-on-existing-rule-engine) | Nested `.gitignore` support via scope stack on existing rule engine | Accepted |
 | [ADR-016](#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) | Embedded-corpus MCP build pattern via `mcp.Run` library function | Accepted |
 | [ADR-017](#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance) | Database schema indexing — two-tier (static SQL + live Postgres) with documented PII stance | Accepted |
-| [ADR-018](#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay) | SQLite engine + migration-history folding via lightweight ALTER replay | Accepted |
+| [ADR-018](#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay) | SQLite engine + migration-history folding via lightweight ALTER replay | Accepted (extended by ADR-022) |
 | [ADR-019](#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) | MySQL engine + schema filtering for multi-schema dev databases | Accepted (extended by ADR-021) |
 | [ADR-020](#adr-020-listennotify-push-based-schema-change-detection-v080-part-1) | LISTEN/NOTIFY push-based schema change detection + `reindex_db` MCP tool + opt-in `mcp/db` package for SDK authors (v0.8.0) | Accepted |
 | [ADR-021](#adr-021-mariadb-first-class-engine-support-v081-part-b) | MariaDB first-class engine support (v0.8.1 Part B) | Accepted |
+| [ADR-022](#adr-022-rename-column--rename-constraint-folding-via-eager-application-v081-part-c) | RENAME COLUMN + RENAME CONSTRAINT folding via eager application (v0.8.1 Part C) | Accepted |
 
 ---
 
@@ -653,7 +654,7 @@ Engineered redaction controls (column-exclusion DSL, redaction modes, row synthe
 
 ## ADR-018: SQLite engine + migration-history folding via lightweight ALTER replay
 
-**Status:** Accepted
+**Status:** Accepted. *RENAME COLUMN + RENAME CONSTRAINT folding shipped in v0.8.1 Part C; see [ADR-022](#adr-022-rename-column--rename-constraint-folding-via-eager-application-v081-part-c).*
 
 **Date:** 2026-05-25
 
@@ -706,7 +707,7 @@ v0.7.1 closes both gaps. SQLite indexing covers the missing engine; migration fo
 - **SQLite users get Tier 2 indexing.** Rails / Django / Phoenix / Laravel / FastAPI / embedded apps — the audience the v0.7.0 Postgres-only release explicitly didn't serve. Same chunk shape, same row-sampling / refresh / SIGHUP machinery, no operator-facing differences beyond the DSN scheme.
 - **Migration-driven workflows on any engine get folded chunks.** Tier 1's folding is filesystem-based, not DB-based — Postgres / SQLite / future-MySQL Tier 2 paths all benefit because they index against the same `internal/search` walker.
 - **The engine-routing pattern is established.** MySQL in v0.7.2 follows the same shape: sibling file `internal/db/mysql.go`, DSN scheme dispatch in `IndexSchema`. The `envDSN` allow-list extends with one entry.
-- **Partial-fold failures never lose data.** The BOTH-chunks rule means agents never see less than they did under v0.7.0. The worst case is one extra chunk for the agent to disambiguate (per affected ALTER); the best case is N+1 chunks collapse to 1.
+- **Partial-fold failures never lose data.** The BOTH-chunks rule means agents never see less than they did under v0.7.0. The worst case is one extra chunk for the agent to disambiguate (per affected ALTER); the best case is N+1 chunks collapse to 1. **v0.8.1 Part C follow-on:** RENAME COLUMN + RENAME CONSTRAINT — explicitly listed in the v0.7.1 out-of-scope set above — are now folded eagerly in v0.8.1 Part C; the BOTH-chunks pattern carries over for genuine failures (missing source column from operator typo; anonymous constraint with no name to match; MySQL `CHANGE` syntax). See [ADR-022](#adr-022-rename-column--rename-constraint-folding-via-eager-application-v081-part-c) for the eager-application design + 7 rejected alternatives + the calibration-credibility framing (Tier-1 chunk fidelity, not retrieval recall).
 - **CI: SQLite tests run in the existing `test-db-integration` job.** No new service container needed (SQLite is file-based). The job's name updates to reflect both engines (`ubuntu / DB integration (Postgres + SQLite)`). The default `go test ./...` job runs the SQLite stdout-clean test too (which uses a temp .db file, no env required).
 - **`mcp.Run` (v0.6.0 embedded-corpus) is unchanged.** No new `mcp.Options` fields. Tier 1's migration folding DOES apply when embedded corpora include `.sql` files in a migration directory; no operator action required.
 - **Freshness header policy for SQLite.** Basename only (`sqlite@dev.db`), never the full path. Operators who need full provenance grep stderr logs. Audited by `TestSQLiteIntegration_FreshnessHeader_BasenameOnly`.
@@ -1055,3 +1056,69 @@ v0.8.0's release notes pre-announced v0.8.1 as the release that would convert AD
 - **The probe-and-branch mechanism stays available as future-extension.** Documented as rejected for v0.8.1 because the chosen normalization didn't need it, NOT because the mechanism is wrong in principle. If a future divergence requires engine-specific code paths, the probe can land then with this ADR as the precedent.
 
 - **Calibration credibility upheld.** v0.8.1's narrative ("each Part closes a specific gap between claim and delivery") holds: ADR-019 said "MariaDB compatible"; v0.8.1 makes that load-bearing-tested + documents what "compatible" actually means at the chunk-rendering level. No mis-framing as a recall or search-ranking improvement; this is a chunk-content fidelity + cross-engine consistency improvement.
+
+---
+
+## ADR-022: RENAME COLUMN + RENAME CONSTRAINT folding via eager application (v0.8.1 Part C)
+
+**Status:** Accepted
+
+**Date:** 2026-05-25
+
+**Issue:** [townsendmerino/ken#14](https://github.com/townsendmerino/ken/issues/14)
+
+### Context
+
+[ADR-018](#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay) shipped v0.7.1's Tier-1 migration folding with `RENAME COLUMN` explicitly listed as out of scope. The BOTH-chunks fallback preserved correctness — the raw migration `.sql` files were still line-chunked and emitted alongside any folded chunk, so an agent reading either surface saw the rename action. The cost was fold *quality*: folded chunks showed pre-rename column names while the live database (via Tier 2 introspection) had post-rename names. For projects with long migration histories that rename columns over time, the folded chunk and the live chunk disagreed about identifiers — the agent could read either and reach a defensible answer, but the disagreement was load-bearing for the "fold gives current schema shape" claim ADR-018 implicitly made.
+
+v0.8.1's calibration-release framing names this exact gap: ADR-018 said "fold gives current schema shape." For RENAME, it didn't. Part C closes that gap.
+
+**Critical framing discipline.** RENAME folding is a **Tier-1 SQL chunk-content fidelity** improvement. It is **NOT** a recall / search-ranking improvement. `docs/BENCH.md`'s hybrid-retrieval recall@10 numbers (82-91%) measure a completely different system — they're about whether ken's hybrid BM25 + Model2Vec + RRF pipeline surfaces the right chunks at the top of search results. RENAME folding is about whether the chunks ken indexes contain the post-RENAME column names rather than the pre-RENAME names. Different system; different number; **do not conflate**. Every surface this ADR touches (CHANGELOG, commit messages, release notes, README) uses "Tier-1 chunk fidelity" language. Mis-framing as "improves recall" or "closes the recall gap" would erode the calibration credibility this release is built on.
+
+### Decision
+
+**Eager application during ALTER replay**, not lazy resolution at chunk emission. When a `RENAME COLUMN old TO new` statement fires during the per-statement walk, `applyColumnRename` mutates the in-flight `foldedTable` in place — `columnDef.name` gets the new value, and `renameInFirstParens` rewrites column references inside this-table constraint strings via word-boundary regex (`\b` anchors so renaming `email` doesn't touch `email_verified` or `current_email`). Subsequent ALTERs see the post-rename state.
+
+`RENAME CONSTRAINT old TO new` follows the same eager pattern via `applyConstraintRename`: walk the constraint strings, find one whose leading `CONSTRAINT <name>` prefix matches, rewrite the name in place. Anonymous constraints (`PRIMARY KEY (id)` with no name) have nothing to match and fall back to BOTH-chunks.
+
+**Scope choices:**
+
+- **Per-table only.** The rename map's scope is the table being mutated. FK constraints' source-side column lists (the columns OF THIS table that appear in `FOREIGN KEY (col) REFERENCES other(remote)`) ARE rewritten via the first-parens-only rewrite. FK target-side columns (the `other(remote)` portion) are NOT rewritten — those belong to a different table and propagating the rename across tables would need full migration-DAG analysis. Operators who rename FK target columns mid-migration-history see the FK chunk pointing at the old target name. Real-world frequency is low (FK targets are typically primary keys + rarely renamed); the per-table scope is the right complexity ceiling.
+
+- **First-parens-only constraint rewrite.** `renameInFirstParens` rewrites the FIRST parenthesized group of each constraint string only. This catches `PRIMARY KEY (cols)` / `UNIQUE (cols)` / `FOREIGN KEY (source_cols) REFERENCES ...` / `CHECK (expr)` / `CONSTRAINT name <body-with-first-parens>` — all the shapes where THIS-TABLE column lists appear. The FK target-side column list lives in a LATER paren group (after `REFERENCES other`) and is left verbatim.
+
+- **MySQL `CHANGE` syntax NOT decoded.** `ALTER TABLE foo CHANGE old new INT NOT NULL` renames AND retypes in a single statement. Decoding requires composing two operations (rename + alter-column-type) and the existing applyAlterColumn doesn't naturally compose with applyColumnRename. v0.8.1 leaves CHANGE on the BOTH-chunks fallback path — operators using CHANGE see the v0.7.1-era behavior (folded chunk shows pre-CHANGE state; raw migration file's CHANGE action is preserved separately). If field signal asks for CHANGE folding, v0.8.x+ can add it as a small extension.
+
+- **RENAME TO (table rename) NOT decoded.** `ALTER TABLE foo RENAME TO bar` renames the table itself. Folding requires a per-database table rename map to propagate to FK target references in OTHER tables. v0.8.1's per-table scope doesn't cover this. v0.9.0+ if requested.
+
+### Alternatives considered
+
+- **Lazy resolution at chunk emission via a per-table `map[oldCol]newCol` rename map.** Rejected. The lazy approach accumulates renames during the per-statement walk and applies them once at emission time when the folded chunk is rendered. This handles simple A→B cases cleanly but mishandles edge case #4 in issue #14: "RENAME A→B in file 5, ADD COLUMN A in file 7." At lazy-emission time, the rename map says `A→B`, but `foldedTable.columns` contains BOTH the now-renamed-to-B former A AND the freshly-added file-7 A. Lazy resolution can't tell which is which without per-file ordering state — it would either rename both (wrong: the file-7 A should stay A) or neither (wrong: the file-5 A should be B). Eager application avoids this entirely because the foldedTable state evolves through the per-statement walk: after file 5's rename, A *is* B; file 7's ADD COLUMN A creates a fresh A; no resolution needed at emission. The cleaner state machine + the naturally-correct edge-case-#4 handling are why eager won.
+
+- **Cycle detection in the rename map (BOTH-chunks fallback for A→B→A patterns).** Rejected as unnecessary under eager. With eager application, A→B→A naturally round-trips back to A — the final state matches the initial state, which is what the live DB would actually show for an intentional revert. If the operator intended A→B→C but typo'd C as A, the typo surfaces in the raw migration files (which are line-chunked separately by the FS walker) — the agent sees both surfaces and can reason about the discrepancy. Adding explicit cycle detection would treat intentional reverts and unintentional typos identically, which would mark intentional reverts as "uncertain" and emit unhelpful BOTH-chunks where the eager round-trip is actually correct.
+
+- **Full SQL DDL AST parser.** Rejected for the same reason ADR-018 rejected it for the original fold-replay: no pure-Go cross-dialect DDL parser exists today, and `pg_query.go` wraps libpg_query (C; violates ADR-001's no-cgo invariant). The existing tokenizer-and-dispatcher pattern in `internal/sql` handles RENAME COLUMN / RENAME CONSTRAINT parsing at the per-statement level — the canonical convergent syntax (`RENAME COLUMN old TO new`) is identical across Postgres, MySQL, SQLite (since 3.25.0), and MariaDB. No AST needed.
+
+- **Apply renames to FK target-side columns** (rewrite the column reference after `REFERENCES other(remote)`). Rejected. The per-table rename map's scope doesn't safely cover cross-table references — a FK declared `REFERENCES users.id` should still say `REFERENCES users.id` even if THIS table's `id` was renamed to `user_id` in a separate migration, because the `users.id` reference points to a different table's column. Cross-table rename propagation requires migration-DAG analysis: track which renames happen to which tables in which order, and propagate target-side references when the rename happened to a referenced table. Out of scope for the per-table approach; documented as a known limitation operators should expect.
+
+- **Substring text-replace instead of word-boundary regex.** Rejected. A rename of `email` to `email_address` via substring replace would corrupt `email_verified` → `email_addressed`, `current_email` → `current_email_address`, etc. The `\b` word-boundary anchors in Go's regex package correctly fire between word chars (incl. underscore) and non-word chars, so `\bemail\b` matches the standalone identifier without touching the substring occurrences. `TestFoldRename_WordBoundary_DoesNotMatchSubstrings` pins this contract.
+
+- **Decode MySQL `CHANGE` syntax (rename + retype in one statement).** Rejected for v0.8.1. CHANGE is structurally `RENAME COLUMN + ALTER COLUMN TYPE` in one statement; decoding it cleanly requires both code paths to compose at the per-statement level. The existing applyAlterColumn returns a boolean for "fully applied"; composing it with applyColumnRename across a single CHANGE statement would need new wiring. Defer — operators using CHANGE see the BOTH-chunks fallback (correct behavior; just less polished than the RENAME COLUMN path). If field signal arrives that CHANGE-heavy migration histories are common, v0.8.x can extend in a small follow-on.
+
+- **Skip RENAME entirely (status quo from ADR-018).** Rejected by v0.8.1's calibration-release framing. The whole point of this Part is closing the documented-but-not-true gap in ADR-018's "fold gives current schema shape" claim. Keeping the status quo would leave the gap open and erode the calibration credibility this release is built on.
+
+### Consequences
+
+- **ADR-018's "fold gives current schema shape" claim is now true for RENAME** (with the documented per-table scope + the MySQL CHANGE + RENAME TO deferrals). Tier-1 chunks reflect post-RENAME column + constraint names; the previously-deferred case is no longer the "this works in theory but the chunks show stale names" exception.
+
+- **BOTH-chunks fallback unchanged.** The existing ADR-018 graceful-degradation pattern fires for: missing source column (operator typo in migrations); RENAME CONSTRAINT on an anonymous constraint (no name to match); MySQL CHANGE syntax (not decoded in v0.8.1); RENAME TO (table rename out of scope). In every fallback case the per-file ALTER chunk is preserved AND the folded table chunk is emitted with what could be applied — the agent never sees less than v0.7.0 surfaced. Eager-cycle-handling means BOTH-chunks does NOT fire for A→B→A patterns (those round-trip naturally to A).
+
+- **FK target-side column renames remain out of scope.** Operators who rename a column that's the target of FKs in other tables see the FK chunks in those other tables continue to point at the old target name. Real-world frequency is low (FK targets are typically primary keys; primary keys are rarely renamed); the per-table scope is the right complexity ceiling for v0.8.1. v0.9.0+ if signal arrives that cross-table propagation is needed.
+
+- **MySQL `CHANGE` syntax falls back to BOTH-chunks.** Documented as a known deferral. Operators using `CHANGE` instead of `RENAME COLUMN` see the v0.7.1-era behavior; the folded chunk retains pre-CHANGE state and the raw migration file's CHANGE action is preserved via the per-file ALTER chunk. v0.8.x extension if needed.
+
+- **13 new tests in `internal/sql/fold_test.go`.** Cover chain resolution (A→B→C), the eager-cycle round-trip (A→B→A → A; no BOTH-chunks), the rename-then-re-add interaction (eager naturally distinguishes the post-rename A from the freshly-added A), drop-then-re-add-then-rename, cross-table FK source-side-rewritten / target-untouched, multi-column constraint participation, the word-boundary regex regression guard, the named-constraint rename happy path, the anonymous-constraint BOTH-chunks fallback, the missing-source BOTH-chunks fallback, the idempotence regression guard (run-twice byte-identical), SQLite syntax variant, and the MySQL CHANGE BOTH-chunks fallback. The existing `TestFold15_RenameColumnFolds` (renamed from the v0.7.1-era `_OutOfScope` assertion) covers the simple A→B happy path.
+
+- **Calibration credibility upheld.** The CHANGELOG, this ADR, the README, the DESIGN.md update, and the release-notes language all use **"Tier-1 SQL chunk fidelity"** framing throughout. No surface conflates this work with retrieval-recall improvement — `docs/BENCH.md`'s 82-91% hybrid-retrieval-recall@10 number is unaffected by this work; that's a different system and a different metric. Future engine additions that find rendering divergences (cf. ADR-021's MariaDB integer-display-width finding) should follow the same calibration-discipline framing: name the actual gap, normalize narrowly, document what's deliberately not normalized, do not over-claim across system boundaries.
+
+- **v0.8.1 ready to tag** after this lands. The three-part calibration-release ships as one fast-forward merge: Parts A (cleanup pass + instructions polish), B (MariaDB first-class), C (RENAME folding). The branch `v0.8.1-cleanup` accumulates all 9 commits in chronological order; v0.8.1 narrative is "three claim-vs-delivery gaps closed."
