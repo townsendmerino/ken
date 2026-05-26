@@ -146,7 +146,8 @@ func collectGitignores(fsys fs.FS) []scopedGitignore {
 		if !d.IsDir() {
 			return nil
 		}
-		if d.Name() == ".git" || matchScopes(active, path, true) {
+		name := d.Name()
+		if name == ".git" || name == ".ken" || matchScopes(active, path, true) {
 			return fs.SkipDir
 		}
 		if gi := loadGitignoreFS(fsys, gopath.Join(path, ".gitignore")); len(gi.rules) > 0 {

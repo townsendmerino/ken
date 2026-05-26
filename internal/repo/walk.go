@@ -75,7 +75,13 @@ func WalkFS(fsys fs.FS, opts Options) ([]string, error) {
 		// to the FS root, so no filepath.Rel / ToSlash dance is needed.
 		scopes = pruneScopes(scopes, path)
 		if d.IsDir() {
-			if d.Name() == ".git" || matchScopes(scopes, path, true) {
+			// Prune .git (the upstream-VCS prune) and .ken (v0.8.3
+			// pre-built-index directory — the file at
+			// `<corpus>/.ken/index.bin` is loaded by mcp.Run as a
+			// build-time artifact, not chunked into the corpus). Both
+			// are convention-over-configuration: no env var, no opt-in.
+			name := d.Name()
+			if name == ".git" || name == ".ken" || matchScopes(scopes, path, true) {
 				return fs.SkipDir
 			}
 			// Push this directory's .gitignore (if any) so its children
@@ -165,7 +171,11 @@ func (m *Matcher) ShouldIndex(relPath string) bool {
 		return false
 	}
 	// .git directory check matches Walk's directory-level prune.
-	if relPath == ".git" || strings.HasPrefix(relPath, ".git/") {
+	// .ken matches the v0.8.3 pre-built-index directory prune (mirrors
+	// WalkFS); operators with a literal `.ken/` directory of indexable
+	// content lose those files. Documented as a convention.
+	if relPath == ".git" || strings.HasPrefix(relPath, ".git/") ||
+		relPath == ".ken" || strings.HasPrefix(relPath, ".ken/") {
 		return false
 	}
 	// Walk-style dir-prune simulation: ask matchScopes for each
