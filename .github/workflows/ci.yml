@@ -55,6 +55,32 @@ jobs:
       - name: go test ./...
         run: go test ./...
 
+  # Race-detector pass on the full unit suite. Lives in a separate
+  # job from `test` so the ~2-3x slowdown from `-race` runs in
+  # parallel with fast-feedback CI rather than blocking it.
+  # ubuntu-latest only — the race detector is deterministic across
+  # platforms and the macOS runner-time cost isn't worth doubling.
+  #
+  # M1 in the post-v0.8.3 bug review was a real data race in the
+  # cmd/ken-mcp stdout-cleanliness tests, fixed via the safeBuf
+  # wrapper. This job is the regression guard for that class of
+  # bug — anything that introduces a shared-state race under
+  # subprocess I/O capture (or anywhere else in the codebase) will
+  # surface here before merge.
+  test-race:
+    name: ubuntu / go test -race ./...
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+      - name: go test -race ./...
+        run: go test -race ./...
+
   # v0.7.0 (ADR-017) + v0.7.1 (ADR-018) + v0.7.2 (ADR-019) Tier-2
   # integration tests: spin up Postgres + MySQL and run the full
   # internal/db integration suite (which also covers the SQLite
@@ -159,7 +185,10 @@ jobs:
       - name: cmd/ken-mcp stdout audit with Postgres
         env:
           KEN_DB_TEST_DSN: postgres://postgres:test@127.0.0.1:5432/postgres?sslmode=disable
-        run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithDB -v
+        # -race here regression-guards M1 against the live-DB
+        # subprocess path: the audits exercise the exec.Cmd +
+        # stderr-capture pattern that surfaced the original race.
+        run: go test -race ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithDB -v
 
       # v0.7.1: confirm modernc.org/sqlite stays silent on stdout when
       # KEN_DB_DSN points at a SQLite file. Uses a temp .db created by
@@ -167,7 +196,7 @@ jobs:
       # successfully in the default test job, but we re-run here in -v
       # for parity with the Postgres audit).
       - name: cmd/ken-mcp stdout audit with SQLite
-        run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithSQLite -v
+        run: go test -race ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithSQLite -v
 
       # v0.7.2: confirm go-sql-driver/mysql stays silent on stdout when
       # KEN_DB_DSN points at a MySQL instance. The mysql:8 service
@@ -181,7 +210,7 @@ jobs:
       - name: cmd/ken-mcp stdout audit with MySQL
         env:
           KEN_DB_MYSQL_TEST_DSN: root:test@tcp(127.0.0.1:3306)/ken_test?parseTime=true
-        run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithMySQL -v
+        run: go test -race ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithMySQL -v
 
       # v0.8.1 Part B (ADR-021): same audit against MariaDB. Driver
       # is shared with MySQL (go-sql-driver/mysql), so the stdout
@@ -195,7 +224,7 @@ jobs:
       - name: cmd/ken-mcp stdout audit with MariaDB
         env:
           KEN_DB_MARIADB_TEST_DSN: root:test@tcp(127.0.0.1:3307)/ken_test?parseTime=true
-        run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithMariaDB -v
+        run: go test -race ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithMariaDB -v
 
       # v0.8.0 (ADR-020): confirm the listener's dedicated pgx.Conn
       # doesn't leak anything to stdout when KEN_DB_LISTEN=1 fires the
@@ -204,4 +233,4 @@ jobs:
       - name: cmd/ken-mcp stdout audit with LISTEN/NOTIFY
         env:
           KEN_DB_TEST_DSN: postgres://postgres:test@127.0.0.1:5432/postgres?sslmode=disable
-        run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithListen -v
+        run: go test -race ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithListen -v
