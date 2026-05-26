@@ -707,9 +707,12 @@ func mergeOp(a, b fsnotify.Op) fsnotify.Op {
 
 // addRecursive registers `root` and every subdirectory with the
 // fsnotify watcher except .git/ (load-bearing skip: any git operation
-// fires hundreds of events inside .git/objects). Errors on individual
-// dirs are logged silently — a permission-denied subdir shouldn't fail
-// the whole watcher.
+// fires hundreds of events inside .git/objects) and .ken/ (v0.8.3
+// pre-built-index directory — paired with the matching prunes in
+// internal/repo's WalkFS + Matcher.ShouldIndex so the watcher
+// doesn't pay kernel-event cost for index.bin writes). Errors on
+// individual dirs are logged silently — a permission-denied subdir
+// shouldn't fail the whole watcher.
 func addRecursive(w *fsnotify.Watcher, root string) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -722,7 +725,8 @@ func addRecursive(w *fsnotify.Watcher, root string) error {
 		if !d.IsDir() {
 			return nil
 		}
-		if d.Name() == ".git" {
+		name := d.Name()
+		if name == ".git" || name == ".ken" {
 			return fs.SkipDir
 		}
 		return w.Add(path)
