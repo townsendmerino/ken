@@ -44,8 +44,9 @@ import (
 	// internal/search blank-imports the regex chunker (the universal
 	// default); the line chunker is auto-registered by internal/chunk
 	// itself. NOT imported: internal/chunk/treesitter — its grammar
-	// bundle would add ~19 MB to this binary for zero benefit on a
-	// docs-only corpus.
+	// bundle would add ~26 MB to this binary for zero benefit on a
+	// docs-only corpus (gotreesitter v0.18.0 ships ~206 grammars;
+	// see ADR-023 for the per-language-gating investigation).
 	_ "github.com/townsendmerino/ken/internal/chunk/markdown"
 )
 

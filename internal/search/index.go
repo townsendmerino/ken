@@ -46,9 +46,12 @@ import (
 	// that want them must blank-import them explicitly — e.g. cmd/ken-mcp
 	// and cmd/ken-mcp-docs do, but the embedded-corpus demo binary
 	// (cmd/ken-mcp-docs) deliberately skips treesitter to keep its
-	// gotreesitter/grammars 19MB blob bundle out of the binary. The
-	// chunker registry is the seam: side-effect imports happen at the
-	// binary's main package, not in this shared library layer.
+	// gotreesitter/grammars ~26 MB blob bundle out of the binary
+	// (gotreesitter v0.18.0 ships ~206 grammars; per ADR-023 the
+	// bundle is monolithic at the embed layer so per-language gating
+	// doesn't shrink it). The chunker registry is the seam:
+	// side-effect imports happen at the binary's main package, not
+	// in this shared library layer.
 	"github.com/townsendmerino/ken/internal/embed"
 	"github.com/townsendmerino/ken/internal/repo"
 	"github.com/townsendmerino/ken/internal/sql"

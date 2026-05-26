@@ -339,6 +339,48 @@ func TestSerializeRoundtrip_Determinism(t *testing.T) {
 	}
 }
 
+// TestSerializeRoundtrip_Determinism_Semantic extends the
+// determinism guard to ModeSemantic. ADR-024 claims byte-identical
+// output for the whole format (not just the BM25 path); the vecs
+// section is ~95% of the payload under semantic/hybrid, so without
+// this test a future randomness leak in model.Encode (pooling
+// init, weight-table iteration) would slip past.
+//
+// M7 (post-v0.8.3 bug review) regression guard. Gated on
+// testdata/model presence.
+func TestSerializeRoundtrip_Determinism_Semantic(t *testing.T) {
+	model := loadTestModel(t)
+	fsys := tinyCorpus()
+	a, err := BuildAndSerializeIndex(fsys, BuildOptions{
+		Mode: ModeSemantic, Chunker: "regex", Model: model,
+	})
+	if err != nil {
+		t.Fatalf("build A: %v", err)
+	}
+	b, err := BuildAndSerializeIndex(fsys, BuildOptions{
+		Mode: ModeSemantic, Chunker: "regex", Model: model,
+	})
+	if err != nil {
+		t.Fatalf("build B: %v", err)
+	}
+	if !bytes.Equal(a, b) {
+		// Find the first divergent byte to help triage.
+		diffAt := -1
+		minLen := len(a)
+		if len(b) < minLen {
+			minLen = len(b)
+		}
+		for i := 0; i < minLen; i++ {
+			if a[i] != b[i] {
+				diffAt = i
+				break
+			}
+		}
+		t.Fatalf("two semantic builds produced different bytes (len A=%d B=%d, first diff at byte %d)",
+			len(a), len(b), diffAt)
+	}
+}
+
 // TestLoadSerialized_SemanticRequiresModel confirms ErrModelRequired
 // fires when a semantic/hybrid index is loaded without a model.
 func TestLoadSerialized_SemanticRequiresModel(t *testing.T) {

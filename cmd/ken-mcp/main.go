@@ -38,8 +38,11 @@ import (
 	// Side-effect imports: register every chunker the stock binary
 	// offers. internal/search blank-imports "regex" (the default), so
 	// we only need the optional chunkers here. The treesitter import
-	// pulls in gotreesitter's ~19MB grammar bundle — desired for the
-	// code-search use case but explicitly skipped by cmd/ken-mcp-docs.
+	// pulls in gotreesitter's ~26 MB grammar bundle (gotreesitter
+	// v0.18.0 ships ~206 grammars; per ADR-023 the bundle is
+	// monolithic at the embed layer so per-language gating doesn't
+	// shrink it) — desired for the code-search use case but
+	// explicitly skipped by cmd/ken-mcp-docs.
 	_ "github.com/townsendmerino/ken/internal/chunk/markdown"
 	_ "github.com/townsendmerino/ken/internal/chunk/treesitter"
 	"github.com/townsendmerino/ken/internal/search"
