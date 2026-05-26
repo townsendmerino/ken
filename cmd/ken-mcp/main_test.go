@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,33 @@ import (
 
 	kenmcp "github.com/townsendmerino/ken/mcp"
 )
+
+// safeBuf is a goroutine-safe wrapper around bytes.Buffer used by the
+// stdout-cleanliness tests below. The exec.Cmd's stderr-copy
+// goroutine (launched by sdk.CommandTransport) writes to it while
+// the test goroutine reads stderr.String() after sess.CallTool
+// returns — bytes.Buffer is not goroutine-safe, so a plain
+// `var stderr bytes.Buffer` produces a real data race under
+// `go test -race`. Caught as M1 in the post-v0.8.3 bug review. The
+// mutex serializes Write/String; the print-listen-script test (which
+// uses cmd.Run, a blocking call that includes io-pipe drain) doesn't
+// need this and continues to use plain bytes.Buffer.
+type safeBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *safeBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *safeBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
 
 // sqliteOpenForTest is a tiny helper used by the SQLite stdout-clean
 // test to materialize a fixture .db file. Lives here (not in
@@ -435,7 +463,7 @@ func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 		"KEN_MCP_LOG_LEVEL=error",
 		"KEN_MCP_DEFAULT_REPO=" + fixture,
 	}
-	var stderr bytes.Buffer
+	var stderr safeBuf
 	cmd.Stderr = &stderr
 
 	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-test", Version: "0"}, nil)
@@ -526,7 +554,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithDB(t *testing.T) {
 		"KEN_DB_SAMPLE_ROWS=3",
 		"KEN_DB_REINDEX_INTERVAL=30s",
 	}
-	var stderr bytes.Buffer
+	var stderr safeBuf
 	cmd.Stderr = &stderr
 
 	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-test-db", Version: "0"}, nil)
@@ -656,7 +684,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithListen(t *testing.T) {
 		"KEN_DB_DSN=" + dsn,
 		"KEN_DB_LISTEN=1",
 	}
-	var stderr bytes.Buffer
+	var stderr safeBuf
 	cmd.Stderr = &stderr
 
 	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-test-listen", Version: "0"}, nil)
@@ -753,7 +781,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithReindexDB(t *testing.T) {
 		"KEN_MCP_DEFAULT_REPO=" + fixture,
 		"KEN_DB_DSN=" + dsn,
 	}
-	var stderr bytes.Buffer
+	var stderr safeBuf
 	cmd.Stderr = &stderr
 
 	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-test-reindex", Version: "0"}, nil)
@@ -842,7 +870,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithMySQL(t *testing.T) {
 		// through wireDBTier2 without disturbing the stdout contract.
 		"KEN_DB_SCHEMAS=ken_test",
 	}
-	var stderr bytes.Buffer
+	var stderr safeBuf
 	cmd.Stderr = &stderr
 
 	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-test-mysql", Version: "0"}, nil)
@@ -922,7 +950,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithMariaDB(t *testing.T) {
 		"KEN_DB_SAMPLE_ROWS=2",
 		"KEN_DB_SCHEMAS=ken_test",
 	}
-	var stderr bytes.Buffer
+	var stderr safeBuf
 	cmd.Stderr = &stderr
 
 	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-test-mariadb", Version: "0"}, nil)
@@ -1007,7 +1035,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithSQLite(t *testing.T) {
 		"KEN_DB_DSN=sqlite://" + dbPath,
 		"KEN_DB_SAMPLE_ROWS=2",
 	}
-	var stderr bytes.Buffer
+	var stderr safeBuf
 	cmd.Stderr = &stderr
 
 	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-test-sqlite", Version: "0"}, nil)
