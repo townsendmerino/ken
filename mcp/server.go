@@ -7,20 +7,54 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/townsendmerino/ken/internal/chunk"
 	"github.com/townsendmerino/ken/internal/search"
 )
 
-// ReindexFunc is the callback the v0.8.0 reindex_db MCP tool invokes
-// (ADR-020 Part 2). Returns a ReindexResult; the handler inspects
-// InProgress, Elapsed, and Err to choose the agent-facing message.
+// DBIntegration is the seam between mcp.Run / mcp.NewServer and a
+// Tier-2 DB provider (typically *mcp/db.Refresher; mock impls in
+// tests). The v0.8.0 Part 3 addendum (ADR-020) bundles both
+// chunk-integration (Start) and tool invocation (TryRefresh) into
+// one interface so the same provider drives both surfaces.
 //
-// cmd/ken-mcp wires a closure that calls *db.Refresher.TryRefresh and
-// translates db.ErrReindexInProgress into ReindexResult{InProgress:true};
-// mcp.Run's Part 3 DBSource path provides its own closure. The
-// result-struct shape keeps the mcp package free of internal/db
-// imports, so there's no error-sentinel coupling across package
-// boundaries.
-type ReindexFunc func(ctx context.Context) ReindexResult
+// Lifecycle:
+//
+//   - Start is called once by mcp.Run (or NewServer's caller) AFTER
+//     the index is built. The onExtras callback fires each time the
+//     provider has fresh DB chunks ready (initial introspection,
+//     interval ticks, LISTEN/NOTIFY, agent-triggered reindex). The
+//     receiver should treat each onExtras call as a complete
+//     snapshot replacement, not an append — see *Index.WithExtraChunks
+//     for the production pattern. The returned cleanup func is
+//     deferred by the caller; canceling ctx is the secondary signal.
+//
+//   - TryRefresh is invoked by the reindex_db MCP tool handler. It
+//     MUST be fail-fast on contention (return InProgress: true rather
+//     than block) because the agent is waiting on the MCP response.
+//
+// Implementations must be safe to call TryRefresh concurrently with
+// in-flight onExtras callbacks AND with other TryRefresh callers.
+// *mcp/db.Refresher satisfies this via the underlying
+// internal/db.Refresher's mutex serialization (the four blocking
+// trigger sources + TryLock for the fifth — ADR-020 Part 2).
+//
+// The mcp package stays internal/db-free: this interface is what
+// callers (cmd/ken-mcp; SDK authors using mcp.Run + mcp/db) implement
+// in their layer. The v0.6.0 binary-size contract holds — see
+// TestBinary_MCPPackageStaysDBFree.
+type DBIntegration interface {
+	// Start registers onExtras as the swap callback that fires on
+	// each refresh. Starts whatever interval / LISTEN goroutines the
+	// implementation needs. Returns a cleanup func the caller MUST
+	// defer; canceling ctx is also honored.
+	Start(ctx context.Context, onExtras func([]chunk.Chunk)) (cleanup func(), err error)
+
+	// TryRefresh triggers an immediate refresh and returns the
+	// outcome. Fail-fast on contention: in-flight refreshes (interval
+	// tick, LISTEN burst, SIGHUP, prior TryRefresh) cause this call
+	// to return ReindexResult{InProgress: true} without queuing.
+	TryRefresh(ctx context.Context) ReindexResult
+}
 
 // ReindexResult is the outcome of one reindex attempt. Exactly one of
 // InProgress=true, Err!=nil, or "everything else (success)" is the
@@ -55,14 +89,19 @@ type Config struct {
 	ServerName    string      // default "ken"
 	ServerVersion string      // default "0"
 
-	// Reindex, when non-nil, registers the v0.8.0 reindex_db MCP tool
-	// (ADR-020 Part 2). cmd/ken-mcp wires a closure that delegates to
-	// *db.Refresher.TryRefresh and translates db.ErrReindexInProgress
-	// into ReindexResult{InProgress:true}; mcp.Run's Part 3 DBSource
-	// path will wire its own closure. nil = tool not registered (the
-	// agent's tools/list won't show reindex_db at all when no DB is
-	// configured, which keeps the tool surface honest).
-	Reindex ReindexFunc
+	// DB, when non-nil, registers the v0.8.0 reindex_db MCP tool
+	// (ADR-020 Part 2) and wires Tier-2 chunk integration via the
+	// caller's swap target (ADR-020 Part 3 addendum). nil = tool
+	// not registered + no chunk integration; the agent's tools/list
+	// won't show reindex_db at all when no DB is configured, which
+	// keeps the tool surface honest.
+	//
+	// cmd/ken-mcp wires this with a *mcp/db.Refresher whose Start
+	// callback writes to the WatchedIndex.SetExtraChunks of the
+	// pre-warmed default-repo Index. SDK authors using mcp.Run wire
+	// the same *mcp/db.Refresher; mcp.Run's Start callback updates
+	// an atomic.Pointer[search.Index] via WithExtraChunks.
+	DB DBIntegration
 }
 
 // NewServer returns an MCP server with `search` and `find_related`
@@ -111,9 +150,11 @@ func NewServer(cfg Config) *sdk.Server {
 	})
 
 	// v0.8.0 Part 2 (ADR-020): reindex_db tool. Registered ONLY when
-	// a Reindex callback is wired — keeps tools/list honest (an agent
+	// a DBIntegration is wired — keeps tools/list honest (an agent
 	// shouldn't see a tool that returns "no DB" 100% of the time).
-	if cfg.Reindex != nil {
+	// Part 3 addendum: same condition, different field name
+	// (Reindex ReindexFunc → DB DBIntegration).
+	if cfg.DB != nil {
 		sdk.AddTool(srv, &sdk.Tool{
 			Name: "reindex_db",
 			Description: "Trigger a Tier 2 database schema reindex on demand. " +
@@ -128,22 +169,22 @@ func NewServer(cfg Config) *sdk.Server {
 	return srv
 }
 
-// handleReindexDB invokes the configured Reindex callback and renders
-// the result as a text response matching semble's plain-text MCP wire
-// format. Four shapes:
+// handleReindexDB invokes the configured DBIntegration's TryRefresh and
+// renders the result as a text response matching semble's plain-text
+// MCP wire format. Four shapes:
 //
-//   - Reindex unset → "DB indexing not configured…" (defense-in-depth;
-//     NewServer only registers the tool when Reindex is non-nil, but
-//     a future code path that calls this handler directly should fail
+//   - DB unset → "DB indexing not configured…" (defense-in-depth;
+//     NewServer only registers the tool when DB is non-nil, but a
+//     future code path that calls this handler directly should fail
 //     safe).
 //   - InProgress → "Reindex already in progress; nothing to do."
 //   - Err != nil → "Reindex failed: <err>"
 //   - success → "Reindexed in 123ms."
 func handleReindexDB(ctx context.Context, cfg *Config) (*sdk.CallToolResult, any, error) {
-	if cfg.Reindex == nil {
+	if cfg.DB == nil {
 		return textResult("DB indexing is not configured (KEN_DB_DSN is unset); nothing to reindex."), nil, nil
 	}
-	res := cfg.Reindex(ctx)
+	res := cfg.DB.TryRefresh(ctx)
 	switch {
 	case res.InProgress:
 		return textResult("Reindex already in progress; nothing to do."), nil, nil

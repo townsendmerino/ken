@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/townsendmerino/ken/internal/chunk"
@@ -11,101 +12,154 @@ import (
 	"github.com/townsendmerino/ken/mcp"
 )
 
-// Setup constructs the v0.8.0 Tier-2 machinery for SDK authors using
-// mcp.Run: validates the Config, runs the initial IndexSchema, starts
-// the periodic-refresh goroutine (if cfg.ReindexInterval > 0), starts
-// the LISTEN/NOTIFY listener (if cfg.EnableListen && DSN is Postgres),
-// and returns a mcp.ReindexFunc that the SDK author passes as
-// mcp.Options.Reindex.
+// Refresher is the SDK author's Tier-2 handle. Returned by Setup;
+// passed to mcp.Options.DB (or mcp.Config.DB for the cache-backed
+// NewServer path). Implements mcp.DBIntegration so mcp.Run can call
+// Start (registers the chunk-integration callback + spawns the
+// interval/listener goroutines) and TryRefresh (invoked by the
+// reindex_db MCP tool).
 //
 // Lifecycle:
 //
-//   - Setup runs the initial IndexSchema synchronously; the resulting
-//     chunks are passed to a swap callback that's currently a no-op
-//     (logged at info via cfg.LogWriter). Chunk integration into
-//     mcp.Run's embedded *search.Index is deferred to v0.9.0 — see
-//     the package-level docstring's caveat.
-//   - The returned ReindexFunc is what the reindex_db MCP tool calls.
-//     It delegates to *db.Refresher.TryRefresh and translates
+//   - Setup constructs and validates the Refresher; no goroutines
+//     run yet, no DB connection is opened. The DSN is parsed at
+//     Start time, not Setup time.
+//   - Start opens the DB connection, runs the initial IndexSchema
+//     (firing onExtras synchronously with the initial chunks before
+//     returning), constructs the inner *internal/db.Refresher, and
+//     starts the interval-ticker + LISTEN/NOTIFY goroutines. Returns
+//     a cleanup func the caller defers.
+//   - TryRefresh delegates to the inner Refresher; translates
 //     db.ErrReindexInProgress into mcp.ReindexResult{InProgress: true}.
-//   - cleanup() is currently a no-op (the periodic + listener
-//     goroutines exit on ctx cancellation). Reserved as a future seam
-//     for explicit connection-pool close.
+//   - Refresh (the blocking variant) is exposed for cmd/ken-mcp's
+//     SIGHUP handler. SDK authors using mcp.Run typically don't need
+//     it.
 //
-// Empty-DSN behavior: when cfg.DSN == "", returns (nil, nil, nil).
-// SDK author should treat this as "no DB; don't set opts.Reindex" —
-// the safety net lets the author conditionally configure DSN without
-// branching around the Setup call.
-func Setup(ctx context.Context, cfg Config) (mcp.ReindexFunc, func(), error) {
-	if cfg.DSN == "" {
-		return nil, nil, nil
-	}
+// Empty-DSN behavior: Setup with Config{DSN: ""} returns (nil, nil),
+// matching the v0.8.0 Part 3 safety-net contract — SDK authors with
+// conditional DB configuration can call Setup unconditionally and
+// pass the nil *Refresher to mcp.Options.DB; the mcp package's nil-DB
+// path is byte-identical to the v0.6.0/v0.7.x docs-only behavior.
+type Refresher struct {
+	cfg Config
 
-	opts := cfg.toDBOptions()
-
-	// onSwap is the swap callback Refresher invokes after each
-	// successful IndexSchema. For v0.8.0 Part 3 this is a logging
-	// no-op — chunks are captured but not yet unioned into mcp.Run's
-	// embedded *search.Index. The log line gives the SDK author a
-	// debug breadcrumb confirming the introspection ran.
-	//
-	// When a v0.9.0 follow-up adds *search.Index.SetExtraChunks (or
-	// equivalent), the SDK author wiring will need to:
-	//   - Pass an *Index pointer into Setup (or a swap callback like
-	//     cmd/ken-mcp passes wix.SetExtraChunks)
-	//   - Setup composes the SetExtraChunks call with the existing
-	//     log line.
-	// The Config struct would gain a Swap callback field, default
-	// (nil → log-only); SDK authors opting into chunk integration
-	// would supply one. Documented in ADR-020 Part 3 Consequences.
-	onSwap := func(chunks []chunk.Chunk) {
-		if cfg.LogWriter == nil {
-			return
-		}
-		fmt.Fprintf(cfg.LogWriter,
-			"mcp/db: reindex captured %d DB chunks (chunk-into-Index integration deferred to v0.9.0; see ADR-020 Part 3)\n",
-			len(chunks),
-		)
-	}
-
-	refresher, cleanup, err := db.SetupTier2(ctx, opts, cfg.EnableListen, onSwap)
-	if err != nil {
-		return nil, nil, fmt.Errorf("mcp/db.Setup: %w", err)
-	}
-
-	reindex := reindexCallback(refresher)
-	return reindex, cleanup, nil
+	mu      sync.Mutex
+	inner   *db.Refresher // populated by Start; nil before
+	started bool
 }
 
-// reindexCallback bridges *db.Refresher's TryRefresh into the
-// mcp.ReindexFunc shape mcp.Run consumes via Options.Reindex.
-//
-// The bridge translates db.ErrReindexInProgress into
-// mcp.ReindexResult{InProgress: true} so the mcp package itself
-// doesn't need to import internal/db. This is a near-duplicate of
-// cmd/ken-mcp's reindexCallback — kept here (rather than extracted
-// to internal/db or mcp itself) because:
-//   - internal/db can't import mcp (would create a cycle: mcp tries
-//     to stay DB-free, internal/db is the implementation).
-//   - mcp can't import internal/db (the entire v0.6.0 binary-size
-//     contract this package preserves depends on that boundary).
-//
-// So the bridge lives at both callsites (cmd/ken-mcp and mcp/db)
-// because each is the layer that has BOTH dependencies in scope.
-func reindexCallback(refresher *db.Refresher) mcp.ReindexFunc {
-	if refresher == nil {
-		return nil
+// Setup validates Config and returns a *Refresher ready for Start.
+// Empty Config.DSN returns (nil, nil) — the documented safety net.
+// Other validation errors (TBD as new fields land) return non-nil
+// error. v0.8.0 Part 3 addendum (ADR-020) merges Part 3's original
+// Setup signature (which returned a ReindexFunc + cleanup) with the
+// chunk-integration seam from the revised Prompt C: the Refresher
+// now owns its own Start, taking the onExtras swap target from the
+// caller (mcp.Run or cmd/ken-mcp) at Start time.
+func Setup(_ context.Context, cfg Config) (*Refresher, error) {
+	if cfg.DSN == "" {
+		return nil, nil
 	}
-	return func(ctx context.Context) mcp.ReindexResult {
-		start := time.Now()
-		err := refresher.TryRefresh(ctx)
-		switch {
-		case errors.Is(err, db.ErrReindexInProgress):
-			return mcp.ReindexResult{InProgress: true}
-		case err != nil:
-			return mcp.ReindexResult{Err: err}
-		default:
-			return mcp.ReindexResult{Elapsed: time.Since(start)}
-		}
+	// Config validation (TBD as new fields land). Currently no
+	// validation needed beyond the engine-dispatch which happens
+	// inside internal/db.IndexSchema at Start time.
+	return &Refresher{cfg: cfg}, nil
+}
+
+// Start wires onExtras as the swap callback and orchestrates the full
+// Tier-2 lifecycle (initial IndexSchema → Refresher → interval ticker
+// → LISTEN/NOTIFY listener). Returns a cleanup func the caller MUST
+// defer; canceling ctx is also honored.
+//
+// onExtras MUST be non-nil. mcp.Run provides an
+// ixPtr.Store(baseIx.WithExtraChunks(extras)) closure; cmd/ken-mcp
+// provides a wix.SetExtraChunks wrapper composed with its logger.
+//
+// Calling Start twice on the same Refresher returns an error — Start
+// is one-shot. SDK authors typically construct one Refresher per
+// process and pass it once.
+//
+// Receiver nil-safety: Start on a nil *Refresher returns a no-op
+// cleanup and nil error, so SDK authors can pass the nil-result-from-
+// Setup directly to mcp.Options.DB without branching.
+func (r *Refresher) Start(ctx context.Context, onExtras func([]chunk.Chunk)) (func(), error) {
+	if r == nil {
+		return func() {}, nil
 	}
+	if onExtras == nil {
+		return nil, errors.New("mcp/db.Refresher.Start: onExtras callback is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.started {
+		return nil, errors.New("mcp/db.Refresher.Start: already started (Refresher is one-shot)")
+	}
+
+	opts := r.cfg.toDBOptions()
+	inner, cleanup, err := db.SetupTier2(ctx, opts, r.cfg.EnableListen, onExtras)
+	if err != nil {
+		return nil, fmt.Errorf("mcp/db.Refresher.Start: %w", err)
+	}
+	r.inner = inner
+	r.started = true
+	return cleanup, nil
+}
+
+// TryRefresh implements mcp.DBIntegration. Bridges
+// *internal/db.Refresher.TryRefresh into mcp.ReindexResult; translates
+// db.ErrReindexInProgress into ReindexResult{InProgress: true} so the
+// mcp package itself doesn't need to import internal/db.
+//
+// Returns ReindexResult{Err: ...} if Start hasn't been called yet —
+// this is a programming error on the caller's side (mcp.Run calls
+// Start before serving the first request) but we surface it via the
+// existing Err channel rather than panicking. handleReindexDB's "Err
+// != nil" branch renders this as "Reindex failed: ..." to the agent.
+//
+// Receiver nil-safety: TryRefresh on a nil *Refresher returns
+// ReindexResult{Err: ...} — defense-in-depth for callers that route
+// past mcp's nil-DB-tool-not-registered gate.
+func (r *Refresher) TryRefresh(ctx context.Context) mcp.ReindexResult {
+	if r == nil {
+		return mcp.ReindexResult{Err: errors.New("DB integration not configured")}
+	}
+	r.mu.Lock()
+	inner := r.inner
+	r.mu.Unlock()
+	if inner == nil {
+		return mcp.ReindexResult{Err: errors.New("DB integration not started (call Refresher.Start before serving requests)")}
+	}
+	start := time.Now()
+	err := inner.TryRefresh(ctx)
+	switch {
+	case errors.Is(err, db.ErrReindexInProgress):
+		return mcp.ReindexResult{InProgress: true}
+	case err != nil:
+		return mcp.ReindexResult{Err: err}
+	default:
+		return mcp.ReindexResult{Elapsed: time.Since(start)}
+	}
+}
+
+// Refresh is the BLOCKING variant of TryRefresh. Exposed for
+// cmd/ken-mcp's SIGHUP handler — interval-tick / SIGHUP / LISTEN
+// semantics genuinely want to serialize (their callers know they're
+// blocking), unlike the agent-callable reindex_db tool which uses
+// the fail-fast TryRefresh.
+//
+// Returns nil on success, the underlying error otherwise (NOT
+// translated through ReindexResult). SDK authors using mcp.Run
+// typically don't need this method; it's a cmd/ken-mcp-specific
+// surface.
+func (r *Refresher) Refresh(ctx context.Context) error {
+	if r == nil {
+		return errors.New("mcp/db.Refresher.Refresh: nil receiver")
+	}
+	r.mu.Lock()
+	inner := r.inner
+	r.mu.Unlock()
+	if inner == nil {
+		return errors.New("mcp/db.Refresher.Refresh: not started (call Start before Refresh)")
+	}
+	return inner.Refresh(ctx)
 }

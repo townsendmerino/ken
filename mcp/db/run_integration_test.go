@@ -27,11 +27,14 @@ package mcpdb_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
 )
@@ -170,5 +173,114 @@ func TestRun_WithoutMCPDB_ToolListExcludesReindexDB(t *testing.T) {
 		if tool.Name == "reindex_db" {
 			t.Errorf("reindex_db should NOT be in tools/list when MY_DB_DSN is empty")
 		}
+	}
+}
+
+// TestRun_WithDB_ChunksBecomeSearchableAfterReindex is the
+// load-bearing v0.8.0 Part 3 addendum (ADR-020) verification. The
+// gap this addendum closes: in Part 3's initial ship, calling
+// reindex_db ran IndexSchema but the chunks weren't unioned into
+// mcp.Run's embedded *search.Index — the agent's next search call
+// returned the same stale results. This test asserts the gap is
+// closed: after reindex_db, search finds DB chunks that weren't in
+// the corpus pre-reindex.
+//
+// The test:
+//  1. Spins up a real Postgres (via KEN_DB_TEST_DSN).
+//  2. Creates a uniquely-named table (so we can grep for it
+//     independently of any other corpus content).
+//  3. Spawns the mini-binary with that DSN.
+//  4. Calls reindex_db via MCP.
+//  5. Calls search for the table name.
+//  6. Asserts the table appears in the results.
+//
+// Skipped without KEN_DB_TEST_DSN (CI sets it via the
+// postgres:16-alpine service container — same shape as
+// internal/db's reindex_db integration tests).
+func TestRun_WithDB_ChunksBecomeSearchableAfterReindex(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess MCP test in -short mode")
+	}
+	dsn := os.Getenv("KEN_DB_TEST_DSN")
+	if dsn == "" {
+		t.Skip("KEN_DB_TEST_DSN not set; see internal/db/integration_test.go for setup")
+	}
+
+	// Create a uniquely-named table directly via pgx — the mini-binary
+	// will see it on its initial introspection.
+	table := fmt.Sprintf("qzx_addendum_marker_%d", time.Now().UnixNano())
+	createSQL := fmt.Sprintf("CREATE TABLE %s (id int)", table)
+	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", table)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Create the table via a fresh pgx connection (matches the
+	// pattern internal/db/reindex_integration_test.go uses).
+	setupConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgx.Connect (setup): %v", err)
+	}
+	if _, err := setupConn.Exec(ctx, createSQL); err != nil {
+		_ = setupConn.Close(context.Background())
+		t.Fatalf("create table: %v", err)
+	}
+	_ = setupConn.Close(context.Background())
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		cleanupConn, err := pgx.Connect(cleanupCtx, dsn)
+		if err != nil {
+			return // best-effort cleanup
+		}
+		_, _ = cleanupConn.Exec(cleanupCtx, dropSQL)
+		_ = cleanupConn.Close(context.Background())
+	})
+
+	binPath := buildEmbeddedWithDBBinary(t)
+	cmd := newBinaryCommand(t, ctx, binPath, dsn)
+	stderr := newStderrBuf()
+	cmd.Stderr = stderr
+
+	cli := sdk.NewClient(&sdk.Implementation{Name: "mcp-db-run-chunks", Version: "0"}, nil)
+	sess, err := cli.Connect(ctx, &sdk.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v\n--stderr--\n%s", err, stderr.String())
+	}
+	defer sess.Close()
+
+	// Trigger reindex_db explicitly — even though the initial Start
+	// fires the swap, calling reindex_db proves the on-demand path
+	// also makes chunks searchable in real time.
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name:      "reindex_db",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(reindex_db): %v\n--stderr--\n%s", err, stderr.String())
+	}
+	rtxt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(rtxt, "Reindexed in") && !strings.Contains(rtxt, "Reindex already in progress") {
+		t.Errorf("unexpected reindex_db response: %s\n--stderr--\n%s", rtxt, stderr.String())
+	}
+
+	// Search for the table name. After the reindex, the DB chunk for
+	// this table should be in the embedded Index (via
+	// *search.Index.WithExtraChunks rebuild + atomic-store).
+	searchRes, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query": table,
+			"mode":  "bm25",
+			"top_k": 10,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search): %v\n--stderr--\n%s", err, stderr.String())
+	}
+	stxt := searchRes.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(stxt, table) {
+		t.Errorf("search for table name %q didn't find the DB chunk; got:\n%s\n--stderr--\n%s",
+			table, stxt, stderr.String())
 	}
 }

@@ -38,19 +38,19 @@ func main() {
 	ctx := context.Background()
 
 	// SDK author's opt-in: only construct DB wiring if MY_DB_DSN is set.
-	// This mirrors the canonical README example for v0.8.0 Part 3.
-	var reindex mcp.ReindexFunc
+	// This mirrors the canonical README example for v0.8.0 Part 3 (with
+	// the Part 3 addendum's DBIntegration shape: pass the *Refresher
+	// directly as mcp.Options.DB; mcp.Run calls Refresher.Start
+	// internally with the chunk-integration callback).
+	var dbi mcp.DBIntegration
 	if dsn := os.Getenv("MY_DB_DSN"); dsn != "" {
-		r, cleanup, err := mcpdb.Setup(ctx, mcpdb.Config{
+		refresher, err := mcpdb.Setup(ctx, mcpdb.Config{
 			DSN: dsn,
 		})
 		if err != nil {
 			log.Fatalf("mcpdb.Setup: %v", err)
 		}
-		if cleanup != nil {
-			defer cleanup()
-		}
-		reindex = r
+		dbi = refresher // *Refresher satisfies mcp.DBIntegration
 	}
 
 	corpus := embeddedCorpus()
@@ -58,7 +58,7 @@ func main() {
 		Mode:        "bm25",
 		ChunkerName: "regex",
 		LogLevel:    "warn",
-		Reindex:     reindex, // nil when MY_DB_DSN is unset → reindex_db NOT registered
+		DB:          dbi, // nil when MY_DB_DSN is unset → reindex_db NOT registered
 	}
 	if err := mcp.Run(ctx, corpus, opts); err != nil {
 		log.Fatalf("mcp.Run: %v", err)

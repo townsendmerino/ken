@@ -6,125 +6,140 @@ import (
 	"database/sql"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	_ "modernc.org/sqlite" // empty-sqlite-file harness for the happy-path tests
+
+	"github.com/townsendmerino/ken/internal/chunk"
 )
 
 // TestSetup_EmptyDSN_ReturnsNil pins the documented safety net: an
 // SDK author who conditionally configures DSN can call Setup
-// unconditionally; an empty DSN returns (nil, nil, nil) so the caller
-// just doesn't wire opts.Reindex.
+// unconditionally; an empty DSN returns (nil, nil) so the caller
+// passes the nil *Refresher to mcp.Options.DB and the tool isn't
+// registered.
 func TestSetup_EmptyDSN_ReturnsNil(t *testing.T) {
-	reindex, cleanup, err := Setup(context.Background(), Config{})
+	refresher, err := Setup(context.Background(), Config{})
 	if err != nil {
 		t.Errorf("Setup with empty DSN should not error; got %v", err)
 	}
-	if reindex != nil {
-		t.Errorf("Setup with empty DSN should return nil reindex; got non-nil")
-	}
-	if cleanup != nil {
-		t.Errorf("Setup with empty DSN should return nil cleanup; got non-nil")
+	if refresher != nil {
+		t.Errorf("Setup with empty DSN should return nil refresher; got non-nil")
 	}
 }
 
-// TestSetup_InvalidDSN_ReturnsError — a DSN with a scheme that doesn't
-// route to any known engine fails at IndexSchema time. Setup wraps the
-// error rather than panicking.
-func TestSetup_InvalidDSN_ReturnsError(t *testing.T) {
-	_, _, err := Setup(context.Background(), Config{
+// TestSetup_StartInvalidDSN_ReturnsError — Setup validates Config
+// only; the DSN routing happens at Start time. A bogus DSN surfaces
+// as a Start error.
+func TestSetup_StartInvalidDSN_ReturnsError(t *testing.T) {
+	refresher, err := Setup(context.Background(), Config{
 		DSN:       "redis://nope:6379/0",
 		LogWriter: &bytes.Buffer{},
 	})
-	if err == nil {
-		t.Errorf("Setup with bogus DSN scheme should error")
+	if err != nil {
+		t.Fatalf("Setup should not error for unsupported scheme until Start; got %v", err)
 	}
-	if !strings.Contains(err.Error(), "mcp/db.Setup") {
-		t.Errorf("error should be wrapped with mcp/db.Setup prefix; got %v", err)
+	if refresher == nil {
+		t.Fatal("Setup with non-empty DSN should return non-nil refresher")
+	}
+	_, err = refresher.Start(context.Background(), func([]chunk.Chunk) {})
+	if err == nil {
+		t.Errorf("Refresher.Start with bogus DSN scheme should error")
+	}
+	if !strings.Contains(err.Error(), "mcp/db.Refresher.Start") {
+		t.Errorf("error should be wrapped with mcp/db.Refresher.Start prefix; got %v", err)
 	}
 }
 
 // TestSetup_HappyPath — empty SQLite DSN routes through to a clean
-// IndexSchema (zero chunks), Setup returns a non-nil ReindexFunc + a
-// non-nil cleanup func, and the onSwap log line names the v0.9.0
-// chunk-integration deferral so SDK authors / operators see the
-// limitation at runtime.
+// IndexSchema (zero chunks). Setup returns a non-nil Refresher;
+// Start fires the onExtras callback with the initial chunks before
+// returning. TryRefresh wires through the inner Refresher.
 func TestSetup_HappyPath(t *testing.T) {
 	dsn := emptySQLiteDSN(t)
 	logBuf := &bytes.Buffer{}
 
 	ctx := t.Context()
 
-	reindex, cleanup, err := Setup(ctx, Config{
+	refresher, err := Setup(ctx, Config{
 		DSN:       dsn,
 		LogWriter: logBuf,
 	})
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	if reindex == nil {
-		t.Fatal("Setup happy path returned nil reindex")
+	if refresher == nil {
+		t.Fatal("Setup happy path returned nil refresher")
+	}
+
+	var swapCalls atomic.Int32
+	onExtras := func([]chunk.Chunk) { swapCalls.Add(1) }
+	cleanup, err := refresher.Start(ctx, onExtras)
+	if err != nil {
+		t.Fatalf("Refresher.Start: %v", err)
 	}
 	if cleanup == nil {
-		t.Fatal("Setup happy path returned nil cleanup")
+		t.Fatal("Refresher.Start returned nil cleanup")
 	}
 	defer cleanup()
 
-	// Onswap log line confirms the chunk-integration deferral is
-	// surfaced to operators at runtime (not just in the docs).
-	if !strings.Contains(logBuf.String(), "deferred to v0.9.0") {
-		t.Errorf("Setup's onSwap log should name the v0.9.0 deferral; got:\n%s", logBuf.String())
+	// Start fires onExtras synchronously with the initial chunks
+	// before returning — the swap callback has run at least once by
+	// now.
+	if got := swapCalls.Load(); got != 1 {
+		t.Errorf("onExtras call count after Start = %d, want 1 (initial swap)", got)
 	}
 
-	// Calling the returned ReindexFunc exercises the full
-	// Refresher → TryRefresh → mcp.ReindexResult bridge.
-	res := reindex(ctx)
+	// TryRefresh exercises the full Refresher → TryRefresh → mcp.ReindexResult bridge.
+	res := refresher.TryRefresh(ctx)
 	if res.Err != nil {
-		t.Errorf("reindex() returned err=%v", res.Err)
+		t.Errorf("TryRefresh returned err=%v", res.Err)
 	}
 	if res.InProgress {
-		t.Errorf("reindex() during idle should NOT report InProgress")
+		t.Errorf("TryRefresh during idle should NOT report InProgress")
 	}
 }
 
-// TestSetup_NonPostgresWithEnableListen — passing EnableListen=true
-// with a SQLite DSN is the "operator pre-set the flag" case from Part 1.
-// Setup must NOT error; the listener silently no-ops with a warn log.
+// TestSetup_NonPostgresWithEnableListen — EnableListen=true with a
+// SQLite DSN is the "operator pre-set the flag" case. Start must
+// NOT error; the listener silently no-ops with a warn log.
 func TestSetup_NonPostgresWithEnableListen(t *testing.T) {
 	dsn := emptySQLiteDSN(t)
 	logBuf := &bytes.Buffer{}
 	ctx := t.Context()
 
-	_, cleanup, err := Setup(ctx, Config{
+	refresher, err := Setup(ctx, Config{
 		DSN:          dsn,
 		EnableListen: true, // ignored for sqlite engine
 		LogWriter:    logBuf,
 	})
 	if err != nil {
-		t.Errorf("Setup(EnableListen=true, sqlite DSN) should NOT error; got %v", err)
+		t.Fatalf("Setup: %v", err)
+	}
+	cleanup, err := refresher.Start(ctx, func([]chunk.Chunk) {})
+	if err != nil {
+		t.Errorf("Start(EnableListen=true, sqlite DSN) should NOT error; got %v", err)
 	}
 	if cleanup != nil {
 		defer cleanup()
 	}
-	// The internal/db.SetupTier2 warn() helper writes the "ignored"
-	// line via opts.LogWriter — which we passed as logBuf.
 	if !strings.Contains(logBuf.String(), "Postgres-only") {
-		t.Errorf("expected 'Postgres-only' warn in log when EnableListen=true with SQLite DSN; got:\n%s", logBuf.String())
+		t.Errorf("expected 'Postgres-only' warn when EnableListen=true with SQLite DSN; got:\n%s", logBuf.String())
 	}
 }
 
 // TestSetup_BothSchemaListsSet — when IncludeSchemas AND ExcludeSchemas
 // are both populated, the allow-list wins and the deny-list is
-// silently cleared. The warning surfaces via LogWriter so SDK authors
-// see the conflict at runtime. Matches cmd/ken-mcp's identical
-// behavior in v0.7.2 (ADR-019).
+// silently cleared. The warning surfaces via LogWriter. Matches
+// cmd/ken-mcp's v0.7.2 behavior (ADR-019).
 func TestSetup_BothSchemaListsSet(t *testing.T) {
 	dsn := emptySQLiteDSN(t)
 	logBuf := &bytes.Buffer{}
 	ctx := t.Context()
 
-	_, cleanup, err := Setup(ctx, Config{
+	refresher, err := Setup(ctx, Config{
 		DSN:            dsn,
 		IncludeSchemas: []string{"public"},
 		ExcludeSchemas: []string{"audit"},
@@ -132,6 +147,10 @@ func TestSetup_BothSchemaListsSet(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
+	}
+	cleanup, err := refresher.Start(ctx, func([]chunk.Chunk) {})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
 	}
 	if cleanup != nil {
 		defer cleanup()
@@ -161,11 +180,71 @@ func TestListenNotifyScript_ReExports(t *testing.T) {
 	}
 }
 
+// TestRefresher_StartTwice rejects the second call (Refresher is
+// one-shot per process). SDK authors who accidentally call Start
+// twice see the error rather than silently leaking goroutines.
+func TestRefresher_StartTwice(t *testing.T) {
+	dsn := emptySQLiteDSN(t)
+	ctx := t.Context()
+	refresher, err := Setup(ctx, Config{DSN: dsn})
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	cleanup, err := refresher.Start(ctx, func([]chunk.Chunk) {})
+	if err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	defer cleanup()
+
+	_, err = refresher.Start(ctx, func([]chunk.Chunk) {})
+	if err == nil {
+		t.Errorf("second Start should error (Refresher is one-shot); got nil")
+	}
+}
+
+// TestRefresher_TryRefreshBeforeStart — calling TryRefresh on a
+// Refresher that hasn't been Started yet returns ReindexResult.Err
+// rather than panicking. mcp.Run's lifecycle calls Start before
+// serving requests so this shouldn't fire in practice; defense-in-
+// depth.
+func TestRefresher_TryRefreshBeforeStart(t *testing.T) {
+	refresher, err := Setup(context.Background(), Config{DSN: emptySQLiteDSN(t)})
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	res := refresher.TryRefresh(context.Background())
+	if res.Err == nil {
+		t.Errorf("TryRefresh before Start should return ReindexResult.Err; got nil")
+	}
+}
+
+// TestRefresher_NilReceiver — calling methods on a nil *Refresher
+// (the "no DB" return from Setup) is safe. Start returns a no-op
+// cleanup; TryRefresh returns ReindexResult.Err; Refresh returns
+// an error. Same safety-net intent as the empty-DSN gate.
+func TestRefresher_NilReceiver(t *testing.T) {
+	var r *Refresher
+
+	cleanup, err := r.Start(context.Background(), func([]chunk.Chunk) {})
+	if err != nil {
+		t.Errorf("(*Refresher)(nil).Start should not error; got %v", err)
+	}
+	if cleanup == nil {
+		t.Errorf("(*Refresher)(nil).Start should return a non-nil cleanup; got nil")
+	}
+
+	res := r.TryRefresh(context.Background())
+	if res.Err == nil {
+		t.Errorf("(*Refresher)(nil).TryRefresh should return ReindexResult.Err")
+	}
+
+	if err := r.Refresh(context.Background()); err == nil {
+		t.Errorf("(*Refresher)(nil).Refresh should error")
+	}
+}
+
 // emptySQLiteDSN materializes a fresh empty .db file in t.TempDir()
-// and returns its sqlite:// DSN. IndexSchema returns no chunks against
-// it (no tables, no errors), making it a clean substrate for unit
-// tests that need a working engine without a Postgres / MySQL service
-// container.
+// and returns its sqlite:// DSN.
 func emptySQLiteDSN(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "mcpdb-test.db")
@@ -181,24 +260,25 @@ func emptySQLiteDSN(t *testing.T) string {
 	return "sqlite://" + path
 }
 
-// TestSetup_CleanupExitsOnCtxCancel — when ReindexInterval > 0, Setup
-// spawns the periodic-refresh goroutine. cleanup() (or ctx cancel)
-// must let it exit cleanly without leaking. We use a tiny timeout
-// guard around the cleanup to catch hangs.
-func TestSetup_CleanupExitsOnCtxCancel(t *testing.T) {
+// TestRefresher_CleanupExitsOnCtxCancel — when ReindexInterval > 0,
+// Start spawns the periodic-refresh goroutine. cleanup() (or ctx
+// cancel) must let it exit cleanly. Tiny timeout guard catches hangs.
+func TestRefresher_CleanupExitsOnCtxCancel(t *testing.T) {
 	dsn := emptySQLiteDSN(t)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	_, cleanup, err := Setup(ctx, Config{
+	refresher, err := Setup(ctx, Config{
 		DSN:             dsn,
 		ReindexInterval: time.Hour, // never ticks during the test
 	})
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
+	cleanup, err := refresher.Start(ctx, func([]chunk.Chunk) {})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	cancel()
-	// Cleanup is currently a no-op but reserved as a future seam;
-	// invoke it to exercise the contract.
 	done := make(chan struct{})
 	go func() {
 		cleanup()

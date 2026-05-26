@@ -22,7 +22,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log"
 	"net/url"
@@ -43,9 +42,9 @@ import (
 	// code-search use case but explicitly skipped by cmd/ken-mcp-docs.
 	_ "github.com/townsendmerino/ken/internal/chunk/markdown"
 	_ "github.com/townsendmerino/ken/internal/chunk/treesitter"
-	"github.com/townsendmerino/ken/internal/db"
 	"github.com/townsendmerino/ken/internal/search"
 	kenmcp "github.com/townsendmerino/ken/mcp"
+	mcpdb "github.com/townsendmerino/ken/mcp/db"
 )
 
 func init() {
@@ -91,7 +90,7 @@ func runSubcommand() bool {
 		//   ken-mcp print-listen-script | psql $KEN_DB_DSN
 		// once to install the event trigger that drives KEN_DB_LISTEN=1.
 		// See ADR-020. Idempotent — re-running the output is safe.
-		_, _ = io.WriteString(os.Stdout, db.ListenNotifyScript)
+		_, _ = io.WriteString(os.Stdout, mcpdb.ListenNotifyScript)
 		return true
 	}
 	return false
@@ -206,10 +205,11 @@ func main() {
 	// manual refresh via SIGHUP. DB chunks attach to the default repo
 	// specifically — multi-repo searches (no default) get FS-only.
 	//
-	// v0.8.0 Part 2 (ADR-020): wireDBTier2 also returns the *db.Refresher
-	// (or nil) so NewServer can register the reindex_db tool. We run
-	// wireDBTier2 BEFORE NewServer specifically for this — otherwise
-	// the Refresher wouldn't exist at tool-registration time.
+	// v0.8.0 Part 2 + Part 3 addendum (ADR-020): wireDBTier2 returns
+	// the *mcpdb.Refresher (or nil) so NewServer can register the
+	// reindex_db tool AND wire chunk integration. We run wireDBTier2
+	// BEFORE NewServer specifically for this — otherwise the
+	// Refresher wouldn't exist at tool-registration time.
 	//
 	// Returns (nil refresher, nil cleanup) when Tier 2 isn't configured
 	// or initial connection fails (the latter logs warn and continues
@@ -221,12 +221,12 @@ func main() {
 		DefaultRepo: defaultRepo,
 		Mode:        mode,
 		Chunker:     chunker,
-		// v0.8.0 Part 2 (ADR-020): bridge db.ErrReindexInProgress into
-		// mcp.ReindexResult{InProgress: true} so the mcp package
-		// doesn't need to import internal/db. nil refresher → nil
-		// callback → reindex_db tool NOT registered (tools/list stays
-		// honest for FS-only deployments).
-		Reindex: reindexCallback(refresher),
+		// v0.8.0 Part 3 addendum: *mcpdb.Refresher satisfies
+		// mcp.DBIntegration. nil refresher → reindex_db tool NOT
+		// registered (tools/list stays honest for FS-only deployments).
+		// The chunk-integration callback was already wired inside
+		// wireDBTier2's Start call against the WatchedIndex.
+		DB: refresher,
 	})
 
 	// Signal-driven cleanup: when the agent disconnects (Ctrl-C or pipe
@@ -282,7 +282,7 @@ func main() {
 //   - Initial db.IndexSchema fails: warning, Tier 2 stays off (no
 //     refresher started — agents shouldn't get stale empty chunks if
 //     the DB was never reachable).
-func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache, defaultRepo string) (*db.Refresher, func()) {
+func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache, defaultRepo string) (*mcpdb.Refresher, func()) {
 	dsn := envDSN("KEN_DB_DSN", logger)
 	if dsn == "" {
 		return nil, nil
@@ -339,49 +339,52 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 		return nil, nil
 	}
 
-	opts := db.Options{
-		DSN:             dsn,
-		SampleRows:      sampleRows,
-		ReindexInterval: reindex,
-		// pgx default Tracer is nil → no protocol logging to stdout.
-		// go-sql-driver/mysql default logger writes to stderr — audited
-		// by TestBinary_StdoutIsCleanJSONRPC_WithMySQL. Send our own
-		// diagnostics to stderr via the kenmcp logger's underlying
-		// writer (os.Stderr always when configured by main).
-		LogWriter: os.Stderr,
-		// v0.7.1: SQLite uses this to anchor relative DSN paths like
-		// "sqlite://./dev.db" at the default repo root. Postgres + MySQL
-		// ignore it. defaultRepo here is already known to be a local
-		// directory (wireDBTier2 rejects http(s) URLs earlier).
-		DefaultRepoPath: defaultRepo,
-		// v0.7.2: schema filtering (Postgres + MySQL; ignored by SQLite).
-		IncludeSchemas: includeSchemas,
-		ExcludeSchemas: excludeSchemas,
-	}
-
-	// v0.8.0 Part 3 (ADR-020): SetupTier2 is the shared lifecycle
-	// orchestration extracted into internal/db so both cmd/ken-mcp and
-	// mcp/db.Setup use the same code path. The onSwap wrapper composes
-	// wix.SetExtraChunks with cmd/ken-mcp's preferred "Tier 2: indexed
-	// N chunks" log line — SetupTier2 itself doesn't write that line so
-	// the SDK author path can use its own logging.
-	onSwap := func(chunks []chunk.Chunk) {
-		wix.SetExtraChunks(chunks)
-		logger.Logf(kenmcp.LogInfo, "Tier 2: indexed %d DB chunks into %q", len(chunks), defaultRepo)
-	}
-	logger.Logf(kenmcp.LogInfo, "Tier 2: introspecting %s (sample_rows=%d reindex=%s)",
-		redactDSN(dsn), sampleRows, durOrOff(reindex))
 	enableListen := envBool("KEN_DB_LISTEN", false, logger)
 	if enableListen {
 		logger.Logf(kenmcp.LogInfo, "Tier 2: KEN_DB_LISTEN=1 (Postgres LISTEN/NOTIFY)")
 	}
-	refresher, cleanup, err := db.SetupTier2(ctx, opts, enableListen, onSwap)
+	logger.Logf(kenmcp.LogInfo, "Tier 2: introspecting %s (sample_rows=%d reindex=%s)",
+		redactDSN(dsn), sampleRows, durOrOff(reindex))
+
+	// v0.8.0 Part 3 addendum (ADR-020): use mcp/db's public Refresher
+	// type so cmd/ken-mcp and SDK-author mcp.Run paths go through one
+	// integration shape (mcp.DBIntegration). The Refresher's Start
+	// method runs SetupTier2 internally; we supply the cmd/ken-mcp
+	// onExtras callback that composes WatchedIndex.SetExtraChunks
+	// with our preferred log line.
+	refresher, err := mcpdb.Setup(ctx, mcpdb.Config{
+		DSN:             dsn,
+		SampleRows:      sampleRows,
+		ReindexInterval: reindex,
+		EnableListen:    enableListen,
+		// v0.7.2: schema filtering (Postgres + MySQL; ignored by SQLite).
+		IncludeSchemas: includeSchemas,
+		ExcludeSchemas: excludeSchemas,
+		LogWriter:      os.Stderr,
+	})
 	if err != nil {
-		logger.Logf(kenmcp.LogWarn, "Tier 2: SetupTier2 failed: %v — disabling Tier 2", err)
+		logger.Logf(kenmcp.LogWarn, "Tier 2: mcpdb.Setup failed: %v — disabling Tier 2", err)
+		return nil, nil
+	}
+	if refresher == nil {
+		// Empty DSN (shouldn't reach here — we returned earlier on
+		// dsn=="" — but defense-in-depth for a future config-level
+		// disable path).
 		return nil, nil
 	}
 
-	// SIGHUP wiring stays in cmd/ken-mcp — CLI concern, not in SetupTier2.
+	onExtras := func(chunks []chunk.Chunk) {
+		wix.SetExtraChunks(chunks)
+		logger.Logf(kenmcp.LogInfo, "Tier 2: indexed %d DB chunks into %q", len(chunks), defaultRepo)
+	}
+	cleanup, err := refresher.Start(ctx, onExtras)
+	if err != nil {
+		logger.Logf(kenmcp.LogWarn, "Tier 2: Refresher.Start failed: %v — disabling Tier 2", err)
+		return nil, nil
+	}
+
+	// SIGHUP wiring stays in cmd/ken-mcp — CLI concern. mcpdb.Refresher
+	// exposes Refresh (blocking variant) specifically for this path.
 	watchSIGHUP(ctx, func() {
 		logger.Logf(kenmcp.LogInfo, "Tier 2: SIGHUP received; refreshing DB chunks")
 		if err := refresher.Refresh(ctx); err != nil {
@@ -389,36 +392,6 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 		}
 	})
 	return refresher, cleanup
-}
-
-// reindexCallback bridges *db.Refresher's TryRefresh into the
-// mcp.ReindexFunc shape NewServer expects. The bridge translates
-// db.ErrReindexInProgress into ReindexResult{InProgress: true} so the
-// mcp package itself doesn't need to import internal/db. Returns nil
-// when refresher is nil (no DB configured) so NewServer skips
-// reindex_db tool registration entirely — tools/list stays honest
-// for FS-only deployments.
-//
-// Time measurement is wall-clock around the TryRefresh call. The
-// InProgress path returns Elapsed=0 because no work happened on this
-// invocation; the handler renders the in-progress message without
-// surfacing timing.
-func reindexCallback(refresher *db.Refresher) kenmcp.ReindexFunc {
-	if refresher == nil {
-		return nil
-	}
-	return func(ctx context.Context) kenmcp.ReindexResult {
-		start := time.Now()
-		err := refresher.TryRefresh(ctx)
-		switch {
-		case errors.Is(err, db.ErrReindexInProgress):
-			return kenmcp.ReindexResult{InProgress: true}
-		case err != nil:
-			return kenmcp.ReindexResult{Err: err}
-		default:
-			return kenmcp.ReindexResult{Elapsed: time.Since(start)}
-		}
-	}
 }
 
 // redactDSN returns a DSN with the userinfo (and therefore the password)

@@ -8,6 +8,7 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/townsendmerino/ken/internal/chunk"
 	"github.com/townsendmerino/ken/internal/search"
 )
 
@@ -132,11 +133,33 @@ func TestServer_FindRelated_NeedsSemanticMode(t *testing.T) {
 	}
 }
 
-// newReindexServerClient is the server fixture for v0.8.0 Part 2
-// reindex_db tests. Same shape as newInMemoryServerClient but with a
-// caller-supplied ReindexFunc so each test can control the result the
-// tool's handler observes (success / in-progress / error).
-func newReindexServerClient(t *testing.T, reindex ReindexFunc) (context.Context, *sdk.ClientSession, func()) {
+// mockDB is a test double that satisfies mcp.DBIntegration. Each test
+// supplies a TryRefreshFunc to control the response the reindex_db
+// handler observes (success / in-progress / error). Start is a no-op
+// in tests — they don't exercise the chunk-integration loop; the
+// chunks-become-searchable end-to-end is covered by
+// mcp/db/run_integration_test.go.
+type mockDB struct {
+	TryRefreshFunc func(ctx context.Context) ReindexResult
+}
+
+func (m *mockDB) Start(_ context.Context, _ func([]chunk.Chunk)) (func(), error) {
+	return func() {}, nil
+}
+
+func (m *mockDB) TryRefresh(ctx context.Context) ReindexResult {
+	if m.TryRefreshFunc == nil {
+		return ReindexResult{}
+	}
+	return m.TryRefreshFunc(ctx)
+}
+
+// newReindexServerClient is the server fixture for v0.8.0 Part 2 +
+// Part-3-addendum reindex_db tests. Same shape as
+// newInMemoryServerClient but with a caller-supplied DBIntegration
+// (via mockDB) so each test can control the result the tool's handler
+// observes (success / in-progress / error).
+func newReindexServerClient(t *testing.T, dbi DBIntegration) (context.Context, *sdk.ClientSession, func()) {
 	t.Helper()
 	ix, err := search.NewWatchedIndex("../testdata/repo", search.ModeBM25, "regex", "", false)
 	if err != nil {
@@ -145,7 +168,7 @@ func newReindexServerClient(t *testing.T, reindex ReindexFunc) (context.Context,
 	cache := NewCache(4, func(context.Context, string) (*search.WatchedIndex, func(), error) {
 		return ix, nil, nil
 	})
-	srv := NewServer(Config{Cache: cache, DefaultRepo: "../testdata/repo", Reindex: reindex})
+	srv := NewServer(Config{Cache: cache, DefaultRepo: "../testdata/repo", DB: dbi})
 
 	clientT, serverT := sdk.NewInMemoryTransports()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -167,12 +190,14 @@ func newReindexServerClient(t *testing.T, reindex ReindexFunc) (context.Context,
 	return ctx, sess, cleanup
 }
 
-// TestReindexDBTool_Registered confirms that when Config.Reindex is
+// TestReindexDBTool_Registered confirms that when Config.DB is
 // non-nil, the tool appears in tools/list alongside search +
 // find_related.
 func TestReindexDBTool_Registered(t *testing.T) {
-	ctx, sess, cleanup := newReindexServerClient(t, func(context.Context) ReindexResult {
-		return ReindexResult{Elapsed: 5 * time.Millisecond}
+	ctx, sess, cleanup := newReindexServerClient(t, &mockDB{
+		TryRefreshFunc: func(context.Context) ReindexResult {
+			return ReindexResult{Elapsed: 5 * time.Millisecond}
+		},
 	})
 	defer cleanup()
 
@@ -220,8 +245,10 @@ func TestReindexDBTool_NoDB(t *testing.T) {
 // the callback.
 func TestReindexDBTool_Success(t *testing.T) {
 	const elapsed = 142 * time.Millisecond
-	ctx, sess, cleanup := newReindexServerClient(t, func(context.Context) ReindexResult {
-		return ReindexResult{Elapsed: elapsed}
+	ctx, sess, cleanup := newReindexServerClient(t, &mockDB{
+		TryRefreshFunc: func(context.Context) ReindexResult {
+			return ReindexResult{Elapsed: elapsed}
+		},
 	})
 	defer cleanup()
 
@@ -242,8 +269,10 @@ func TestReindexDBTool_Success(t *testing.T) {
 // the agent-facing response is the documented "already in progress"
 // text — no timing data leaked, no error markers.
 func TestReindexDBTool_InProgress(t *testing.T) {
-	ctx, sess, cleanup := newReindexServerClient(t, func(context.Context) ReindexResult {
-		return ReindexResult{InProgress: true}
+	ctx, sess, cleanup := newReindexServerClient(t, &mockDB{
+		TryRefreshFunc: func(context.Context) ReindexResult {
+			return ReindexResult{InProgress: true}
+		},
 	})
 	defer cleanup()
 
@@ -265,8 +294,10 @@ func TestReindexDBTool_InProgress(t *testing.T) {
 // classify the error (transient vs fatal) — that's the agent's call.
 func TestReindexDBTool_Error(t *testing.T) {
 	const errText = "introspection query failed: connection refused"
-	ctx, sess, cleanup := newReindexServerClient(t, func(context.Context) ReindexResult {
-		return ReindexResult{Err: &mockError{errText}}
+	ctx, sess, cleanup := newReindexServerClient(t, &mockDB{
+		TryRefreshFunc: func(context.Context) ReindexResult {
+			return ReindexResult{Err: &mockError{errText}}
+		},
 	})
 	defer cleanup()
 

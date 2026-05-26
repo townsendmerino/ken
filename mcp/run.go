@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"sync/atomic"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -59,25 +60,32 @@ type Options struct {
 	// the stdout/stderr contract in cmd/ken-mcp/main.go.
 	LogWriter io.Writer
 
-	// Reindex, when non-nil, registers the v0.8.0 Part 2 reindex_db MCP
-	// tool (ADR-020). SDK authors using mcp.Run wire this via
-	// mcp/db.Setup; mcp.Run itself stays DB-free so embedded-corpus
+	// DB, when non-nil, wires Tier-2 DB support: registers the
+	// reindex_db MCP tool AND integrates DB chunks into the embedded
+	// search results. SDK authors using mcp.Run wire this via
+	// mcp/db.Setup → mcp/db.Refresher. mcp.Run itself stays DB-free
+	// (no pgx / sqlite / mysql in the import graph) so embedded-corpus
 	// binaries that don't import mcp/db keep the v0.6.0 small-binary
-	// posture (no pgx / sqlite / mysql in the dep tree).
+	// posture — verified by mcp/binary_contract_test.go.
 	//
-	// Important caveat for v0.8.0 Part 3: when Reindex is non-nil, the
-	// reindex_db tool DOES run IndexSchema on each invocation (and the
-	// LISTEN/interval pipelines fire normally) — but the chunks
-	// captured are NOT yet unioned into the embedded-corpus search
-	// results that mcp.Run serves. Chunk integration into mcp.Run's
-	// static *search.Index is deferred to v0.9.0; ADR-020 Part 3's
-	// Consequences section documents the deferral with the rationale.
-	// The tool is still useful — it validates the DSN works, fires
-	// LISTEN handlers on schema changes, exercises the interval-ticker
-	// path, and gives operators an explicit "reindex on demand"
-	// signal — but the schema isn't searchable from within the
-	// embedded binary until the v0.9.0 follow-up lands.
-	Reindex ReindexFunc
+	// Lifecycle:
+	//   1. mcp.Run builds the embedded *search.Index from fsys.
+	//   2. Calls opts.DB.Start(ctx, onExtras) — onExtras is an
+	//      mcp.Run-internal closure that calls
+	//      baseIx.WithExtraChunks(extras) and atomic-stores the
+	//      result. Cleanup is deferred for process shutdown.
+	//   3. Search / find_related handlers read the current Index via
+	//      atomic.Pointer.Load() — they see the latest snapshot
+	//      including DB chunks after each refresh.
+	//   4. The reindex_db tool calls opts.DB.TryRefresh which
+	//      eventually fires onExtras with the latest chunks.
+	//
+	// v0.8.0 Part 3 addendum (ADR-020): this completes the chunk-
+	// integration loop that v0.8.0 Part 3's initial ship deferred
+	// to v0.9.0. The deferral is no longer applicable — DB chunks
+	// become searchable in the next search/find_related call after
+	// a successful refresh.
+	DB DBIntegration
 }
 
 // Run starts an MCP server (over the SDK's default StdioTransport)
@@ -114,11 +122,57 @@ func Run(ctx context.Context, fsys fs.FS, opts Options) error {
 // runOnTransport is Run with an explicit transport seam. mcp.Run wires
 // StdioTransport; in-process tests wire one half of NewInMemoryTransports
 // so they can drive the server without spawning a subprocess.
+//
+// v0.8.0 Part 3 addendum (ADR-020): orchestrates the chunk-integration
+// loop when opts.DB is non-nil. Build sequence:
+//
+//  1. Build the embedded *search.Index from fsys (via buildEmbeddedIndex).
+//  2. Wrap in an atomic.Pointer[search.Index] — handlers read via .Load().
+//  3. If opts.DB != nil, define onExtras = func(extras) {
+//     ixPtr.Store(baseIx.WithExtraChunks(extras))
+//     } and call opts.DB.Start(ctx, onExtras). Defer the returned
+//     cleanup func for process shutdown.
+//  4. Build the server with handlers wired to ixPtr.Load().
+//  5. Run.
+//
+// The baseIx closure captures the original snapshot so each refresh
+// rebuilds against the SAME original — extras replace, they don't
+// accumulate. See *search.Index.WithExtraChunks for the rebuild
+// contract.
 func runOnTransport(ctx context.Context, fsys fs.FS, opts Options, transport sdk.Transport) error {
-	srv, err := buildEmbeddedServer(fsys, opts)
+	ix, logger, err := buildEmbeddedIndex(fsys, opts)
 	if err != nil {
 		return err
 	}
+
+	// Atomic-pointer indirection so refreshes can publish new snapshots
+	// without the handlers needing a mutex. Initialized with the
+	// baseline (no extras yet) Index.
+	var ixPtr atomic.Pointer[search.Index]
+	ixPtr.Store(ix)
+
+	// Tier-2 chunk integration (v0.8.0 Part 3 addendum). When opts.DB
+	// is wired, start the integration BEFORE the server runs so the
+	// initial introspection's swap fires before any agent search.
+	cleanup := func() {}
+	if opts.DB != nil {
+		baseIx := ix // capture the no-extras snapshot for rebuilds
+		onExtras := func(extras []chunk.Chunk) {
+			newIx := baseIx.WithExtraChunks(extras)
+			ixPtr.Store(newIx)
+			logger.Logf(LogInfo, "mcp.Run: integrated %d DB chunks into the embedded index", len(extras))
+		}
+		c, derr := opts.DB.Start(ctx, onExtras)
+		if derr != nil {
+			return fmt.Errorf("mcp.Run: opts.DB.Start: %w", derr)
+		}
+		if c != nil {
+			cleanup = c
+		}
+	}
+	defer cleanup()
+
+	srv := newServerForIndex(&ixPtr, logger, opts.DB)
 	if err := srv.Run(ctx, transport); err != nil {
 		// Client-closed-stdin is the canonical clean-shutdown path; surface
 		// it as nil error so callers don't have to special-case it.
@@ -130,11 +184,12 @@ func runOnTransport(ctx context.Context, fsys fs.FS, opts Options, transport sdk
 	return nil
 }
 
-// buildEmbeddedServer materializes a single-corpus *sdk.Server from opts
-// and fsys: validates opts, loads the model (downgrades to bm25 with a
-// warning if unavailable), builds the index once, and registers the
-// search/find_related tools with handlers wired to that index.
-func buildEmbeddedServer(fsys fs.FS, opts Options) (*sdk.Server, error) {
+// buildEmbeddedIndex materializes the corpus *search.Index + the
+// scoped *Logger. Validates opts, loads the model (downgrades to bm25
+// with a warning if unavailable), and runs the walk+chunk+embed pass.
+// The caller (runOnTransport) wraps the Index in an atomic.Pointer
+// and wires DB chunk integration on top.
+func buildEmbeddedIndex(fsys fs.FS, opts Options) (*search.Index, *Logger, error) {
 	// Bootstrap logger at warn so we can warn about an invalid LogLevel
 	// before applying it (same chicken-and-egg dance as cmd/ken-mcp).
 	logger := NewLogger(opts.LogWriter, LogWarn)
@@ -171,11 +226,11 @@ func buildEmbeddedServer(fsys fs.FS, opts Options) (*sdk.Server, error) {
 
 	ix, err := search.FromFSWithModel(fsys, mode, chunkerName, model)
 	if err != nil {
-		return nil, fmt.Errorf("build index from fsys: %w", err)
+		return nil, nil, fmt.Errorf("build index from fsys: %w", err)
 	}
 	logger.Logf(LogInfo, "indexed %d chunks (mode=%s chunker=%s)", ix.Len(), search.ModeNames()[int(mode)], chunkerName)
 
-	return newServerForIndex(ix, logger, opts.Reindex), nil
+	return ix, logger, nil
 }
 
 // loadModel returns the Model2Vec snapshot to use, preferring ModelFS
@@ -201,20 +256,18 @@ func loadModel(opts Options) (*embed.StaticModel, string, error) {
 }
 
 // newServerForIndex constructs an *sdk.Server whose search /
-// find_related tools dispatch to the fixed index. The agent's `repo`
-// argument is accepted (the wire schema stays identical to the
-// cmd/ken-mcp Cache-backed server) but ignored — logged at debug when
-// non-empty so an operator can see when an agent is mis-passing repo.
+// find_related tools dispatch to the index pointed to by ixPtr. The
+// agent's `repo` argument is accepted (the wire schema stays identical
+// to the cmd/ken-mcp Cache-backed server) but ignored — logged at
+// debug when non-empty so an operator can see when an agent is
+// mis-passing repo.
 //
-// v0.8.0 Part 3 (ADR-020): when reindex is non-nil, the reindex_db
-// tool is registered alongside search + find_related, matching
-// NewServer's conditional-registration pattern. SDK authors using
-// mcp.Run wire this via mcp/db.Setup; reindex stays nil for plain
-// docs-only embedded-corpus binaries. See the caveat on
-// Options.Reindex: in v0.8.0 the tool RUNS introspection but the
-// chunks aren't yet unioned into ix's search results — chunk
-// integration is v0.9.0.
-func newServerForIndex(ix *search.Index, logger *Logger, reindex ReindexFunc) *sdk.Server {
+// v0.8.0 Part 3 addendum (ADR-020): handlers read via ixPtr.Load()
+// rather than capturing a fixed *Index, so DB chunk refreshes that
+// publish a new snapshot are visible to the very next agent
+// search/find_related call. When db is non-nil, the reindex_db tool
+// is registered too, calling db.TryRefresh.
+func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db DBIntegration) *sdk.Server {
 	srv := sdk.NewServer(&sdk.Implementation{
 		Name:    "ken",
 		Version: "0",
@@ -232,7 +285,7 @@ func newServerForIndex(ix *search.Index, logger *Logger, reindex ReindexFunc) *s
 		if args.Repo != "" {
 			logger.Logf(LogDebug, "search: repo=%q ignored (embedded-corpus mode)", args.Repo)
 		}
-		return runSearch(ix, args)
+		return runSearch(ixPtr.Load(), args)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -246,18 +299,15 @@ func newServerForIndex(ix *search.Index, logger *Logger, reindex ReindexFunc) *s
 		if args.FilePath == "" || args.Line <= 0 {
 			return textResult("file_path is required and line must be ≥ 1."), nil, nil
 		}
-		return runFindRelated(ix, args)
+		return runFindRelated(ixPtr.Load(), args)
 	})
 
 	// v0.8.0 Part 2 + Part 3 (ADR-020): reindex_db tool. Same
 	// conditional-registration pattern as NewServer — registered ONLY
-	// when reindex is non-nil so tools/list stays honest for plain
-	// docs-only embedded-corpus binaries that don't wire mcp/db.Setup.
-	//
-	// Captures cfg via closure with just the Reindex field so the
-	// handler shape matches handleReindexDB's contract.
-	if reindex != nil {
-		cfg := &Config{Reindex: reindex}
+	// when db is non-nil so tools/list stays honest for plain docs-only
+	// embedded-corpus binaries that don't wire mcp/db.Setup.
+	if db != nil {
+		cfg := &Config{DB: db}
 		sdk.AddTool(srv, &sdk.Tool{
 			Name: "reindex_db",
 			Description: "Trigger a Tier 2 database schema reindex on demand. " +

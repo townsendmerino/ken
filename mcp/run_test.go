@@ -6,9 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/townsendmerino/ken/internal/search"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -58,10 +61,17 @@ func runRunOnInMemoryTransport(t *testing.T, opts Options) (context.Context, *sd
 		opts.LogLevel = "debug" // capture everything in tests
 	}
 
-	srv, err := buildEmbeddedServer(embeddedCorpus(), opts)
+	// v0.8.0 Part 3 addendum: buildEmbeddedServer was split into
+	// buildEmbeddedIndex (returns the Index + Logger) and runOnTransport's
+	// inline atomic-pointer wiring. We replicate the wiring shape here
+	// so the same in-memory transport pattern works.
+	ix, logger, err := buildEmbeddedIndex(embeddedCorpus(), opts)
 	if err != nil {
-		t.Fatalf("buildEmbeddedServer: %v", err)
+		t.Fatalf("buildEmbeddedIndex: %v", err)
 	}
+	var ixPtr atomic.Pointer[search.Index]
+	ixPtr.Store(ix)
+	srv := newServerForIndex(&ixPtr, logger, nil /* no DB integration in these tests */)
 
 	clientT, serverT := sdk.NewInMemoryTransports()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -157,7 +167,7 @@ func TestRun_RepoArgIgnored(t *testing.T) {
 // behavior.
 func TestRun_TypoedModeFallsBackWithWarn(t *testing.T) {
 	logBuf := &bytes.Buffer{}
-	srv, err := buildEmbeddedServer(embeddedCorpus(), Options{
+	ix, _, err := buildEmbeddedIndex(embeddedCorpus(), Options{
 		Mode:        "Hybrid", // case-mismatch
 		ChunkerName: "regex",
 		LogLevel:    "warn",
@@ -166,10 +176,10 @@ func TestRun_TypoedModeFallsBackWithWarn(t *testing.T) {
 	// The build should succeed (falls back to hybrid, then downgrades to
 	// bm25 since no model is configured) — never an error.
 	if err != nil {
-		t.Fatalf("buildEmbeddedServer with typoed Mode: %v\n--log--\n%s", err, logBuf.String())
+		t.Fatalf("buildEmbeddedIndex with typoed Mode: %v\n--log--\n%s", err, logBuf.String())
 	}
-	if srv == nil {
-		t.Fatalf("server is nil despite no error")
+	if ix == nil {
+		t.Fatalf("index is nil despite no error")
 	}
 	if !strings.Contains(logBuf.String(), "invalid Options.Mode") {
 		t.Errorf("expected warn about invalid Options.Mode, got:\n%s", logBuf.String())
@@ -182,17 +192,17 @@ func TestRun_TypoedModeFallsBackWithWarn(t *testing.T) {
 // first-launch usability promise the prompt's "auto-downgrade" calls out.
 func TestRun_HybridDowngradesToBM25WhenNoModel(t *testing.T) {
 	logBuf := &bytes.Buffer{}
-	srv, err := buildEmbeddedServer(embeddedCorpus(), Options{
+	ix, _, err := buildEmbeddedIndex(embeddedCorpus(), Options{
 		Mode:        "hybrid",
 		ChunkerName: "regex",
 		LogLevel:    "warn",
 		LogWriter:   logBuf,
 	})
 	if err != nil {
-		t.Fatalf("buildEmbeddedServer: %v\n--log--\n%s", err, logBuf.String())
+		t.Fatalf("buildEmbeddedIndex: %v\n--log--\n%s", err, logBuf.String())
 	}
-	if srv == nil {
-		t.Fatalf("server is nil despite no error")
+	if ix == nil {
+		t.Fatalf("index is nil despite no error")
 	}
 	low := strings.ToLower(logBuf.String())
 	for _, want := range []string{"downgrading to bm25", "neither options.modelfs nor options.modeldir"} {
