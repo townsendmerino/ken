@@ -82,10 +82,28 @@ func splitNode(n *gotreesitter.Node, chunkSize uint32, out *[]span) {
 	if n == nil {
 		return
 	}
-	size := n.EndByte() - n.StartByte()
+	start, end := n.StartByte(), n.EndByte()
+	if end < start {
+		// Degenerate node from gotreesitter parse-error recovery.
+		// ERROR nodes occasionally carry inverted byte ranges; emitting
+		// such a span would later trip a `source[start:end]` slice panic
+		// in (*Chunker).Chunk's text-extraction loop. Recurse into named
+		// children in the hope their bounds are well-formed; if there are
+		// none, skip silently — the surrounding text falls into adjacent
+		// chunks via the cAST end-from-next-start re-derive pass.
+		nc := n.NamedChildCount()
+		if nc == 0 {
+			return
+		}
+		for i := range nc {
+			splitNode(n.NamedChild(i), chunkSize, out)
+		}
+		return
+	}
+	size := end - start
 	nc := n.NamedChildCount()
 	if size <= chunkSize || nc == 0 {
-		*out = append(*out, span{n.StartByte(), n.EndByte()})
+		*out = append(*out, span{start, end})
 		return
 	}
 	// Recurse into named children. Anonymous children (punctuation,
@@ -93,6 +111,21 @@ func splitNode(n *gotreesitter.Node, chunkSize uint32, out *[]span) {
 	for i := range nc {
 		splitNode(n.NamedChild(i), chunkSize, out)
 	}
+}
+
+// spansValid returns false if any element of in is degenerate (start >
+// end) or out of bounds (end > srcLen). Used by (*Chunker).Chunk as a
+// belt-and-braces check after cAST: layer 1 (splitNode's end<start
+// guard) catches single-node defects; this catches sibling-ordering
+// defects the post-cAST re-derive pass can still produce when
+// gotreesitter emits siblings whose start bytes are not monotonic.
+func spansValid(in []span, srcLen uint32) bool {
+	for _, sp := range in {
+		if sp.start > sp.end || sp.end > srcLen {
+			return false
+		}
+	}
+	return true
 }
 
 // mergeSpans is the greedy merge pass. Walk spans in order, accumulate
