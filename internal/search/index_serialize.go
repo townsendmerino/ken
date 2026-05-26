@@ -86,6 +86,19 @@ const (
 	// builds ("this binary was built against ken v0.8.3") without
 	// gating loadability. Bump on each ken release.
 	serializedKenVersion = "v0.8.3"
+
+	// minSerializedChunkBytes is the minimum on-disk size of a single
+	// serialized chunk: 4 (file LP len) + 0 (empty file bytes) + 4
+	// (startLine) + 4 (endLine) + 1 (tombstoned) + 4 (text LP len) + 0
+	// (empty text bytes) = 17. Used at load time to bound a header-
+	// supplied numChunks against the actual chunks section size — a
+	// hostile blob claiming numChunks=2^31 with a 0-byte chunks body
+	// would otherwise request ~96 GB during the pre-allocation in
+	// deserializeChunks + deserializeVecs before any chunk decoding
+	// runs. Real chunks have non-empty file/text and are far larger
+	// than 17 bytes; using the structural minimum is the safe bound
+	// that never rejects a legitimate file.
+	minSerializedChunkBytes = 17
 )
 
 // Typed errors returned by LoadSerializedIndex so callers (notably
@@ -373,6 +386,18 @@ func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
 	if chunksLen > uint32(r.Len()) {
 		return nil, fmt.Errorf("%w: chunks section length %d > remaining %d", ErrCorrupt, chunksLen, r.Len())
 	}
+	// numChunks sanity bound. Header-supplied numChunks is otherwise
+	// fed directly to make([]chunk.Chunk, 0, numChunks) in
+	// deserializeChunks AND make([][]float32, numChunks) in
+	// deserializeVecs — a hostile blob can request multi-GB
+	// allocations before any decoding starts. Each real chunk needs at
+	// least minSerializedChunkBytes (17) of body, so numChunks > chunksLen/17
+	// is structurally impossible regardless of attacker intent.
+	// uint64 math avoids overflow on hostile uint32 inputs.
+	if uint64(numChunks)*uint64(minSerializedChunkBytes) > uint64(chunksLen) {
+		return nil, fmt.Errorf("%w: numChunks=%d exceeds chunks section capacity (%d bytes; min %d bytes/chunk)",
+			ErrCorrupt, numChunks, chunksLen, minSerializedChunkBytes)
+	}
 	chunkBytes := make([]byte, chunksLen)
 	if _, err := io.ReadFull(r, chunkBytes); err != nil {
 		return nil, fmt.Errorf("%w: read chunks section: %v", ErrCorrupt, err)
@@ -395,8 +420,14 @@ func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
 		if mode == ModeBM25 {
 			return nil, fmt.Errorf("%w: vecs section non-empty under BM25 mode", ErrCorrupt)
 		}
-		expected := uint32(numChunks) * embedDim * 4
-		if vecsLen != expected {
+		// H3 guard: uint32 multiplication silently wraps. A hostile
+		// blob with e.g. numChunks=2, embedDim=2^29+1 wraps the
+		// expected length to 8 as uint32; if vecsLen=8 the equality
+		// check passes and deserializeVecs's inner loop panics with
+		// an out-of-range slice index. uint64 arithmetic preserves
+		// the true product so the mismatch is caught here.
+		expected := uint64(numChunks) * uint64(embedDim) * 4
+		if uint64(vecsLen) != expected {
 			return nil, fmt.Errorf("%w: vecs section length %d != numChunks*embedDim*4 (%d)",
 				ErrCorrupt, vecsLen, expected)
 		}
@@ -405,8 +436,12 @@ func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
 			return nil, fmt.Errorf("%w: read vecs section: %v", ErrCorrupt, err)
 		}
 		vecs = deserializeVecs(vecBytes, int(numChunks), int(embedDim))
-	} else if mode != ModeBM25 {
-		return nil, fmt.Errorf("%w: vecs section empty under non-BM25 mode %v", ErrCorrupt, mode)
+	} else if mode != ModeBM25 && numChunks > 0 {
+		// H2 guard: a legitimately empty corpus (numChunks=0)
+		// produces vecsLen=0 under semantic/hybrid mode too — that's
+		// a valid round-trip, not ErrCorrupt. Only error when chunks
+		// exist but their vecs are missing.
+		return nil, fmt.Errorf("%w: vecs section empty under non-BM25 mode %v (numChunks=%d)", ErrCorrupt, mode, numChunks)
 	}
 
 	// Anything left over after the vecs section but before the CRC
