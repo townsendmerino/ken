@@ -458,6 +458,7 @@ command = "/absolute/path/to/ken-mcp"
 | `KEN_SQL_NO_AUTO_MIGRATIONS` | (off) | `1` / `true` / `yes` disables v0.7.1 Tier-1 migration-history folding (restores v0.7.0 per-file behavior). Useful when you maintain a canonical `schema/current.sql` and don't want migration history surfaced as folded chunks. |
 | `KEN_MCP_CACHE_SIZE` | `16` | LRU bound on the repo→Index cache. |
 | `KEN_MCP_LOG_LEVEL` | `warn` | `debug` / `info` / `warn` / `error`. All logs go to stderr; **stdout is the JSON-RPC channel** ([details](docs/DESIGN.md#hard-rule--stdoutstderr-contract)). |
+| `KEN_ALLOW_PRIVATE_CLONE_TARGETS` | `0` | Defaults off. When an agent passes an http(s) URL as `repo`, ken pre-resolves the host and rejects loopback / link-local / RFC1918 / RFC4193 / unspecified addresses (SSRF guard — blocks an agent from coaxing ken-mcp into probing cloud-metadata or other internal endpoints). Set to `1` / `true` / `yes` if you legitimately need to clone from an internal git host. |
 
 ### Tuning ken's routing for your repo
 
