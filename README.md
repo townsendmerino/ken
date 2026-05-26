@@ -177,7 +177,7 @@ As of **v0.7.2**, Tier 2 supports **Postgres + SQLite + MySQL**. Engine routing 
 |---|---|---|
 | `postgres://` / `postgresql://` | `github.com/jackc/pgx/v5` (pure Go) | server-backed dev DBs |
 | `sqlite://` / `sqlite3://` | `modernc.org/sqlite` (pure Go, transpiled from C, no cgo) | Rails / Django / Phoenix / Laravel / FastAPI / embedded apps |
-| `mysql://` or `user:pass@tcp(host:port)/db` | `github.com/go-sql-driver/mysql` (pure Go) | MySQL 5.7+ / MySQL 8.x / MariaDB 10.x+ dev DBs (Rails, Django, Laravel, .NET, LAMP) |
+| `mysql://` or `user:pass@tcp(host:port)/db` | `github.com/go-sql-driver/mysql` (pure Go) | MySQL 5.7+ / MySQL 8.x / **MariaDB 10.x+** (first-class as of v0.8.1) — Rails, Django, Laravel, .NET, LAMP |
 
 SQLite DSN examples:
 - `sqlite:///var/data/dev.db` — absolute path (note the triple slash: scheme + empty host + absolute path).
@@ -188,7 +188,11 @@ MySQL DSN examples:
 - `alice:s3cret@tcp(db.local:3306)/mydb?parseTime=true` — native go-sql-driver form, accepted directly because that's what most .env files in the wild already contain.
 - `alice@unix(/var/run/mysqld/mysqld.sock)/mydb` — Unix-socket form.
 
-`parseTime=true` is forced on internally if absent — without it, DATE/DATETIME/TIMESTAMP columns deserialize as `[]byte` and don't render cleanly in row samples. MariaDB is wire-compatible via the same driver and works without first-class CI testing.
+`parseTime=true` is forced on internally if absent — without it, DATE/DATETIME/TIMESTAMP columns deserialize as `[]byte` and don't render cleanly in row samples.
+
+**MariaDB is first-class as of v0.8.1** ([ADR-021](docs/DECISIONS.md#adr-021-mariadb-first-class-engine-support-v081-part-b)) — same `KEN_DB_DSN` env var, same MySQL DSN forms above, same `go-sql-driver/mysql` driver. CI's `test-db-integration` job now runs the integration suite against both `mysql:8` and `mariadb:11-jammy` service containers; the v0.8.1 normalization layer strips MariaDB's legacy `bigint(20)` / `int(11)` integer display widths so chunks stay byte-identical across engines. End users see no operator-visible difference — point ken at MariaDB the same way you point it at MySQL.
+
+`KEN_DB_MARIADB_TEST_DSN` is a **CI / development-only** env var that the integration test suite uses to run the same tests against a live MariaDB container in parallel with `KEN_DB_MYSQL_TEST_DSN`. End users do not need to set it; both engines share `KEN_DB_DSN` for production use.
 
 The freshness header omits credentials and shows the engine label only (`postgres@dev-pg.local`, `mysql@db.local`, `sqlite@dev.db`); ports are surfaced only when non-default. SQLite uses the file basename so chunks don't leak local filesystem layout. The same row-sampling / periodic-refresh / SIGHUP machinery works for all three engines without configuration changes.
 

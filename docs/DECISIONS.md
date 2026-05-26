@@ -24,8 +24,9 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-016](#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) | Embedded-corpus MCP build pattern via `mcp.Run` library function | Accepted |
 | [ADR-017](#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance) | Database schema indexing — two-tier (static SQL + live Postgres) with documented PII stance | Accepted |
 | [ADR-018](#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay) | SQLite engine + migration-history folding via lightweight ALTER replay | Accepted |
-| [ADR-019](#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) | MySQL engine + schema filtering for multi-schema dev databases | Accepted |
+| [ADR-019](#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) | MySQL engine + schema filtering for multi-schema dev databases | Accepted (extended by ADR-021) |
 | [ADR-020](#adr-020-listennotify-push-based-schema-change-detection-v080-part-1) | LISTEN/NOTIFY push-based schema change detection + `reindex_db` MCP tool + opt-in `mcp/db` package for SDK authors (v0.8.0) | Accepted |
+| [ADR-021](#adr-021-mariadb-first-class-engine-support-v081-part-b) | MariaDB first-class engine support (v0.8.1 Part B) | Accepted |
 
 ---
 
@@ -714,7 +715,7 @@ v0.7.1 closes both gaps. SQLite indexing covers the missing engine; migration fo
 
 ## ADR-019: MySQL engine + schema filtering for multi-schema dev databases
 
-**Status:** Accepted
+**Status:** Accepted. *MariaDB compatibility promoted to first-class in v0.8.1; see [ADR-021](#adr-021-mariadb-first-class-engine-support-v081-part-b).*
 
 **Date:** 2026-05-25
 
@@ -794,7 +795,7 @@ v0.7.2 pairs them because both are Tier 2 ergonomic improvements that ship clean
 
 - **`mcp.Run` (v0.6.0 embedded-corpus) is unchanged.** No new `mcp.Options` fields. Live DB support for `mcp.Run` is v0.8.0+ scope.
 
-- **MariaDB compatibility is documented, not first-class tested.** Operators pointing ken at MariaDB 10.x+ should hit the same code path with the same chunk shape. If `INFORMATION_SCHEMA` differences surface (likely candidate: `routines.dtd_identifier` rendering for parameterized return types), file separately and consider a per-engine variant.
+- **MariaDB compatibility is documented, not first-class tested.** Operators pointing ken at MariaDB 10.x+ should hit the same code path with the same chunk shape. If `INFORMATION_SCHEMA` differences surface (likely candidate: `routines.dtd_identifier` rendering for parameterized return types), file separately and consider a per-engine variant. **v0.8.1 Part B follow-on:** the predicted `dtd_identifier` divergence was real (along with column-level integer display widths from the same MariaDB-vs-MySQL-8.0 fork lineage); [ADR-021](#adr-021-mariadb-first-class-engine-support-v081-part-b) records the audit + the unconditional-normalization fix + the CI matrix expansion that makes MariaDB first-class.
 
 ---
 
@@ -986,3 +987,71 @@ v0.8.0 is the "operator-control-loop" release; this ADR's section covers Part 1 
 - **Backwards compatibility:** stock `cmd/ken-mcp` behaves byte-identically to v0.8.0 Part 2; `mcp.Run` with `opts.Reindex == nil` (the v0.6.0 → v0.7.2 default) behaves byte-identically to v0.7.2's `mcp.Run`. All six stdout-cleanliness variants from Parts 1 + 2 pass; the new mcp/db binary tests are additive.
 
 - **v0.8.0 ready to tag.** Parts 1 (LISTEN/NOTIFY), 2 (reindex_db tool), and 3 (mcp/db package) all shipped on branch `v0.8.0-listen`; the three reindex-trigger sources + agent-callable refresh + SDK-author opt-in package compose into the "operator-control-loop" release narrative.
+
+---
+
+## ADR-021: MariaDB first-class engine support (v0.8.1 Part B)
+
+**Status:** Accepted
+
+**Date:** 2026-05-25
+
+**Issue:** v0.8.0 release notes pre-announce ("v0.8.1 — MariaDB first-class engine"); ADR-019's deferred-with-rationale MariaDB compatibility claim.
+
+### Context
+
+[ADR-019](#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) shipped v0.7.2's MySQL engine with MariaDB compatibility documented but not CI-tested. The reasoning at the time: MariaDB is wire-compatible via the same `go-sql-driver/mysql`, `INFORMATION_SCHEMA` is standard SQL across both, and the CI matrix cost of a third service container was speculatively-justified for a claim no operator had asked us to load-bearing-prove. ADR-019's Consequences section explicitly flagged the bet — "If `INFORMATION_SCHEMA` differences surface (likely candidate: `routines.dtd_identifier` rendering for parameterized return types), file separately and consider a per-engine variant."
+
+v0.8.0's release notes pre-announced v0.8.1 as the release that would convert ADR-019's compatibility claim into load-bearing-tested first-class support. v0.8.1's calibration-release framing names the gap explicitly: ADR-019 says "MariaDB compatible," and v0.8.1 makes that testable + verified.
+
+### Decision
+
+**Three pieces shipping together in v0.8.1 Part B:**
+
+1. **CI matrix expansion** (always, regardless of audit findings). New `mariadb:11-jammy` service container alongside `postgres:16-alpine` + `mysql:8` in the `test-db-integration` job. New `KEN_DB_MARIADB_TEST_DSN` env var parallel to `KEN_DB_MYSQL_TEST_DSN`. The existing `internal/db/mysql_integration_test.go` suite is parameterized over both engines via subtests — same fixture, same assertions, byte-identical chunks across engines. New `TestBinary_StdoutIsCleanJSONRPC_WithMariaDB` (seventh sibling of the stdout-cleanliness contract suite) drives a full MCP session through `sdk.CommandTransport` against the live MariaDB service.
+
+2. **Divergence audit + finding classification.** Loaded an identical fixture (tables + indexes + views + scalar functions + procedures, the last two exercising the ADR-019-flagged `routines.dtd_identifier` path) into MySQL 8.4 and MariaDB 11.3, ran `IndexSchema` against both, diffed the rendered chunks character-by-character. Three buckets of divergence emerged:
+
+   - **Tier 1 — Integer display widths.** MariaDB 11.x still emits the legacy `bigint(20)` / `int(11)` syntax on integer-family columns + scalar-function return types + procedure parameter types. MySQL 8.0 deprecated and removed them (MySQL bug #80094); MySQL 8.4 returns the bare `bigint` / `int` form. ADR-019's predicted `dtd_identifier` divergence was real — and it extended to every integer column in every table chunk, not just routines. **Highest-impact tier**: affects almost every chunk that has integer columns.
+
+   - **Tier 2 — DEFAULT expression rendering.** MariaDB preserves SQL-literal fidelity: a column declared `DEFAULT 'guest'` is reported as `'guest'` (quoted); `DEFAULT CURRENT_TIMESTAMP` is normalized to `current_timestamp()` (lowercase + parens). MySQL 8.x post-processes both: strips simple-string quotes (`'guest'` → `guest`), normalizes function names (`current_timestamp()` → `CURRENT_TIMESTAMP`). Affects DEFAULT-bearing columns only — a smaller chunk fraction than Tier 1.
+
+   - **Tier 3 — View body parenthesization.** MariaDB's view-rewrite pass strips redundant parens (`on(cond)`); MySQL keeps them (`on((cond))`). Affects view chunks only.
+
+3. **Targeted normalization on Tier 1 only.** `normalizeMySQLIntType()` strips `(N)` from integer-family type strings via a regex (`\b(bigint|int|mediumint|smallint|tinyint)\(\d+\)`). Applied unconditionally at three read sites in `mysqlListTablesAndColumns` + `mysqlListRoutines` (column types, function return types, parameter types). Idempotent on MySQL 8.x output (regex matches nothing); corrective on MariaDB output. Modifiers downstream of the type are preserved (`bigint(20) unsigned` → `bigint unsigned`). Non-integer families left alone — their `(N)` is semantic (`varchar(255)` size, `decimal(10,2)` precision/scale, etc.).
+
+   Tier 2 + Tier 3 divergences are documented as known cosmetic-but-substantive differences ken does NOT currently normalize. Reasoning: quote-stripping risks mangling escaped values; function-name normalization risks clashing with user-defined function names; view-body parenthesization needs a SQL parser. The cost of getting any of these wrong is silent-corruption of chunk text. If field signal shows agents are confused by the Tier 2/3 differences, v0.8.x+ can add narrower normalization.
+
+### Alternatives considered
+
+- **Separate `EngineMariaDB` constant in `dsnEngine` dispatch, with separate `mariadb://` DSN scheme.** Rejected. Most operators don't know whether their "MySQL" deployment is MariaDB until something breaks; forcing a per-variant DSN scheme makes the operator perform engine-detection that ken can do for itself. Wire-compatibility means a single DSN works; the (only) divergence we found can be normalized at the introspection-result-handling layer without operator-visible config changes.
+
+- **Treat MariaDB as a separate engine entirely** (separate `internal/db/mariadb` package). Rejected. Two engine implementations 99% identical — the maintenance burden of keeping them in sync outweighs the cleanliness of separation. The divergence we found is per-query-result, not per-query — same query against both engines returns the same row count + shape, only the string-rendering of certain columns differs.
+
+- **Probe engine variant at connection time via `SELECT VERSION()`, branch introspection on the cached variant.** Rejected even though the audit found substantive divergence. Mechanism: `MariaDB`-containing version string → cache `EngineMariaDB` on the pool struct → wherever the divergent column gets read, branch on cached variant and apply MariaDB-specific normalization. Why rejected: the chosen normalization (`normalizeMySQLIntType`) is engine-agnostic-safe — idempotent on MySQL output, corrective on MariaDB output. A probe-and-branch would make the variant branch dead code today, since both branches would call the same normalization. The probe mechanism stays available as a documented extension hook for v0.9.0+ if a divergence emerges that genuinely needs engine-specific code paths (different INFORMATION_SCHEMA queries, fundamentally-different value semantics).
+
+- **Pre-emptive per-engine dispatch without finding divergence first.** Rejected by ADR-019's setup — speculative complexity until field signal arrives. The audit gave us field signal; the audit's findings showed unconditional normalization beats per-engine-branch on the divergence type we found.
+
+- **Normalize all three tiers** (strip DEFAULT-expression quotes + normalize function names + reformat view bodies). Rejected for v0.8.1. The integer-width normalization is a single-regex transform with a well-defined input domain and zero risk of mangling semantically-significant content. The Tier 2 transforms have mangling risk — a column default of `'O\'Hara'` could get its quote-stripping wrong, a user-defined function named `current_timestamp` could get its call site replaced. The Tier 3 transform needs SQL-grammar awareness to know when to drop parens. ADR-021's calibration-release framing favors honest documentation of known cosmetic differences over risky-normalization-now; v0.8.x+ can extend if real signal shows the cosmetic differences hurt agent task completion.
+
+- **Test against MariaDB locally but skip CI matrix expansion.** Rejected. ADR-019's "compatible but not first-class tested" claim sits in the same shape as ADR-001's "no cgo" — both are load-bearing claims that need CI enforcement to stay true. Local-only testing leaves the claim in the same state ADR-019 left it: aspirational. The whole calibration-release point is converting aspirational claims into load-bearing-tested ones.
+
+- **Document the divergence in ADR-019 without code changes.** Rejected. The Tier 1 divergence affects almost every chunk — leaving it unnormalized means operators switching between MySQL and MariaDB get visibly-different chunks for the same schema, which breaks the cross-engine consistency v0.7.2's chunk-shape contract implicitly promised.
+
+### Consequences
+
+- **ADR-019's MariaDB compatibility claim is now CI-tested.** Future commits that break MariaDB compatibility fail CI before merge. The audit + this ADR record both the predicted divergence (`dtd_identifier`, correctly predicted) AND the previously-unpredicted broader integer-width divergence at the column level.
+
+- **MariaDB users get the same chunk shape as MySQL users.** No operator-visible config changes — `KEN_DB_DSN` continues to route both engines identically. The normalization makes `bigint(20)` from MariaDB look identical to `bigint` from MySQL 8.x, so the same fixture produces byte-identical chunks regardless of engine.
+
+- **`KEN_DB_MARIADB_TEST_DSN` is CI / testing only.** End users continue using `KEN_DB_DSN`. The new env var exists solely so the integration test suite can run against both engines in CI without requiring operators to know two DSN env vars.
+
+- **CI matrix slot added.** `mariadb:11-jammy` joins `postgres:16-alpine` + `mysql:8` in the `test-db-integration` job. Small CI time cost (<2 minutes added). Healthcheck uses `mariadb-admin ping` (the version-stable name post-fork; `mysqladmin` would still work but tracks an older lineage).
+
+- **Documented audit findings.** ADR-021 records all three tiers — Tier 1's normalization, Tier 2 + Tier 3's deliberate non-normalization. Future engine additions (a MariaDB-fork variant, e.g.) follow the same audit-then-classify-then-normalize-narrowly shape.
+
+- **MariaDB-specific features remain out of scope.** Galera cluster introspection, columnar engine specifics, virtual columns, scheduled events (the `events` table MariaDB has but MySQL only minimally exposes), and the row-format extensions are NOT indexed. v0.9.0+ if anyone files an issue with a real-world use case.
+
+- **The probe-and-branch mechanism stays available as future-extension.** Documented as rejected for v0.8.1 because the chosen normalization didn't need it, NOT because the mechanism is wrong in principle. If a future divergence requires engine-specific code paths, the probe can land then with this ADR as the precedent.
+
+- **Calibration credibility upheld.** v0.8.1's narrative ("each Part closes a specific gap between claim and delivery") holds: ADR-019 said "MariaDB compatible"; v0.8.1 makes that load-bearing-tested + documents what "compatible" actually means at the chunk-rendering level. No mis-framing as a recall or search-ranking improvement; this is a chunk-content fidelity + cross-engine consistency improvement.
