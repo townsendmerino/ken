@@ -1,0 +1,98 @@
+# golangci-lint config for ken.
+#
+# Conservative posture: enable the linters that catch real bugs
+# (errcheck, staticcheck, unused, gosimple, ineffassign, govet),
+# disable cosmetic-only quickfix rules (QF1001 / QF1003 — De Morgan's
+# law and tagged-switch suggestions; valid stylistic preferences but
+# not bugs), and exclude common errcheck false-positive patterns
+# (deferred Close on file/sql.Rows/sess, fmt.Fprint* to a logger,
+# os.Unsetenv in tests, go-routine srv.Run in tests).
+#
+# Landed alongside the v0.8.3 post-bug-review hardening sequence:
+# step 1 was M1 (race in subprocess stderr capture); step 2 wired
+# -race into CI; step 3 (this file) wires golangci-lint into CI.
+
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+  settings:
+    staticcheck:
+      # Default "all" enables every check including the QF
+      # (quickfix-only) family. The QF rules are stylistic
+      # suggestions, not bug detectors:
+      #   - QF1001 "could apply De Morgan's law"
+      #   - QF1003 "could use tagged switch"
+      # Disabling them keeps the linter focused on real findings.
+      checks:
+        - "all"
+        - "-QF1001"
+        - "-QF1003"
+
+    errcheck:
+      # Don't flag these patterns — they're idiomatic-Go-by-design.
+      exclude-functions:
+        # Idiomatic deferred-Close on read-side resources where the
+        # close error genuinely doesn't matter (we're not writing,
+        # so there's no pending data to flush).
+        - (*os.File).Close
+        - (io.Closer).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.DB).Close
+        - (github.com/modelcontextprotocol/go-sdk/mcp.ClientSession).Close
+        # Logging writers — the writer's Write error is uninteresting
+        # for a log line (and the logger interface explicitly accepts
+        # io.Writer with no error-return convention beyond Write).
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
+        # Test-only patterns: tests use these for setup/teardown
+        # where the error is structurally uninteresting.
+        - os.Unsetenv
+
+  exclusions:
+    # File-pattern allowlist for noisy rules in specific contexts.
+    rules:
+      # Test goroutines launching server-side Run loops via `go
+      # srv.Run(ctx, transport)` — the error is intentionally
+      # unchecked because the test goroutine signals shutdown via
+      # ctx-cancel and the server's clean-stop returns nil.
+      - path: _test\.go
+        text: "Error return value of `srv\\.Run` is not checked"
+      # WatchedIndex.Close in test cleanup; close error is benign
+      # for tests that have already verified the watcher's published
+      # snapshot.
+      - path: _test\.go
+        text: "Error return value of `wix\\.Close` is not checked"
+      # MCP ClientSession.Close in test cleanup; close error during
+      # teardown of a test session is uninteresting.
+      - path: _test\.go
+        text: "Error return value of `sess\\.Close` is not checked"
+      # The pgx conn.Close in db/listen.go's reconnect loop is
+      # deferred for the dedicated long-lived connection — close
+      # error during shutdown is uninteresting (we're already on the
+      # way out).
+      - path: internal/db/listen\.go
+        text: "Error return value of `conn\\.Close` is not checked"
+      # internal/modelfetch downloads files; the HTTP body Close is
+      # deferred after CopyN/atomic-rename has succeeded — a close
+      # error here is post-success cleanup.
+      - path: internal/modelfetch/fetch\.go
+        text: "Error return value of `resp\\.Body\\.Close` is not checked"
+      # internal/repo's binary-sniff helpers open files for an 8 KiB
+      # read; close error on read-only files is uninteresting.
+      - path: internal/repo/walk\.go
+        text: "Error return value of `f\\.Close` is not checked"
+
+issues:
+  # Show every finding so the cleanup pass can't miss any. Default
+  # is 50 (golangci-lint v2); we have fewer than that even pre-cleanup.
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -44,6 +44,19 @@ jobs:
       - name: go vet ./...
         run: go vet ./...
 
+      # golangci-lint with the conservative config at .golangci.yml.
+      # Conservative posture: errcheck + govet + ineffassign +
+      # staticcheck + unused + gosimple (no QF1001/QF1003 stylistic
+      # quickfix rules; deferred Close + log writer false-positives
+      # excluded via the config). Linux-only (the matrix runs on
+      # macOS too, but golangci-lint is deterministic across
+      # platforms and there's no value in running it twice).
+      - name: golangci-lint
+        if: matrix.os == 'ubuntu-latest'
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.11.4
+
       - name: go build ./...
         run: go build ./...
 
