@@ -207,8 +207,27 @@ func (m *StaticModel) encodeIDs(ids []int32) []float32 {
 	return pooled
 }
 
-// weightedMeanPoolSafe is weightedMeanPool with tolerance for nil rows
-// (treated as zero contribution). Used when ids contain out-of-range values.
+// weightedMeanPoolSafe computes Σ rows[i]·weights[i] / Σ weights[i], the
+// verified Model2Vec runtime pooling algorithm. Tolerates nil rows
+// (treated as zero contribution; used when ids contain out-of-range values).
+//
+// `rows` is a logical [N, dim] view: rows[i] is a slice of length dim into
+// the embeddings tensor (F32). `weights` is length N (F64 from the model).
+//
+// PRECISION CONTRACT (required for golden-test parity):
+//   - All accumulators (sum[dim], wsum, the dot product inside L2 norm) are
+//     float64. Each `rows[i][j]` (float32) is widened to float64 BEFORE
+//     multiplying by w[i] and accumulating.
+//   - Output is float32 (cast at the end), matching numpy's
+//     `embeddings[...].astype(np.float64) ... .astype(np.float32)` shape
+//     in pin_inference.py.
+//
+// Doing the accumulation in float32 will silently drift cosine below the
+// 1 − 1e-5 parity bar on longer inputs. This is the single most likely
+// silent failure mode for a re-implementer; do not "optimize" it away.
+//
+// Returns a zero vector if N==0 or Σweights == 0 (an all-pad / all-zero-weight
+// degenerate case).
 func weightedMeanPoolSafe(rows [][]float32, weights []float64, dim int) []float32 {
 	out := make([]float32, dim)
 	if len(rows) == 0 {

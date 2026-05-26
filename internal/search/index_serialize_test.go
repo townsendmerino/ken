@@ -56,7 +56,7 @@ func loadTestModel(t *testing.T) *embed.StaticModel {
 	if _, err := os.Stat(filepath.Join(modelDir, "model.safetensors")); err != nil {
 		t.Skipf("testdata/model not present; see testdata/README.md")
 	}
-	m, err := embed.Load(modelDir)
+	m, err := embed.LoadFromFS(os.DirFS(modelDir), ".")
 	if err != nil {
 		t.Fatalf("embed.Load: %v", err)
 	}

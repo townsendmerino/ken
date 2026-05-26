@@ -90,7 +90,7 @@ func cmdBuildIndex(args []string) int {
 			fmt.Fprintln(os.Stderr, "ken: mode requires --model <dir> or $KEN_MODEL_DIR (or run `ken download-model`)")
 			return 1
 		}
-		m, lerr := embed.Load(model)
+		m, lerr := embed.LoadFromFS(os.DirFS(model), ".")
 		if lerr != nil {
 			fmt.Fprintf(os.Stderr, "ken: load model from %s: %v\n", model, lerr)
 			return 1

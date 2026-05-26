@@ -273,7 +273,7 @@ func cmdIndex(args []string) int {
 
 	if !watch {
 		// v0.2 behavior: build once, print, exit.
-		ix, err := search.FromPath(rest[0], mode, chunker, model)
+		ix, err := search.FromFS(os.DirFS(rest[0]), mode, chunker, model)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 			return 1
@@ -445,7 +445,7 @@ func cmdSearch(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
-	ix, err := search.FromPath(sa.root, mode, sa.chunker, sa.model)
+	ix, err := search.FromFS(os.DirFS(sa.root), mode, sa.chunker, sa.model)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1
@@ -511,7 +511,7 @@ func cmdBench(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
-	ix, err := search.FromPath(rest[0], mode, chunker, model)
+	ix, err := search.FromFS(os.DirFS(rest[0]), mode, chunker, model)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1

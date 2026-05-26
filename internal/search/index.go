@@ -200,7 +200,7 @@ func walkAndChunkFS(fsys fs.FS, mode Mode, chunkerName, modelDir string, opts FS
 		if modelDir == "" {
 			return nil, nil, nil, nil, fmt.Errorf("search: mode requires an embedding model — pass --model <dir>, run `ken download-model`, or use --mode=bm25")
 		}
-		m, err := embed.Load(modelDir)
+		m, err := embed.LoadFromFS(os.DirFS(modelDir), ".")
 		if err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("search: model not found at %s: %w — run `ken download-model --to %s` to fetch it, or use --mode=bm25", modelDir, err, modelDir)
 		}

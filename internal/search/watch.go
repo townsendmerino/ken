@@ -740,8 +740,5 @@ func addRecursive(w *fsnotify.Watcher, root string) error {
 // attempt (no-op because no chunks match). False positives can't
 // over-tombstone — tombstoneFile only marks matching chunks.
 func knownIndexedFile(root, rel string) bool {
-	if chunk.Language(rel) != "" {
-		return true
-	}
-	return false
+	return chunk.Language(rel) != ""
 }

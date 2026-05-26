@@ -21,8 +21,9 @@ import (
 	"github.com/townsendmerino/ken/internal/search"
 )
 
-// Default value for top_k across both tools (matches semble's
-// `top_k: int = 5`; the Stage-5 prompt's "default 10" was a reconstruction).
+// DefaultTopK is the default value for top_k across both tools
+// (matches semble's `top_k: int = 5`; the Stage-5 prompt's "default
+// 10" was a reconstruction).
 const DefaultTopK = 5
 
 // SearchArgs is the argument schema for the `search` tool. The Query /

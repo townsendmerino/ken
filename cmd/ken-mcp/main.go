@@ -53,14 +53,6 @@ func init() {
 	log.SetOutput(os.Stderr)
 }
 
-// envOr returns the value of env var name, or def if it's unset/empty.
-func envOr(name, def string) string {
-	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
-		return v
-	}
-	return def
-}
-
 // modelAvailable reports whether dir looks like a usable Model2Vec snapshot.
 func modelAvailable(dir string) bool {
 	if dir == "" {

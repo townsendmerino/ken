@@ -55,13 +55,12 @@ func splitStatements(source []byte) []statement {
 	for i < n {
 		c := source[i]
 
-		// Track lines for the statement's start position.
+		// Track lines for the statement's start position. When
+		// stmtStart == -1 we're still skipping leading whitespace
+		// before a statement; the newline just advances curLine + i.
 		if c == '\n' {
 			curLine++
 			i++
-			if stmtStart == -1 {
-				// Still skipping leading whitespace before a statement.
-			}
 			continue
 		}
 
