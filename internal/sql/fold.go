@@ -20,11 +20,22 @@ package sql
 //   - ALTER COLUMN ... TYPE / SET DATA TYPE
 //   - ADD CONSTRAINT
 //   - DROP CONSTRAINT
+//   - RENAME COLUMN (v0.8.1 Part C / ADR-022; eager application,
+//     mutates the in-flight foldedTable so subsequent ALTERs see
+//     the post-rename state; rewrites column references inside
+//     this-table constraints via first-parens scope; cross-table
+//     FK target-side renames are NOT propagated)
+//   - RENAME CONSTRAINT (v0.8.1 Part C / ADR-022; named constraints
+//     only — anonymous PRIMARY KEY (id) etc. have no name to match
+//     and fall back to BOTH-chunks)
 //
 // Out of scope (statement falls back to its per-file ALTER chunk):
-//   - RENAME COLUMN (needs name resolution across files)
-//   - Multi-statement RENAME interactions
-//   - Engine-specific extensions (Postgres partition syntax, MySQL MODIFY COLUMN)
+//   - RENAME TO (table rename — needs per-database rename map for
+//     cross-table FK target-side propagation; v0.9.0+ if requested)
+//   - MySQL CHANGE old new TYPE (rename + retype in one statement;
+//     v0.8.1's RENAME path doesn't decode the type-change half)
+//   - Engine-specific extensions (Postgres partition syntax, MySQL
+//     MODIFY COLUMN)
 //
 // Failure handling — emit BOTH chunks:
 //   For each ALTER that can't be applied cleanly (unknown column, missing
@@ -273,8 +284,16 @@ func splitAlterActions(action string) []string {
 
 // applyOneAction dispatches a single action to the appropriate handler.
 // Returns true iff the action was fully applied; false means the action
-// is out of scope (RENAME COLUMN, etc.) or the target column/constraint
-// wasn't found.
+// is out of scope or the target column/constraint wasn't found — caller
+// preserves the per-file ALTER chunk so the agent always sees the
+// action in the raw migration text (BOTH-chunks fallback).
+//
+// v0.8.1 Part C (ADR-022): the RENAME branch now folds rather than
+// fail-out. RENAME COLUMN + RENAME CONSTRAINT apply eagerly via
+// applyRename → applyColumnRename / applyConstraintRename in
+// migrations.go. MySQL's CHANGE syntax (which renames + retypes in
+// one go) remains unsupported in v0.8.1 — operators using it see the
+// BOTH-chunks fallback. See ADR-022's "MySQL CHANGE syntax" entry.
 func applyOneAction(t *foldedTable, action, srcFile string, line int, logger io.Writer) bool {
 	tokens := tokenize([]byte(action))
 	if len(tokens) == 0 {
@@ -289,12 +308,75 @@ func applyOneAction(t *foldedTable, action, srcFile string, line int, logger io.
 	case "ALTER":
 		return applyAlterColumn(t, action, tokens, srcFile, line, logger)
 	case "RENAME":
-		fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: RENAME COLUMN/CONSTRAINT not supported in v0.7.1 lightweight fold; preserved as per-file chunk\n",
-			srcFile, line)
-		return false
+		return applyRename(t, tokens, srcFile, line, logger)
 	default:
 		fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: unsupported ALTER action %q; preserved as per-file chunk\n",
 			srcFile, line, first)
+		return false
+	}
+}
+
+// applyRename handles ALTER TABLE ... RENAME COLUMN / RENAME CONSTRAINT.
+// Eager: mutates t in place so subsequent ALTERs see the post-rename
+// state. See ADR-022 for the eager-vs-lazy choice rationale.
+//
+// Accepted shapes (Postgres / MySQL / SQLite / MariaDB convergent
+// syntax — the same identifier-level form across all four):
+//
+//	RENAME COLUMN old TO new
+//	RENAME CONSTRAINT old TO new
+//
+// Anything else (e.g. MySQL CHANGE which renames+retypes in one
+// statement) falls through to the per-file BOTH-chunks fallback.
+func applyRename(t *foldedTable, tokens []token, srcFile string, line int, logger io.Writer) bool {
+	if len(tokens) < 5 {
+		fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: malformed RENAME action; preserved as per-file chunk\n",
+			srcFile, line)
+		return false
+	}
+	second := strings.ToUpper(tokens[1].text)
+	switch second {
+	case "COLUMN":
+		// "RENAME COLUMN <old> TO <new>"
+		if !strings.EqualFold(tokens[3].text, "TO") {
+			fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: RENAME COLUMN expected TO; preserved as per-file chunk\n",
+				srcFile, line)
+			return false
+		}
+		oldName := strings.Trim(tokens[2].text, `"`)
+		newName := strings.Trim(tokens[4].text, `"`)
+		if !applyColumnRename(t, oldName, newName) {
+			fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: RENAME COLUMN %q not found on %s; preserved as per-file chunk\n",
+				srcFile, line, oldName, t.name)
+			return false
+		}
+		return true
+	case "CONSTRAINT":
+		// "RENAME CONSTRAINT <old> TO <new>"
+		if !strings.EqualFold(tokens[3].text, "TO") {
+			fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: RENAME CONSTRAINT expected TO; preserved as per-file chunk\n",
+				srcFile, line)
+			return false
+		}
+		oldName := strings.Trim(tokens[2].text, `"`)
+		newName := strings.Trim(tokens[4].text, `"`)
+		if !applyConstraintRename(t, oldName, newName) {
+			fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: RENAME CONSTRAINT %q not found on %s; preserved as per-file chunk\n",
+				srcFile, line, oldName, t.name)
+			return false
+		}
+		return true
+	case "TO":
+		// "RENAME TO <new>" — table rename. Out of scope for v0.8.1
+		// Part C (per-database table rename map would be needed to
+		// propagate to FK target references in other tables); the
+		// per-file ALTER chunk preserves the action for the agent.
+		fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: RENAME TABLE (rename to) not supported by lightweight fold; preserved as per-file chunk\n",
+			srcFile, line)
+		return false
+	default:
+		fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: unsupported RENAME subject %q; preserved as per-file chunk\n",
+			srcFile, line, second)
 		return false
 	}
 }

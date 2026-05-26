@@ -332,19 +332,23 @@ func TestFold14_MultiActionAlter(t *testing.T) {
 }
 
 // ============================================================================
-// Scenario F15: RENAME COLUMN is out of scope — preserve per-file chunk + warn.
+// Scenario F15: RENAME COLUMN now folds (v0.8.1 Part C / ADR-022). Replaces
+// the v0.7.1 deferral assertion this test originally pinned. Post-rename
+// column name shows in the folded chunk; no warning + no per-file ALTER
+// chunk for the rename itself (the action was applied cleanly).
 // ============================================================================
 
-func TestFold15_RenameColumnOutOfScope(t *testing.T) {
+func TestFold15_RenameColumnFolds(t *testing.T) {
 	fsys := makeMigrationFS(map[string]string{
 		"m/0001_init.sql":   `CREATE TABLE x (id INT, old_name TEXT);`,
 		"m/0002_rename.sql": `ALTER TABLE x RENAME COLUMN old_name TO new_name;`,
 	})
 	body, warns := mustFold(t, fsys, "m")
-	if !strings.Contains(string(warns), "RENAME") {
-		t.Errorf("expected RENAME warn; got:\n%s", warns)
+	if len(warns) > 0 {
+		t.Errorf("unexpected warns from a foldable RENAME: %s", warns)
 	}
-	// Folded chunk still emitted; RENAME was preserved as per-file chunk.
-	mustContain(t, body, "TABLE x", "old_name  TEXT")
-	mustContain(t, body, "ALTER TABLE x", "RENAME COLUMN old_name TO new_name")
+	mustContain(t, body, "TABLE x", "new_name  TEXT")
+	mustNotContain(t, body, "old_name  TEXT")
+	// The folded chunk is the only chunk — no per-file ALTER leftover.
+	mustNotContain(t, body, "ALTER TABLE x")
 }
