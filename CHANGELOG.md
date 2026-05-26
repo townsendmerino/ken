@@ -12,7 +12,7 @@ with pre-built binaries.
 
 (no changes yet)
 
-## [0.8.3] — UNRELEASED
+## [0.8.3] — 2026-05-26
 
 **Cold-start optimization for the v0.6.0 embedded-corpus build pattern.** Narrative: "v0.6.0 shipped embedded corpora; v0.8.3 makes their cold start fast." [ADR-024](docs/DECISIONS.md#adr-024-pre-built-embedded-indices-for-mcprun-v083) closes the optimization gap [ADR-016](docs/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) left open. SDK authors using `mcp.Run` can now pre-build their search index at `go generate` / build time and ship it inside their `//go:embed` corpus; `mcp.Run` auto-loads it at startup and skips the per-launch walk + chunk + embed pass. Closes [#10](https://github.com/townsendmerino/ken/issues/10).
 
@@ -42,7 +42,7 @@ The v0.6.0 single-static-binary contract is preserved: pre-built indices live in
 - **Existing dep tree unchanged.** Custom binary serialization uses `encoding/binary`, `hash/crc32`, and the existing `io/fs` plumbing. No new third-party deps.
 - **v0.6.0 single-static-binary contract preserved.** Pre-built indices live inside the SDK author's `//go:embed corpus`, not as sidecar assets. The `cmd/ken-mcp-docs` worked example continues to be a single 74 MB binary.
 
-## [0.8.2] — UNRELEASED
+## [0.8.2] — 2026-05-25
 
 **Investigation outcome release.** v0.8.2 ships no new features. v0.8.x's calibration-release discipline applied to [#16](https://github.com/townsendmerino/ken/issues/16) (selective tree-sitter grammar embedding for smaller binaries): we investigated whether `gotreesitter`'s package shape permits per-language binary-size reduction via source-file build tags, found that the embed layer's monolithic `//go:embed grammar_blobs/*.bin` glob defeats the approach at the v0.18.0 layout, documented the finding honestly, named the specific upstream change that would unblock the feature, and closed #16 as wontfix-without-upstream-cooperation. The 74 MB `cmd/ken-mcp-docs` binary measured in [ADR-016](docs/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) stays 74 MB after v0.8.2.
 
@@ -71,7 +71,7 @@ This release is the kind of outcome v0.8.x's calibration framing makes legitimat
 - **No code changes.** No new dependencies; no new env vars; no new build tags consumed by ken's own build; no test invariants regressed. `go build`, `go test`, `go vet`, and `gofmt` produce identical output to v0.8.1 modulo the documentation-only diffs in [`docs/DECISIONS.md`](docs/DECISIONS.md), [`docs/DESIGN.md`](docs/DESIGN.md), and [README.md](README.md).
 - **Stdout-cleanliness invariants unchanged.** All seven stdout-clean variants (stock / Postgres / SQLite / MySQL / LISTEN/NOTIFY / reindex_db / MariaDB) continue to pass byte-identically to v0.8.1.
 
-## [0.8.1] — UNRELEASED
+## [0.8.1] — 2026-05-25
 
 **The calibration release.** Three Parts that each close a gap between something ken claimed and what ken actually delivered. The through-line is calibration credibility: when a doc, an instruction string, or an ADR says ken does X, ken should *load-bearing-do* X — and when ken can't, the docs should name the gap honestly. v0.8.1 walks three of those gaps and closes them.
 
@@ -122,7 +122,7 @@ This release is the kind of outcome v0.8.x's calibration framing makes legitimat
 - **`KEN_SQL_NO_AUTO_MIGRATIONS=1` continues to fully disable Tier-1 migration folding.** Operators who maintain a canonical `schema/current.sql` and don't want any migration-history-folded chunks (with or without RENAME folding) set this and get v0.7.0 per-file behavior.
 - **Stdout-cleanliness invariants unchanged.** All seven variants pass (stock / Postgres / SQLite / MySQL / LISTEN/NOTIFY / reindex_db / MariaDB). The pgx-tracer-must-stay-nil discipline (feedback_pgx_tracer memory) extends identically to the MariaDB code path — same driver as MySQL, same audit applies.
 
-## [0.8.0] — UNRELEASED
+## [0.8.0] — 2026-05-25
 
 The operator-control-loop release. Three features round out the database-integration story started in v0.7.0 — push-based schema change detection, agent-initiated reindex, and DB support in `mcp.Run`. **All three parts shipped; v0.8.0 ready to tag.**
 

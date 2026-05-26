@@ -156,28 +156,28 @@ func TestRun_CorruptPrebuiltIndex_FallsBackWithWarning(t *testing.T) {
 	}
 }
 
-// TestRun_ModeMismatch_FallsBackWithWarning builds a BM25 pre-built
-// index but sets Options.Mode="hybrid". mcp.Run downgrades hybrid to
-// bm25 (no model), THEN tries the pre-built index — which IS bm25,
-// so this actually loads cleanly. Cover the "real mismatch" case by
-// keeping Options.Mode in bm25 but injecting a semantic-built
-// pre-built blob via Options.PrebuiltIndex.
-func TestRun_ModeMismatch_FallsBackWithWarning(t *testing.T) {
-	// Build a bm25 index, then we'll claim it's semantic by feeding
-	// it via Options.PrebuiltIndex while setting Options.Mode=bm25.
-	// To force the mismatch, build semantic-flavored bytes by hand
-	// instead: re-use BuildAndSerializeIndex but force the mode byte
-	// — easiest is to actually build a fake semantic index. Since
-	// this test environment may not have a model, use a different
-	// shape: build BM25, then claim Options.Mode=hybrid downgrades
-	// to bm25, then re-check — the pre-built bytes match the
-	// downgraded bm25, so no mismatch. The cleanest path is to
-	// flip mode using a hand-built pair: build bm25, then run
-	// mcp.Run requesting mode=bm25 with a pre-built file that was
-	// (somehow) built as semantic. We construct such a file by
-	// calling search.BuildAndSerializeIndex(... ModeBM25 ...) and
-	// patching the mode byte. Reflection-free: rebuild the LP-string
-	// preamble + chunks/vecs and overwrite the single mode byte.
+// TestRun_ModeDowngrade_RealignsWithPrebuilt covers the interaction
+// between mcp.Run's "downgrade hybrid → bm25 when no model is loaded"
+// path (the v0.6.0 first-launch usability promise) and the v0.8.3
+// pre-built-index load. The setup:
+//
+//   - Options.Mode = "hybrid" (the SDK author's intent).
+//   - No model configured (no ModelFS, no ModelDir, no testdata/model
+//     gating). mcp.Run downgrades hybrid → bm25 with a warn log.
+//   - Options.PrebuiltIndex = a bm25 pre-built blob.
+//
+// The downgraded mode (bm25) re-aligns with the pre-built blob's
+// mode (bm25), so ExpectedMode matches and the load succeeds — no
+// mismatch warning. This pins the desirable interaction: an SDK
+// author who shipped a bm25 pre-built and asks for hybrid on a
+// model-less deployment doesn't get a spurious "pre-built mismatch"
+// warning on top of the (legitimate) downgrade warning.
+//
+// The actual "mismatch fires a fallback warning" path is exercised
+// by TestRun_ChunkerMismatch_FallsBackWithWarning below — chunker
+// mismatch is the easier-to-stage variant because it doesn't
+// interact with the model-resolution downgrade.
+func TestRun_ModeDowngrade_RealignsWithPrebuilt(t *testing.T) {
 	bm25Data, err := search.BuildAndSerializeIndex(embeddedCorpus(), search.BuildOptions{
 		Mode:    search.ModeBM25,
 		Chunker: "regex",
@@ -185,10 +185,6 @@ func TestRun_ModeMismatch_FallsBackWithWarning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildAndSerializeIndex: %v", err)
 	}
-	// Pretend the bytes are hybrid by exercising the SAME byte
-	// stream with ExpectedMode=hybrid — that's enough to trigger
-	// ErrModeMismatch via the load path, validating the fallback
-	// without needing a model-bearing semantic build.
 	logBuf := &bytes.Buffer{}
 	ix, _, err := buildEmbeddedIndex(embeddedCorpus(), Options{
 		Mode:          "hybrid", // requests hybrid; mcp.Run downgrades to bm25 (no model)
@@ -203,15 +199,15 @@ func TestRun_ModeMismatch_FallsBackWithWarning(t *testing.T) {
 	if ix == nil {
 		t.Fatalf("index is nil")
 	}
-	// Since hybrid downgraded to bm25 and the pre-built bytes are
-	// bm25, the load actually succeeds — no mismatch. The downgrade
-	// warning IS in the log, but no pre-built warning fires. This
-	// covers the "downgrade aligns with pre-built mode" path.
-	// (The mismatch-with-warning path is exercised by
-	// TestRun_ChunkerMismatch_FallsBackWithWarning below.)
 	if strings.Contains(logBuf.String(), "failed to load pre-built") {
 		t.Errorf("downgrade path should re-align with pre-built mode; "+
 			"got unexpected fallback warning:\n%s", logBuf.String())
+	}
+	// The downgrade warning IS expected (model-resolution path); the
+	// pre-built-mismatch warning is NOT (because bm25 == bm25 after
+	// downgrade).
+	if !strings.Contains(logBuf.String(), "downgrading to bm25") {
+		t.Errorf("expected the model-downgrade warning to fire, got:\n%s", logBuf.String())
 	}
 }
 
