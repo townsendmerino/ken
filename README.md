@@ -88,6 +88,20 @@ Design and rationale: [ADR-024](docs/DECISIONS.md#adr-024-pre-built-embedded-ind
 
 For multi-repo code search with live file-watching, use [`cmd/ken-mcp`](cmd/ken-mcp/) directly (below) — the two modes coexist by design.
 
+## Who's this for?
+
+ken has several distinct use cases. Pick the entry point that matches yours; each bullet names the relevant binary or mode and links to the in-depth section where its workflow is documented.
+
+- **AI coding agent users** (Claude Code, Cursor, Codex, opencode, VS Code) — install `ken-mcp` as an MCP server in your agent client. Same `search` / `find_related` tool schemas and wire format as semble, so existing semble configurations work with the `command:` path swapped to `ken-mcp`. See [MCP server](#mcp-server) and [Comparison to semble](#comparison-to-semble).
+
+- **SDK / docs authors shipping a single static binary** — use `mcp.Run` to bake your `//go:embed` corpus + the Model2Vec model into one executable that serves MCP search. No backend, no per-platform asset bundles, version-pinned by build artifact. See [Embedded-corpus build pattern](#embedded-corpus-build-pattern-v060) and [Pre-building the index for faster cold start](#pre-building-the-index-for-faster-cold-start-v083).
+
+- **Backend developers with code + database schemas** — point `ken-mcp` at your repo alongside a local Postgres / SQLite / MySQL / MariaDB dev DB. Code chunks, `.sql` file chunks, and live schema chunks compete in one ranked retrieval. See [Indexing database schemas](#indexing-database-schemas-v070-expanded-in-v071) and [Tier 2 — Live Postgres introspection](#tier-2--live-postgres-introspection-ken_db_dsn).
+
+- **CLI-first code search** — `ken index <path>` + `ken search <path> <query>` for fast local exploration of an unfamiliar repository, with `--json` output for piping into other tools. Pure Go, single static binary cross-compiled to any `GOOS` / `GOARCH`. See [Quickstart](#quickstart).
+
+- **Air-gapped or restricted-egress environments** — embedding inference, BM25 scoring, and fusion all run locally on the CPU. No network calls for search; no external vector DB; no API keys. See [Why this is interesting](#why-this-is-interesting).
+
 ## What ken indexes well
 
 ken's hybrid BM25 + Model2Vec retrieval is calibrated for two content types:
