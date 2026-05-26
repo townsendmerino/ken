@@ -52,3 +52,15 @@ testdata/bench/
 # `go test -tags=bench ./bench/tokens/`). Tens of MB; never committed.
 # The markdown tables in docs/BENCH.md are the committed reference.
 bench/tokens/results/
+
+# `ken perf` collection output (regenerated via scripts/perf_collect.sh
+# on the perf-investigation branch). Per-workload, per-date pprof
+# profiles + JSON records + the built ken binary; reproducible from
+# the methodology in docs/PERF.md (on the perf-investigation branch).
+# Tens to hundreds of MB; never committed.
+bench_out/
+
+# Investigation scratchpad — planning Claude's per-phase briefings and
+# campaign plans drafted alongside the perf-investigation work. Not
+# part of the published repo.
+outputs/
