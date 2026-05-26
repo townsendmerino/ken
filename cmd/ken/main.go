@@ -88,12 +88,19 @@ usage:
   ken index           <path>           [--watch|--no-watch] [--chunker regex|treesitter|line] [--mode bm25|semantic|hybrid] [--model DIR]
   ken search          <path> <query>...  [-k N] [--json] [--chunker ...] [--mode ...] [--model DIR]
   ken bench           <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR]
+  ken build-index     <corpus>         -o <path> [--chunker ...] [--mode ...] [--model DIR]
   ken download-model                     [--model ORG/NAME] [--to DIR] [--force]
 
 ken index --watch (default in v0.3+) keeps the process alive and re-indexes
 files on change; --no-watch is the v0.2 behavior (build once, print, exit).
 For one-shot queries via 'ken search' the flag is accepted but a no-op since
 the process exits after the result.
+
+ken build-index pre-builds a search index from a corpus directory and writes
+the serialized bytes to <path>. SDK authors using mcp.Run typically point
+-o at <corpus>/.ken/index.bin so the file is picked up by //go:embed corpus
+at build time and auto-loaded at runtime — see docs/DECISIONS.md ADR-024
+for the cold-start narrative.
 
 ken bench reads queries from stdin (one per line; lines starting with '#'
 ignored) and emits one JSON record per query to stdout against a single
@@ -184,6 +191,8 @@ func main() {
 		os.Exit(cmdSearch(os.Args[2:]))
 	case "bench":
 		os.Exit(cmdBench(os.Args[2:]))
+	case "build-index":
+		os.Exit(cmdBuildIndex(os.Args[2:]))
 	case "download-model":
 		os.Exit(cmdDownloadModel(os.Args[2:]))
 	default:
