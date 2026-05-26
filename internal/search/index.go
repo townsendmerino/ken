@@ -45,13 +45,14 @@ import (
 	// NOTE: treesitter and markdown are NOT blank-imported here. Binaries
 	// that want them must blank-import them explicitly — e.g. cmd/ken-mcp
 	// and cmd/ken-mcp-docs do, but the embedded-corpus demo binary
-	// (cmd/ken-mcp-docs) deliberately skips treesitter to keep its
-	// gotreesitter/grammars ~26 MB blob bundle out of the binary
-	// (gotreesitter v0.18.0 ships ~206 grammars; per ADR-023 the
-	// bundle is monolithic at the embed layer so per-language gating
-	// doesn't shrink it). The chunker registry is the seam:
-	// side-effect imports happen at the binary's main package, not
-	// in this shared library layer.
+	// (cmd/ken-mcp-docs) deliberately skips treesitter because
+	// importing it inflates the linked binary by ~26 MB
+	// (darwin/arm64; the gotreesitter/grammars embed.FS payload is
+	// ~19 MB on-disk for 206 grammar blobs, plus parser runtime).
+	// Per ADR-023 the bundle is monolithic at the embed layer so
+	// per-language gating doesn't shrink it. The chunker registry is
+	// the seam: side-effect imports happen at the binary's main
+	// package, not in this shared library layer.
 	"github.com/townsendmerino/ken/internal/embed"
 	"github.com/townsendmerino/ken/internal/repo"
 	"github.com/townsendmerino/ken/internal/sql"

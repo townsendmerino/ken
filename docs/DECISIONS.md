@@ -1205,6 +1205,27 @@ The shape classification: **partially cooperative, fundamentally limited for the
 
 - **v0.8.2 ready to tag** after this lands. The investigation-outcome release ships as one fast-forward merge of branch `v0.8.2-investigation` — two commits (the docs commit carrying this ADR + the ADR-016 amendment + DESIGN.md correction, plus a separate CHANGELOG commit for reviewability of the user-facing narrative). v0.8.x calibration-release shape extends naturally: each Part / each point release closes a specific gap between claim and delivery, including the "the claim doesn't work yet and here's why" case.
 
+### Calibration amendment (post-v0.8.3 audit)
+
+**The "~26 MB" figure that v0.8.2 introduced into ADR-016 / ADR-023 / DESIGN.md §1 conflated two different measurements.** A post-v0.8.3 audit re-measured against `gotreesitter` v0.18.0 (and cross-checked against v0.19.1, the current upstream — same shape). The actual numbers, with units of measurement made explicit:
+
+| Quantity | Value | What it means |
+|---|---|---|
+| On-disk grammar bundle | **19.1 MB** (20,011,313 bytes) | Sum of the 206 `*.bin` files in `gotreesitter/grammars/grammar_blobs/`. The actual embed.FS payload. **Stable across v0.18.0 and v0.19.1.** |
+| Linked-binary cost when treesitter is imported | **~26 MB** (26,985,952 bytes delta) | Difference between `cmd/ken-mcp` built with the `_ "github.com/townsendmerino/ken/internal/chunk/treesitter"` import (53.13 MB) and the same binary without it (27.40 MB). Includes the embed payload, the gotreesitter parser runtime, and Go's symbol bookkeeping for both. Measured darwin/arm64 with default `-ldflags` (debug info included). |
+
+**What the prior text got wrong:** v0.8.2's stale-claim audit read v0.6.0's "19 MB" reference, observed that gotreesitter had grown from 17 to ~206 grammars between v0.6.0 and v0.18.0, and inferred that the on-disk bundle must have grown proportionally to "~26 MB." It didn't — the v0.6.0 "19 MB" was the on-disk-bundle measurement, and the on-disk bundle is *still* ~19 MB at v0.18.0. The ~26 MB figure that v0.8.2 propagated through ADR-016 amendments, ADR-023 Phase 1 findings, the DESIGN.md §1 update, and the in-code comments is plausibly the binary-cost figure (which matches the post-v0.8.3 re-measurement), but the v0.8.2 text framed it as the bundle size — two different quantities collapsed into one label.
+
+**What's been corrected in the post-v0.8.3 sweep:**
+
+- The three in-code comments (`cmd/ken-mcp/main.go`, `cmd/ken-mcp-docs/main.go`, `internal/search/index.go`) now read "the linked binary inflates by ~26 MB ... the gotreesitter/grammars embed.FS payload is ~19 MB on-disk for 206 grammar blobs." Both numbers are named with their units.
+- DESIGN.md §1 amended to the same dual-number framing.
+- This calibration amendment in ADR-023 names the prior conflation explicitly so future readers don't redo the same mismeasurement.
+
+**What's deliberately NOT rewritten:** the prior text of ADR-016, ADR-023's earlier sections, and the v0.8.2 amendment block itself remain as the historical record. ken's calibration discipline is to amend, not overwrite — same pattern as v0.8.2 amending v0.6.0 originally.
+
+**Resolution:** for any future reader, the canonical figures are **~19 MB on-disk grammar bundle** and **~26 MB binary cost when treesitter is imported**. The earlier "the bundle is now ~26 MB" framing is wrong about the bundle but right about the binary cost; the two were conflated.
+
 ---
 
 ## ADR-024: Pre-built embedded indices for `mcp.Run` (v0.8.3)
