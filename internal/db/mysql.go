@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -28,6 +29,36 @@ import (
 
 	"github.com/townsendmerino/ken/internal/chunk"
 )
+
+// mysqlIntDisplayWidth matches the legacy integer display-width suffix
+// (e.g. "bigint(20)", "int(11)") MariaDB 10.x / 11.x still emits for
+// integer-family columns + scalar-function return types. MySQL 8.0
+// deprecated and removed these widths (MySQL bug #80094, "Deprecate the
+// display width of integer types"); MySQL 8.4 now returns the bare
+// "bigint" / "int" form. ADR-019's v0.7.2 chunks were captured against
+// MySQL 8.x and use the bare form; v0.8.1 Part B normalizes MariaDB
+// output to match so cross-engine chunk text stays identical. See
+// ADR-021 for the full divergence audit + the rejected probe-and-branch
+// alternative.
+var mysqlIntDisplayWidth = regexp.MustCompile(`\b(bigint|int|mediumint|smallint|tinyint)\(\d+\)`)
+
+// normalizeMySQLIntType strips the legacy integer display-width suffix
+// from a MySQL/MariaDB type expression. Idempotent: MySQL 8.x output
+// already lacks the suffix, so the regex matches nothing and the
+// string is returned unchanged. The transform preserves modifiers
+// downstream of the type ("bigint(20) unsigned" → "bigint unsigned").
+//
+// Limited to integer families because:
+//   - char/varchar/binary/varbinary genuinely need their (N) (the size
+//     IS the type's semantic) and both engines emit them identically.
+//   - decimal/numeric have (precision,scale) which is also semantic.
+//   - enum/set have ('a','b','c') member lists — wholly different shape.
+//
+// Only the integer family lost its display-width parameter in MySQL 8.0;
+// only the integer family needs normalization.
+func normalizeMySQLIntType(s string) string {
+	return mysqlIntDisplayWidth.ReplaceAllString(s, "$1")
+}
 
 // mysqlDB is the engine label used in the freshness header
 // ("-- indexed at ... from mysql@<host>"). Distinct from the driver
@@ -332,7 +363,7 @@ ORDER BY t.table_schema, t.table_name, c.ordinal_position;
 		}
 		col := columnInfo{
 			name:     colName,
-			dataType: strings.ToLower(colType),
+			dataType: normalizeMySQLIntType(strings.ToLower(colType)),
 			notNull:  !strings.EqualFold(isNullable, "YES"),
 		}
 		if defaultExpr.Valid {
@@ -651,7 +682,7 @@ ORDER BY routine_schema, routine_name;
 		}
 		m := routineMeta{schema: schema, name: name, routineType: rtype}
 		if strings.EqualFold(rtype, "FUNCTION") && ret.Valid {
-			m.returnT = strings.ToLower(ret.String)
+			m.returnT = normalizeMySQLIntType(strings.ToLower(ret.String))
 		}
 		metas = append(metas, m)
 	}
@@ -694,7 +725,7 @@ ORDER BY specific_schema, specific_name, ordinal_position;
 		}
 		k := key{schema, name}
 		// "name type" if the parameter has a name, else just "type".
-		entry := strings.ToLower(dataType)
+		entry := normalizeMySQLIntType(strings.ToLower(dataType))
 		if paramName.Valid && paramName.String != "" {
 			entry = paramName.String + " " + entry
 		}

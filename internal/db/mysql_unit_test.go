@@ -235,3 +235,67 @@ func TestDSNEngine(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizeMySQLIntType pins the v0.8.1 Part B integer display-width
+// stripping behavior. MariaDB 11.x still emits the legacy "(N)" suffix
+// for integer-family columns + scalar-function return types; MySQL 8.x
+// dropped them in 8.0 (bug #80094). The normalizer collapses the MariaDB
+// output to match the MySQL form so cross-engine chunk text stays byte-
+// identical. Idempotent — running it on already-bare input is a no-op.
+//
+// See ADR-021 for the full audit + the rejected probe-and-branch
+// alternative.
+func TestNormalizeMySQLIntType(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// Tier-1 transforms — MariaDB → MySQL form.
+		{"bigint(20)", "bigint(20)", "bigint"},
+		{"int(11)", "int(11)", "int"},
+		{"smallint(6)", "smallint(6)", "smallint"},
+		{"tinyint(4)", "tinyint(4)", "tinyint"},
+		{"mediumint(9)", "mediumint(9)", "mediumint"},
+
+		// Modifiers downstream of the type preserved.
+		{"unsigned modifier preserved", "bigint(20) unsigned", "bigint unsigned"},
+		{"zerofill modifier preserved", "int(11) unsigned zerofill", "int unsigned zerofill"},
+
+		// MySQL 8.x output — already bare, idempotent.
+		{"already bare bigint", "bigint", "bigint"},
+		{"already bare int unsigned", "int unsigned", "int unsigned"},
+
+		// Non-integer families must NOT be touched (their (N) is semantic).
+		{"varchar with size retained", "varchar(255)", "varchar(255)"},
+		{"char with size retained", "char(36)", "char(36)"},
+		{"decimal with precision retained", "decimal(10,2)", "decimal(10,2)"},
+		{"binary with size retained", "binary(16)", "binary(16)"},
+		{"varbinary with size retained", "varbinary(255)", "varbinary(255)"},
+
+		// Tinyint(1) is the special case MySQL/MariaDB BOTH use to mean
+		// boolean; the (1) carries the semantic, but historically both
+		// engines also accept "tinyint(4)" / "tinyint(20)" with the
+		// same column. We strip uniformly — agents reading the chunk see
+		// "tinyint" and treat boolean-vs-int via context, which is the
+		// same disambiguation they'd do for SQLite (no native bool).
+		{"tinyint(1) stripped uniformly", "tinyint(1)", "tinyint"},
+
+		// Function-return-type forms.
+		{"function returns int(11)", "int(11)", "int"},
+
+		// Mixed string with non-int parens left alone.
+		{"varchar(64) + tinyint(4)", "varchar(64), tinyint(4)", "varchar(64), tinyint"},
+
+		// Empty input.
+		{"empty string", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := normalizeMySQLIntType(c.in)
+			if got != c.want {
+				t.Errorf("normalizeMySQLIntType(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
