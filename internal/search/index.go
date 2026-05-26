@@ -442,8 +442,18 @@ func (ix *Index) WithExtraChunks(extras []chunk.Chunk) *Index {
 	var mergedVecs [][]float32
 	if ix.model != nil {
 		// Semantic / hybrid: encode extras via the retained model.
-		// ix.vecs may be nil (BM25 mode promoted to semantic via a
-		// build path that omitted vecs); guard for that.
+		// Invariant: when model != nil, ix.vecs has one entry per
+		// existing chunk. BuildIndex enforces this on all current
+		// callers (FromFSWithModel + LoadSerializedIndex); a
+		// hypothetical caller that sets model without parallel vecs
+		// would produce a short mergedVecs and ann.Flat over a
+		// truncated matrix — wrong rankings silently. L2 hardening:
+		// fail fast in that case rather than continue with bad data.
+		if len(ix.vecs) != len(ix.chunks) {
+			panic(fmt.Sprintf(
+				"search: WithExtraChunks invariant: model != nil requires len(vecs)==len(chunks); got vecs=%d chunks=%d",
+				len(ix.vecs), len(ix.chunks)))
+		}
 		extraVecs := make([][]float32, len(extras))
 		for i, c := range extras {
 			extraVecs[i] = ix.model.Encode(c.Text)
@@ -473,7 +483,12 @@ func (ix *Index) Mode() Mode { return ix.mode }
 // ResolveChunk returns the chunk that contains the 1-indexed line in
 // filePath, or nil if there is none. Mirrors semble utils._resolve_chunk:
 // prefer an interior hit (line < end_line); fall back to a boundary
-// (line == end_line) so end-of-file references still resolve.
+// (line == end_line) so end-of-file references still resolve. With
+// multiple boundary-tied candidates the FIRST one in chunk-slice order
+// wins — for chunks produced by repo.WalkFS that's deterministic
+// (lexical file order, then in-file order from the chunker), but
+// readers should not depend on the specific tied-boundary winner if
+// they reorder the chunk slice.
 //
 // Tombstoned chunks are skipped — a file that's been deleted under v0.3's
 // incremental indexing should resolve to nil even if its chunks are still
@@ -561,10 +576,14 @@ func (ix *Index) Search(query string, k int) []Result {
 // returns; over-fetch by the tombstone count so the filtered result
 // still hits k on indices with edit churn.
 func (ix *Index) SearchMode(query string, k int, mode Mode) ([]Result, Mode) {
-	if mode != ModeBM25 && ix.flat == nil {
+	if mode != ModeBM25 && (ix.flat == nil || ix.model == nil) {
 		// Capability downgrade: requested semantic/hybrid but no
 		// flat/model. Fall back to BM25 so the caller gets results
-		// rather than a panic.
+		// rather than a panic. Both checks are defensive: BuildIndex
+		// sets flat + model atomically today, but a future construction
+		// path that sets one without the other (e.g. LoadSerializedIndex
+		// with model==nil — caught earlier by ErrModelRequired in v0.8.3,
+		// but defense-in-depth here) shouldn't panic.
 		mode = ModeBM25
 	}
 	overFetch := k + ix.tombstoneCount()
