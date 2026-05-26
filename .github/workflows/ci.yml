@@ -64,7 +64,7 @@ jobs:
   # on this — it always runs on both OSes and the dbintegration tests
   # are gated by the build tag, so non-DB runs skip them silently.
   test-db-integration:
-    name: ubuntu / DB integration (Postgres + SQLite + MySQL + Listen)
+    name: ubuntu / DB integration (Postgres + SQLite + MySQL + MariaDB + Listen)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -97,6 +97,24 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      # v0.8.1 Part B (ADR-021): MariaDB promoted to first-class engine
+      # support. Shares the MySQL code path + driver (wire-compatible);
+      # v0.8.1 normalizes the only substantive INFORMATION_SCHEMA
+      # divergence (integer display widths) so cross-engine chunks are
+      # byte-identical. mariadb-admin ping is the canonical healthcheck
+      # for the official mariadb image (mysqladmin still works but
+      # mariadb-admin is the version-stable name post-fork).
+      mariadb:
+        image: mariadb:11-jammy
+        env:
+          MARIADB_ROOT_PASSWORD: test
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "mariadb-admin ping -h localhost -ptest --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v6
       - name: Set up Go
@@ -123,10 +141,14 @@ jobs:
       # Same -tags=dbintegration gate; per-test file checks the relevant
       # env var and skips if absent. v0.8.0: also runs the four listener
       # integration tests against the trigger installed above.
-      - name: internal/db integration tests (Postgres + SQLite + MySQL + Listen)
+      - name: internal/db integration tests (Postgres + SQLite + MySQL + MariaDB + Listen)
         env:
           KEN_DB_TEST_DSN: postgres://postgres:test@127.0.0.1:5432/postgres?sslmode=disable
           KEN_DB_MYSQL_TEST_DSN: root:test@tcp(127.0.0.1:3306)/?parseTime=true&multiStatements=true
+          # v0.8.1 Part B: the MySQL integration suite is parameterized
+          # over both engines; the runner skips MariaDB if this DSN is
+          # unset, matching the existing MySQL skip behavior.
+          KEN_DB_MARIADB_TEST_DSN: root:test@tcp(127.0.0.1:3307)/?parseTime=true&multiStatements=true
         run: go test -tags=dbintegration ./internal/db/
 
       # Also exercise the cmd/ken-mcp DB-variant stdout-cleanliness test
@@ -160,6 +182,20 @@ jobs:
         env:
           KEN_DB_MYSQL_TEST_DSN: root:test@tcp(127.0.0.1:3306)/ken_test?parseTime=true
         run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithMySQL -v
+
+      # v0.8.1 Part B (ADR-021): same audit against MariaDB. Driver
+      # is shared with MySQL (go-sql-driver/mysql), so the stdout
+      # contract is wire-protocol-tested by the MySQL variant; this
+      # test additionally exercises the integer-display-width
+      # normalization path against the live MariaDB server-version
+      # output. mysql client speaks to MariaDB on port 3307 here.
+      - name: prepare ken_test database (MariaDB)
+        run: |
+          mysql -h 127.0.0.1 -P 3307 -uroot -ptest -e 'CREATE DATABASE IF NOT EXISTS ken_test;'
+      - name: cmd/ken-mcp stdout audit with MariaDB
+        env:
+          KEN_DB_MARIADB_TEST_DSN: root:test@tcp(127.0.0.1:3307)/ken_test?parseTime=true
+        run: go test ./cmd/ken-mcp/ -run TestBinary_StdoutIsCleanJSONRPC_WithMariaDB -v
 
       # v0.8.0 (ADR-020): confirm the listener's dedicated pgx.Conn
       # doesn't leak anything to stdout when KEN_DB_LISTEN=1 fires the

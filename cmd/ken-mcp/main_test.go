@@ -874,6 +874,86 @@ func TestBinary_StdoutIsCleanJSONRPC_WithMySQL(t *testing.T) {
 	}
 }
 
+// TestBinary_StdoutIsCleanJSONRPC_WithMariaDB is the v0.8.1 Part B
+// sibling of _WithMySQL: spawns the real ken-mcp binary with a MariaDB
+// DSN set via KEN_DB_MARIADB_TEST_DSN. MariaDB shares the
+// go-sql-driver/mysql driver with MySQL (wire-compatible), so the
+// stdout-contract surface is the same; this test exists to (1) pin the
+// contract against the live MariaDB server version output, and (2)
+// exercise the v0.8.1 integer-display-width normalization path against
+// real MariaDB chunks. ADR-021 records the divergence-audit findings.
+//
+// Skipped when KEN_DB_MARIADB_TEST_DSN is unset. CI sets it via the
+// mariadb:11-jammy service container in .github/workflows/ci.yml.
+func TestBinary_StdoutIsCleanJSONRPC_WithMariaDB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess MCP test in -short mode")
+	}
+	dsn := os.Getenv("KEN_DB_MARIADB_TEST_DSN")
+	if dsn == "" {
+		t.Skip("KEN_DB_MARIADB_TEST_DSN not set; see internal/db/mysql_integration_test.go for setup")
+	}
+
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "ken-mcp")
+	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
+	}
+
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(repoRoot, "testdata", "repo")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binPath)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"KEN_MCP_MODE=bm25",
+		"KEN_MCP_CHUNKER=regex",
+		"KEN_MCP_LOG_LEVEL=info",
+		"KEN_MCP_DEFAULT_REPO=" + fixture,
+		"KEN_DB_DSN=" + dsn,
+		"KEN_DB_SAMPLE_ROWS=2",
+		"KEN_DB_SCHEMAS=ken_test",
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-test-mariadb", Version: "0"}, nil)
+	sess, err := cli.Connect(ctx, &sdk.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("Connect (with MariaDB DSN): %v\n--stderr--\n%s", err, stderr.String())
+	}
+	defer sess.Close()
+
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query": "validate_user",
+			"mode":  "bm25",
+			"top_k": 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search) with MariaDB DSN: %v\n--stderr--\n%s", err, stderr.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(txt, "Search results for:") {
+		t.Errorf("search output malformed with MariaDB DSN:\n%s", txt)
+	}
+
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "Tier 2: indexed") {
+		t.Errorf("expected 'Tier 2: indexed' in stderr (proves MariaDB code ran), got:\n%s", stderrStr)
+	}
+}
+
 // TestBinary_StdoutIsCleanJSONRPC_WithSQLite is the v0.7.1 sibling of
 // _WithDB: spawns the real ken-mcp binary with KEN_DB_DSN pointing at a
 // local SQLite file (created by this test). Confirms modernc.org/sqlite
