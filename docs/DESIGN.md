@@ -156,6 +156,33 @@ Supporting changes that landed alongside `mcp.Run`:
 - `internal/chunk/markdown` — heading-aware chunker for documentation corpora (heading-bounded sections, atomic fenced-code / tables / lists, frontmatter handling, byte-fidelity preserved). Registered as `"markdown"` in the chunker registry.
 - Chunker side-effect registration moved out of `internal/search` into the binaries that want each optional chunker. `internal/search` keeps the `regex` (universal default) blank-import; `cmd/ken` and `cmd/ken-mcp` add `treesitter` + `markdown`; `cmd/ken-mcp-docs` adds only `markdown`. This is what keeps the ~26 MB `gotreesitter/grammars` blob bundle out of the docs binary (per-binary chunker selection; not per-grammar — the bundle is monolithic at the embed layer, per [ADR-023](DECISIONS.md#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome)).
 
+### Pre-built embedded indices — `mcp.Run` cold-start optimization (v0.8.3)
+
+v0.8.3 closes the cold-start loop v0.6.0 left open. The expensive part of building an `*Index` is the per-chunk `model.Encode` call (linear in corpus size; dominates startup for any semantic / hybrid embedded corpus). v0.8.3 adds **serialize/deserialize primitives** in `internal/search` so SDK authors can pre-build their index once at `go generate` / build time and ship the bytes inside their `//go:embed` corpus, skipping the per-launch walk + chunk + embed pass.
+
+Three surfaces land together (ADR-024):
+
+- **`search.BuildAndSerializeIndex(fsys, opts) ([]byte, error)`** — library function. Wraps the existing `walkAndChunkFSWithModel` + a new `serializeIndex` internal helper. SDK authors who script the build call this directly; the CLI subcommand is a thin operator-facing wrapper.
+- **`search.LoadSerializedIndex(data, opts) (*Index, error)`** — library function. Validates the on-disk header + CRC32 trailer, reconstructs the chunks slice + embedding matrix, calls the existing `BuildIndex` to re-tokenize for BM25 + wire up `ann.Flat`. Returns typed errors (`ErrCorrupt` / `ErrFormatVersion` / `ErrModeMismatch` / `ErrChunkerMismatch` / `ErrModelRequired`) so callers can decide whether to fall back or hard-fail.
+- **`ken build-index <corpus> -o <output_path>`** — CLI subcommand. Model resolution priority order matches `ken index` / `ken search` (`--model` flag → `KEN_MODEL_DIR` → `~/.ken/model` → `./testdata/model`). Writes atomically (`<output>.tmp` + `os.Rename`); auto-creates the parent directory.
+
+Two `mcp.Run` integrations:
+
+- **Convention-over-configuration auto-discovery.** `mcp.Run` reads `corpus/.ken/index.bin` from the supplied `fs.FS` (if present). SDK authors who follow the convention add zero `main.go` lines from the v0.6.0 baseline; only their build script gets the extra `ken build-index` call.
+- **`Options.PrebuiltIndex []byte` explicit override.** For SDK authors using a non-conventional layout (index in a sibling `embed.FS`, index outside the corpus root, etc.). When set, the explicit bytes win and auto-discovery is skipped.
+
+**Lazy fallback on any load failure** keeps the optimization opt-in to the upside, never opt-in to the failure mode: corrupt bytes, format-version mismatch, mode mismatch, chunker mismatch — all log a stderr warning naming the reason + suggest `ken build-index` to refresh, then fall back to `search.FromFSWithModel` (the v0.6.0 build-from-corpus behavior). The pre-built path is purely an optimization, never a requirement; a stale or corrupt pre-built file gets a slower-but-still-working binary, not a crash.
+
+**Walker `.ken/` prune.** `internal/repo`'s walker (both `WalkFS` and `Matcher.ShouldIndex`) skips `.ken/` directories analogously to the existing `.git/` prune. Without this, the pre-built index file would be chunked as part of the corpus on the lazy-fallback path. No env var; convention.
+
+**Binary format spec.** Custom binary with `"KEN1"` magic + uint32 format-version gate + informational ken-version string + len-prefixed chunks/vecs sections + CRC32 IEEE corruption trailer. The format reference lives at the top of `internal/search/index_serialize.go`. Internal-only — not a public API; ken's own serialization for its own use. JSON / gob / protobuf were considered + rejected (ADR-024's alternatives).
+
+**BM25 internals are NOT serialized.** `BuildIndex` re-tokenizes every chunk on load and rebuilds postings + df + docLen from the chunks slice — deterministic by construction (chunks come from `repo.WalkFS` in lexical order). The cost is negligible compared to the embedding matrix the optimization actually saves.
+
+**Model-reference handling.** Semantic / hybrid `ix.Search` re-encodes the user's query string at query time (the pre-built matrix only covers the corpus). `LoadOptions.Model` is therefore mandatory for non-BM25 modes (returns `ErrModelRequired` if missing); the resulting `*Index` carries the supplied model, so `WithExtraChunks` works on loaded indices the same way it works on freshly-built ones. Combination "pre-built index + `mcp/db.Setup` chunk integration" works out of the box.
+
+This is a **cold-start time** optimization, not a retrieval-quality change — `docs/BENCH.md`'s hybrid-retrieval recall@10 numbers measure a different system and are unaffected. Same calibration discipline as v0.8.1 / v0.8.2: name the actual gap closed, do not over-claim across system boundaries.
+
 ## 2. Code chunking without cgo
 
 Tree-sitter is how semble (via Chonkie) gets sub-sentence chunks that respect function/class boundaries instead of cutting through them. Lose that and retrieval quality drops, because a chunk that splits a function in half is worth less to a code search. So this is the choice that materially affects NDCG.

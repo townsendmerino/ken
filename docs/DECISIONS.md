@@ -29,6 +29,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-021](#adr-021-mariadb-first-class-engine-support-v081-part-b) | MariaDB first-class engine support (v0.8.1 Part B) | Accepted |
 | [ADR-022](#adr-022-rename-column--rename-constraint-folding-via-eager-application-v081-part-c) | RENAME COLUMN + RENAME CONSTRAINT folding via eager application (v0.8.1 Part C) | Accepted |
 | [ADR-023](#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome) | `gotreesitter` `grammar_subset` machinery + binary-size reduction outcome (v0.8.2 investigation outcome) | Accepted |
+| [ADR-024](#adr-024-pre-built-embedded-indices-for-mcprun-v083) | Pre-built embedded indices for `mcp.Run` (v0.8.3) | Accepted |
 
 ---
 
@@ -1203,3 +1204,91 @@ The shape classification: **partially cooperative, fundamentally limited for the
 - **Calibration credibility upheld.** v0.8.2's release narrative is "we investigated; here's the answer; here's what would change the answer." No surface (CHANGELOG, this ADR, README, release notes, commit messages, the #16 closing comment) conflates documentation-only work with shipped binary-size reduction. The 74 MB binary measured in ADR-016 stays 74 MB after v0.8.2. Future investigation-outcome releases — the natural shape any time ken investigates a feature path and finds the path closed — follow this template: name the actual gap, name the upstream / external trigger that would change the answer, document the stop-gap that's available if pain becomes acute, close the issue with the trigger as the reopening condition. Same discipline as [ADR-021](#adr-021-mariadb-first-class-engine-support-v081-part-b)'s tiered-divergence framing and [ADR-022](#adr-022-rename-column--rename-constraint-folding-via-eager-application-v081-part-c)'s Tier-1-chunk-fidelity-vs-recall framing, applied to a "the answer is no, here's why, here's what would change it" outcome rather than a feature ship.
 
 - **v0.8.2 ready to tag** after this lands. The investigation-outcome release ships as one fast-forward merge of branch `v0.8.2-investigation` — two commits (the docs commit carrying this ADR + the ADR-016 amendment + DESIGN.md correction, plus a separate CHANGELOG commit for reviewability of the user-facing narrative). v0.8.x calibration-release shape extends naturally: each Part / each point release closes a specific gap between claim and delivery, including the "the claim doesn't work yet and here's why" case.
+
+---
+
+## ADR-024: Pre-built embedded indices for `mcp.Run` (v0.8.3)
+
+**Status:** Accepted
+
+**Date:** 2026-05-26
+
+**Issue:** [townsendmerino/ken#10](https://github.com/townsendmerino/ken/issues/10); closes the cold-start loop left open by [ADR-016](#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function).
+
+### Context
+
+[ADR-016](#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) shipped the embedded-corpus build pattern (`mcp.Run` + `embed.LoadFromFS` + the markdown chunker) in v0.6.0: SDK authors `go build` once and ship a single static binary that serves search / find_related over their `//go:embed` corpus. The product story works end-to-end as of v0.6.0; the canonical worked example (`cmd/ken-mcp-docs`) is a ~20-line `main.go` that bakes ken's own docs + the Model2Vec model into a 74 MB binary.
+
+Every `mcp.Run` startup walks the embedded corpus, chunks every indexable file, and (for semantic / hybrid mode) calls `model.Encode` on every chunk to produce the dense embedding matrix. The embedding pass is linear in corpus size and dominates cold-start time — for a small docs corpus (~100 files / ~500 chunks) it's modest; for a larger embedded corpus (~10K+ chunks) it's seconds-to-minutes of CPU on each process launch. v0.6.0's "binary IS the corpus" pitch is undermined when starting the binary takes meaningfully longer than starting any other agent backend.
+
+Narrative: **"v0.6.0 shipped embedded corpora; v0.8.3 makes their cold start fast."** Same calibration shape as v0.7.x → v0.8.x: each release closes a specific gap the prior release left open.
+
+### Decision
+
+Serialize the built `*search.Index` artifact (chunks slice + parallel embedding matrix) to a custom binary format SDK authors can ship inside their `//go:embed` corpus. Three new surfaces + two integrations:
+
+**Three library / CLI surfaces:**
+
+1. **`search.BuildAndSerializeIndex(fsys fs.FS, opts BuildOptions) ([]byte, error)`** — library function. Wraps the existing `walkAndChunkFSWithModel` + a new `serializeIndex` internal helper. SDK authors who script the build in their `go generate` or Makefile call this directly; the CLI subcommand below is just a thin operator-facing wrapper around it.
+
+2. **`search.LoadSerializedIndex(data []byte, opts LoadOptions) (*Index, error)`** — library function. Validates the on-disk header + CRC32 trailer, reconstructs the chunks slice + embedding matrix, calls the existing `BuildIndex` to re-tokenize for BM25 + wire up the `ann.Flat` index. Returns one of `ErrCorrupt` / `ErrFormatVersion` / `ErrModeMismatch` / `ErrChunkerMismatch` / `ErrModelRequired` on any mismatch so callers can take the lazy-fallback path.
+
+3. **`ken build-index <corpus_dir> -o <output_path>`** — operator-facing CLI subcommand of the existing `ken` binary. Resolves the model the same way `ken index` / `ken search` do (`--model` flag → `KEN_MODEL_DIR` → `~/.ken/model` → `./testdata/model`). Writes the bytes atomically (`<output>.tmp` + `os.Rename`).
+
+**Two `mcp.Run` integrations:**
+
+4. **Convention-over-configuration auto-discovery.** `mcp.Run` reads `corpus/.ken/index.bin` from the supplied `fs.FS` (if present). The literal path `.ken/index.bin` is the convention; no env var, no `Options` path field. SDK authors who follow the convention add zero lines to their `main.go` from the v0.6.0 baseline.
+
+5. **`Options.PrebuiltIndex []byte` explicit override.** For SDK authors using a non-conventional layout (index in a sibling `embed.FS`, index outside the corpus root, etc.). When set, the explicit bytes win and the auto-discovery path is skipped.
+
+**Lazy fallback on any load failure.** Corrupt bytes, format-version mismatch, mode mismatch, chunker mismatch, missing-from-FS — all of these log a stderr warning naming the reason + suggest `ken build-index` to refresh, and fall back to the v0.6.0 build-from-corpus path (`search.FromFSWithModel`). The pre-built path is purely an optimization, never a requirement; an SDK author who deploys a stale or corrupt pre-built file gets a slower-but-still-working binary, not a crash.
+
+**Walker exclusion.** `internal/repo`'s walker (both `WalkFS` and `Matcher.ShouldIndex`) prunes `.ken/` directories analogously to the existing `.git/` prune. Without this, the pre-built index file would be chunked as part of the corpus on the lazy-fallback path. No env var; convention.
+
+**Binary format.** Custom binary with explicit version header, len-prefixed sections, CRC32 IEEE trailer. Format reference lives in the file header of `internal/search/index_serialize.go`; the on-disk layout is internal-only (ken's own serialization for its own use), not a public API. Format version gate (currently `1`) detects incompatible upgrades; the ken-version field is informational only.
+
+**BM25 internals are NOT serialized.** BuildIndex re-tokenizes every chunk on load and rebuilds postings + df + docLen. Deterministic by construction (chunks come from `repo.WalkFS` in lexical order; `BuildIndex` iterates the slice directly with no map iteration). The cost is negligible compared to the embedding matrix the optimization actually saves.
+
+**Model-reference handling.** Semantic / hybrid `ix.Search` re-encodes the user's query string at query time to compare against the precomputed corpus matrix; the model is required at query time, not just at build time. `LoadOptions.Model` is therefore mandatory for non-BM25 modes (returns `ErrModelRequired` if missing). The resulting `*Index` carries the supplied model, so `WithExtraChunks` works on loaded indices the same way it works on freshly-built ones — the combination "pre-built index + mcp/db chunk integration" works out of the box.
+
+### Alternatives considered
+
+- **Sidecar index files alongside the binary** (write the bytes to `~/.ken/cache/<corpus-hash>.bin`; load from disk at startup; rebuild + cache on miss). Rejected. Breaks the v0.6.0 single-static-binary contract — SDK authors lose the "one executable, no per-platform assets, push it and users `go install`" property. The pitch is "binary IS the corpus, version-pinned by build artifact;" sidecars push complexity back into the deployment story. Embedded via `//go:embed` keeps the contract intact. SDK authors who want sidecars can call `BuildAndSerializeIndex` themselves and write the bytes wherever they like — not the blessed path, but mechanically supported.
+
+- **JSON serialization format.** Rejected. JSON inflates the embedding matrix dramatically (a 256-dim `float32` chunk becomes 256 stringified-decimal numbers + commas + brackets, roughly 5× the size; with base64 it's still ~33% larger than raw little-endian bytes); slower to parse (lexer + decoder + value boxing vs `math.Float32frombits` on a slice); no compact format for binary blob sections; line numbers are ints serialized as decimal. Custom binary keeps the file tight and parsing essentially free. The cost is writing serialization tests; the benefit is no third-party format dependency.
+
+- **`encoding/gob` serialization format.** Rejected. `gob` is Go-idiomatic and ergonomic, but the format's stability stance is "the program that wrote the data is responsible for ensuring it can be read" — explicitly not designed for cross-build / cross-release stability. ken's pre-built indices are produced at `go generate` time and consumed at runtime by potentially different ken builds; using `gob` would couple the on-disk format to whatever the Go toolchain happens to emit on the build machine. Custom binary with an explicit format version is more robust + easier to reason about.
+
+- **Protobuf or other schema language.** Rejected for v0.8.3. Adds a dependency (the `google.golang.org/protobuf` runtime + the schema build step + the generated `.pb.go` file in the tree); schema-evolution overhead (every format change is two PRs: schema + code); cross-language interop is irrelevant here (the format is internal). Custom binary keeps the dep tree clean and the format under ken's control. If a future use case actually needs cross-language interop (Python SDK consuming ken-built indices, for instance), revisit then.
+
+- **Strict-version-only load (no forward-compatibility for the ken-version field).** Rejected. The format-version field IS strictly gated (mismatch → `ErrFormatVersion`); the ken-version field is informational only. Forward-compatible header reads let ken patch / minor releases that don't change the format load older indices without forcing SDK authors to re-run `ken build-index` on every ken upgrade. Strict-version-only would multiply the maintenance burden on SDK authors for no benefit. The trade is the format-version gate carrying the load — it's the field that actually says "the bytes mean what this code thinks they mean."
+
+- **Hard-error fallback (refuse to start on missing / corrupt index).** Rejected. The lazy-fallback path ensures the binary always works — a deployed SDK author binary with a stale or corrupt pre-built file is slower-to-start, never broken. Stderr warning makes the fallback visible to operators without breaking the deployment. The hard-error variant would treat the cold-start optimization as a configuration requirement, escalating "the optimization went stale" from a slow-start warning to a deployment outage. Optimizations should be opt-in to the upside, not opt-in to the failure mode.
+
+- **Configurable fallback mode (`Options.IndexFallback strict|lazy`).** Rejected for v0.8.3. Doubles the test surface (each pre-built code path now has two variants) for a binary decision a single deployment shape per release suffices for. If a deployment scenario emerges where strict-fail is genuinely needed — e.g., the SDK author treats a stale pre-built index as a configuration error worth halting startup over — revisit in a future release. The alternative is reversible: add the field non-breakingly, default to lazy, off-by-default-strict for opt-in.
+
+- **Pre-built indices for `cmd/ken-mcp`'s watch path.** Deferred to v0.9.0+. The watch path's optimization profile is fundamentally different: fsnotify-triggered incremental rebuilds (ADR-012), atomic snapshot swap on each rebuild, per-process LRU cache + singleflight dedup across repo paths. Pre-built indices in that world would need invalidation logic on fsnotify events, cache-key handling for multi-repo state, and per-process lifetime management — a separate design conversation. v0.8.3 focuses on `mcp.Run`'s cold start where the corpus is `//go:embed`-static-by-construction and the optimization shape is clean: build once at `go generate` time, load once at startup. If `cmd/ken-mcp` startup also turns out to be too slow, the v0.9.0+ design picks up the open question.
+
+- **Serialize the BM25 internal state (postings + df + docLen + tokenizer settings).** Rejected. The embedding pass dominates cold-start by 2-3 orders of magnitude; rebuilding BM25 from already-decoded chunks via the existing `BuildIndex` is ~1% of the optimization budget. Serializing BM25 would require exposing the `internal/bm25` package's private state through a `Marshal`/`Unmarshal` API, sorting map keys for determinism, and writing BM25-specific serialization tests — meaningful complexity for a sub-1% optimization. Skipping it keeps the format simple and the `internal/bm25` package untouched. Documented here so future contributors don't redo the cost analysis expecting a different answer.
+
+- **Bundle the model into the pre-built index file.** Rejected. The model is already independent of the index per the v0.6.0 design (`Options.ModelFS` / `Options.ModelDir` is its own loading path; SDK authors who bake the model into their binary do so via a separate `//go:embed model/*`). Coupling them into one file would mean SDK authors using `Options.ModelDir` (e.g., a CI image with the model pre-installed) couldn't use the pre-built index. Keeping them decoupled preserves both layouts.
+
+### Consequences
+
+- **Cold-start time drops for `mcp.Run` SDK authors who opt-in via `ken build-index`.** Concrete numbers depend on corpus size: small docs corpora (~100 files, ~500 chunks) see modest improvements; large embedded corpora (~10K+ chunks) save the embedding pass's seconds-to-minutes of CPU on each process launch. The v0.6.0 "binary IS the corpus, instantly servable" pitch holds at scale, not just at docs-site size. The exact numbers will land in the v0.8.3 GitHub Release notes once measured against `cmd/ken-mcp-docs` (small) and a synthetic larger fixture.
+
+- **The v0.6.0 single-binary contract is preserved.** Pre-built indices live inside the SDK author's `//go:embed` corpus, not as sidecar assets shipped alongside the binary. The contract that motivated [ADR-016](#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) — "one static cross-compiled executable, no per-platform assets, `go install` it and forget it" — survives v0.8.3 intact.
+
+- **The convention-over-configuration `.ken/index.bin` path keeps SDK author code identical to v0.6.0.** Auto-discovery means an existing v0.6.0 SDK author adds two lines to their build script (`ken build-index ./corpus -o ./corpus/.ken/index.bin` before `go build`) and gets the cold-start improvement without touching their Go code. `Options.PrebuiltIndex` is the escape hatch for non-conventional layouts.
+
+- **Pre-built indices + live DB chunks (`mcp/db.Setup`) works out of the box.** The loaded `*Index` carries the model reference supplied via `LoadOptions.Model`, so `WithExtraChunks` — the v0.8.0 Part 3 chunk-integration primitive that powers the `mcp/db.Refresher → mcp.Run` `Start` callback — works on loaded indices the same way it works on freshly-built ones. SDK authors who use both can ship a binary that boots fast AND integrates live DB schemas into search results.
+
+- **Walker now skips `.ken/` by default** in both `WalkFS` and `Matcher.ShouldIndex`. Aligns with the existing `.git/` prune (same pattern, same rationale: "this directory holds build artifacts, not corpus content"). Operators with a literal `.ken/` directory of indexable content lose those files; this is documented as a convention but expected to be rare (the name was chosen specifically for the v0.8.3 optimization, not borrowed from an existing widely-used convention).
+
+- **Calibration credibility upheld.** Cold-start time is the specific gap closed; this is not a retrieval-quality improvement, not a recall improvement, not a search-ranking change. The lazy-fallback path preserves the v0.6.0 behavior on any failure mode, so operators can't end up worse off than before. The release narrative ("v0.6.0 shipped embedded corpora; v0.8.3 makes their cold start fast") is honest about scope and doesn't conflate the optimization with system behavior changes downstream of indexing. Same discipline as [ADR-022](#adr-022-rename-column--rename-constraint-folding-via-eager-application-v081-part-c) (Tier-1 chunk fidelity, NOT retrieval recall) and [ADR-021](#adr-021-mariadb-first-class-engine-support-v081-part-b) (chunk-rendering consistency, NOT ranking).
+
+- **Format version is at 1 for v0.8.3.** Any future incompatible change (new fields in the header, restructured sections, different vec encoding) bumps the format-version constant; mismatched files trigger `ErrFormatVersion` and the lazy-fallback rebuild path. SDK authors re-run `ken build-index` on each ken upgrade that bumps the format version. The ken-version field IS NOT version-gating — same format version + different ken version loads cleanly. This keeps the upgrade surface narrow: only format-bumping releases force a rebuild.
+
+- **No new third-party dependencies.** Custom binary serialization uses `encoding/binary`, `hash/crc32`, and the existing `io/fs` plumbing. The dep tree stays clean.
+
+- **v0.8.3 ready to tag after this lands.** Four-commit cadence on `v0.8.3-prebuilt-indices`: (1) serialize/deserialize primitives + walker prune, (2) `ken build-index` CLI subcommand, (3) `mcp.Run` auto-discovery + `Options.PrebuiltIndex`, (4) docs (this ADR + CHANGELOG + README + DESIGN.md). Closes [#10](https://github.com/townsendmerino/ken/issues/10).

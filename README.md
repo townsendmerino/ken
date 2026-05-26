@@ -52,6 +52,33 @@ func main() {
 
 [`cmd/ken-mcp-docs/`](cmd/ken-mcp-docs/) is the canonical worked example — it bakes ken's own [`docs/*.md`](docs/) and the Model2Vec model into a 74 MB static binary built via [`scripts/build-docs-mcp.sh`](scripts/build-docs-mcp.sh). Design and rationale: [ADR-016](docs/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function).
 
+### Pre-building the index for faster cold start (v0.8.3)
+
+Every `mcp.Run` startup walks the embedded corpus, chunks every indexable file, and (for semantic / hybrid mode) calls `model.Encode` on every chunk to produce the dense embedding matrix. For a small docs corpus the cost is modest; for a larger embedded corpus (~10K+ chunks) it can add seconds-to-minutes of CPU on each process launch.
+
+v0.8.3 ships **pre-built embedded indices** — serialize the index once at build time, ship the bytes inside your `//go:embed` corpus, skip the walk + chunk + embed pass at runtime. Cold start drops from "build the index" to "read pre-serialized bytes + verify header."
+
+Two additions to your build script:
+
+```bash
+# Before `go build`, pre-build the index from your corpus.
+ken build-index ./corpus \
+    -o ./corpus/.ken/index.bin \
+    --mode hybrid \
+    --chunker markdown \
+    --model ~/.ken/model
+
+# Then `go build` as usual — //go:embed corpus picks up
+# .ken/index.bin alongside the rest of your files.
+go build ./cmd/your-docs-mcp
+```
+
+Your `main.go` is unchanged from the v0.6.0 baseline — `mcp.Run` auto-discovers `corpus/.ken/index.bin` from the supplied `fs.FS` and loads it. SDK authors who use a non-conventional layout (index outside the corpus FS, in a sibling `embed.FS`, etc.) can set `mcp.Options.PrebuiltIndex []byte` explicitly.
+
+**Lazy fallback on any load failure** — corrupt bytes, format-version mismatch, mode / chunker mismatch — produces a stderr warning + falls back to the v0.6.0 build-from-corpus path. The pre-built path is purely an optimization, never a requirement; a stale or corrupt pre-built file gets you a slower-but-still-working binary, not a crash. Re-run `ken build-index` to refresh.
+
+Design and rationale: [ADR-024](docs/DECISIONS.md#adr-024-pre-built-embedded-indices-for-mcprun-v083).
+
 ### Why this is interesting
 
 - **Zero-infrastructure distribution.** No backend, no vector DB, no per-query cloud calls. The binary IS the corpus.
