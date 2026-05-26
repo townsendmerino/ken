@@ -209,6 +209,15 @@ func (c *Chunker) Chunk(source []byte, language string, chunkSize int) ([]chunk.
 	}
 
 	spans := cAST(root, uint32(len(source)), uint32(chunkSize))
+	// Belt-and-braces: layer 1 (splitNode's end<start guard in cast.go)
+	// catches degenerate single nodes from gotreesitter ERROR-recovery;
+	// this layer catches sibling-ordering defects the cAST re-derive
+	// pass can still produce when gotreesitter emits siblings whose
+	// start bytes aren't monotonic. If anything still looks wrong, fall
+	// back to the line chunker rather than panic in the slice op below.
+	if !spansValid(spans, uint32(len(source))) {
+		return c.fallback(source, language, chunkSize)
+	}
 	out := make([]chunk.Chunk, len(spans))
 	for i, sp := range spans {
 		text := string(source[sp.start:sp.end])
