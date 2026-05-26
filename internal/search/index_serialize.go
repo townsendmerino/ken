@@ -528,9 +528,9 @@ func deserializeChunks(body []byte, expectedN int) ([]chunk.Chunk, error) {
 // that vecsLen == numChunks * embedDim * 4, so this is a tight loop.
 func deserializeVecs(body []byte, numChunks, embedDim int) [][]float32 {
 	vecs := make([][]float32, numChunks)
-	for i := 0; i < numChunks; i++ {
+	for i := range numChunks {
 		v := make([]float32, embedDim)
-		for j := 0; j < embedDim; j++ {
+		for j := range embedDim {
 			off := (i*embedDim + j) * 4
 			v[j] = math.Float32frombits(binary.LittleEndian.Uint32(body[off : off+4]))
 		}

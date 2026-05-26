@@ -366,11 +366,8 @@ func TestSerializeRoundtrip_Determinism_Semantic(t *testing.T) {
 	if !bytes.Equal(a, b) {
 		// Find the first divergent byte to help triage.
 		diffAt := -1
-		minLen := len(a)
-		if len(b) < minLen {
-			minLen = len(b)
-		}
-		for i := 0; i < minLen; i++ {
+		minLen := min(len(b), len(a))
+		for i := range minLen {
 			if a[i] != b[i] {
 				diffAt = i
 				break
@@ -484,7 +481,7 @@ func TestLoadSerialized_HostileEmbedDim_OverflowGuard(t *testing.T) {
 	writeU32LE(&buf, uint32(1<<29)+1) // embedDim that overflows uint32 math
 	// Chunks section: two 17-byte empty chunks (file="" + 0 + 0 + 0 + text="").
 	writeU32LE(&buf, 34) // chunksLen
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		writeU32LE(&buf, 0) // file LP len
 		writeU32LE(&buf, 0) // startLine
 		writeU32LE(&buf, 0) // endLine

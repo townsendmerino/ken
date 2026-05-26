@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"maps"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -24,9 +25,7 @@ func corpusWithPrebuilt(t *testing.T, mode search.Mode, chunker string) (fstest.
 		t.Fatalf("BuildAndSerializeIndex: %v", err)
 	}
 	withPrebuilt := fstest.MapFS{}
-	for k, v := range base {
-		withPrebuilt[k] = v
-	}
+	maps.Copy(withPrebuilt, base)
 	withPrebuilt[".ken/index.bin"] = &fstest.MapFile{Data: data}
 	return withPrebuilt, data
 }
@@ -146,9 +145,7 @@ func TestRun_ValidExplicitPrebuiltIndex(t *testing.T) {
 	// corrupt bytes would have produced a warn-level "failed to
 	// load" log; the explicit-override path would succeed cleanly.
 	corpus := fstest.MapFS{}
-	for k, v := range embeddedCorpus() {
-		corpus[k] = v
-	}
+	maps.Copy(corpus, embeddedCorpus())
 	corpus[".ken/index.bin"] = &fstest.MapFile{Data: []byte("not a valid index")}
 
 	logBuf := &bytes.Buffer{}
@@ -183,9 +180,7 @@ func TestRun_ValidExplicitPrebuiltIndex(t *testing.T) {
 // message and still builds the index from corpus.
 func TestRun_CorruptPrebuiltIndex_FallsBackWithWarning(t *testing.T) {
 	fsys := fstest.MapFS{}
-	for k, v := range embeddedCorpus() {
-		fsys[k] = v
-	}
+	maps.Copy(fsys, embeddedCorpus())
 	// Garbage bytes — fails the magic check.
 	fsys[".ken/index.bin"] = &fstest.MapFile{Data: []byte("this is not a valid ken index")}
 
