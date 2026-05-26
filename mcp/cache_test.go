@@ -39,6 +39,7 @@ func makeFakeBuilder(t *testing.T) (Builder, *atomic.Int64, *atomic.Int64) {
 func TestCache_HitMiss(t *testing.T) {
 	build, builds, _ := makeFakeBuilder(t)
 	c := NewCache(8, build)
+	t.Cleanup(c.Close)
 	path := t.TempDir()
 	if _, err := c.Get(context.Background(), path); err != nil {
 		t.Fatalf("first Get: %v", err)
@@ -67,6 +68,7 @@ func TestCache_SingleflightDedupesConcurrentBuilds(t *testing.T) {
 		return ix, nil, nil
 	}
 	c := NewCache(8, b)
+	t.Cleanup(c.Close)
 	path := t.TempDir()
 
 	var wg sync.WaitGroup
@@ -92,6 +94,7 @@ func TestCache_SingleflightDedupesConcurrentBuilds(t *testing.T) {
 func TestCache_KeySeparationURLvsLocalPath(t *testing.T) {
 	build, builds, _ := makeFakeBuilder(t)
 	c := NewCache(8, build)
+	t.Cleanup(c.Close)
 	// Use a real local path AND a URL with a similar tail; they MUST
 	// normalize to distinct keys.
 	local := t.TempDir() // e.g. /var/folders/.../foo
@@ -173,6 +176,7 @@ func TestCache_CloseDuringBuild_ReapsStraggler(t *testing.T) {
 func TestCache_LRUEvictionRunsCleanup(t *testing.T) {
 	build, builds, cleanups := makeFakeBuilder(t)
 	c := NewCache(2, build) // bound = 2
+	t.Cleanup(c.Close)
 	a, b, d := t.TempDir(), t.TempDir(), t.TempDir()
 	for _, p := range []string{a, b, d} {
 		if _, err := c.Get(context.Background(), p); err != nil {
