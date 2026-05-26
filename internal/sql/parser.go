@@ -109,27 +109,33 @@ func splitStatements(source []byte) []statement {
 			stmtStart = i
 		}
 
-		// Single-quoted string.
+		// Single-quoted string. Count embedded newlines so curLine
+		// stays accurate for the NEXT statement's startLine — without
+		// the catch-up, a multi-line `'...\n...'` body would skip
+		// past those newlines silently and downstream chunks would
+		// report a too-low StartLine in MCP search citations.
 		if c == '\'' {
-			i = skipSingleQuoted(source, i)
+			end := skipSingleQuoted(source, i)
+			curLine += countNewlines(source[i:end])
+			i = end
 			continue
 		}
 
-		// Double-quoted identifier.
+		// Double-quoted identifier. Same newline-catch-up as the
+		// single-quote case — quoted identifiers can legally span
+		// lines (e.g. `"weird\nname"`) and the line counter must
+		// advance with them.
 		if c == '"' {
-			i = skipDoubleQuoted(source, i)
+			end := skipDoubleQuoted(source, i)
+			curLine += countNewlines(source[i:end])
+			i = end
 			continue
 		}
 
 		// Dollar-quoted string. Tag is the identifier between the two $s.
 		if c == '$' {
 			if end, ok := skipDollarQuoted(source, i); ok {
-				// Advance line counter for any \n inside.
-				for k := i; k < end; k++ {
-					if source[k] == '\n' {
-						curLine++
-					}
-				}
+				curLine += countNewlines(source[i:end])
 				i = end
 				continue
 			}

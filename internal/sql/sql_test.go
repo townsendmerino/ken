@@ -403,3 +403,58 @@ func TestViewTruncatedWhenLong(t *testing.T) {
 		t.Errorf("expected truncation notice, got:\n%s", chunks[0].Text)
 	}
 }
+
+// TestStatementStartLine_AfterMultiLineQuoted pins the H3 fix:
+// `splitStatements` now counts newlines inside single-quoted strings
+// and double-quoted identifiers so the NEXT statement's startLine is
+// accurate. Pre-fix, the line counter only caught up after
+// dollar-quoted strings; the two sibling quote forms silently skipped
+// past embedded `\n`, and subsequent CREATE TABLE chunks reported a
+// too-low StartLine in MCP search citations.
+func TestStatementStartLine_AfterMultiLineQuoted(t *testing.T) {
+	cases := []struct {
+		name        string
+		src         string
+		needle      string
+		wantStart   int
+		description string
+	}{
+		{
+			name: "single-quoted body spans 3 lines",
+			src: "CREATE TABLE foo (id INT);\n" +
+				"INSERT INTO foo VALUES ('a\nb\nc');\n" +
+				"CREATE TABLE bar (id INT);",
+			needle:      "TABLE bar",
+			wantStart:   5,
+			description: "line 1=foo; line 2 begins INSERT, two \\n inside the string body push through lines 3,4; line 5=bar. Pre-fix reported a too-low value.",
+		},
+		{
+			name: "double-quoted identifier spans 2 lines",
+			src: "CREATE TABLE foo (id INT);\n" +
+				"CREATE TABLE \"weird\nname\" (id INT);\n" +
+				"CREATE TABLE bar (id INT);",
+			needle:      "TABLE bar",
+			wantStart:   4,
+			description: "line 1=foo; lines 2-3=quoted-ident table (one \\n inside the identifier); line 4=bar. Pre-fix reported 3.",
+		},
+		{
+			name: "multiple multi-line single-quoted strings accumulate",
+			src: "CREATE TABLE foo (id INT);\n" +
+				"INSERT INTO foo VALUES ('first\nspan');\n" +
+				"INSERT INTO foo VALUES ('second\nspan');\n" +
+				"CREATE TABLE bar (id INT);",
+			needle:      "TABLE bar",
+			wantStart:   6,
+			description: "line 6=bar after two multi-line INSERTs each pushing one \\n. Pre-fix reported 4 (counting only the four bare statement-separator \\n).",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chunks := parse(t, "lines.sql", tc.src, nil)
+			c := findChunk(t, chunks, tc.needle)
+			if c.StartLine != tc.wantStart {
+				t.Errorf("StartLine = %d, want %d (%s)", c.StartLine, tc.wantStart, tc.description)
+			}
+		})
+	}
+}
