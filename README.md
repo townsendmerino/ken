@@ -522,7 +522,7 @@ For test fixtures, `testing/fstest.MapFS` works the same way: `search.FromFS(fst
 ken ships with **two chunkers** behind the same `--chunker=` flag (CLI) / `KEN_MCP_CHUNKER=` env var (MCP):
 
 - **`regex`** *(default)* — hand-rolled per-language regex rules for Python / Go / TypeScript / Java / Rust with a line-window fallback for everything else.
-- **`treesitter`** *(opt-in)* — pure-Go tree-sitter via [`gotreesitter`](https://github.com/odvcencio/gotreesitter), running the cAST split-then-merge algorithm from [arXiv 2506.15655](https://arxiv.org/html/2506.15655). Its 206 embedded grammars account for ~26 MB of the binary and are linked into **every** build — chunker choice is a runtime flag, not a build option.
+- **`treesitter`** *(opt-in)* — pure-Go tree-sitter via [`gotreesitter`](https://github.com/odvcencio/gotreesitter), running the cAST split-then-merge algorithm from [arXiv 2506.15655](https://arxiv.org/html/2506.15655). Its 206 embedded grammars account for ~26 MB of the binary and are linked into **every** build — chunker choice is a runtime flag, not a build option. (v0.8.2 investigated per-grammar build-tag gating to shrink this; the embed layer is monolithic upstream so build tags don't actually reduce the binary today — see [ADR-023](docs/DECISIONS.md#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome).)
 
 **TL;DR:** stay on `regex` unless you index one of the languages where treesitter measurably wins.
 
