@@ -636,3 +636,60 @@ func TestFoldRename_MySQLChangeSyntax_FallsBackToBothChunks(t *testing.T) {
 	mustContain(t, body, "old_name  VARCHAR(64) NOT NULL")
 	mustContain(t, body, "CHANGE old_name new_name VARCHAR(128) NOT NULL")
 }
+
+// TestFoldRename_TableRenameFallsBack pins the M6 fix: `RENAME TO
+// <table>` reaches its dedicated "RENAME TABLE not supported by
+// lightweight fold" diagnostic. Pre-fix, the outer `len(tokens) < 5`
+// guard at the top of applyRename swallowed this case (the
+// RENAME TO form tokenizes to 3-4 tokens) and emitted the generic
+// "malformed RENAME action" diagnostic instead, making the `case
+// "TO":` branch structurally unreachable.
+func TestFoldRename_TableRenameFallsBack(t *testing.T) {
+	fsys := makeMigrationFS(map[string]string{
+		"m/0001_init.sql":   `CREATE TABLE x (id INT PRIMARY KEY);`,
+		"m/0002_rename.sql": `ALTER TABLE x RENAME TO y;`,
+	})
+	body, warns := mustFold(t, fsys, "m")
+	// The folded chunk retains the pre-rename table state (we don't
+	// propagate table renames across the migration history; per-table
+	// rename map is the v0.8.1 scope per ADR-022). The raw migration
+	// chunk preserves the RENAME action.
+	mustContain(t, body, "TABLE x")
+	mustContain(t, body, "RENAME TO y")
+	// The diagnostic now names "RENAME TABLE" specifically, not the
+	// generic "malformed" form — that's the M6 fix's observable
+	// behavior change.
+	w := string(warns)
+	if !strings.Contains(w, "RENAME TABLE") {
+		t.Errorf("expected 'RENAME TABLE' specific diagnostic, got:\n%s", w)
+	}
+	if strings.Contains(w, "malformed RENAME action") {
+		t.Errorf("malformed-RENAME diagnostic should NOT fire for the well-formed RENAME TO; got:\n%s", w)
+	}
+}
+
+// TestFoldRename_ConstraintQuotesWhenNewNameNeedsQuoting pins the M7
+// fix: a rename of a bare-identifier constraint to a name that needs
+// SQL quoting (spaces, punctuation, leading digit) emits the quoted
+// form in the folded chunk. Pre-fix, applyConstraintRename rebuilt
+// the constraint string as `CONSTRAINT <newName>` verbatim — losing
+// the quotes for any name that needed them, producing structurally
+// invalid SQL in the rendered chunk.
+func TestFoldRename_ConstraintQuotesWhenNewNameNeedsQuoting(t *testing.T) {
+	fsys := makeMigrationFS(map[string]string{
+		"m/0001_init.sql": `
+CREATE TABLE x (
+    id BIGINT PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    CONSTRAINT bare_name UNIQUE (email)
+);`,
+		"m/0002_rename.sql": `ALTER TABLE x RENAME CONSTRAINT bare_name TO "weird name";`,
+	})
+	body, warns := mustFold(t, fsys, "m")
+	if len(warns) > 0 {
+		t.Errorf("unexpected warns: %s", warns)
+	}
+	// Newname has a space; renderer must re-quote it.
+	mustContain(t, body, `CONSTRAINT "weird name" UNIQUE (email)`)
+	mustNotContain(t, body, `CONSTRAINT bare_name`)
+}

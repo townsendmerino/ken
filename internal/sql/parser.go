@@ -155,7 +155,10 @@ func splitStatements(source []byte) []statement {
 			continue
 		}
 
-		// Statement terminator at top level.
+		// Statement terminator at top level. The `parenDepth == 0`
+		// guard above means this branch only fires when parens are
+		// balanced, so an explicit `parenDepth = 0` reset would be a
+		// no-op — omitted.
 		if c == ';' && parenDepth == 0 {
 			end := i + 1
 			body := source[stmtStart:end]
@@ -167,7 +170,6 @@ func splitStatements(source []byte) []statement {
 				startLine: curLine - countNewlines(source[stmtStart:end]),
 			})
 			stmtStart = -1
-			parenDepth = 0
 			i = end
 			continue
 		}

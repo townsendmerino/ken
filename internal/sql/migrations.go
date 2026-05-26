@@ -129,6 +129,15 @@ func applyColumnRename(t *foldedTable, oldName, newName string) bool {
 // anonymous constraints (bare `PRIMARY KEY (id)` etc.) have no name
 // to match, so the rename fails (returns false) and the caller emits
 // a BOTH-chunks fallback.
+//
+// M7 hardening: if the new name contains characters that require SQL
+// identifier quoting (whitespace, punctuation, leading digit, etc.),
+// emit it wrapped in double quotes. Without this, a rename of a
+// previously-bare-identifier constraint TO a quoted name (e.g.
+// `RENAME CONSTRAINT normal TO "weird name"`) would have produced an
+// invalid `CONSTRAINT weird name ...` line in the folded chunk —
+// fine for retrieval (BM25 still finds the words) but lossy if an
+// agent reads the chunk and tries to act on the SQL.
 func applyConstraintRename(t *foldedTable, oldName, newName string) bool {
 	for i, c := range t.constraints {
 		ctoks := tokenize([]byte(c))
@@ -142,10 +151,42 @@ func applyConstraintRename(t *foldedTable, oldName, newName string) bool {
 		// Rebuild with the new name, preserving everything after the
 		// constraint identifier (the constraint body).
 		bodyStart := ctoks[1].start + len(ctoks[1].text)
-		t.constraints[i] = "CONSTRAINT " + newName + c[bodyStart:]
+		t.constraints[i] = "CONSTRAINT " + quoteIdentIfNeeded(newName) + c[bodyStart:]
 		return true
 	}
 	return false
+}
+
+// quoteIdentIfNeeded wraps name in SQL double-quotes when it contains
+// any character that isn't a bare-identifier character (ASCII letters,
+// digits after the first position, or underscore). Used by the
+// constraint-rename path to preserve syntactic validity when an
+// agent-supplied newName needs quoting.
+//
+// Conservative heuristic: doesn't track reserved-word collisions
+// (would require a per-engine reserved-word table). The classic
+// "needs quotes because it's a keyword like `user`" case slips
+// through. Documented as a known limitation; if it surfaces in
+// practice, extend with a small per-engine word list.
+func quoteIdentIfNeeded(name string) string {
+	if name == "" {
+		return `""`
+	}
+	for i, c := range name {
+		switch {
+		case c == '_':
+			// always OK
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+			// always OK
+		case c >= '0' && c <= '9':
+			if i == 0 {
+				return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+			}
+		default:
+			return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+		}
+	}
+	return name
 }
 
 // renameInFirstParens replaces word-boundary occurrences of oldName

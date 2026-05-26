@@ -329,7 +329,14 @@ func applyOneAction(t *foldedTable, action, srcFile string, line int, logger io.
 // Anything else (e.g. MySQL CHANGE which renames+retypes in one
 // statement) falls through to the per-file BOTH-chunks fallback.
 func applyRename(t *foldedTable, tokens []token, srcFile string, line int, logger io.Writer) bool {
-	if len(tokens) < 5 {
+	// Outer guard: every supported form has at least RENAME +
+	// (COLUMN|CONSTRAINT|TO) + 1 name = 3 tokens. The previous "< 5"
+	// guard accidentally swallowed the "RENAME TO <table>" case
+	// (which tokenizes to 3-4 tokens with the trailing punctuation)
+	// and stole its dedicated diagnostic. The COLUMN/CONSTRAINT
+	// branches now do their own arity check below for the
+	// "old TO new" 5-token form.
+	if len(tokens) < 3 {
 		fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: malformed RENAME action; preserved as per-file chunk\n",
 			srcFile, line)
 		return false
@@ -337,7 +344,12 @@ func applyRename(t *foldedTable, tokens []token, srcFile string, line int, logge
 	second := strings.ToUpper(tokens[1].text)
 	switch second {
 	case "COLUMN":
-		// "RENAME COLUMN <old> TO <new>"
+		// "RENAME COLUMN <old> TO <new>" — needs 5 tokens.
+		if len(tokens) < 5 {
+			fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: RENAME COLUMN expected old TO new; preserved as per-file chunk\n",
+				srcFile, line)
+			return false
+		}
 		if !strings.EqualFold(tokens[3].text, "TO") {
 			fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: RENAME COLUMN expected TO; preserved as per-file chunk\n",
 				srcFile, line)
@@ -352,7 +364,12 @@ func applyRename(t *foldedTable, tokens []token, srcFile string, line int, logge
 		}
 		return true
 	case "CONSTRAINT":
-		// "RENAME CONSTRAINT <old> TO <new>"
+		// "RENAME CONSTRAINT <old> TO <new>" — needs 5 tokens.
+		if len(tokens) < 5 {
+			fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: RENAME CONSTRAINT expected old TO new; preserved as per-file chunk\n",
+				srcFile, line)
+			return false
+		}
 		if !strings.EqualFold(tokens[3].text, "TO") {
 			fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: RENAME CONSTRAINT expected TO; preserved as per-file chunk\n",
 				srcFile, line)
@@ -371,6 +388,8 @@ func applyRename(t *foldedTable, tokens []token, srcFile string, line int, logge
 		// Part C (per-database table rename map would be needed to
 		// propagate to FK target references in other tables); the
 		// per-file ALTER chunk preserves the action for the agent.
+		// Previously unreachable due to the "< 5" outer guard; now
+		// reachable with the corrected "< 3" outer guard.
 		fmt.Fprintf(logger, "sql.FoldMigrations: %s:%d: RENAME TABLE (rename to) not supported by lightweight fold; preserved as per-file chunk\n",
 			srcFile, line)
 		return false
