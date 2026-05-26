@@ -321,6 +321,58 @@ type mockError struct{ msg string }
 
 func (e *mockError) Error() string { return e.msg }
 
+func TestDefaultInstructions_ContainsRecallGuidance(t *testing.T) {
+	// v0.8.1 Part A: the default instructions tell agent planners that
+	// ken is relevance-optimized and they should fall back to grep for
+	// exhaustive operations. Sanity check the surfaced text contains
+	// the load-bearing tokens of that framing — not the exact phrasing
+	// (which can drift), but the planner-visible cues.
+	cache := NewCache(2, func(context.Context, string) (*search.WatchedIndex, func(), error) {
+		t.Fatal("builder should not be invoked just to read instructions")
+		return nil, nil, nil
+	})
+	srv := NewServer(Config{Cache: cache})
+
+	clientT, serverT := sdk.NewInMemoryTransports()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go srv.Run(ctx, serverT)
+	cli := sdk.NewClient(&sdk.Implementation{Name: "t"}, nil)
+	sess, err := cli.Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer sess.Close()
+
+	init := sess.InitializeResult()
+	if init == nil {
+		t.Fatal("InitializeResult was nil")
+	}
+	instr := init.Instructions
+
+	wantSubstrings := []string{
+		"ken",
+		"grep",
+		"100% recall",
+		"isn't designed for exhaustive enumeration",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(instr, want) {
+			t.Errorf("default instructions missing %q\ngot: %q", want, instr)
+		}
+	}
+
+	// The hardcoded "82-91% recall at K=10" framing from v0.8.0 was
+	// deliberately removed in v0.8.1 — hardcoded numbers date the
+	// instructions when ken's pipeline improves. If it sneaks back
+	// in, the deletion was undone.
+	for _, banned := range []string{"82", "91%", "K=10"} {
+		if strings.Contains(instr, banned) {
+			t.Errorf("default instructions still contain hardcoded recall number %q (should be qualitative framing)\ngot: %q", banned, instr)
+		}
+	}
+}
+
 func TestServer_NoRepoNoDefault_ReturnsValidationText(t *testing.T) {
 	// Build a server WITHOUT a default repo. Tools should reject a call
 	// that also omits `repo` — as text, not a protocol error.
