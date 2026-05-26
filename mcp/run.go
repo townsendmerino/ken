@@ -86,7 +86,35 @@ type Options struct {
 	// become searchable in the next search/find_related call after
 	// a successful refresh.
 	DB DBIntegration
+
+	// PrebuiltIndex is an optional pre-serialized index produced by
+	// `ken build-index` (or search.BuildAndSerializeIndex programmatically).
+	// When non-nil, mcp.Run loads it via search.LoadSerializedIndex
+	// instead of walking + chunking + embedding fsys at startup —
+	// the v0.8.3 cold-start optimization (ADR-024, closes #10).
+	//
+	// SDK authors who follow the convention (write the bytes to
+	// `<corpus>/.ken/index.bin`) can leave this nil; mcp.Run
+	// auto-discovers the file in fsys at that path. The explicit
+	// override is for SDK authors using a non-conventional layout
+	// (index outside the corpus FS, in a sibling embed.FS, etc.).
+	//
+	// On any load failure (corrupt bytes, format-version mismatch,
+	// mode/chunker mismatch vs Options.Mode/Options.ChunkerName),
+	// mcp.Run logs a stderr warning naming the reason and falls
+	// back to building from fsys — the pre-built path is purely an
+	// optimization, never a requirement.
+	//
+	// v0.8.3 (ADR-024).
+	PrebuiltIndex []byte
 }
+
+// prebuiltIndexPath is the convention-over-configuration location
+// inside the corpus FS where mcp.Run looks for a serialized index.
+// No env var, no Options field for the path itself — SDK authors
+// who follow the convention get auto-discovery; those who don't can
+// set Options.PrebuiltIndex explicitly.
+const prebuiltIndexPath = ".ken/index.bin"
 
 // Run starts an MCP server (over the SDK's default StdioTransport)
 // serving search and find_related over the single fixed corpus rooted at
@@ -186,9 +214,10 @@ func runOnTransport(ctx context.Context, fsys fs.FS, opts Options, transport sdk
 
 // buildEmbeddedIndex materializes the corpus *search.Index + the
 // scoped *Logger. Validates opts, loads the model (downgrades to bm25
-// with a warning if unavailable), and runs the walk+chunk+embed pass.
-// The caller (runOnTransport) wraps the Index in an atomic.Pointer
-// and wires DB chunk integration on top.
+// with a warning if unavailable), and either loads a pre-built index
+// (v0.8.3 cold-start optimization, ADR-024) or runs the
+// walk+chunk+embed pass. The caller (runOnTransport) wraps the Index
+// in an atomic.Pointer and wires DB chunk integration on top.
 func buildEmbeddedIndex(fsys fs.FS, opts Options) (*search.Index, *Logger, error) {
 	// Bootstrap logger at warn so we can warn about an invalid LogLevel
 	// before applying it (same chicken-and-egg dance as cmd/ken-mcp).
@@ -224,6 +253,18 @@ func buildEmbeddedIndex(fsys fs.FS, opts Options) (*search.Index, *Logger, error
 		}
 	}
 
+	// v0.8.3 (ADR-024): try the pre-built index path before falling
+	// back to the build-from-corpus pass. Two sources:
+	//   1. Options.PrebuiltIndex (explicit override; non-conventional layout)
+	//   2. fsys/.ken/index.bin (convention-over-configuration)
+	// Either source's failure is non-fatal: the lazy fallback ensures
+	// the binary always works even if the pre-built bytes go bad.
+	if ix := tryLoadPrebuilt(fsys, opts, mode, chunkerName, model, logger); ix != nil {
+		logger.Logf(LogInfo, "loaded pre-built index (%d chunks, mode=%s chunker=%s)",
+			ix.Len(), search.ModeNames()[int(mode)], chunkerName)
+		return ix, logger, nil
+	}
+
 	ix, err := search.FromFSWithModel(fsys, mode, chunkerName, model)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build index from fsys: %w", err)
@@ -231,6 +272,54 @@ func buildEmbeddedIndex(fsys fs.FS, opts Options) (*search.Index, *Logger, error
 	logger.Logf(LogInfo, "indexed %d chunks (mode=%s chunker=%s)", ix.Len(), search.ModeNames()[int(mode)], chunkerName)
 
 	return ix, logger, nil
+}
+
+// tryLoadPrebuilt attempts the v0.8.3 pre-built-index path. Returns
+// the loaded *Index on success, or nil on any failure (corrupt, version
+// mismatch, mode/chunker mismatch, missing file). All non-"missing
+// file" failures are logged at warn so operators can see why the
+// optimization was skipped; the missing-file case is silent (the
+// pre-built path is opt-in).
+//
+// Explicit Options.PrebuiltIndex wins over the .ken/index.bin
+// convention; if both are present and explicit is set, the convention
+// file is never consulted.
+func tryLoadPrebuilt(fsys fs.FS, opts Options, mode search.Mode, chunkerName string, model *embed.StaticModel, logger *Logger) *search.Index {
+	var (
+		data []byte
+		src  string
+	)
+	switch {
+	case opts.PrebuiltIndex != nil:
+		data = opts.PrebuiltIndex
+		src = "Options.PrebuiltIndex"
+	default:
+		b, err := fs.ReadFile(fsys, prebuiltIndexPath)
+		if err != nil {
+			// Missing file = no opt-in; silent. Any other error
+			// (permission, malformed FS) is unusual enough to log.
+			if !errors.Is(err, fs.ErrNotExist) {
+				logger.Logf(LogDebug, "no pre-built index at %s: %v", prebuiltIndexPath, err)
+			}
+			return nil
+		}
+		data = b
+		src = fmt.Sprintf("%s (auto-discovered)", prebuiltIndexPath)
+	}
+
+	loadOpts := search.LoadOptions{
+		ExpectedMode:    search.ModeNames()[int(mode)],
+		ExpectedChunker: chunkerName,
+		Model:           model,
+	}
+	ix, err := search.LoadSerializedIndex(data, loadOpts)
+	if err != nil {
+		logger.Logf(LogWarn,
+			"failed to load pre-built index from %s (%v); falling back to build-from-corpus. "+
+				"Re-run `ken build-index` to refresh.", src, err)
+		return nil
+	}
+	return ix
 }
 
 // loadModel returns the Model2Vec snapshot to use, preferring ModelFS
