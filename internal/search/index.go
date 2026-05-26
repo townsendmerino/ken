@@ -460,6 +460,12 @@ func (ix *Index) Len() int { return len(ix.chunks) }
 // MCP find_related handler to resolve a file:line into an indexed chunk).
 func (ix *Index) Chunks() []chunk.Chunk { return ix.chunks }
 
+// Mode returns the build-time mode of the index. The MCP search tool
+// uses this to compute the "natural default" mode for a request that
+// doesn't supply args.Mode — the index's own mode, not a fixed
+// "hybrid" assumption.
+func (ix *Index) Mode() Mode { return ix.mode }
+
 // ResolveChunk returns the chunk that contains the 1-indexed line in
 // filePath, or nil if there is none. Mirrors semble utils._resolve_chunk:
 // prefer an interior hit (line < end_line); fall back to a boundary
@@ -524,13 +530,41 @@ func (ix *Index) FindRelated(filePath string, line, k int) ([]Result, error) {
 	return out, nil
 }
 
-// Search returns the top-k chunks for query under the index's mode.
-// Tombstoned chunks are filtered after the underlying retriever returns;
-// over-fetch by the tombstone count so the filtered result still hits k
-// on indices with edit churn.
+// Search returns the top-k chunks for query under the index's
+// build-time mode. Thin wrapper around SearchMode for callers that
+// don't need per-call mode overrides (the historical signature, kept
+// for backward compatibility).
 func (ix *Index) Search(query string, k int) []Result {
+	results, _ := ix.SearchMode(query, k, ix.mode)
+	return results
+}
+
+// SearchMode runs Search with the supplied mode override. Returns the
+// results plus the mode actually used — which may differ from the
+// requested mode if the index lacks the required retriever (e.g.
+// requesting ModeSemantic against a BM25-only index silently
+// downgrades to ModeBM25 rather than panicking on nil flat/model).
+// The "transparent downgrade" semantics match the build-time pattern
+// in mcp.Run, where a missing model downgrades hybrid→bm25 instead of
+// erroring.
+//
+// This is a ken-side extension; the upstream semble MCP server has no
+// per-call mode arg. ken's MCP `search` tool routes args.Mode through
+// here so an agent can experiment with bm25-vs-hybrid retrieval on a
+// single long-lived index without rebuilding.
+//
+// Tombstoned chunks are filtered after the underlying retriever
+// returns; over-fetch by the tombstone count so the filtered result
+// still hits k on indices with edit churn.
+func (ix *Index) SearchMode(query string, k int, mode Mode) ([]Result, Mode) {
+	if mode != ModeBM25 && ix.flat == nil {
+		// Capability downgrade: requested semantic/hybrid but no
+		// flat/model. Fall back to BM25 so the caller gets results
+		// rather than a panic.
+		mode = ModeBM25
+	}
 	overFetch := k + ix.tombstoneCount()
-	switch ix.mode {
+	switch mode {
 	case ModeSemantic:
 		// semble search_semantic: cosine similarity, no rerank.
 		hits := ix.flat.Query(ix.model.Encode(query), overFetch)
@@ -545,7 +579,7 @@ func (ix *Index) Search(query string, k int) []Result {
 				break
 			}
 		}
-		return out
+		return out, mode
 	case ModeHybrid:
 		// hybridSearch already over-fetches by k*5 internally for its
 		// rerank pipeline; tombstones are filtered there.
@@ -561,7 +595,7 @@ func (ix *Index) Search(query string, k int) []Result {
 				break
 			}
 		}
-		return out
+		return out, mode
 	default: // ModeBM25 — raw lexical (Stage 1 behavior, no rerank)
 		hits := ix.bm.TopK(bm25.Tokenize(query), overFetch)
 		out := make([]Result, 0, k)
@@ -575,7 +609,7 @@ func (ix *Index) Search(query string, k int) []Result {
 				break
 			}
 		}
-		return out
+		return out, mode
 	}
 }
 

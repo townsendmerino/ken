@@ -25,13 +25,16 @@ import (
 // `top_k: int = 5`; the Stage-5 prompt's "default 10" was a reconstruction).
 const DefaultTopK = 5
 
-// SearchArgs is the argument schema for the `search` tool. JSON tag names
-// and the jsonschema descriptions are deliberately verbatim of
-// semble/mcp.py so the wire schema matches across implementations.
+// SearchArgs is the argument schema for the `search` tool. The Query /
+// Repo / TopK fields and their jsonschema descriptions mirror
+// semble/mcp.py verbatim so the wire schema matches across
+// implementations. Mode is a ken-side extension (semble's MCP search
+// has no equivalent) — see Mode's jsonschema and runSearch for
+// per-call override semantics.
 type SearchArgs struct {
 	Query string `json:"query" jsonschema:"Natural language or code query."`
 	Repo  string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL (e.g. https://github.com/org/repo) or local directory path to index and search. Required when no default index was configured at startup. The index is cached after the first call, so repeat queries are fast."`
-	Mode  string `json:"mode,omitempty" jsonschema:"Search mode: hybrid|semantic|bm25. 'hybrid' is best for most queries."`
+	Mode  string `json:"mode,omitempty" jsonschema:"Optional per-call mode override: hybrid|semantic|bm25. If omitted, uses the mode the server was started with. Requesting semantic or hybrid against a bm25-only index transparently downgrades to bm25 (the response header reports the effective mode)."`
 	TopK  int    `json:"top_k,omitempty" jsonschema:"Number of results to return."`
 }
 

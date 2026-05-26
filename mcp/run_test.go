@@ -124,6 +124,70 @@ func TestRun_BM25_FindsKnownTerm(t *testing.T) {
 	}
 }
 
+// TestRun_SearchModeArg_PerCallOverride pins the H4 fix: args.mode is
+// honored as a per-call override AND the response header reports the
+// effective post-downgrade mode. Index is built BM25 (no model wired);
+// the agent requests hybrid; runSearch routes through SearchMode,
+// downgrades to BM25 silently, and the header says mode=bm25.
+func TestRun_SearchModeArg_PerCallOverride(t *testing.T) {
+	ctx, sess, logBuf, cleanup := runRunOnInMemoryTransport(t, Options{
+		Mode:        "bm25",
+		ChunkerName: "regex",
+	})
+	defer cleanup()
+
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query": "ValidateUser",
+			"mode":  "hybrid",
+			"top_k": 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search): %v\n--log--\n%s", err, logBuf.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	// The capability downgrade must be reflected in the header — agent
+	// asked for hybrid, BM25-only index can't serve hybrid, header
+	// says bm25.
+	if !strings.Contains(txt, "mode=bm25") {
+		t.Errorf("expected post-downgrade 'mode=bm25' in header, got:\n%s", txt)
+	}
+	// Sanity: results still come back.
+	if !strings.Contains(txt, "main.go") {
+		t.Errorf("expected main.go in results:\n%s", txt)
+	}
+}
+
+// TestRun_SearchModeArg_EmptyUsesIndexMode confirms that an absent
+// args.mode uses the index's build-time mode rather than the old
+// hard-coded "hybrid" schema-default header. Calibration-honest: the
+// header reflects what the index actually ran.
+func TestRun_SearchModeArg_EmptyUsesIndexMode(t *testing.T) {
+	ctx, sess, logBuf, cleanup := runRunOnInMemoryTransport(t, Options{
+		Mode:        "bm25",
+		ChunkerName: "regex",
+	})
+	defer cleanup()
+
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query": "ValidateUser",
+			"top_k": 3,
+			// no mode arg
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search): %v\n--log--\n%s", err, logBuf.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(txt, "mode=bm25") {
+		t.Errorf("expected 'mode=bm25' (index built bm25), got:\n%s", txt)
+	}
+}
+
 // TestRun_RepoArgIgnored confirms the embedded-corpus contract: the
 // agent's `repo` argument is accepted (for wire compat) but ignored —
 // passing a bogus repo must produce the same hit as passing none.

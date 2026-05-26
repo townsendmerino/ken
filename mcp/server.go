@@ -244,23 +244,33 @@ func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (
 // how the Index was selected (Cache lookup, fixed single-corpus, etc.).
 // Shared between handleSearch (Cache-backed NewServer) and the
 // embedded-corpus tool handlers built by mcp.Run.
+//
+// args.Mode semantics (ken-side extension; semble's MCP search has no
+// such arg): if non-empty, overrides the index's build-time mode for
+// just this call via Index.SearchMode. If empty, the index's
+// build-time mode is used. The mode reported in the response header
+// is the EFFECTIVE mode actually used — so an agent that asks for
+// hybrid against a BM25-only index sees "mode=bm25" in the header
+// (capability downgrade is visible, not silent).
 func runSearch(ix *search.Index, args SearchArgs) (*sdk.CallToolResult, any, error) {
-	modeStr := args.Mode
-	if modeStr == "" {
-		modeStr = "hybrid"
-	}
-	if _, perr := search.ParseMode(modeStr); perr != nil {
-		return textResult(perr.Error()), nil, nil
+	requestedMode := ix.Mode()
+	if args.Mode != "" {
+		parsed, perr := search.ParseMode(args.Mode)
+		if perr != nil {
+			return textResult(perr.Error()), nil, nil
+		}
+		requestedMode = parsed
 	}
 	topK := args.TopK
 	if topK <= 0 {
 		topK = DefaultTopK
 	}
-	results := ix.Search(args.Query, topK)
+	results, effectiveMode := ix.SearchMode(args.Query, topK, requestedMode)
 	if len(results) == 0 {
 		return textResult("No results found."), nil, nil
 	}
-	header := fmt.Sprintf("Search results for: %q (mode=%s)", args.Query, modeStr)
+	header := fmt.Sprintf("Search results for: %q (mode=%s)",
+		args.Query, search.ModeNames()[int(effectiveMode)])
 	return textResult(FormatResults(header, results)), nil, nil
 }
 
