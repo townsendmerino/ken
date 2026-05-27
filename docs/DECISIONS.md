@@ -36,6 +36,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-028](#adr-028-bm25-tokenizer-parts-slice-pooling-via-tokbuffers-struct-v086) | BM25 tokenizer `parts`-slice pooling via `tokBuffers` struct (v0.8.6) | Accepted |
 | [ADR-029](#adr-029-v08x-perf-campaign-capstone--allocationgc-ceiling-reached-indexing-is-single-threaded-parallelism-is-the-next-frontier) | v0.8.x perf campaign capstone — allocation/GC ceiling reached; indexing is single-threaded; parallelism is the next frontier | Accepted (extended by ADR-030) |
 | [ADR-030](#adr-030-indexing-pipeline-parallelism--phase-a-per-file-workers-for-chunk--embed-v087) | Indexing pipeline parallelism — Phase A (per-file workers for chunk + embed) (v0.8.7) | Accepted |
+| [ADR-031](#adr-031-mysql-introspection-sample-loop-parallelism-postgres-deferred-with-trigger-v088) | MySQL introspection sample-loop parallelism; Postgres deferred-with-trigger (v0.8.8) | Accepted |
 
 ---
 
@@ -2154,3 +2155,108 @@ After Phase A, the indexing wall-time profile shifts:
 - A post-Phase-A re-measurement shows `bm25.Build` is the bottleneck on a workload pattern semble medium doesn't represent.
 
 Without one of those triggers, the parallelism campaign closes here. Phase A is the publication; Phase B is documented future work.
+
+
+---
+
+## ADR-031: MySQL introspection sample-loop parallelism; Postgres deferred-with-trigger (v0.8.8)
+
+**Status:** Accepted
+
+**Date:** 2026-05-27
+
+**Issue:** TBD (cross-link when opened).
+
+**Extends:** [ADR-019](#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) (the MySQL introspection engine — Phase A2 parallelizes its hottest loop), [ADR-021](#adr-021-mariadb-first-class-engine-support-v081-part-b) (MariaDB shares the same introspection path), [ADR-017](#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance) (Postgres introspection — the deferred Phase A2 target), [ADR-030](#adr-030-indexing-pipeline-parallelism--phase-a-per-file-workers-for-chunk--embed-v087) (the indexing-pipeline analogue; same predict-measure-decide discipline).
+
+### Context
+
+A second-opinion review of `internal/db/mysql.go` flagged `mysqlAppendSamples` as a candidate for `errgroup` parallelism: `*sql.DB` is goroutine-safe by design, each table's sample fetch is independent, and the per-table writes target distinct `&snap.tables[i]` slots so no synchronization is needed.
+
+Initial skepticism (worth recording, because it was wrong): the sample loop runs once per reindex, the SQL is `LIMIT 5` over indexed PKs, and intuition said it would be a small fraction of total introspection wall time. The v0.8.x perf-campaign discipline (instrument-before-optimizing, see [ADR-029](#adr-029-v08x-perf-campaign-capstone--allocationgc-ceiling-reached-indexing-is-single-threaded-parallelism-is-the-next-frontier)) said: measure before deciding.
+
+A new `//go:build dbperf`-gated harness (`internal/db/mysql_perf_test.go`, mirrored by `postgres_perf_test.go`) was added with a 50-tables × 100-rows synthetic fixture per engine. Sequential baselines on Apple M1 Pro / Go 1.26.3 / Docker localhost MySQL 8 + Postgres 16:
+
+| metric | MySQL | Postgres |
+|---|---|---|
+| sample-loop wall (3-trial median) | 43.7 ms | 22.7 ms |
+| full introspection wall | 76.6 ms | 90.9 ms |
+| **sample-loop fraction of total** | **57.0%** | **25.0%** |
+| Amdahl ceiling (8 workers) | **2.0×** | 1.28× |
+
+**MySQL falsified the initial skepticism hard** — the sample loop is the single biggest contributor to introspection wall time on localhost, and the per-table latency-bound shape (median 813 µs, dominated by query round-trip + Go-side decode) is exactly what `errgroup` fans out cleanly.
+
+**Postgres was borderline** on localhost (25%, ceiling 1.28×). Phase A2 needed to account for the engine asymmetry rather than assume symmetric architecture would yield symmetric wins.
+
+### Decision
+
+**Parallelize `mysqlAppendSamples` via `errgroup.SetLimit(sampleWorkers())`. Defer Postgres parallelism with an explicit re-open trigger.**
+
+#### MySQL: parallelize
+
+`mysqlAppendSamples` (`internal/db/mysql.go`) wraps each table's sample fetch in `g.Go(func() error { ...; return nil })` over an `errgroup.WithContext`. `sampleWorkers()` returns `min(8, runtime.NumCPU())` — bounded so the parallel pass never exceeds shared dev/staging MySQL `max_connections` (commonly 50–150). The `*sql.DB` opened in `indexSchemaMySQL` is capped with `SetMaxOpenConns(sampleWorkers())` so the pool size matches the worker count and there's no race between "burst of 8 goroutines" and "MySQL connection limit."
+
+Workers return `nil` unconditionally — per-table failures keep the existing `warn+continue` semantics. Returning `err` would cause `errgroup.WithContext` to cancel siblings on the first failure, which is the wrong shape for a best-effort sample pass.
+
+Output ordering is preserved because per-table results are written to `&snap.tables[i]` (a pre-existing distinct slot per table); the `snap.tables` slice itself is built once before the parallel pass.
+
+#### Postgres: deferred-with-trigger
+
+`sampleRowsImpl` (`internal/db/sample.go`) stays sequential in v0.8.8. The architectural obstacle is real: `*pgx.Conn` is NOT goroutine-safe (the pgx contract is one-goroutine-per-conn), so the Postgres path can't fan out across the existing connection. The investigated alternative — a scoped `pgxpool.Pool` opened just for the sample pass — was implemented and measured:
+
+| metric | Postgres sequential (baseline) | Postgres scoped-pgxpool (parallel) |
+|---|---|---|
+| sampleRowsImpl wall (3-trial median) | 22.7 ms | 21.7 ms |
+| full introspection wall | 90.9 ms | 94.7 ms |
+
+**Localhost measurement: net wash.** Pool setup overhead (open 8 connections, warmup, teardown) approximately equals the parallelism gain on the 50-table × 100-row fixture. The architectural shape works (pool teardown is clean, no race conditions, integration tests pass `-race`), but the *measured benefit on localhost is zero*.
+
+The load-bearing case for Postgres parallelism is **remote DBs** where per-query latency is RTT-bound (5–50 ms per `SELECT`). Synthetic estimate: at 30 ms RTT × 50 tables = 1.5 s sequential vs ~200 ms parallel = 7–8× speedup, and the sample-loop fraction shoots from 25% to ~70% of total introspection. **But we don't have a remote-DB measurement to publish.**
+
+Per the v0.8.x discipline ("measured wins only"), Postgres parallelism stays out of v0.8.8. The harness lives in `internal/db/postgres_perf_test.go` as the regression baseline; the scoped-pgxpool implementation was reverted (kept in git history at the v0.8.8-db-parallelism branch's pre-revert state if a future reader wants to consult it).
+
+**Phase A2-Postgres re-opens** when:
+- A real user reports Postgres introspection latency as actionable pain on a remote DB (managed RDS / Aurora / etc.), OR
+- A remote-DB run of `postgres_perf_test.go` (with `KEN_DB_TEST_DSN` pointed at a real-network endpoint) shows the sample-loop fraction climbs past ~50% and parallel impl wins ≥1.5× on full introspection wall time.
+
+### Alternatives considered
+
+- **Parallelize Postgres anyway with localhost-caveat disclosure.** Rejected. The v0.8.x discipline is "measured wins only" — shipping unmeasured architecture is exactly the pattern ADR-029 closed out. Localhost is where most CI / dev / first-touch users will exercise the introspection; a measured wash there is not a release-worthy upgrade.
+- **Migrate the whole Postgres introspection to `pgxpool.Pool` wholesale.** Rejected as scope-creep for v0.8.8. The original ADR-017 chose `*pgx.Conn` deliberately (introspection is one-shot per reindex; pooling adds complexity for no benefit). Reversing that decision needs its own ADR with its own measurement — concurrent metadata queries, connection lifetime under listen.go's separate LISTEN connection, etc. — not a side effect of a sample-loop parallelism release.
+- **Synthetic latency injection in the harness (sleep N ms per query) to "prove" the remote case.** Rejected. Synthetic latency isn't network latency — TCP backoff, MySQL/Postgres-side query pipelining, kernel scheduling under real load all behave differently from `time.Sleep`. A synthetic-but-meaningful measurement is still a single-machine experiment; it would land Postgres parallelism on artifice, not evidence.
+- **Bigger fan-out for MySQL (16 or 32 workers).** Rejected. `min(8, NumCPU())` matches the indexing-pipeline ADR-030 pattern; the 8-cap protects shared MySQL servers; the measured 1.85× speedup is already 92% of the 2.0× Amdahl ceiling — diminishing returns past 8.
+- **`errgroup` without `SetLimit`.** Rejected. Without the limit, a 200-table schema would spawn 200 goroutines and 200 connection requests simultaneously, blowing past MySQL's `max_connections` on shared servers. The `SetLimit + SetMaxOpenConns` pair is two belts (errgroup-side + pool-side) for one suspender.
+- **Drop the pre-walk approxRowCount attach step from the parallel section.** Kept inside the parallel guard for clarity; technically the attach pass touches `t.approxRowCount` before the parallel pass begins, so there's no race with workers (which only write `t.sampleColumns` + `t.sampleRows`).
+
+### Consequences
+
+**Measured impact** (Apple M1 Pro / Go 1.26.3 / darwin/arm64 / Docker localhost MySQL 8 / 50 tables × 100 rows / 3-trial medians):
+
+| metric | post-v0.8.7 (sequential) | post-v0.8.8 (parallel) | Δ |
+|---|---|---|---|
+| **mysqlAppendSamples wall** | 43.7 ms | **19.2 ms** | **−56% (2.28× speedup)** |
+| **MySQL full introspection wall** | 76.6 ms | **41.4 ms** | **−46% (1.85× speedup)** |
+| sample-loop fraction of total | 57.0% | 46.3% | shrunk proportionally |
+
+1.85× on full MySQL introspection is **92% of the 2.0× Amdahl ceiling** — minimal scheduling/coordination overhead, the parallel impl cashes nearly all of the theoretical max.
+
+**Postgres unchanged** in v0.8.8: sampleRowsImpl 22.7 ms / full introspection 90.9 ms / sample-loop fraction 25.0%. Re-opens on the trigger above.
+
+- **Output ordering preserved.** `TestMySQLIntegration_RowSamplingDeterministic` (the load-bearing parity test for sample-row determinism) passes `-race` clean post-parallel. Per-table writes target distinct `&snap.tables[i]` slots; the `snap.tables` slice itself is built once before the parallel pass and never mutated by workers.
+- **`-race` clean across the full integration suite.** `go test -tags=dbintegration -race -run TestMySQLIntegration ./internal/db/` passes all 5 subtests.
+- **Pool cap protects shared servers.** `*sql.DB.SetMaxOpenConns(sampleWorkers())` bounds the pool to ≤8 connections even on a 16-core box. The errgroup limit + the pool cap together guarantee no shared-MySQL connection exhaustion regardless of how many goroutines an upstream caller spawns.
+- **No new third-party dependencies.** `runtime` (stdlib), `golang.org/x/sync/errgroup` (already in go.mod).
+- **Public API unchanged.** `mysqlAppendSamples` is package-private; `IndexSchema` signature is unchanged; ken-mcp and `mcp/db` see no surface change.
+- **Harnesses live in tree as regression baselines.** Both `mysql_perf_test.go` and `postgres_perf_test.go` are gated by `//go:build dbperf` so they don't run in normal `go test ./...`. The Postgres harness exists deliberately even though Postgres isn't parallelized — it's the proof of work for the "deferred-with-trigger" decision and the harness that re-opens Phase A2-Postgres when remote-DB users surface latency pain.
+- **Honest disclosure on engine asymmetry.** v0.8.8 is the first DB-introspection release that has measurably different speedup across engines. MySQL gets a clean 1.85× win; Postgres + SQLite are unchanged. Users running ken-mcp against the Tier-2 DB path will see the gain only when DSN points at MySQL/MariaDB.
+- **The "fast-path optimization" precursor was rejected.** Before this work, a second-opinion review proposed adding `if !strings.Contains(s, "(")` short-circuit to `normalizeMySQLIntType`. Correctness-preserving but the savings were below measurement noise (~0.2% of introspection wall — 150 calls × ~1 µs each = ~150 µs saved out of 77 ms). Rejecting it was the same discipline as accepting the Postgres deferral: don't ship what isn't measurably better.
+
+### What re-opens Phase B (parallel introspection metadata)
+
+After Phase A2, MySQL introspection wall is ~41 ms at medium scale. The remaining 22 ms is dominated by serial information_schema queries (constraints, indexes, FK references, views, routines). Each of these is a single big metadata query that has nowhere to fan out — they're already optimal in shape. Phase B would target running them concurrently against the same `*sql.DB`, saving perhaps another 10–15 ms.
+
+Phase B re-opens if:
+- A real user reports MySQL introspection on a giant-schema deployment (thousands of tables, complex constraints) shows the metadata queries as the new bottleneck.
+- The harness's full-introspection median climbs past 100 ms on a representative workload — meaning per-table parallelism has shipped its win and the next layer is worth investigating.
+
+Without one of those triggers, the parallelism work closes at v0.8.8.
