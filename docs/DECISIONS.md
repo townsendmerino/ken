@@ -34,7 +34,8 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-026](#adr-026-paired-heap-refactor-for-annflatquery--bm25indextopk-v084) | Paired heap refactor for `ann.Flat.Query` + `bm25.Index.TopK` via shared `internal/topk` (v0.8.4) | Accepted |
 | [ADR-027](#adr-027-bm25-tokenizer-allocation-reduction--rune--byte--syncpool-scratch--lowercase-fast-path-v085) | BM25 tokenizer allocation reduction (`[]rune` → `[]byte` + `sync.Pool` scratch + lowercase fast-path) (v0.8.5) | Accepted |
 | [ADR-028](#adr-028-bm25-tokenizer-parts-slice-pooling-via-tokbuffers-struct-v086) | BM25 tokenizer `parts`-slice pooling via `tokBuffers` struct (v0.8.6) | Accepted |
-| [ADR-029](#adr-029-v08x-perf-campaign-capstone--allocationgc-ceiling-reached-indexing-is-single-threaded-parallelism-is-the-next-frontier) | v0.8.x perf campaign capstone — allocation/GC ceiling reached; indexing is single-threaded; parallelism is the next frontier | Accepted |
+| [ADR-029](#adr-029-v08x-perf-campaign-capstone--allocationgc-ceiling-reached-indexing-is-single-threaded-parallelism-is-the-next-frontier) | v0.8.x perf campaign capstone — allocation/GC ceiling reached; indexing is single-threaded; parallelism is the next frontier | Accepted (extended by ADR-030) |
+| [ADR-030](#adr-030-indexing-pipeline-parallelism--phase-a-per-file-workers-for-chunk--embed-v087) | Indexing pipeline parallelism — Phase A (per-file workers for chunk + embed) (v0.8.7) | Accepted |
 
 ---
 
@@ -1995,3 +1996,161 @@ ADR-026/027/028 each shipped single-machine (M1 Pro / arm64). ADR-028 flagged th
 
 ---
 
+
+
+---
+
+## ADR-030: Indexing pipeline parallelism — Phase A (per-file workers for chunk + embed) (v0.8.7)
+
+**Status:** Accepted
+
+**Date:** 2026-05-27
+
+**Issue:** TBD (cross-link when opened).
+
+**Extends:** [ADR-029](#adr-029-v08x-perf-campaign-capstone--allocationgc-ceiling-reached-indexing-is-single-threaded-parallelism-is-the-next-frontier) (the campaign seed — Phase A is the architecture ADR-029 sketched), [ADR-024](#adr-024-pre-built-embedded-indices-for-mcprun-v083) (byte-stable serialization contract; Phase A's determinism story is what preserves it), [ADR-008](#adr-008-bm25-tokenizer--verbatim-port-of-sembles-tokenspy) (tokenizer parity carries through unchanged), [ADR-010](#adr-010-tree-sitter-via-gotreesitter-instead-of-wazerowasm) (the `ParserPool`'s `sync.Pool`-backed design is the prerequisite that makes the treesitter chunker parallel-safe by construction).
+
+### Context
+
+[ADR-029](#adr-029-v08x-perf-campaign-capstone--allocationgc-ceiling-reached-indexing-is-single-threaded-parallelism-is-the-next-frontier) closed the v0.8.x allocation/GC perf campaign at its honest ceiling and surfaced the next-frontier opportunity: **indexing uses ~1.13 of 8 cores at medium scale**, and the wall-time critical path is the serial pipeline, not GC. Seven idle cores are the largest unrealized wall-time win in the system.
+
+The parallelism investigation plan (`outputs/parallelism-investigation-plan.md`) ran a Phase 1 investigation with seven written-down predictions; the findings (`outputs/parallelism-phase1-findings.md`) graded them via five cheap experiments — code-read audits + `-race` tests + an env-var-gated throwaway parallel impl + a CPU profile re-read. Headline grading:
+
+| # | Prediction | Status |
+| --- | --- | --- |
+| P1 | `embed.StaticModel.Encode` goroutine-safe | **CONFIRMED** (`TestEncodeConcurrent`: 320 concurrent calls, `-race` clean, byte-identical outputs) |
+| P2 | bm25 mode ≥1.5× speedup | **FALSIFIED hard** — actual 1.09× (serial fraction 91%; `bm25.Build` dominates bm25-mode wall) |
+| P3 | hybrid mode ≥2× speedup | **CONFIRMED** — actual 3.05× (serial fraction 23%) |
+| P4 | Byte-identical determinism preserved by file-index-ordered reassembly | **CONFIRMED** (parity test passes both modes) |
+| P5 | GC share drops, CPU/wall ratio rises | **CONFIRMED stronger than predicted** (GC 38%→8%, ratio 1.13×→3.29×; corrected mental model: ratio ≈ speedup) |
+| P6 | Memory-ceiling concern at giant scale | Deferred to Phase 2+ design |
+| P7 | Watch-mode interaction orthogonal | **CONFIRMED** (initial build inherits via `walkAndChunkFSWithModel`) |
+
+The Phase 1 decision was to continue the campaign and ship Phase A (parallelize chunk + embed via per-file workers; keep `bm25.Build` and migration folding serial) targeting the hybrid 3× user-default win. **bm25 mode's 1.09× is honest disclosure**: `bm25.Build` is the serial bottleneck, and Phase A leaves it serial *by design* — that's exactly what makes the determinism story trivial (serial Build over a deterministically-ordered chunks slice is byte-stable for free).
+
+### Decision
+
+**Phase A: per-file worker pool for chunking + embedding, file-index-ordered collection, serial `bm25.Build` + migration folding.** Default-on (no opt-in flag); the implementation lives at `internal/search.walkAndChunkFSWithModel`.
+
+Architecture (matching [ADR-029](#adr-029-v08x-perf-campaign-capstone--allocationgc-ceiling-reached-indexing-is-single-threaded-parallelism-is-the-next-frontier)'s Phase A sketch):
+
+1. **Walk** (`repo.WalkFS`) produces the ordered file list. Serial. Cheap.
+2. **Worker pool** of `runtime.NumCPU()` workers feeds off a bounded job channel (`numWorkers * 2` capacity for backpressure). Each worker performs per-file work end-to-end:
+   - `fs.ReadFile(rel)` — read bytes.
+   - `chunkOneFile(...)` — chunk + SQL structural extras.
+   - For each chunk, if `model != nil`: `model.Encode(chunk.Text)` — produce embedding.
+   - Write the per-file result into `results[fileIndex]` (a pre-sized slice; each worker writes a distinct index, so no synchronization needed for the write itself).
+3. **Collector** flattens `results[]` in file-index order into the `chunks` + `vecs` slices — deterministic by construction because `repo.WalkFS` returns files in lexical order.
+4. **Migration folding** runs serially after the parallel pass over a sorted directory list — same shape as the pre-Phase-A serial impl (small fraction of total cost, and serial preserves determinism trivially).
+5. **Downstream `bm25.Build` + `serializeIndex`** (callers of `walkAndChunkFSWithModel`) run serially over the ordered chunks slice — byte-stable serialization by construction.
+
+The error path: workers continue draining the job channel after their first error (the `errCh` is buffered `numWorkers`; later errors are dropped). The build returns the first surfaced error after the `wg.Wait()` join. One root-cause error per build is all callers need.
+
+#### Concurrency safety prerequisites (verified during Phase 1)
+
+- **`embed.StaticModel.Encode`** is goroutine-safe by construction: all model fields are initialized at `Load()` and never mutated; per-call accumulators (`rows`, `w`, `sum`, `wsum`, `out`) are locals; `Tokenizer`'s `vocab` + `addedTokens` maps are read-only after `Load` (Go's memory model permits concurrent read-only map access). Empirically confirmed by `TestEncodeConcurrent` (`-race` clean, 320 concurrent calls produce byte-identical outputs).
+- **`chunk.ChunkFile`** + **`sql.ParseFile`** are pure functions of their inputs. The registered chunkers are concurrency-safe: regex + line are stateless; treesitter's `ParserPool` is `sync.Pool`-backed by [ADR-010](#adr-010-tree-sitter-via-gotreesitter-instead-of-wazerowasm)'s design (concurrent-safe by construction).
+- **`bm25.tokenizerPool`** (v0.8.6 / [ADR-028](#adr-028-bm25-tokenizer-parts-slice-pooling-via-tokbuffers-struct-v086)) is `sync.Pool`-backed — concurrency-safe.
+
+### Alternatives considered
+
+- **Phase B: parallelize `bm25.Build` (sharded postings + deterministic merge).** Deferred. Phase 1 found that bm25 mode's serial fraction is ~91%; Phase B would target that. But the determinism risk is higher (sharded merge has to produce byte-identical output to a serial build), bm25 mode is opt-in (`--mode=bm25`), and the hybrid 3× already covers the user-default case. **Concrete trigger to re-open Phase B**: a real user reports bm25-mode indexing latency as actionable pain, OR post-Phase-A re-measurement shows `bm25.Build` is the bottleneck on some workload pattern not represented in semble medium. Per ADR-029's "defer-with-trigger" pattern.
+
+- **Stage-based parallel pipeline** (separate worker stages for chunker → tokenizer → embed, with channels between stages). Rejected. Per-file workers are simpler (one channel; no inter-stage backpressure to tune), match how the serial loop interleaves stages today (so the diff to the existing code is local), and Phase 1's measured 3.05× already hits the Amdahl ceiling implied by the 23% serial fraction. There's no headroom a stage-based design would unlock.
+
+- **Make parallel opt-in via a flag.** Considered (would have been the conservative path). Rejected because: (a) the byte-identical parity is established (`TestBuildDeterminism_CrossRun` smoke + the N=20 medium stress in this ADR's calibration evidence), (b) bm25 mode isn't worse off (1.09× speedup is small but positive), and (c) opt-in features become orphaned features. Default-on means every `mcp.Run` deployment, every `ken-mcp` watch run, and every `ken build-index` invocation gets the hybrid 3× win without changing their command lines.
+
+- **Bigger `NumCPU * K` channel buffer for parallel chunking** (e.g., K=4 or unbounded). Considered. Kept `numWorkers * 2` as the conservative default: bounded enough to prevent unbounded in-flight memory at giant-scale corpora (the P6 deferred concern), large enough that workers don't starve on the producer at medium scale. If giant-scale runs surface memory-ceiling issues, this is the first knob to revisit.
+
+- **Per-mode parallelism strategies** (e.g., serial for bm25, parallel for hybrid). Rejected for simplicity: one code path, one set of tests, one calibration matrix. The bm25 1.09× is small but always positive; there's no case where the parallel path is worse than serial.
+
+- **Skip `embed.StaticModel.Encode` goroutine-safety audit and just assume it's safe.** Rejected. Phase 1.1 was a 30-minute investment that produced a permanent regression test (`TestEncodeConcurrent`) and removed a class of uncertainty from the design. The right discipline for any concurrency campaign.
+
+### Consequences
+
+**Measured impact** (Apple M1 Pro / Go 1.26.3 / darwin/arm64 / `CGO_ENABLED=0` / semble bench corpus / 378,524 chunks):
+
+- **End-to-end medium-corpus indexing wall time** (3-trial medians; full data in `bench_out/parallelism-phase2/`):
+
+  | combo | metric | post-v0.8.6 (serial) | post-v0.8.7 (parallel) | Δ |
+  |---|---|---|---|---|
+  | bm25-regex INDEX | wall (median of 3) | 28.57 s | 24.78 s | −13% (**1.15× speedup**) |
+  | hybrid-regex INDEX | wall (median of 3) | 165.32 s | 45.43 s | −73% (**3.64× speedup**) |
+  | bm25-regex INDEX | objects allocated | 53 M | 53 M | ≈ flat (refactor doesn't change tokenizer) |
+  | hybrid-regex INDEX | objects allocated | 572 M | 572 M | ≈ flat |
+  | bm25-regex INDEX | heap inuse (peak) | 7.12 GB | 6.17 GB | −13% (parallel mutator reclaims faster) |
+  | hybrid-regex INDEX | heap inuse (peak) | 6.34 GB | 6.72 GB | +6% (per-file in-flight chunks during parallel pass; well below `numWorkers*2` channel cap) |
+
+  Search latency unchanged (Phase A only touches the indexing path).
+
+- **CPU profile (post-Phase-A hybrid medium index, parallel)** — the headline shift:
+
+  ```
+  Duration: 53.18s, Total samples = 174.61s (328.31%)
+        flat  flat%   sum%        cum   cum%
+       0.04s 0.023% 0.023%    117.78s 67.45%  walkAndChunkFSWithModel.func1  (the per-file worker body)
+       0.01s 0.0057% 0.029%    94.26s 53.98%  embed.(*StaticModel).Encode
+       2.01s  1.15%  1.18%     67.48s 38.65%  embed.(*Tokenizer).Encode
+      27.13s 15.54% 17.54%     27.13s 15.54%  syscall.rawsyscalln          (file reads parallelized)
+       0.80s  0.46% 18.33%     25.55s 14.63%  runtime.mallocgc
+      17.79s 10.19% 28.52%        21s 12.03%  embed.weightedMeanPoolSafe
+      19.20s 11.00% 45.43%     19.20s 11.00%  runtime.memclrNoHeapPointers
+       0.01s 0.0057% 45.63%    14.47s  8.29%  runtime.gcBgMarkWorker        (was 38.3% pre-parallel)
+       2.56s  1.47% 47.10%     13.81s  7.91%  runtime.scanObject            (was 37.8%)
+       7.41s  4.24% 65.00%      7.41s  4.24%  runtime.(*mspan).typePointersOfUnchecked  (was 22.3%)
+  ```
+
+  Key signals: `runtime.gcBgMarkWorker` cum share dropped from 38.3% (ADR-029 serial baseline) to 8.29%; `runtime.scanObject` 37.8% → 7.91%; `runtime.(*mspan).typePointersOfUnchecked` 22.3% → 4.24%. The parallel mutator runs concurrent with GC, so GC's relative CPU share shrinks ~4×. CPU samples / wall = 174.61s / 53.18s = **3.28×** — matches the measured speedup (per the corrected Amdahl mental model from `outputs/parallelism-phase1-findings.md`; the CPU/wall ratio in steady state equals the speedup, not some independent "cores used" multiplier).
+
+- **N=20 determinism stress at semble medium scale** (LOAD-BEARING per the planning Claude's audit of the Phase 1 findings):
+
+  Built the semble medium corpus 20 times via the post-Phase-A parallel impl + once via a pre-Phase-A serial reference (the env-var-gated throwaway binary, gate set off → serial path). All 21 serialized index files compared by SHA-256:
+
+  | mode | SHA-256 (reference + all 20 parallel builds) | unique SHA count |
+  |---|---|---|
+  | bm25 | `b4f256f2a4a09c4dd5c1b8a2f6c5bf34a31d7eaf0ec9ea9a3bc848cfbcaceac1` | **1** (expected 1) |
+  | hybrid | `43db9941e60c592f56505954da82aa9ff8012b71096d48f434c9a4e3e6753b8c` | **1** (expected 1) |
+
+  All N=21 builds per mode produced byte-identical files (`shasum -a 256` across `bm25-{reference,parallel-1..20}.bin` + same for hybrid: every line ends with the same hash). This is the strongest possible determinism check — same input → same output across 21 trials at the corpus size where contention is real (~378k chunks, 8 workers racing through hundreds of files). Raw data: `bench_out/parallelism-phase2/stress/{bm25,hybrid}-shas.txt`.
+
+- **NDCG@10 safety check** (semble bench corpus, 63 repos / 1,251 tasks, regex chunker both sides):
+
+  | mode | post-v0.8.6 (serial) NDCG@10 | post-v0.8.7 (parallel) NDCG@10 | Δ |
+  |---|---|---|---|
+  | bm25 | 0.6237 | 0.6237 | **+0.0000 (exact match)** |
+  | semantic | 0.6469 | 0.6469 | **+0.0000 (exact match)** |
+  | hybrid | 0.8418 | 0.8418 | **+0.0000 (exact match)** |
+
+  Exact match required (the parity invariant: same chunks in → same scores → identical NDCG). Mechanically guaranteed given the determinism stress passes, but the explicit safety check stays in the gauntlet.
+
+- **In-tree regression nets** added: `TestBuildDeterminism_CrossRun` (3 sub-cases: smoke-bm25 + smoke-hybrid on `testdata/repo/`, contention-bm25 on the repo root — exercises ~2.5 MB of serialized index across hundreds of files); `TestEncodeConcurrent` (`-race`-mandatory: 320 concurrent `Encode` calls, byte-identical outputs).
+
+- **bm25 mode gets a small parallel win, not a large one** (1.09× speedup at medium scale per Phase 1.2). This is honest disclosure: `bm25.Build` is the dominant serial bottleneck for bm25-only indexing, and Phase A leaves it serial by design. Phase B (sharded parallel `bm25.Build`) is a possible future release with a concrete re-open trigger documented above.
+
+- **One Phase 1 finding left unresolved (deliberately):** the 91% serial fraction in bm25 mode wasn't disentangled into "bm25.Build pure time" vs "allocator contention at parallel-chunking concurrency." Irrelevant for Phase A (Build stays serial either way), but **a future Phase B design should start by resolving this** — the Phase B architecture depends on whether the 91% is pure Build-time (sharded merge will help proportionally) or partly contention (sharded merge would help less). Flagging here so the Phase B briefing doesn't re-assume.
+
+- **Watch-mode (`ADR-012`) inherits parallel-by-default for free.** The initial bulk build in `internal/search/watch.go:156` invokes `walkAndChunk` → `walkAndChunkFSWithModel` — the same canonical entry point Phase A patches. The incremental per-file rebuild path (lines 441/492/622) is unchanged + already small-batch (debounce absorbs the latency); no Phase 2 changes needed there.
+
+- **Pre-built indices (`ADR-024`) byte-stability holds.** `serializeIndex`'s output is byte-identical between the serial reference and the N=20 parallel builds. SDK authors using `ken build-index` for `mcp.Run` get the parallel speedup at build time + the same on-disk file shape. No format-version bump.
+
+- **Public API unchanged.** `walkAndChunkFSWithModel`'s signature is the same; callers (`FromFSWithModel`, `BuildAndSerializeIndex`, `NewWatchedIndex`) see no change. The env-var gate (`KEN_PARALLEL_INDEX`) used during Phase 1 was throwaway and is removed in this commit.
+
+- **No new third-party dependencies.** `sync`, `runtime` (already standard library; not previously imported by `internal/search/index.go`).
+
+- **Accumulating second-machine debt: deferred to user-action follow-up.** [ADR-029](#adr-029-v08x-perf-campaign-capstone--allocationgc-ceiling-reached-indexing-is-single-threaded-parallelism-is-the-next-frontier) pre-committed second-machine confirmation for the parallelism campaign. The calibration in this ADR was executed on Apple M1 Pro / darwin/arm64 only. Token-set parity is machine-independent (the determinism contract — same chunks slice → byte-identical serialized index → exact NDCG — holds across architectures by construction). The wall-time speedup figure may shift by ±20% on Linux x86_64 depending on cache hierarchy + memory bandwidth + scheduler choices; that's within the noise envelope ADR-028's calibration variance already documented. Second-machine confirmation is a user-action on a Linux x86_64 box before the next release tag; same harness, same corpus, same model dir.
+
+- **Memory ceiling for giant-scale workloads (P6) remains an open question.** The bounded `numWorkers * 2` channel buffer caps in-flight memory at any moment, but the per-file work item (chunks + embeddings) is large for big files. At semble medium scale, hybrid peak heap inuse moved from 6.34 GB (serial) to 6.72 GB (parallel) — a +6% increase, well below the channel cap implied ceiling. Giant-scale (chromium-class, ~500k files) is documented future work per [ADR-025](#adr-025-perf-campaign-phase-1-investigation-outcome--hotspot-identification-across-small--medium-workloads); re-measurement on the same workload will tell us whether parallel-chunking-induced peak RSS becomes a deployment concern there.
+
+### Post-Phase-A picture & what re-opens Phase B
+
+After Phase A, the indexing wall-time profile shifts:
+
+- **hybrid mode**: the embed-dominated path is now ~3× faster. The bm25.Build portion (still serial) is a larger fraction of remaining wall time but absolute time is unchanged. Anyone running ken-mcp with `mcp.Run` against an embedded corpus gets the win automatically on next rebuild.
+- **bm25 mode**: barely moves (1.09×). Serial `bm25.Build` is now overwhelmingly the bottleneck.
+- **semantic mode**: not measured in Phase 1, but architecturally similar to hybrid (embed dominates) — expect a similar large speedup. Phase A's calibration measured semantic mode for the NDCG check; the wall-time win is implied but not separately published.
+
+**Phase B re-opens** if and only if:
+- A user reports bm25-mode indexing latency as actionable pain on a real workload, OR
+- A post-Phase-A re-measurement shows `bm25.Build` is the bottleneck on a workload pattern semble medium doesn't represent.
+
+Without one of those triggers, the parallelism campaign closes here. Phase A is the publication; Phase B is documented future work.
