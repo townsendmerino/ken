@@ -1465,11 +1465,11 @@ CHANGELOG entry for the next release: ADR-025 lands as a docs-only commit. No co
 
 **Issue:** TBD (open a townsendmerino/ken issue for the v0.8.4 refactor + cross-link here on merge).
 
-**Extends:** ADR-025 perf-investigation outcome (currently in `outputs/adr-025-perf-investigation-outcome.md`, pending promotion to this file — ADR-026 references the empirical findings produced by that investigation).
+**Extends:** [ADR-025](#adr-025-perf-campaign-phase-1-investigation-outcome--hotspot-identification-across-small--medium-workloads) (perf-investigation outcome — ADR-026 references the empirical findings produced by that investigation).
 
 ### Context
 
-[ADR-025](outputs/adr-025-perf-investigation-outcome.md)'s medium-scale (semble bench corpus, 378,524 chunks) CPU profile surfaced two adjacent hotspots that share the same structural defect:
+[ADR-025](#adr-025-perf-campaign-phase-1-investigation-outcome--hotspot-identification-across-small--medium-workloads)'s medium-scale (semble bench corpus, 378,524 chunks) CPU profile surfaced two adjacent hotspots that share the same structural defect:
 
 - **`ann.Flat.Query` is 78.56% of hybrid-regex search CPU at medium**, and **30.88% of that is `sort.Slice`** sorting all 378k candidate cosine-similarity scores to take K=10. Top-K-of-N via full sort is O(N log N).
 - **`bm25.Index.TopK` is 36% of bm25-regex search CPU at medium**, all in `sort.Slice` / `sort.pdqsort_func` / `sort.partition_func` over the positive-score candidate list. Same O(N log N) pattern.
