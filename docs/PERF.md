@@ -52,7 +52,7 @@ Four scales, each pinned to a specific revision. Adding a new workload means add
 | Scale | Corpus | Files (approx) | Pin | Why |
 | --- | --- | --- | --- | --- |
 | Small | ken itself | ~150 Go | HEAD on `perf-investigation` | Fast iteration; runs on a laptop in seconds; baseline. |
-| Medium | semble bench corpus | ~19 repos aggregate | `repos.json` revisions (upstream-pinned) | Same corpus as `docs/BENCH.md` NDCG runs; perf and quality numbers line up. |
+| Medium | semble bench corpus | ~80k files / 63 repos aggregate (~378k chunks indexed via regex) | `repos.json` revisions (upstream-pinned) | Same corpus as `docs/BENCH.md` NDCG runs; perf and quality numbers line up. |
 | Large | Linux kernel | ~80k files / ~30M LoC | `v6.10` tag | Real-world large monorepo; multiple languages; common code-search reference. |
 | Giant | TBD — chromium or synthetic | ~500k files | TBD | One-time landmark measurement for the "does the architecture hold at this scale?" question; not a routine re-run. |
 
@@ -95,7 +95,28 @@ The acceptance threshold for shipping a perf change is:
 
 ## Empirical findings
 
-*This section accumulates per-investigation findings the same way `docs/BENCH.md` accumulates per-version findings. The first investigation pass will land its outcome here, cross-referenced to ADR-025.*
+### Phase 1 (2026-05-26) — investigation pass against small + medium workloads
+
+See [ADR-025](DECISIONS.md#adr-025-perf-campaign-phase-1-investigation-outcome--hotspot-identification-across-small--medium-workloads) for the full hotspot ranking, decision categories, and triggers for follow-on work.
+
+**Caveats** — all numbers below are single-run on a single machine spec (Apple M1 Pro, native arm64 darwin / Go 1.26.3) and **are NOT publishable headlines** under the acceptance threshold in this file. They are investigation evidence; median-of-N + second-machine confirmation are required before any number lands in the "Headline numbers" section above.
+
+**Hotspot summary (from medium-scale CPU + alloc profiles):**
+
+- **ANN flat scan dominates hybrid search at scale.** `ann.Flat.Query` = 78.56% of hybrid-regex search CPU at medium (378,524 chunks). Inside that, the candidate-sort step (`sort.Slice` over all candidate scores to take K=10) is 30.88%. Min-heap-of-size-K refactor landed in v0.8.4 ([ADR-026](DECISIONS.md#adr-026-paired-heap-refactor-for-annflatquery--bm25indextopk-v084)).
+- **BM25 search top-K used sort instead of heap.** `bm25.Index.TopK` was 36% of bm25-regex search CPU at medium; all in `sort.Slice` / `pdqsort_func`. Sister refactor to the ANN fix; also landed in v0.8.4.
+- **BM25 tokenizer allocates ~45% of all indexing allocations.** `Tokenize.func1` + `camelSplit` + `Tokenize-range1` = 8.7 GB of 19.3 GB cumulative bm25-regex indexing allocations at medium. Per-chunk alloc grows from 35 KB (small) to 53 KB (medium) — not constant overhead; the cost grows with scale. Targeted by v0.8.5 (BM25 tokenizer alloc reduction); carries real NDCG-regression risk per the acceptance threshold.
+- **GC dominates CPU at medium scale.** ~50% of indexing CPU and ~36% of search CPU at medium goes to `runtime.gcBgMarkWorker` + `tryDeferToSpanScan` + `scanObject`. Direct consequence of the allocation pattern; reducing allocations (v0.8.5) reduces GC time proportionally.
+- **Tree-sitter chunker scales super-linearly.** Per-chunk arena allocation grows 6.4× small→medium (450 KB → 2.9 MB). 1.09 TB cumulative allocation to index 379k chunks via bm25-treesitter at medium. 37-minute wall time. This is an upstream gotreesitter concern, not in-tree fixable; documented in `outputs/treesitter-port-considerations.md`.
+- **`filePathPenalty` regex backtracking was a small-scale-only hotspot.** 24% of hybrid search CPU at small (1,560 chunks); <0.5% at medium. Not worth shipping a fix unless a small-corpus user reports actionable pain.
+
+**Predictions vs evidence** (Phase 1 ran with seven written-down predictions in `outputs/perf-investigation-plan.md`):
+
+- Confirmed: embed dominates indexing CPU (#1), BM25 tokenizer alloc-heavy (#2), ANN flat dominates search at scale (#3), file walk not hot (#4), parser pool not hot (#6).
+- Falsified: rerank not hot at k=20 (#7) — failed at small scale due to `filePathPenalty`; re-confirmed at medium where ANN-flat overwhelms rerank work.
+- New findings: GC dominates CPU at scale; tree-sitter super-linear per-chunk; `bm25.Index.TopK` + `ann.Flat.Query` both used sort-then-slice instead of heap-of-K (both fixed in v0.8.4).
+
+**Reproduction:** `scripts/perf_collect.sh small` for the small workload (~30s), `scripts/perf_collect.sh medium --modes=bm25,hybrid --chunkers=regex,treesitter` for the medium triage (~3 hours wall on M1 Pro native arm64; full cross-product is impractical — see [ADR-025](DECISIONS.md#adr-025-perf-campaign-phase-1-investigation-outcome--hotspot-identification-across-small--medium-workloads) for the methodology adjustment).
 
 ## Files
 
