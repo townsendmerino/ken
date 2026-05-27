@@ -29,6 +29,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/internal/chunk/treesitter"
 	"github.com/townsendmerino/ken/internal/perf"
 	"github.com/townsendmerino/ken/internal/search"
 )
@@ -102,13 +104,22 @@ land at the --cpuprofile / --memprofile paths. Sibling to 'ken bench'
 }
 
 // perfIndexRecord is the JSON shape `ken perf index` writes to stdout.
+//
+// TreesitterStats is populated only when `--chunker=treesitter` was
+// selected for the run; for any other chunker it stays nil and the
+// `treesitter` field is omitted from the JSON output (preserving
+// byte-identical records for regex / line runs). The counters live on
+// the treesitter Chunker singleton registered in the chunk registry, so
+// reading them after FromFS returns gives the per-reason fallback
+// breakdown for this specific build.
 type perfIndexRecord struct {
-	IndexMs      float64         `json:"index_ms"`
-	Chunks       int             `json:"chunks"`
-	BytesIndexed int             `json:"bytes_indexed"`
-	AllocDelta   perf.AllocDelta `json:"alloc_delta"`
-	Heap         perf.HeapStats  `json:"heap"`
-	perfMeta                     // embedded; flattened into the JSON record
+	IndexMs         float64           `json:"index_ms"`
+	Chunks          int               `json:"chunks"`
+	BytesIndexed    int               `json:"bytes_indexed"`
+	AllocDelta      perf.AllocDelta   `json:"alloc_delta"`
+	Heap            perf.HeapStats    `json:"heap"`
+	TreesitterStats *treesitter.Stats `json:"treesitter,omitempty"`
+	perfMeta                          // embedded; flattened into the JSON record
 }
 
 func cmdPerfIndex(args []string) int {
@@ -197,6 +208,21 @@ func cmdPerfIndex(args []string) int {
 		AllocDelta:   allocDelta,
 		Heap:         heap,
 		perfMeta:     buildMeta(modeStr, chunker, model),
+	}
+	// Capture treesitter fallback stats only when this run used the
+	// treesitter chunker. Reading the registry-resident singleton's
+	// counters here (after FromFS returns) yields the per-reason
+	// breakdown of how many files this build actually AST-chunked vs
+	// silently degraded to the line chunker. Used by the OSS-demo
+	// playbook to validate the AST-quality premise per-corpus before
+	// committing a treesitter chunker choice.
+	if chunker == "treesitter" {
+		if ch, err := chunk.Get("treesitter"); err == nil {
+			if ts, ok := ch.(*treesitter.Chunker); ok {
+				stats := ts.Stats()
+				rec.TreesitterStats = &stats
+			}
+		}
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(rec); err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
