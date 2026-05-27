@@ -424,7 +424,7 @@ func cmdPerfWatch(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 
 	if err := copyTree(rest[0], tmp); err != nil {
 		fmt.Fprintln(os.Stderr, "ken: copy corpus to temp: "+err.Error())
@@ -447,7 +447,7 @@ func cmdPerfWatch(args []string) int {
 		return 1
 	}
 	initialIndexMs := float64(time.Since(initStart).Microseconds()) / 1000.0
-	defer wix.Close()
+	defer func() { _ = wix.Close() }()
 
 	// Single-slot flush channel so we never block the debouncer goroutine.
 	// Drained at the top of each edit iteration so each measurement is
