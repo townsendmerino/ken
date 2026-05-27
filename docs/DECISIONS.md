@@ -32,6 +32,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-024](#adr-024-pre-built-embedded-indices-for-mcprun-v083) | Pre-built embedded indices for `mcp.Run` (v0.8.3) | Accepted |
 | [ADR-025](#adr-025-perf-campaign-phase-1-investigation-outcome--hotspot-identification-across-small--medium-workloads) | Perf-campaign Phase 1 investigation outcome — hotspot identification across small + medium workloads | Accepted |
 | [ADR-026](#adr-026-paired-heap-refactor-for-annflatquery--bm25indextopk-v084) | Paired heap refactor for `ann.Flat.Query` + `bm25.Index.TopK` via shared `internal/topk` (v0.8.4) | Accepted |
+| [ADR-027](#adr-027-bm25-tokenizer-allocation-reduction--rune--byte--syncpool-scratch--lowercase-fast-path-v085) | BM25 tokenizer allocation reduction (`[]rune` → `[]byte` + `sync.Pool` scratch + lowercase fast-path) (v0.8.5) | Accepted |
 
 ---
 
@@ -1574,3 +1575,134 @@ Replace sort-then-slice with min-heap-of-size-K in `ann.Flat.Query` and `bm25.In
 - **Two-commit PR shape.** Commit 1 lands `internal/topk` + tests + micro-benchmark; commit 2 lands the two refactors + this ADR-026. Reviewers see the new utility in isolation before reading the integrations.
 
 - **Future perf work informed.** The remaining ADR-025 hotspots (BM25 tokenizer allocs at ~45% of indexing allocs, embed `weightedMeanPoolSafe` accumulator) will ship in subsequent rolling point releases (v0.8.5+) as the analysis from this work feeds back into the prioritization. Specifically, with search latency cut as documented above, the embed inference cost becomes a proportionally larger fraction of cold-start time on the giant-corpus workload that the planning Claude's Phase 1 medium re-run will benchmark next.
+
+---
+
+## ADR-027: BM25 tokenizer allocation reduction — `[]rune` → `[]byte` + `sync.Pool` scratch + lowercase fast-path (v0.8.5)
+
+**Status:** Accepted
+
+**Date:** 2026-05-26
+
+**Issue:** TBD (open a townsendmerino/ken issue for the v0.8.5 tokenizer-allocs work + cross-link here on merge).
+
+**Extends:** [ADR-025](#adr-025-perf-campaign-phase-1-investigation-outcome--hotspot-identification-across-small--medium-workloads) (perf-investigation outcome that ranked BM25 tokenizer alloc reduction as Ship-tier #3), [ADR-008](#adr-008-bm25-tokenizer--verbatim-port-of-sembles-tokenspy-snake-case-compound-preservation) (verbatim-parity contract — this refactor explicitly affirms token-set parity is preserved).
+
+### Context
+
+[ADR-025](#adr-025-perf-campaign-phase-1-investigation-outcome--hotspot-identification-across-small--medium-workloads)'s medium-scale (semble bench corpus, 378,524 chunks) alloc_space pprof attributed **~45% of bm25-regex indexing allocations to the tokenizer**:
+
+```
+bm25.Tokenize.func1            5.7 GB  (29.6%)
+bm25.camelSplit                2.6 GB  (13.5%)
+bm25.Tokenize.func1-range1     0.37 GB (1.9%)
+─────────────────────────────────────────────
+Tokenizer subtotal            ~8.7 GB  (~45%)
+```
+
+Per-chunk tokenizer allocation grew from 35 KB (small workload, 1,560 chunks) to 53 KB (medium, 378k chunks) — not constant overhead; the cost grew with scale. GC dominated indexing CPU at scale (~50% per ADR-025), so the wall-time win from reducing tokenizer allocs is larger than the alloc-bytes number alone suggests — every byte not allocated is a byte the GC doesn't have to scan.
+
+The hotspot's structural source: the tokenizer iterated text as `[]rune` (4 bytes per ASCII char) and called `strings.ToLower(string(run))` twice per token (once for the compound, once per camelSplit part), each conversion allocating. ASCII-only design — `isIdentStart` / `isIdentCont` reject non-ASCII bytes — means the `[]rune` decoding was paying UTF-8 overhead it didn't need.
+
+[ADR-008](#adr-008-bm25-tokenizer--verbatim-port-of-sembles-tokenspy-snake-case-compound-preservation) makes the load-bearing constraint explicit: `Tokenize` is a verbatim port of `semble/tokens.py`, and any change that affects its token output violates the parity contract. The refactor's North Star is therefore "cut allocations without changing output bytes."
+
+### Decision
+
+Refactor `internal/bm25/tokenize.go` to scan input bytes directly (instead of decoding runes) and to share a `sync.Pool`-backed scratch buffer across calls for lowercase conversion. Public API unchanged: `Tokenize(text string) []string` and the documented identifier-extraction + split semantics are preserved byte-for-byte.
+
+**Three allocation levers:**
+
+1. **Byte-level scan replaces rune decoding.** ASCII identifier bytes (0x30-0x39, 0x41-0x5A, 0x5F, 0x61-0x7A) are all < 0x80; UTF-8 multi-byte sequences use only 0x80-0xFF bytes. The two ranges don't overlap, so a non-ASCII byte cannot false-positive as an identifier-start byte and correctly terminates any in-progress run. Byte-iteration is structurally faster than `for _, r := range text`'s UTF-8 decoder and removes the `[]rune` allocation entirely.
+
+2. **`sync.Pool` scratch buffer for lowercase conversion.** Each `Tokenize` call gets one pooled `[]byte` (initial cap 256, grows for rare long identifiers); the buffer is reused for every `lowerString` slow-path conversion within the call and returned to the pool on defer. Eliminates per-token allocation for the lowercase output buffer.
+
+3. **Lowercase fast-path.** `lowerString` scans for any uppercase ASCII byte first; if none, returns the input string unchanged — zero allocation, the same string header pointing at the same underlying bytes. Real-source identifiers (variable names, function names that are already lowercase or whose parts are after camelSplit) hit this path constantly. Slow path is exactly one allocation (`string(*scratch)` after the per-byte ToLower copy) — half of the prior pattern's two allocations (`string(rune-slice)` then `strings.ToLower(string)`).
+
+**Implementation supporting details:**
+
+- `isIdentStartByte` / `isIdentContByte` / `isUpperByte` / `isLowerByte` / `isDigitByte` replace the rune-typed predicates; trivially zero-allocation.
+- `slices.Contains(rs, '_')` replaced by `strings.IndexByte(run, '_') >= 0` — single byte scan, no slice header overhead.
+- `strings.SplitSeq(compound, "_")` iterator replaced by hand-rolled snake-split over the SOURCE run (not the lowercased compound) so each part takes the lowercase fast-path independently when already lowercase.
+- `camelSplitBytes` is a verbatim algorithmic port of the old `camelSplit` to byte offsets — same ordered-alternation regex semantics from semble's `_CAMEL_RE`. Lowercase-only and digit-only matches emit source views via the fast-path; uppercase-containing matches go through `lowerString` with the shared scratch.
+
+### Alternatives considered
+
+- **Change `Tokenize` to return `[][]byte`.** Rejected for API-invasiveness and [ADR-008](#adr-008-bm25-tokenizer--verbatim-port-of-sembles-tokenspy-snake-case-compound-preservation) scope. The function-level contract is byte-equality of output strings, not return-type identity. The return-type change would ripple into `bm25.Build`'s map-insertion path, query-side tokenization, and external consumers via the `Tokenize` symbol — invasive blast radius for a marginal additional alloc reduction. Documented in the v0.8.5 briefing as deferred.
+
+- **Optimize `bm25.Build`'s postings-map lookup with the `m[string(b)]` compiler-optimized pattern.** Considered for v0.8.5; rejected to keep scope tight. The win depends on `Tokenize` returning `[][]byte` (alternative above, also rejected) AND a more complex Build refactor. Flagged as v0.8.6+ candidate after we see whether post-v0.8.5 GC pressure still warrants chasing it. ADR-025 ranked `bm25.Build` at 37.6% of indexing allocations — the larger absolute target — but the path to reduce it is more invasive than the tokenizer rewrite.
+
+- **Adopt a third-party tokenizer** (e.g., `bluge`'s analyzer chain, or import the Python tokenizer via a CGO bridge). Rejected for two reasons: (a) [ADR-008](#adr-008-bm25-tokenizer--verbatim-port-of-sembles-tokenspy-snake-case-compound-preservation)'s verbatim-parity contract with semble's `tokens.py` would be at the mercy of an external library's choices, and (b) [ADR-001](#adr-001-pure-go-no-cgo) forbids CGO regardless. The byte-level refactor keeps the existing verbatim port intact.
+
+- **Pool the `Tokenize` result `[]string` slice in addition to the scratch buffer.** Considered. Started without it; allocation profiles after the refactor show the result-slice growth is not a remaining hotspot (the scratch-pool + fast-path already eliminate the per-token output-buffer allocation; the result slice itself is one growing append). Adding result-slice pooling would complicate the API contract (callers would need to release the slice, or the pool would have to copy) for diminishing return. Documented for v0.8.6+ if a future profile shows otherwise.
+
+- **Skip the lowercase fast-path; always lowercase via scratch.** Marginally simpler code but loses the zero-allocation common case. Real-source identifiers are predominantly already lowercase (variable names, after-camelSplit parts); the fast-path is the load-bearing alloc-reduction lever, not just an optimization. Kept.
+
+- **Pre-size the `parts []string` slice in `camelSplitBytes` and the `out []string` slice in `Tokenize`.** Considered. Both are small slices (typical identifier produces 2-4 parts; typical chunk produces tens of tokens). The growth-from-empty pattern's amortized cost is bounded, and pre-sizing would require an upfront scan to count. Skipped on cost/benefit — pre-sizing would help a marginal alloc count but adds a scan pass. Revisit if profile shows otherwise.
+
+### Consequences
+
+**Measured impact** (Apple M1 Pro / Go 1.26.3 / darwin/arm64 / `CGO_ENABLED=0 -trimpath -ldflags='-s -w'`):
+
+- **`Tokenize` micro-benchmark** (`go test -bench BenchmarkTokenize -benchmem -count=10`, before = main HEAD with rune-based code, after = this commit):
+
+  ```
+              │  rune-based       │  byte-based                    │
+              │   sec/op          │   sec/op       vs base         │
+  Tokenize    │ 530.8µs ± 3%      │ 267.8µs ± 2%   −49.5% (p=0.000) │
+
+              │  B/s              │  B/s           vs base          │
+  Tokenize    │ 47.36 MiB/s ± 3%  │ 93.87 MiB/s ± 2%  +98.2% (p=0.000) │
+
+              │  B/op             │  B/op          vs base          │
+  Tokenize    │ 398.7 KiB ± 0%    │ 318.9 KiB ± 0%  −20.0% (p=0.000) │
+
+              │  allocs/op        │  allocs/op     vs base          │
+  Tokenize    │ 13,600 ± 0%       │ 5,613 ± 0%     −58.7% (p=0.000) │
+  ```
+
+  The `BenchmarkScore/N100` and `/N1000` benchmarks (which exercise `bm25.Index.TopK`) show no movement on this commit, as expected — those benchmarks build the corpus + index outside the timer, so they don't measure `Tokenize` in the hot loop.
+
+  The B/op reduction (−20%) is below the briefing's −50-80% projection range. The shortfall is because the lowercase fast-path's zero-allocation case only fires when an identifier is entirely lowercase; real-source corpora have many mixed-case identifiers (camelCase, PascalCase) that take the slow path. The allocs/op reduction (−58.7%) is the more representative win because it captures every avoided allocation regardless of byte size. Briefing surfaced this as a flag-if-below; documented here as the actual measured outcome.
+
+- **End-to-end medium-corpus re-measurement** (`scripts/perf_collect.sh medium --modes=bm25,hybrid --chunkers=regex`, 378,524 chunks):
+
+  | combo | metric | rune-based | byte-based | Δ |
+  |---|---|---|---|---|
+  | bm25-regex INDEX | wall time | 59.8s | **40.1s** | **−32.9%** |
+  | bm25-regex INDEX | objects allocated | 301.9M | **133.6M** | **−55.7%** |
+  | bm25-regex INDEX | bytes allocated | 18.80 GB | 16.86 GB | −10.3% |
+  | bm25-regex INDEX | heap inuse | 6.41 GB | 5.96 GB | −7.0% |
+  | bm25-regex SEARCH | p50 | 1.78 ms | 1.76 ms | ≈ noise |
+  | hybrid-regex INDEX | wall time | 192.8s | **166.8s** | **−13.5%** |
+  | hybrid-regex INDEX | heap inuse | 9.13 GB | **5.71 GB** | **−37.5%** |
+  | hybrid-regex INDEX | objects allocated | 820.3M | 652.0M | −20.5% |
+  | hybrid-regex SEARCH | p50 | 117.9 ms | 124.1 ms | +5% (within noise) |
+
+  The bm25 indexing wall-time reduction (−32.9%) hits the upper end of the briefing's −20-30% projection. The cause is the GC-time reduction: ADR-025 measured GC at ~50% of medium-scale indexing CPU; the tokenizer's −55.7% object-count drop translates roughly proportionally into GC pressure drop. The hybrid indexing wall-time reduction (−13.5%) is smaller because embedding is the dominant cost in hybrid mode and is unaffected by this refactor — but the bm25 portion of hybrid indexing still benefits, so the net is non-trivial. **Search latency is unchanged within noise** in both modes — sanity check that the refactor only touched the indexing tokenizer.
+
+  Heap inuse drop on hybrid (−37.5%) is the most-surprising win: the steady-state hybrid index retains less working memory because lowercase tokens now share storage with the chunk text (the `lowerString` fast-path returns the source string view) rather than being independent copies. The chunk text is retained by the index anyway, so the net working set shrinks.
+
+- **NDCG@10 safety check** (semble bench corpus, 63 repos / 1251 tasks, all 3 modes, `--chunker regex` both sides):
+
+  | mode | rune-based NDCG@10 | byte-based NDCG@10 | Δ |
+  |---|---|---|---|
+  | bm25 | 0.6237 | 0.6237 | **0.0000** (exact) |
+  | semantic | 0.6469 | 0.6469 | **0.0000** (exact) |
+  | hybrid | 0.8418 | 0.8418 | **0.0000** (exact) |
+
+  Exact match in all three modes is the strongest possible confirmation of token-set parity: same tokens in → same scores → same K results → same ranking → identical NDCG@10. The v0.8.5 briefing called this an exact-match requirement (the ±0.005 escape hatch in `docs/PERF.md`'s acceptance threshold is reserved for intentional algorithmic changes; this refactor is "same tokens, less allocation" so any non-zero delta would indicate a bug). NDCG-bench wall times also dropped substantially (bm25 9.1 → 5.7s, semantic 32.4 → 23.3s, hybrid 81.9 → 50.4s — the per-repo index builds in the NDCG harness pay the same tokenizer-alloc-reduction win).
+
+- **Token-set parity test extension.** `internal/bm25/tokenize_test.go` grew three new test functions ([commit 1/2 of this PR](https://github.com/townsendmerino/ken/commit/6042be5)):
+  - `TestTokenize_AdversarialParity` (16 sub-cases): whitespace-only / pure-punctuation, camelCase + acronym + digit mixes, snake leading/trailing/multiple underscores, digit-start runs, non-ASCII input (the load-bearing UTF-8 byte-vs-rune-equivalence cases), a real Go source snippet, and a multi-identifier stress input. All expected outputs hand-traced against the pre-refactor rune-based impl and verified on main HEAD before the refactor landed.
+  - `TestTokenize_StablePoolReuse`: 100 iterations of three representative inputs, requires byte-identical output on every iteration. Catches scratch-buffer-pool corruption (one call leaking state into the next).
+  - `TestTokenize_LongInputNoPanic`: deterministic 4 KiB realistic input + 10 pool-stability re-runs. Catches pool corruption at scale that the StablePoolReuse stress might miss with small inputs.
+
+  All adversarial cases + the existing 28-case `TestTokenize_IdentifierSplitting` suite pass byte-identically on the byte-based impl — that's what makes the NDCG exact-match result mechanically guaranteed.
+
+- **Allocations per call go DOWN, not up** (different from ADR-026's +3 trade). The `sync.Pool` scratch buffer eliminates the per-token output-buffer allocation; the lowercase fast-path eliminates allocations for the common already-lowercase case; the byte-level scan eliminates the rune-slice growth. Both alloc count AND alloc bytes drop. This is the opposite tradeoff from ADR-026's heap refactor (which traded +3 allocs for −99% bytes); here both metrics improve together.
+
+- **No public API changes.** `Tokenize(text string) []string` signature unchanged. The `[]string` return type stays per [ADR-008](#adr-008-bm25-tokenizer--verbatim-port-of-sembles-tokenspy-snake-case-compound-preservation)'s function-level byte-equality contract.
+
+- **No new third-party dependencies.** Refactor uses only standard library (`strings`, `sync`). Drops two prior dependencies inside the file (`slices`, `strings.SplitSeq`/`strings.ToLower`/`strings.IndexByte`) in favor of the byte-direct equivalents.
+
+- **Future perf work informed.** Post-v0.8.5, the remaining ADR-025 hotspots are: `bm25.Build`'s 37.6% indexing-alloc share (potentially addressable via `m[string(b)]` lookup pattern — deferred to v0.8.6+ pending a re-measurement that shows it's still worth the API churn), and the embed pipeline (`weightedMeanPoolSafe` accumulator at 23% of small hybrid CPU — gated on a pure-Go-no-cgo SIMD pattern). GC pressure should drop substantially with this refactor in tree, which will shift the relative shares.
