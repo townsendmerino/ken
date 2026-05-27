@@ -24,8 +24,10 @@
 //     "validate", "user"]` (compound first), not `["validate", "user"]`.
 //     CamelCase splitting matches the `_CAMEL_RE` regex's ordered
 //     alternation. See ADR-008 for why verbatim parity is the contract,
-//     and ADR-027 for the v0.8.5 alloc-reduction refactor that
-//     preserves byte-equality of Tokenize output.
+//     ADR-027 for the v0.8.5 byte-level scan refactor, and ADR-028 for
+//     the v0.8.6 parts-slice pooling that eliminates the per-identifier
+//     allocation overhead. All three releases preserve token output
+//     byte-identically.
 package bm25
 
 import (
@@ -33,15 +35,30 @@ import (
 	"sync"
 )
 
-// tokenizerScratch pools per-call scratch byte buffers used by lowerString
-// for lowercase conversion. Starting cap of 256 bytes covers the typical
-// identifier-length distribution; the buffer grows automatically for rare
-// long identifiers and Put resets length but keeps cap. Sharing across
-// goroutines is fine — sync.Pool is the canonical Go idiom for this.
-var tokenizerScratch = sync.Pool{
+// tokBuffers holds the per-call reusable scratch buffers. Pooled so they
+// amortize across the millions of Tokenize calls an index build makes.
+//
+//   - scratch: lowercase conversion target (v0.8.5 / ADR-027). Grown as
+//     needed by lowerString's slow path; reset to length 0 on Put.
+//   - parts:   identifier sub-token accumulator (v0.8.6 / ADR-028). Reset
+//     to length 0 at the top of each emitRun, refilled via the snake- or
+//     camel-split path, then string headers are COPIED into the output
+//     slice via append. The backing array is therefore safe to reuse
+//     for the next identifier — out has its own copies.
+//
+// Initial scratch cap covers typical identifier length; initial parts
+// cap covers typical identifier sub-token count.
+type tokBuffers struct {
+	scratch []byte
+	parts   []string
+}
+
+var tokenizerPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 0, 256)
-		return &b
+		return &tokBuffers{
+			scratch: make([]byte, 0, 256),
+			parts:   make([]string, 0, 16),
+		}
 	},
 }
 
@@ -68,23 +85,28 @@ var tokenizerScratch = sync.Pool{
 //   - Sub-tokenization follows `split_identifier`: if `_` is in the run,
 //     split on `_` (drop empties) — no camel recursion inside the parts.
 //     Otherwise camelCase-split via the same `_CAMEL_RE` regex, modeled
-//     by camelSplitBytes below.
+//     by camelSplitBytesInto below.
 //   - Output order is `[compound, *parts]` (compound first), matching
 //     semble.split_identifier exactly.
 //
-// Implementation note (v0.8.5 / ADR-027): scans bytes directly rather
-// than decoding UTF-8 runes. The byte-level scan produces output
-// byte-identical to a rune-based scan on non-ASCII input because UTF-8
-// multi-byte sequences use only 0x80-0xFF bytes — never in the ASCII
-// identifier ranges (0x30-0x39, 0x41-0x5A, 0x5F, 0x61-0x7A) — so a
-// non-ASCII byte correctly terminates any run-in-progress and cannot
-// false-positive as an identifier start. TestTokenize_AdversarialParity
-// pins this with explicit non-ASCII cases.
+// Implementation note (v0.8.5+v0.8.6, ADR-027+ADR-028): scans bytes
+// directly rather than decoding UTF-8 runes. The byte-level scan
+// produces output byte-identical to a rune-based scan on non-ASCII
+// input because UTF-8 multi-byte sequences use only 0x80-0xFF bytes —
+// never in the ASCII identifier ranges (0x30-0x39, 0x41-0x5A, 0x5F,
+// 0x61-0x7A) — so a non-ASCII byte correctly terminates any run-in-
+// progress and cannot false-positive as an identifier start. Both the
+// scratch buffer (for lowercase conversion) and the parts accumulator
+// (for sub-token assembly) are pooled across Tokenize calls so per-
+// identifier allocations drop to near-zero in steady state.
+// TestTokenize_AdversarialParity pins this with explicit non-ASCII
+// cases + a within-call parts-reuse stress case.
 func Tokenize(text string) []string {
-	bufPtr := tokenizerScratch.Get().(*[]byte)
+	bufs := tokenizerPool.Get().(*tokBuffers)
 	defer func() {
-		*bufPtr = (*bufPtr)[:0]
-		tokenizerScratch.Put(bufPtr)
+		bufs.scratch = bufs.scratch[:0]
+		bufs.parts = bufs.parts[:0]
+		tokenizerPool.Put(bufs)
 	}()
 
 	var out []string
@@ -103,11 +125,11 @@ func Tokenize(text string) []string {
 			continue
 		}
 		// Non-identifier byte ends the current run at i (exclusive).
-		out = emitRun(text[runStart:i], bufPtr, out)
+		out = emitRun(text[runStart:i], bufs, out)
 		runStart = -1
 	}
 	if runStart >= 0 {
-		out = emitRun(text[runStart:], bufPtr, out)
+		out = emitRun(text[runStart:], bufs, out)
 	}
 	return out
 }
@@ -116,8 +138,23 @@ func Tokenize(text string) []string {
 // run to out. Dispatches to the snake- or camel-split path based on
 // whether the run contains an underscore byte. Single-part runs emit
 // only the compound.
-func emitRun(run string, scratch *[]byte, out []string) []string {
-	compound := lowerString(run, scratch)
+//
+// bufs.parts is reset to length 0 at the top and used as the
+// accumulator for sub-tokens; at the bottom, len(bufs.parts) is checked
+// and the contents copied into out via append. The backing array is
+// safe to reuse next call because:
+//
+//   - String headers in bufs.parts are copied byte-by-byte into out's
+//     backing array by `append`; out's strings don't alias bufs.parts.
+//   - The string DATA (the underlying bytes those headers point at) is
+//     either a view into text (lowerString fast path — independent of
+//     bufs) or a fresh allocation copied out of bufs.scratch (slow path
+//     — also independent of subsequent bufs mutation).
+//   - So neither out's slice nor its strings depend on bufs.parts'
+//     backing array after the append completes.
+func emitRun(run string, bufs *tokBuffers, out []string) []string {
+	compound := lowerString(run, &bufs.scratch)
+	bufs.parts = bufs.parts[:0]
 
 	if strings.IndexByte(run, '_') >= 0 {
 		// Snake split: iterate the run looking for '_' boundaries.
@@ -125,30 +162,25 @@ func emitRun(run string, scratch *[]byte, out []string) []string {
 		// lets each part take the lowerString fast-path when it's
 		// already lowercase. Empty parts (consecutive '_' or leading/
 		// trailing '_') are filtered, matching semble's `if p`.
-		var parts []string
 		start := 0
 		for i := 0; i <= len(run); i++ {
 			if i == len(run) || run[i] == '_' {
 				if i > start {
-					parts = append(parts, lowerString(run[start:i], scratch))
+					bufs.parts = append(bufs.parts, lowerString(run[start:i], &bufs.scratch))
 				}
 				start = i + 1
 			}
 		}
-		if len(parts) >= 2 {
-			out = append(out, compound)
-			out = append(out, parts...)
-		} else {
-			out = append(out, compound)
-		}
-		return out
+	} else {
+		// camelCase split: operates on byte offsets into run; appends
+		// directly into bufs.parts so we don't allocate a fresh slice
+		// per identifier.
+		camelSplitBytesInto(run, bufs)
 	}
 
-	// camelCase split: operates on byte offsets into run.
-	parts := camelSplitBytes(run, scratch)
-	if len(parts) >= 2 {
+	if len(bufs.parts) >= 2 {
 		out = append(out, compound)
-		out = append(out, parts...)
+		out = append(out, bufs.parts...)
 	} else {
 		out = append(out, compound)
 	}
@@ -164,12 +196,12 @@ func emitRun(run string, scratch *[]byte, out []string) []string {
 //     this path.
 //   - Slow: copies s into scratch with uppercase bytes lowered, then
 //     returns `string(scratch)`. Exactly one allocation regardless of
-//     input length (vs the pre-refactor pattern's two: rune→string +
+//     input length (vs the pre-ADR-027 pattern's two: rune→string +
 //     strings.ToLower).
 //
 // scratch is a pooled byte buffer; emitRun's caller (Tokenize) owns it
-// and resets length on Put. lowerString resets it to zero length before
-// each use.
+// via tokBuffers and resets length on Put. lowerString resets it to
+// zero length before each slow-path use.
 func lowerString(s string, scratch *[]byte) string {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= 'A' && s[i] <= 'Z' {
@@ -203,14 +235,22 @@ func isUpperByte(c byte) bool { return c >= 'A' && c <= 'Z' }
 func isLowerByte(c byte) bool { return c >= 'a' && c <= 'z' }
 func isDigitByte(c byte) bool { return c >= '0' && c <= '9' }
 
-// camelSplitBytes is the byte-level port of the v0.8.4-and-earlier
-// camelSplit. Operates on a run that contains only [a-zA-Z0-9] (no
-// underscores) and returns lowercased sub-tokens in match order. Uses
-// scratch for per-part lowercasing via lowerString; runs of pure
-// lowercase or digits hit the fast path and are returned as views into
-// the source.
+// camelSplitBytesInto is the byte-level camelCase splitter (verbatim
+// algorithm port of the pre-v0.8.5 camelSplit). Operates on a run that
+// contains only [a-zA-Z0-9] (no underscores) and appends lowercased
+// sub-tokens to bufs.parts in match order.
 //
-// Algorithm (verbatim semantics from the []rune version):
+// In v0.8.6 / ADR-028 this changed from returning a fresh `[]string`
+// to appending into the caller's pooled `bufs.parts` slice — eliminates
+// the per-identifier allocation that ADR-025's post-v0.8.5 pprof
+// identified as 68.1% of indexing allocation count (75.8M out of 111M
+// objects at medium scale). The string headers appended here are
+// either views into run (lowercase + digit fast-paths) or fresh
+// allocations out of bufs.scratch (uppercase slow path) — neither
+// aliases bufs.parts' backing array, so the caller can copy them into
+// the output slice and safely reuse bufs.parts on the next identifier.
+//
+// Algorithm (verbatim semantics from the pre-ADR-027 []rune version):
 //
 //	_CAMEL_RE = r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+"
 //
@@ -221,8 +261,7 @@ func isDigitByte(c byte) bool { return c >= '0' && c <= '9' }
 // lowercase and the run has ≥2 uppers, consume run[i:j-1] and let
 // run[j-1] start the next match. This is what splits "HTTPResponse"
 // into "HTTP" + "Response" and "XMLParser" into "XML" + "Parser".
-func camelSplitBytes(run string, scratch *[]byte) []string {
-	var parts []string
+func camelSplitBytesInto(run string, bufs *tokBuffers) {
 	n := len(run)
 	for i := 0; i < n; {
 		c := run[i]
@@ -234,7 +273,7 @@ func camelSplitBytes(run string, scratch *[]byte) []string {
 			}
 			// Alt 1: [A-Z]+(?=[A-Z][a-z]) — need ≥2 uppers and run[j] lower.
 			if j-i >= 2 && j < n && isLowerByte(run[j]) {
-				parts = append(parts, lowerString(run[i:j-1], scratch))
+				bufs.parts = append(bufs.parts, lowerString(run[i:j-1], &bufs.scratch))
 				i = j - 1
 				continue
 			}
@@ -244,12 +283,12 @@ func camelSplitBytes(run string, scratch *[]byte) []string {
 				for k < n && isLowerByte(run[k]) {
 					k++
 				}
-				parts = append(parts, lowerString(run[i:k], scratch))
+				bufs.parts = append(bufs.parts, lowerString(run[i:k], &bufs.scratch))
 				i = k
 				continue
 			}
 			// Alt 3: [A-Z]+ — pure uppercase (no lowercase follows).
-			parts = append(parts, lowerString(run[i:j], scratch))
+			bufs.parts = append(bufs.parts, lowerString(run[i:j], &bufs.scratch))
 			i = j
 		case isLowerByte(c):
 			j := i + 1
@@ -257,19 +296,18 @@ func camelSplitBytes(run string, scratch *[]byte) []string {
 				j++
 			}
 			// Already lowercase — emit the view directly (fast path).
-			parts = append(parts, run[i:j])
+			bufs.parts = append(bufs.parts, run[i:j])
 			i = j
 		case isDigitByte(c):
 			j := i + 1
 			for j < n && isDigitByte(run[j]) {
 				j++
 			}
-			parts = append(parts, run[i:j])
+			bufs.parts = append(bufs.parts, run[i:j])
 			i = j
 		default:
 			// Unreachable: caller filters underscores and non-ASCII.
 			i++
 		}
 	}
-	return parts
 }

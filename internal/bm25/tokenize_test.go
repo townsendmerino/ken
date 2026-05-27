@@ -175,6 +175,23 @@ func TestTokenize_AdversarialParity(t *testing.T) {
 			"delta_epsilon", "delta", "epsilon",
 			"http2", "http", "2",
 		}},
+
+		// ── Within-call parts-slice reuse stress (v0.8.6 / ADR-028).
+		// Five consecutive identifiers of rapidly varying part counts
+		// (2/2/4/3/2 parts respectively). Catches the specific bug
+		// shape the v0.8.6 pooled-parts refactor could introduce:
+		// cross-identifier contamination via the shared `parts` slice
+		// if its backing array isn't properly reset between emitRun
+		// calls. Token-set parity here is the load-bearing safety net
+		// — same logic as v0.8.5's parity discipline, extended to the
+		// new pooled-parts shape.
+		{"within-call-parts-reuse", "aB cD_eF gHiJkL m_n_o PQRSTuv", []string{
+			"ab", "a", "b",
+			"cd_ef", "cd", "ef",
+			"ghijkl", "g", "hi", "jk", "l",
+			"m_n_o", "m", "n", "o",
+			"pqrstuv", "pqrs", "tuv",
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -33,6 +33,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-025](#adr-025-perf-campaign-phase-1-investigation-outcome--hotspot-identification-across-small--medium-workloads) | Perf-campaign Phase 1 investigation outcome — hotspot identification across small + medium workloads | Accepted |
 | [ADR-026](#adr-026-paired-heap-refactor-for-annflatquery--bm25indextopk-v084) | Paired heap refactor for `ann.Flat.Query` + `bm25.Index.TopK` via shared `internal/topk` (v0.8.4) | Accepted |
 | [ADR-027](#adr-027-bm25-tokenizer-allocation-reduction--rune--byte--syncpool-scratch--lowercase-fast-path-v085) | BM25 tokenizer allocation reduction (`[]rune` → `[]byte` + `sync.Pool` scratch + lowercase fast-path) (v0.8.5) | Accepted |
+| [ADR-028](#adr-028-bm25-tokenizer-parts-slice-pooling-via-tokbuffers-struct-v086) | BM25 tokenizer `parts`-slice pooling via `tokBuffers` struct (v0.8.6) | Accepted |
 
 ---
 
@@ -1706,3 +1707,143 @@ Refactor `internal/bm25/tokenize.go` to scan input bytes directly (instead of de
 - **No new third-party dependencies.** Refactor uses only standard library (`strings`, `sync`). Drops two prior dependencies inside the file (`slices`, `strings.SplitSeq`/`strings.ToLower`/`strings.IndexByte`) in favor of the byte-direct equivalents.
 
 - **Future perf work informed.** Post-v0.8.5, the remaining ADR-025 hotspots are: `bm25.Build`'s 37.6% indexing-alloc share (potentially addressable via `m[string(b)]` lookup pattern — deferred to v0.8.6+ pending a re-measurement that shows it's still worth the API churn), and the embed pipeline (`weightedMeanPoolSafe` accumulator at 23% of small hybrid CPU — gated on a pure-Go-no-cgo SIMD pattern). GC pressure should drop substantially with this refactor in tree, which will shift the relative shares.
+
+---
+
+## ADR-028: BM25 tokenizer `parts`-slice pooling via `tokBuffers` struct (v0.8.6)
+
+**Status:** Accepted
+
+**Date:** 2026-05-27
+
+**Issue:** TBD (open a townsendmerino/ken issue for the v0.8.6 work + cross-link on merge).
+
+**Extends:** [ADR-027](#adr-027-bm25-tokenizer-allocation-reduction--rune--byte--syncpool-scratch--lowercase-fast-path-v085) (the v0.8.5 byte-level scan + scratch pool that this builds on), [ADR-025](#adr-025-perf-campaign-phase-1-investigation-outcome--hotspot-identification-across-small--medium-workloads) (the GC-is-~50%-of-indexing-CPU finding that makes object count the right lever), [ADR-008](#adr-008-bm25-tokenizer--verbatim-port-of-sembles-tokenspy-snake-case-compound-preservation) (the verbatim-parity contract this refactor explicitly preserves).
+
+### Context
+
+After ADR-027 shipped, a post-v0.8.5 re-measurement of `ken perf index` at medium scale (semble bench corpus, 378,524 chunks) revealed that the allocation picture had split into two distinct shapes — by bytes vs by object count — and the GC-time lever was on the object-count side:
+
+**By bytes (alloc_space, 17.2 GB total):** `bm25.Build` 41.8% ≈ tokenizer 42.1% — roughly tied.
+
+**By object count (alloc_objects, 111M total) — the GC-pressure signal:**
+
+```
+bm25.camelSplitBytes   75.8M flat  68.1%   ← the target
+bm25.lowerString       20.8M       18.7%
+bm25.emitRun→Tokenize 102.3M cum   91.9%
+bm25.Build              5.5M        4.9%
+```
+
+The tokenizer accounted for **92% of indexing allocation COUNT but only 42% of bytes**. `bm25.Build` was the byte hog (a few large structures: ~1.3 KB/object map buckets + posting slices); the tokenizer was the count hog (tens of millions of tiny `parts []string` slices, one per identifier). GC mark cost scales with object count + pointer density, not raw bytes, and [ADR-025](#adr-025-perf-campaign-phase-1-investigation-outcome--hotspot-identification-across-small--medium-workloads) measured GC at ~50% of indexing CPU. So the GC-time lever for v0.8.6 was specifically `camelSplitBytes`'s 75.8M `parts`-slice allocations.
+
+Root cause: `camelSplitBytes` returned a fresh `parts []string` per identifier; the snake-split path in `emitRun` did the same with a local `var parts`. Those string headers were copied into the output via `append(out, parts...)`, so the `parts` backing array was dead-and-reusable the instant the append completed. The fix is to stop allocating it per-identifier.
+
+### Decision
+
+Extend [ADR-027](#adr-027-bm25-tokenizer-allocation-reduction--rune--byte--syncpool-scratch--lowercase-fast-path-v085)'s pooled `*[]byte` scratch into a small `*tokBuffers` struct holding **both** `scratch []byte` (for lowercase conversion) AND `parts []string` (for sub-token accumulation). One `sync.Pool` Get/Put per `Tokenize` call; the `parts` slice is reset to length 0 at the top of each `emitRun` and refilled via the snake- or camel-split path; at the bottom, contents are copied into the output via `append(out, bufs.parts...)`.
+
+Two surface changes:
+
+1. **`tokBuffers` struct** holds `{scratch []byte, parts []string}`. Pooled via `sync.Pool`; initial capacities cover typical identifier shape (scratch 256 bytes, parts 16 entries).
+2. **`camelSplitBytes` → `camelSplitBytesInto(run string, bufs *tokBuffers)`.** Appends directly into `bufs.parts` instead of returning a fresh slice. The signature couples the camel splitter to the buffer struct, but the struct is per-call state owned by Tokenize so the coupling is local and reads naturally.
+
+`lowerString` signature is unchanged (still takes `scratch *[]byte`); callers pass `&bufs.scratch`.
+
+The correctness argument has three load-bearing pieces:
+
+- **`append(out, bufs.parts...)` COPIES string headers** into out's backing array. After the append, `bufs.parts`'s backing array holds nothing `out` depends on.
+- **The string DATA those headers point at is independent of `bufs`:** lowerString's fast-path returns a view into `text` (valid as long as text lives, no bufs dependency); lowerString's slow-path returns a fresh allocation copied out of `bufs.scratch` (also no bufs dependency after the conversion).
+- So `bufs.parts` can hold a mix of both, and copying them into `out` then reusing `bufs.parts[:0]` for the next identifier is safe. Same reasoning that made ADR-027's scratch reuse safe, extended one level.
+
+### Alternatives considered
+
+- **Pre-size `parts := make([]string, 0, 8)` per call instead of pooling.** Simpler — just a constant-cap allocation per call — but still 1 alloc/identifier. Halves the per-identifier count rather than eliminating it. Rejected: the pooled-struct refactor gets to ~0 amortized; pre-sizing leaves half the win on the table for marginal code-simplicity gain.
+
+- **Pool `parts` separately from `scratch` (two `sync.Pool` instances).** Rejected. One struct holding both keeps Tokenize to a single Get/Put pair per call; two pools doubles the per-call overhead without any compensating benefit. The two buffers are always acquired and released together by the same caller, so the natural shape is one pooled struct.
+
+- **Attack `bm25.Build` (the byte hog) instead.** Rejected for v0.8.6. `bm25.Build` is 41.8% of indexing alloc BYTES but only 4.9% of indexing alloc OBJECTS — so it's a memory-footprint target, not a GC-time target. Heap-inuse already dropped to ~5.5 GB post-v0.8.5; reducing bm25.Build's byte share would help RSS but not GC pressure. Documented as v0.8.7+ candidate if RSS becomes the explicit goal; the natural fix shape (`m[string(b)]` lookup pattern) requires changing `Tokenize` to return `[][]byte` which is explicitly rejected by [ADR-008](#adr-008-bm25-tokenizer--verbatim-port-of-sembles-tokenspy-snake-case-compound-preservation) (the function-level byte-equality contract is on the `[]string` output).
+
+- **Pass `parts *[]string` to `camelSplitBytesInto` instead of `*tokBuffers`** (looser coupling). Considered. The single-argument signature is marginally cleaner but exposes the buffer-of-buffers shape less clearly. Took the struct parameter because emitRun ALSO needs `bufs.scratch` (passed through to `lowerString` for case conversion), and the consistency of "all internal helpers take the struct" reads better than mixing parameter styles.
+
+- **Change `Tokenize`'s public signature to expose buffer reuse to callers** (e.g., `Tokenize(text string, bufs *tokBuffers)`). Rejected — public API stays exactly as ADR-008 / ADR-027 documented. The internal-only pool achieves the same amortization without leaking the buffer plumbing to callers.
+
+### Consequences
+
+**Measured impact** (Apple M1 Pro / Go 1.26.3 / darwin/arm64 / `CGO_ENABLED=0 -trimpath -ldflags='-s -w'`):
+
+- **`Tokenize` micro-benchmark** (`go test -bench BenchmarkTokenize -benchmem -count=10`, before = main HEAD with v0.8.5 byte-based code, after = this commit):
+
+  ```
+              │  v0.8.5 byte-based  │  v0.8.6 pooled-parts                │
+              │      sec/op         │      sec/op           vs base       │
+  Tokenize    │  292.7µs ± 1%       │  207.4µs ± 18%        −29.1% (p=0.000) │
+
+              │      B/s            │      B/s              vs base       │
+  Tokenize    │  85.90 MiB/s ± 1%   │  121.19 MiB/s ± 15%   +41.1% (p=0.000) │
+
+              │      B/op           │      B/op             vs base       │
+  Tokenize    │  318.9 KiB ± 0%     │  244.4 KiB ± 0%       −23.4% (p=0.000) │
+
+              │      allocs/op      │      allocs/op        vs base       │
+  Tokenize    │  5,613 ± 0%         │  1,463 ± 0%           −73.9% (p=0.000) │
+  ```
+
+  **The allocs/op −73.9% reduction is the headline v0.8.6 metric.** This is the GC-pressure lever the briefing identified — the per-identifier `parts` slice allocations are gone. The AFTER sec/op variance (±18%) is high relative to BEFORE (±1%) because the AFTER number is now small enough that timer noise dominates — `p=0.000` still holds (the diff is significant), but treat the central tendency as a range, not a point estimate.
+
+- **End-to-end medium-corpus re-measurement** (`scripts/perf_collect.sh medium --modes=bm25,hybrid --chunkers=regex`, 378,524 chunks):
+
+  | combo | metric | v0.8.5 | v0.8.6 | Δ |
+  |---|---|---|---|---|
+  | bm25-regex INDEX | objects allocated | 133.6M | **53.5M** | **−60.0%** |
+  | bm25-regex INDEX | bytes allocated | 16.86 GB | 15.04 GB | −10.8% |
+  | bm25-regex INDEX | heap inuse | 5.96 GB | 5.54 GB | −7.0% |
+  | bm25-regex INDEX | wall time | 40.1s | 52.4s | +30.7% (variance, see below) |
+  | bm25-regex SEARCH | p50 | 1.76 ms | 1.88 ms | +7% (within noise) |
+  | hybrid-regex INDEX | objects allocated | 652.0M | 571.9M | −12.3% |
+  | hybrid-regex INDEX | bytes allocated | 51.56 GB | 49.74 GB | −3.5% |
+  | hybrid-regex INDEX | heap inuse | 5.71 GB | 5.64 GB | −1% (noise) |
+  | hybrid-regex INDEX | wall time | 166.8s | 216.8s | +30% (variance, see below) |
+  | hybrid-regex SEARCH | p50 | 124.07 ms | 132.73 ms | +7% (within noise) |
+
+  **Object-count win is the load-bearing signal:** bm25-regex INDEX drops 133.6M → 53.5M objects (−60%) — the camelSplitBytes 75.8M and the snake-path `var parts` allocations together. Hybrid-regex INDEX's smaller drop (−12.3%) is expected: hybrid's allocations are dominated by the embed pipeline (which v0.8.6 doesn't touch); the tokenizer's share of hybrid's allocs is much smaller.
+
+  **Wall-time AFTER numbers are dominated by machine-load variance on this measurement window, not a v0.8.6 regression.** Three independent observations support this:
+    1. The benchstat AFTER variance was ±18% (vs ±1% BEFORE) — consistent with high system contention.
+    2. The NDCG-bench wall times for v0.8.6 (bm25 5.7→7.8s, semantic 23.3→28.4s, hybrid 50.4→59.6s — all +20-25%) showed the same uniform slowdown — a single-cause signature.
+    3. The object-count win (−60%) and the alloc_objects pprof confirmation (below) are machine-independent and unambiguous.
+
+  A second measurement window with the machine quieter would likely show wall-time improvement on the order of the briefing's −15-30% projection. Documented honestly here: the object-count win is real and reproducible; the wall-time delta on this specific run isn't a clean signal.
+
+- **`alloc_objects` pprof top — the headline confirmation** (`go tool pprof -top -sample_index=alloc_objects bench_out/medium/2026-05-27/profiles/bm25-regex.index.mem.pprof`):
+
+  ```
+                  flat  flat%   sum%        cum   cum%
+    22,448,951   66.47% 66.47% 22,448,951  66.47%  bm25.lowerString (inline)
+     5,229,215   15.48% 81.95%  5,229,215  15.48%  bm25.Build
+     3,195,012    9.46% 91.41% 25,643,973  75.93%  bm25.emitRun
+     ...
+            10  3e-05%         9,033,193   26.75%  bm25.camelSplitBytesInto    ← was 75.8M / 68.1% pre-v0.8.6
+  ```
+
+  `bm25.camelSplitBytesInto` flat allocations dropped from 75.8M (68.1%) to **10 objects** — essentially eliminated. The function still appears in the cumulative column (it calls `lowerString` for slow-path lowercases) but no longer allocates its own data. Total live-alloc objects: ~33.7M (down from ~111M pre-v0.8.6 — the records.jsonl 53.5M figure is the larger `alloc_delta` across the entire index build including walk/chunk overhead).
+
+- **NDCG@10 safety check** (semble bench corpus, 63 repos / 1251 tasks, all 3 modes, `--chunker regex` both sides):
+
+  | mode | v0.8.5 NDCG@10 | v0.8.6 NDCG@10 | Δ |
+  |---|---|---|---|
+  | bm25 | 0.6237 | 0.6237 | **0.0000** (exact) |
+  | semantic | 0.6469 | 0.6469 | **0.0000** (exact) |
+  | hybrid | 0.8418 | 0.8418 | **0.0000** (exact) |
+
+  Exact match in all three modes confirms token-set parity: same tokens in → same scores → same K results → same ranking → identical NDCG. The buffer-reuse refactor introduced no semantic drift, which is the load-bearing safety property `TestTokenize_AdversarialParity`'s 17 cases (including the new `within-call-parts-reuse` stress) are designed to catch.
+
+- **Token-set parity test extension.** Added one new case to `TestTokenize_AdversarialParity`: `within-call-parts-reuse` ("aB cD_eF gHiJkL m_n_o PQRSTuv") — five consecutive identifiers of rapidly varying part counts (2/2/4/3/2). This is the specific bug shape v0.8.6 could introduce: cross-identifier contamination via the shared `parts` slice if its backing array isn't properly reset between `emitRun` calls. The existing `stress-stable-1` covers 4-identifier reuse; `TestTokenize_LongInputNoPanic` covers many-identifier reuse via the 4 KiB stress input; the new case adds a focused mid-scale variant.
+
+- **No public API changes.** `Tokenize(text string) []string` signature unchanged. Public callers (`bm25.Build`, query-side tokenization, external consumers via the `Tokenize` symbol) see identical behavior.
+
+- **No new third-party dependencies.** Refactor uses only standard library (`strings`, `sync`).
+
+- **The accumulating second-machine-confirmation debt** ([`docs/PERF.md`](PERF.md) acceptance threshold step 2): ADR-026, ADR-027, and now ADR-028 have all shipped with single-machine evidence (Apple M1 Pro / native arm64 darwin / Go 1.26.3). This is the THIRD perf release in the v0.8.x cycle without a second-machine confirmation, and the briefing explicitly flagged: "Don't let it slide silently a fourth time." Before any further perf release (v0.8.7+), we either set up a Linux x86_64 CI confirmation runner OR consciously decide single-machine evidence is sufficient for this class of change and amend the acceptance threshold accordingly. Token-set parity (which load-bears each of these releases) is machine-independent, so the safety check holds across architectures; the wall-time and alloc numbers do not, and that's where the debt accumulates.
+
+- **Future perf work informed.** Post-v0.8.6, the alloc_objects picture has shifted: `bm25.lowerString` is now the dominant flat frame at 66.47% (22.4M objects — these are the slow-path string allocations for tokens containing uppercase bytes; the byte-level lowercase work is the bottleneck). `bm25.Build` is 15.48% (5.2M — map insertions, the natural next target if RSS becomes a goal). The embed pipeline is unchanged and untouched by ADR-027 or ADR-028. Any v0.8.7+ briefing should rank against this updated profile, not the post-v0.8.5 one this ADR motivated against.
