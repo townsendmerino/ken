@@ -88,6 +88,7 @@ usage:
   ken index           <path>           [--watch|--no-watch] [--chunker regex|treesitter|line] [--mode bm25|semantic|hybrid] [--model DIR]
   ken search          <path> <query>...  [-k N] [--json] [--chunker ...] [--mode ...] [--model DIR]
   ken bench           <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR]
+  ken perf            <subcmd> [args]    (index|search|watch — see 'ken perf' for full usage)
   ken build-index     <corpus>         -o <path> [--chunker ...] [--mode ...] [--model DIR]
   ken download-model                     [--model ORG/NAME] [--to DIR] [--force]
 
@@ -106,6 +107,11 @@ ken bench reads queries from stdin (one per line; lines starting with '#'
 ignored) and emits one JSON record per query to stdout against a single
 in-process index. Designed for the semble benchmark harness; see
 docs/BENCH.md.
+
+ken perf is the speed/memory measurement harness (sibling to ken bench;
+they share no state). Each invocation emits one JSON record on stdout
+plus optional pprof profiles. See docs/PERF.md and 'ken perf' for
+sub-command usage.
 
 ken download-model fetches the three files Model2Vec needs (model.safetensors,
 tokenizer.json, config.json) directly from HuggingFace into ~/.ken/model by
@@ -191,6 +197,8 @@ func main() {
 		os.Exit(cmdSearch(os.Args[2:]))
 	case "bench":
 		os.Exit(cmdBench(os.Args[2:]))
+	case "perf":
+		os.Exit(cmdPerf(os.Args[2:]))
 	case "build-index":
 		os.Exit(cmdBuildIndex(os.Args[2:]))
 	case "download-model":
