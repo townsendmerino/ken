@@ -13,7 +13,9 @@ import (
 // parallelism campaign's determinism contract (ADR-030 / Phase A). It
 // builds the same corpus N times via the production parallel
 // walkAndChunkFSWithModel and asserts the serialized index bytes are
-// byte-identical across all N runs.
+// byte-identical across all N runs. Serialized bytes cover chunks +
+// embed matrix; postings are transitively covered because serial Build
+// over the byte-identical ordered chunks is deterministic.
 //
 // CRITICAL CAVEAT: this is a SMOKE test, not the determinism proof.
 // testdata/repo/ is 3 files — determinism bugs in parallel merges
