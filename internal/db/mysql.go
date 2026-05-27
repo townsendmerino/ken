@@ -22,10 +22,12 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/townsendmerino/ken/internal/chunk"
 )
@@ -97,6 +99,12 @@ func indexSchemaMySQL(ctx context.Context, opts Options) ([]chunk.Chunk, error) 
 	if err != nil {
 		return nil, fmt.Errorf("db: mysql open: %w", err)
 	}
+	// Cap the pool at sampleWorkers() so the parallel sample fetch in
+	// mysqlAppendSamples never exceeds the configured worker count.
+	// Without this cap, *sql.DB defaults to unlimited connections and a
+	// burst of 8+ goroutines could exhaust shared MySQL max_connections.
+	// ADR-031.
+	conn.SetMaxOpenConns(sampleWorkers())
 	defer func() { _ = conn.Close() }()
 
 	if err := conn.PingContext(ctx); err != nil {
@@ -762,67 +770,110 @@ func mysqlAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot,
 		warn(opts, "mysql: row-count query failed: %v", err)
 	}
 
+	// Approx-count attach + per-table sample fetch.
+	//
+	// Sample fetches are fanned out across up to sampleWorkers goroutines
+	// via golang.org/x/sync/errgroup. *sql.DB is safe for concurrent use,
+	// and each worker writes to a distinct slice element (&snap.tables[i])
+	// so no cross-goroutine synchronization is needed for the per-table
+	// results. v0.8.4 / ADR-031: introspection sample loop is ~57% of
+	// total wall time on localhost (and dominates on remote DBs where
+	// per-query latency is RTT-bound); parallelism cashes the Amdahl
+	// ceiling.
+	//
+	// Workers return nil unconditionally — per-table failures are warned
+	// and swallowed (matches the pre-parallel warn+continue semantics).
+	// Returning err would cause errgroup.WithContext to cancel siblings
+	// on the first failure, which is the wrong shape for a best-effort
+	// sample pass.
 	for i := range snap.tables {
 		t := &snap.tables[i]
 		if c, ok := approx[t.schema+"."+t.name]; ok {
 			t.approxRowCount = c
 		}
-
-		orderClause := "ORDER BY 1"
-		for _, c := range t.columns {
-			if c.isPrimaryKey {
-				orderClause = "ORDER BY " + mysqlQuoteIdent(c.name)
-				break
-			}
-		}
-		// Fully-qualified schema.table; MySQL backticks for identifier safety.
-		q := fmt.Sprintf("SELECT * FROM %s.%s %s LIMIT ?",
-			mysqlQuoteIdent(t.schema), mysqlQuoteIdent(t.name), orderClause)
-		rows, err := conn.QueryContext(ctx, q, opts.SampleRows)
-		if err != nil {
-			warn(opts, "mysql: sample query failed for %s.%s: %v", t.schema, t.name, err)
-			continue
-		}
-		cols, err := rows.Columns()
-		if err != nil {
-			warn(opts, "mysql: column metadata for %s.%s: %v", t.schema, t.name, err)
-			rows.Close()
-			continue
-		}
-		t.sampleColumns = cols
-		var collected [][]string
-		for rows.Next() {
-			vals := make([]any, len(cols))
-			ptrs := make([]any, len(cols))
-			for j := range vals {
-				ptrs[j] = &vals[j]
-			}
-			if err := rows.Scan(ptrs...); err != nil {
-				warn(opts, "mysql: sample scan failed for %s.%s: %v", t.schema, t.name, err)
-				continue
-			}
-			cells := make([]string, len(vals))
-			for j, v := range vals {
-				// go-sql-driver/mysql returns VARCHAR / CHAR / TEXT / JSON
-				// as []byte rather than string (default driver behavior,
-				// unlike pgx which returns string). Convert at the
-				// driver boundary so formatCell renders them as the
-				// string they actually are. Genuine binary columns
-				// (BLOB / BINARY / VARBINARY) on MySQL also come back
-				// as []byte, but we let those render as strings too —
-				// formatCell's BYTEA path on Postgres still applies to
-				// pgx's []byte, where pgx only returns it for actual
-				// binary types.
-				if b, ok := v.([]byte); ok {
-					v = string(b)
-				}
-				cells[j] = truncateCell(formatCell(v))
-			}
-			collected = append(collected, cells)
-		}
-		rows.Close()
-		t.sampleRows = collected
 	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(sampleWorkers())
+	for i := range snap.tables {
+		t := &snap.tables[i]
+		g.Go(func() error {
+			orderClause := "ORDER BY 1"
+			for _, c := range t.columns {
+				if c.isPrimaryKey {
+					orderClause = "ORDER BY " + mysqlQuoteIdent(c.name)
+					break
+				}
+			}
+			// Fully-qualified schema.table; MySQL backticks for identifier safety.
+			q := fmt.Sprintf("SELECT * FROM %s.%s %s LIMIT ?",
+				mysqlQuoteIdent(t.schema), mysqlQuoteIdent(t.name), orderClause)
+			rows, err := conn.QueryContext(gctx, q, opts.SampleRows)
+			if err != nil {
+				warn(opts, "mysql: sample query failed for %s.%s: %v", t.schema, t.name, err)
+				return nil
+			}
+			cols, err := rows.Columns()
+			if err != nil {
+				warn(opts, "mysql: column metadata for %s.%s: %v", t.schema, t.name, err)
+				rows.Close()
+				return nil
+			}
+			t.sampleColumns = cols
+			var collected [][]string
+			for rows.Next() {
+				vals := make([]any, len(cols))
+				ptrs := make([]any, len(cols))
+				for j := range vals {
+					ptrs[j] = &vals[j]
+				}
+				if err := rows.Scan(ptrs...); err != nil {
+					warn(opts, "mysql: sample scan failed for %s.%s: %v", t.schema, t.name, err)
+					continue
+				}
+				cells := make([]string, len(vals))
+				for j, v := range vals {
+					// go-sql-driver/mysql returns VARCHAR / CHAR / TEXT / JSON
+					// as []byte rather than string (default driver behavior,
+					// unlike pgx which returns string). Convert at the
+					// driver boundary so formatCell renders them as the
+					// string they actually are. Genuine binary columns
+					// (BLOB / BINARY / VARBINARY) on MySQL also come back
+					// as []byte, but we let those render as strings too —
+					// formatCell's BYTEA path on Postgres still applies to
+					// pgx's []byte, where pgx only returns it for actual
+					// binary types.
+					if b, ok := v.([]byte); ok {
+						v = string(b)
+					}
+					cells[j] = truncateCell(formatCell(v))
+				}
+				collected = append(collected, cells)
+			}
+			rows.Close()
+			t.sampleRows = collected
+			return nil
+		})
+	}
+	_ = g.Wait()
+}
+
+// sampleWorkers is the concurrency cap for parallel sample-row fetches
+// in both engines. Capped at 8 to avoid exhausting MySQL/Postgres
+// max_connections in shared dev/staging environments (commonly 50-150);
+// the matching SetMaxOpenConns(8) on the introspection *sql.DB further
+// guarantees we never exceed this. The min() with runtime.NumCPU() is
+// defensive — on a 2-core box, 8 workers would still serialize at the
+// scheduler anyway. ADR-031 documents the rationale.
+func sampleWorkers() int {
+	n := runtime.NumCPU()
+	if n > 8 {
+		n = 8
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
 }
 
 // mysqlApproxRowCounts returns a (schema.table → table_rows) map. Free

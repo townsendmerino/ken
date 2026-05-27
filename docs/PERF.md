@@ -135,6 +135,20 @@ The follow-on campaign ADR-029 scoped landed as v0.8.7. The pipeline now paralle
 
 See [ADR-030](DECISIONS.md#adr-030-indexing-pipeline-parallelism--phase-a-per-file-workers-for-chunk--embed-v087) for the architecture, alternatives considered (Phase B sharded `bm25.Build` deferred-with-trigger; stage-based pipeline rejected; opt-in flag rejected), and the deferred concerns (giant-scale memory ceiling, second-machine confirmation as a user-action follow-up). The next perf campaign is not auto-queued — Phase A closes the parallelism investigation at its scoped target; Phase B re-opens only on a concrete user-pain trigger.
 
+### v0.8.8 DB-introspection parallelism (2026-05-27) — MySQL sample loop, Postgres deferred
+
+Same predict-measure-decide loop, smaller scope. A second-opinion review flagged `mysqlAppendSamples` as an `errgroup` candidate. Initial skepticism (sample LIMIT 5 over indexed PKs should be cheap) was falsified by measurement: a new `//go:build dbperf`-gated harness (50 tables × 100 rows synthetic fixture) showed MySQL sample-loop wall is **57% of total introspection** with an Amdahl ceiling of 2.0×. Postgres' sample-loop was only 25% of its total (Amdahl ceiling 1.28×), and a measured implementation via scoped `pgxpool` came out essentially flat on localhost (22.7 ms → 21.7 ms) because pool-setup overhead ate the parallelism gain. Per v0.8.x discipline, Postgres parallelism was reverted; MySQL shipped.
+
+| metric | post-v0.8.7 (sequential) | post-v0.8.8 (MySQL parallel) | Δ |
+|---|---|---|---|
+| mysqlAppendSamples wall | 43.7 ms | **19.2 ms** | **2.28×** |
+| MySQL full introspection wall | 76.6 ms | **41.4 ms** | **1.85× (92% of Amdahl ceiling)** |
+| Postgres sampleRowsImpl wall | 22.7 ms | unchanged | — (deferred-with-trigger) |
+
+`TestMySQLIntegration_RowSamplingDeterministic` (the load-bearing sample-row determinism test) passes `-race` clean post-parallel. Output ordering is preserved by per-table writes targeting distinct `&snap.tables[i]` slots. The errgroup is bounded at `min(8, NumCPU())` and the introspection `*sql.DB` is matched via `SetMaxOpenConns(sampleWorkers())` so the pool can never exceed the worker count — two belts protecting shared dev/staging MySQL `max_connections`.
+
+See [ADR-031](DECISIONS.md#adr-031-mysql-introspection-sample-loop-parallelism-postgres-deferred-with-trigger-v088) for the full architecture, the Postgres deferral with its concrete re-open trigger (remote-DB user latency pain), and the rejected Gemini `normalizeMySQLIntType` fast-path (below-noise win — 0.2% — rejected by the same discipline that accepts the Postgres deferral).
+
 ## Files
 
 Landed:
