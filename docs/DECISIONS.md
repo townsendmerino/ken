@@ -30,6 +30,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-022](#adr-022-rename-column--rename-constraint-folding-via-eager-application-v081-part-c) | RENAME COLUMN + RENAME CONSTRAINT folding via eager application (v0.8.1 Part C) | Accepted |
 | [ADR-023](#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome) | `gotreesitter` `grammar_subset` machinery + binary-size reduction outcome (v0.8.2 investigation outcome) | Accepted |
 | [ADR-024](#adr-024-pre-built-embedded-indices-for-mcprun-v083) | Pre-built embedded indices for `mcp.Run` (v0.8.3) | Accepted |
+| [ADR-025](#adr-025-perf-campaign-phase-1-investigation-outcome--hotspot-identification-across-small--medium-workloads) | Perf-campaign Phase 1 investigation outcome — hotspot identification across small + medium workloads | Accepted |
 | [ADR-026](#adr-026-paired-heap-refactor-for-annflatquery--bm25indextopk-v084) | Paired heap refactor for `ann.Flat.Query` + `bm25.Index.TopK` via shared `internal/topk` (v0.8.4) | Accepted |
 
 ---
@@ -1314,6 +1315,145 @@ Serialize the built `*search.Index` artifact (chunks slice + parallel embedding 
 - **No new third-party dependencies.** Custom binary serialization uses `encoding/binary`, `hash/crc32`, and the existing `io/fs` plumbing. The dep tree stays clean.
 
 - **v0.8.3 ready to tag after this lands.** Four-commit cadence on `v0.8.3-prebuilt-indices`: (1) serialize/deserialize primitives + walker prune, (2) `ken build-index` CLI subcommand, (3) `mcp.Run` auto-discovery + `Options.PrebuiltIndex`, (4) docs (this ADR + CHANGELOG + README + DESIGN.md). Closes [#10](https://github.com/townsendmerino/ken/issues/10).
+
+---
+
+## ADR-025: Perf-campaign Phase 1 investigation outcome — hotspot identification across small + medium workloads
+
+**Status:** Accepted
+
+**Date:** 2026-05-26
+
+**Extends:** [ADR-010](#adr-010-tree-sitter-via-gotreesitter-instead-of-wazerowasm) (gotreesitter selection), [ADR-011](#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in) (regex stays default), [ADR-016](#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) (mcp.Run pattern), [ADR-023](#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome) (gotreesitter selectivity investigation), [ADR-024](#adr-024-pre-built-embedded-indices-for-mcprun-v083) (pre-built indices).
+
+**Related:** `outputs/treesitter-port-considerations.md` (future-ADR seed; the arena finding here motivates that seed's Tier 2 ranking).
+
+## Context
+
+The v0.8.x release cadence settled the calibration story; v0.9 (or rolling point releases — release shape is task #11, decided after this ADR) is the perf-campaign cycle. [Phase 0](PERF.md) built the measurement infrastructure (`ken perf` subcommand + per-package benchmarks + `scripts/perf_collect.sh` + `docs/PERF.md` methodology). Phase 1 ran the harness against the small (ken itself, ~150 Go files) and medium (semble bench corpus, ~378k chunks, ~715 MB of source) workloads on native arm64 darwin / Go 1.26.3 / M1 Pro.
+
+Phase 1 was an **investigation pass**, not a publication pass. Discipline carries over from `docs/BENCH.md` and ADR-023:
+
+- The "Headline numbers" section in `docs/PERF.md` remains empty until N≥10 median + second-machine confirmation per the documented acceptance threshold.
+- The "Empirical findings" section, by contrast, holds investigation-pass observations with explicit single-run / single-machine caveats — same shape as the per-version findings in `docs/BENCH.md`.
+- Predictions were written down in `outputs/perf-investigation-plan.md` **before** the harness was built. Phase 1 grades them rather than retrofitting.
+
+Workloads measured:
+
+- **Small** (`ken@97feb5e`): 1,560 chunks across 9 mode × chunker combos. ~26 s wall total. Cross-product complete.
+- **Medium** (`~/.cache/semble-bench`, ~19 repos aggregate per upstream `repos.json`): 378k–380k chunks. 4 combos run (bm25/hybrid × regex/treesitter). 2h 49m wall total (treesitter combos dominated). Cross-product *not* complete; targeted via `scripts/perf_collect.sh --modes --chunkers` filter.
+- **Large + giant — explicitly skipped this pass.** Reasoning under "Alternatives considered" below.
+
+One incidental finding the harness exposed before any measurement could complete: a panic in `internal/chunk/treesitter/Chunker.Chunk` when gotreesitter produces a parse-error-recovery node with `EndByte() < StartByte()`. Fixed in commit `120fc06` before Phase 1 medium proceeded. **The perf campaign surfaced a latent correctness bug** — a documented Phase-0 expectation that materialized.
+
+## Phase 1 findings — predictions vs evidence
+
+The seven predictions from `outputs/perf-investigation-plan.md`, graded:
+
+| # | Prediction | Status | Evidence |
+| --- | --- | --- | --- |
+| 1 | Embed inference dominates indexing CPU | ✓ confirmed at small (46% of hybrid-treesitter index CPU) | Medium-scale CPU profile needed to compute exact share at 378k chunks; the wall-time signature (semantic mode adds ~140s on top of bm25 mode at medium-regex) is consistent. |
+| 2 | BM25 tokenizer allocates heavily | ✓ **strongly** confirmed; 45% of bm25-regex indexing allocs at medium (8.7 GB out of 19.3 GB) | Tokenizer split: `Tokenize.func1` 5.7 GB + `camelSplit` 2.6 GB + `Tokenize-range1` 0.4 GB. Per-chunk alloc grew from 35 KB (small) → 53 KB (medium). |
+| 3 | ANN flat dominates search at scale | ✓ **strongly** confirmed | Hybrid p50 = 11.5 ms at small (1,560 chunks) → 193 ms at medium (378,524 chunks). bm25 p50 stayed at ~12 ms; the entire delta is the semantic + ANN-flat work. **Medium hybrid-regex pprof: `ann.Flat.Query` is 78.56% of search CPU (cum) at medium scale.** Inside that: ~68% is vector cosine (`Flat.Query.func1`), ~32% is `sort.Slice` over the candidate-score list. |
+| 4 | File walk is NOT hot | ✓ confirmed (essentially invisible in CPU profiles at both scales) | At medium bm25-regex: walk is dwarfed by tokenizer + GC. |
+| 5 | Watch swap is NOT hot | not measured (no medium-scale watch profile) | `ken perf watch` exists; the medium-scale watch-mode latency is an open question Phase 1 didn't answer. |
+| 6 | ParserPool is NOT hot | ✓ confirmed | No pool overhead visible in either small or medium treesitter profiles. The ADR-010 pool-reuse pattern is doing its job. |
+| 7 | Rerank is NOT hot at k=20 | ✗ falsified at small; ✓ **re-confirmed at medium** | 28% of hybrid-regex search CPU at small goes through `rerankTopK` (24% `regexp.tryBacktrack` inside `filePathPenalty`). **At medium, `filePathPenalty` does not appear in the top 30 cumulative frames** (cutoff ~0.5%). At scale, ANN flat (78.56%) so dominates search that the rerank+penalty work is invisible in the noise. The prediction "rerank not hot" holds at production scale even though it failed at toy scale. |
+| (new) | GC dominates CPU at scale | ✓ **new finding** | At medium bm25-regex: `runtime.gcBgMarkWorker` + `tryDeferToSpanScan` + `scanObject` consume ~50% of indexing CPU and ~36% of search CPU. Direct consequence of the allocation pattern, but only visible at scale where the heap stabilizes at 7–8 GB. |
+| (new) | Treesitter scales super-linearly | ✓ **new finding** | Per-chunk arena allocation: 450 KB at small → 2.9 MB at medium (6.4× growth per chunk). 1.09 TB cumulative allocation to index 379k chunks via bm25-treesitter. 37-minute wall time. The gotreesitter arena pattern (per `outputs/treesitter-port-considerations.md`) compounds badly with file complexity in the semble corpus. |
+| (new) | `bm25.Index.TopK` uses `sort.Slice` instead of a heap | ✓ **new actionable finding** | At medium bm25-regex search: `sort.Slice` + `sort.pdqsort_func` = 36% of search CPU. At 378k chunks with K=10, the O(N log N) sort over all candidates is the dominant in-tree search cost. Classic top-K heap (O(N log K)) is the canonical fix. |
+
+**Two predictions were strongly confirmed, two were falsified or refined, three new findings emerged.** This is the calibration discipline working as intended — writing predictions before measurement makes the surprises visible.
+
+## Hotspot ranking — ordered by ROI × confidence × in-tree-actionability
+
+| # | Hotspot | Location | Confidence | Expected impact | Status |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **ANN flat scan dominates hybrid search** | `internal/ann/` | **Strongly confirmed at medium (78.56% of hybrid-regex search CPU)** | Search latency −80%+ at giant scale with HNSW; ~30% achievable inside flat via candidate-selection refactor (see #1a) | Two-track. Real algorithmic fix (HNSW) requires dep choice or in-tree impl; in-tree quick-win (#1a) is the candidate-selection refactor inside the existing flat scan. |
+| 1a | `ann.Flat.Query` uses `sort.Slice` over ALL candidates for top-K | `internal/ann/` | High (medium-scale CPU profile — 30.88% of hybrid search CPU is `sort.Slice` inside `Flat.Query`) | Hybrid search CPU −20–30% at medium scale without changing the algorithm; complementary to eventual HNSW | **Worth shipping immediately.** Same min-heap-of-size-K refactor as #2; in fact the two changes share a code template. |
+| 2 | `bm25.Index.TopK` uses `sort.Slice` over all candidates | `internal/bm25/` | High (medium-scale CPU profile — 36% of bm25 search CPU is `sort.Slice`) | Search CPU −25–40% on bm25 path at corpus sizes ≥ ~100k chunks | Worth shipping. Same min-heap pattern as #1a; sister refactor. |
+| 3 | BM25 tokenizer string allocations | `internal/bm25/Tokenize` + `camelSplit` | High (medium-scale alloc profile — 45% of bm25-regex indexing allocs) | Indexing allocs −45%, GC time −proportional, indexing wall time −20–30% | Worth shipping. Use `[]byte` slices into source rather than allocating new strings; pool scratch buffers. |
+| 4 | Embed `weightedMeanPoolSafe` accumulator | `internal/embed/` | High at small (23% of hybrid-treesitter CPU); medium-scale share not separately computed but the embed pass scales linearly with chunk count | Indexing CPU −10–20% with SIMD; pure-Go-no-cgo constraint shapes the implementation | Worth investigating. `golang.org/x/sys/cpu` + per-GOARCH assembly stubs is the established pattern (`crypto/sha256` etc. do this). Defer until #1a–#3 land — the relative share will shift. |
+| 5 | gotreesitter node arena | upstream | High (468 MB / 53.6% of allocations at small; 1.09 TB cumulative at medium) | Bounded by gotreesitter upstream + ADR-023's selectivity work | Future-ADR seed exists (`outputs/treesitter-port-considerations.md`). Tier 0–3 mitigation hierarchy documented. Don't port; consider targeted upstream PR after the open selective-grammar issue resolves. |
+| 6 | HNSW (replacement for ANN flat) | `internal/ann/` | Documented in `docs/DESIGN.md` §10 | Search latency −80%+ at giant scale | Documented future work. Real dependency (pure-Go HNSW choice) or in-tree impl. Trigger to elevate: real-user latency complaint, OR a pure-Go HNSW dep emerges that meets the no-cgo bar with good maintenance signal. |
+| (demoted) | `filePathPenalty` regex backtracking | `internal/search/penalties.go` | High at small (24% of hybrid search CPU); **falsified at medium** (does not appear in top-30 frames; <0.5% cumulative) | Search CPU −up to 24% at small scale only; negligible at production scale | **Demoted from Ship-tier.** At small scale the regex matters; at scale it's lost in ANN-flat noise. Only worth fixing if a real user reports search-latency pain on a small-corpus deployment (e.g., a few-thousand-chunk SDK docs server). |
+
+## Decision
+
+**Three categories of follow-on:**
+
+### A. Ship (subject to NDCG calibration discipline)
+
+- **#1a `ann.Flat.Query` → min-heap of size K** (NEW Ship-tier — highest priority after medium pprof). 30.88% of hybrid search CPU at medium goes to `sort.Slice` inside `Flat.Query` sorting all 378k candidate scores to take K=10. Min-heap-of-size-K is the canonical fix. **NDCG regression risk:** none expected — top-K by cosine score is deterministic regardless of full-sort vs heap-based selection, so the same K results emerge in the same order. NDCG@10 re-run is the safety check but expected to be a no-op.
+- **#2 `bm25.Index.TopK` → min-heap of size K.** Sister refactor to #1a — same pattern, same code template, same NDCG-risk profile (none expected). 36% of bm25 search CPU at medium. Often shipped together with #1a as a single PR since the two share a heap utility.
+- **#3 BM25 tokenizer alloc reduction.** Pool allocations; use `[]byte` slices into source for camelCase/PascalCase splits rather than allocating fresh strings; share scratch buffers across calls. **NDCG regression risk:** real — different tokenization changes IDF, which changes BM25 ranking. The discipline is: run the semble NDCG benchmark before and after, accept ≤ ±0.005 shift per `docs/BENCH.md`, write a calibration-discipline ADR if the shift is bigger and the perf win is large enough to justify.
+
+**`filePathPenalty` is NOT in the Ship tier** despite being a clear hotspot at small scale, because the medium pprof showed it disappears into ANN-flat noise (<0.5% of cumulative search CPU at 378k chunks). Documented as demoted in the hotspot table; revisit only on a real small-corpus user report.
+
+These three are independent and ship as **rolling point releases** (decided alongside this ADR; no v0.9.0 themed campaign):
+
+- **v0.8.4** — #1a + #2 paired heap refactor. Lower risk (no NDCG impact expected), immediate user-impact win, natural to ship together since they share a heap-of-size-K code template.
+- **v0.8.5** — #3 BM25 tokenizer alloc reduction. Carries real NDCG-regression risk; ships with its own calibration-discipline ADR if the shift exceeds ±0.005 per `docs/BENCH.md`.
+
+The rolling shape was chosen over a v0.9.0 themed campaign because each fix is independently valuable and there's no narrative coherence benefit to gating them on a single release. Future fixes (#4 embed SIMD, #6 HNSW) can also ship rolling when their triggers fire.
+
+### B. Defer with named triggers
+
+- **#4 HNSW for ANN flat replacement.** Gated on choosing a pure-Go HNSW dependency or accepting an in-tree implementation. Documented in `docs/DESIGN.md` §10. Trigger to revisit: a real user reports search latency as actionable pain on a 100k+ chunk corpus (already on the threshold for some users), OR a pure-Go HNSW dep emerges that meets the no-cgo bar with good maintenance signal.
+- **#5 Embed SIMD accumulator.** Gated on #1–#3 landing first (the relative share will shift) and on a pure-Go-no-cgo-compatible SIMD pattern matching the `crypto/sha256` precedent for per-GOARCH assembly. Trigger to revisit: post-Phase-1-fixes re-measurement still shows embed accumulator > 20% of indexing CPU.
+- **#6 gotreesitter arena scaling.** Per `outputs/treesitter-port-considerations.md` Tier 2: targeted upstream PR after the open selective-grammar issue resolves. Triggers documented in that seed.
+
+### C. Architectural ceilings — document, don't try to "fix"
+
+- **GC dominates CPU at scale.** This is the *consequence* of the allocation pattern, not a separate hotspot. Reducing allocations (#2 above) reduces GC pressure proportionally; that's the actionable lever. Documented in `docs/PERF.md` "Empirical findings" so users running ken-mcp on corpora ≥ ~100k chunks know that the steady-state heap is 5–10 GB and to size their deployment hardware accordingly.
+- **Heap inuse at medium = 7 GB.** Not a bug, a property — the BM25 postings list + chunk source storage + (for hybrid) embed matrix all scale linearly with chunk count. Document the per-chunk memory cost in `docs/PERF.md` so SDK authors using `mcp.Run` can estimate their binary's runtime memory ahead of release.
+
+### D. Calibration discipline carries forward
+
+- **`docs/PERF.md` "Headline numbers" stays empty** until N≥10 median + second-machine confirmation per the documented acceptance threshold. Phase 1 was investigation, not publication.
+- **`docs/PERF.md` "Empirical findings" updates** to summarize the corroborated predictions, the falsified ones, and the new findings — with cross-reference to this ADR. Includes the single-run / single-machine caveats and the Rosetta vs native arm64 footnote.
+- **Reconcile `docs/PERF.md` workload table.** The "~19 repos aggregate" entry for the medium workload is inconsistent with `docs/BENCH.md`'s 63-repo CoIR mention; the actual indexed chunk count (~378k) is closer to the full corpus than to a 19-repo subset. Cleanup ships in the same docs commit as the "Empirical findings" update.
+
+## Alternatives considered
+
+- **Run large + giant workloads before this ADR.** Rejected. Per the analysis at the end of Phase 1: small + medium gave decisive evidence of the scaling pattern; large would mostly confirm linear-or-worse extrapolation already visible. Per-chunk treesitter alloc at large scale projects to ~10–20 MB/chunk extrapolating the small→medium 6.4× growth ratio; verifying that exactly would cost ~12+ hours of wall time for marginal new information. Re-runnable at any time via the harness (the targeted `--modes`/`--chunkers` filter makes it tractable when justified). Trigger to revisit: an SDK author or operator reports actionable pain at large scale, or a perf-regression check needs a baseline.
+- **Run the full mode × chunker cross-product at medium.** Rejected during Phase 1 itself (the original `scripts/perf_collect.sh medium` was killed at ~1:28 elapsed when extrapolation showed 4–8 hours wall time). vscode-claude added `--modes` / `--chunkers` filters; the targeted 4-combo run took 2h 49m. Full cross-product wasn't necessary because semantic mode's wall time at small was indistinguishable from hybrid mode (the BM25 indexing is "free" within semantic build path), and line chunker at scale answers no question regex doesn't already answer.
+- **Publish "Headline numbers" from Phase 1's single-machine, single-run data.** Rejected. `docs/PERF.md`'s acceptance threshold is explicit: median-of-N + second-machine confirm before publication. Phase 1's job was investigation, not headlining. Promoting any of these numbers without the calibration steps would erode the discipline this campaign exists to demonstrate.
+- **Commit to a v0.9.0 themed release shape inside this ADR.** Rejected by scope. Release-shape decision (task #11) is the *next* decision after this one; it depends on whether the three Ship-tier fixes (above) land as separate Parts (matching v0.8.x cadence) or as a single release. Forcing the decision into this ADR confuses what's empirical (the findings) with what's a release-engineering choice.
+- **Ship "treesitter is alloc-pathological at scale" as a calibration warning in the README.** Considered, deferred. The story is more nuanced than a single bullet: regex is the documented default, treesitter is opt-in, `mcp.Run` users via ADR-024 pay the cost once at `ken build-index` time. The right place for this nuance is the `docs/PERF.md` "Empirical findings" section, not the README. Revisit if treesitter usage patterns shift.
+
+## Consequences
+
+- **Three perf wins enter the in-tree development queue** (#1a `ann.Flat.Query` heap, #2 `bm25.Index.TopK` heap, #3 BM25 tokenizer alloc reduction). #1a and #2 are natural pair partners (same heap-of-size-K template) and may ship as one PR; #3 is independent and has a real NDCG-regression-risk check. Each ships with its own ADR when it lands (ADR-026, ADR-027 in some ordering), with the calibration discipline (benchstat sign-off, second machine confirm, NDCG@10 within ±0.005) applied per fix.
+- **Future-ADR seed `outputs/treesitter-port-considerations.md` gains a concrete empirical anchor.** The Tier 2 upstream-PR conversation now has medium-scale numbers (1.09 TB cumulative arena alloc, 37-minute index wall time) to point at if/when the conversation is opened upstream.
+- **`docs/PERF.md` "Empirical findings" lands with the Phase 1 summary** in the same docs commit as this ADR. Workload-table cleanup (19 vs 63 repos) lands alongside.
+- **The harness is proven by use.** `ken perf` + `scripts/perf_collect.sh` + `internal/perf/` survived a real investigation pass including a correctness-bug-discovery, a multi-hour stress run, and the chunker-fix loop. Phase 0's "harness before headlines" discipline paid for itself.
+- **Large + giant workloads are deferred but reachable.** The harness exists; the filter flag makes targeted runs cheap; the only thing missing is the trigger to re-run. Documented so a future contributor knows the cost (~12+ hours for a treesitter combo at large scale) and the value (confirmatory rather than informative).
+- **The calibration credibility holds.** v0.8.2 / ADR-023 established the "investigation outcome with named triggers" shape. This ADR extends it: investigation that surfaces concrete fixes (rather than ADR-023's "the answer is no"). Both shapes are legitimate; both keep the "headline numbers don't ship until they survive a re-run" discipline visible.
+
+## Triggers to ADR-026+ (or to follow-on investigation passes)
+
+- **Trigger A — Ship-tier fix lands:** when #1, #2, or #3 lands as a PR, the accompanying ADR documents the per-fix calibration result (benchstat output, NDCG@10 delta, before/after wall-time numbers on a specific machine spec). One ADR per fix.
+- **Trigger B — Search latency reports from real users:** if an `mcp.Run` SDK author or `ken-mcp` operator reports search latency as actionable pain on a 100k+ chunk corpus, escalate the HNSW conversation (#4) from documented-future to active investigation. New ADR for the dep / implementation choice.
+- **Trigger C — Post-fix re-measurement:** after #1–#3 land, re-run the small + medium workloads. If embed accumulator (#5) is still >20% of indexing CPU, escalate to active SIMD investigation. If GC pressure stays the same (it should drop with #2's alloc reduction), something is wrong and we need to re-investigate.
+- **Trigger D — Large-scale measurement need:** any of (a) a regression check needs a large-scale baseline, (b) the chromium decision in the giant workload becomes a real product question (e.g., kubernetes-demo from `outputs/oss-demo-playbook.md` shows hybrid search behaving differently than medium predicted), (c) an SDK author reports binary-size or memory pain at large scale.
+- **Trigger E — gotreesitter upstream conversation:** when the open selective-grammar issue resolves (whether merged or rejected), the goodwill budget clears for the arena-optimization PR per `outputs/treesitter-port-considerations.md` Tier 2.
+
+---
+
+## Open questions deliberately not resolved here
+
+- ~~Exact share of `filePathPenalty` at medium scale.~~ **Resolved during draft review:** medium pprof showed `filePathPenalty` does not appear in the top 30 cumulative frames (cutoff <0.5%). ANN flat (78.56%) dominates so completely that the regex backtracking is lost in noise at production scale. `filePathPenalty` demoted from Ship tier accordingly; see hotspot table for the full reasoning.
+- **Why is per-chunk tokenizer allocation GROWING with corpus size?** 35 KB/chunk → 53 KB/chunk going small → medium isn't constant overhead per-chunk. Suggests the postings-list hashmap insertion is paying real cost as the vocabulary grows (more rehashing? more collision handling?). Worth a pprof read at the medium scale before fix #2 ships, to make sure the fix targets the actual hotspot.
+- **Where is the chromium-vs-synthetic decision for the "giant" workload row in `docs/PERF.md`?** Still TBD. Phase 1 didn't need to resolve it. Resolve when Trigger D fires.
+
+## Files this ADR's promotion will touch
+
+- `docs/DECISIONS.md` — append ADR-025; cross-link from ADR-010, ADR-011, ADR-016, ADR-023, ADR-024 summary table.
+- `docs/PERF.md` — populate "Empirical findings" section with the Phase 1 summary + cross-reference to this ADR. Fix the workload-table 19-vs-63-repos inconsistency. "Headline numbers" stays empty.
+- `outputs/treesitter-port-considerations.md` — already exists as the future-ADR seed. No edits needed; this ADR references it.
+
+CHANGELOG entry for the next release: ADR-025 lands as a docs-only commit. No code ships in this ADR; each follow-on fix gets its own commit + CHANGELOG entry.
 
 ---
 
