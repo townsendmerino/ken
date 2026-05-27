@@ -36,7 +36,9 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"runtime"
 	"sort"
+	"sync"
 
 	"github.com/townsendmerino/ken/internal/ann"
 	"github.com/townsendmerino/ken/internal/bm25"
@@ -227,6 +229,39 @@ func walkAndChunkFS(fsys fs.FS, mode Mode, chunkerName, modelDir string, opts FS
 // a directory path) and FromFSWithModel (model supplied directly by the
 // caller — the mcp.Run embedded-corpus path where the model comes from a
 // caller's //go:embed fs.FS).
+// walkAndChunkFSWithModel walks the corpus, chunks each file, and (for
+// hybrid/semantic modes) embeds each chunk via model.Encode. Per-file
+// work is fanned out to runtime.NumCPU() workers via a bounded channel;
+// results are collected by file index so the resulting chunks/vecs
+// slices are byte-identical to a serial build. Migration folding runs
+// serially after the parallel pass to preserve the v0.7.1 deterministic
+// order over discovered migration directories.
+//
+// Determinism is load-bearing for two reasons:
+//   - NDCG@10 reproducibility (docs/BENCH.md's parity contract)
+//   - The pre-built-index format (ADR-024 / serializeIndex) requires
+//     byte-stable serialization for embedded-corpus mcp.Run binaries.
+//
+// Both reasons are satisfied by reassembling per-file results in file
+// index order (the walk's lexical order, deterministic by construction
+// per repo.WalkFS) and running bm25.Build / serializeIndex serially over
+// the ordered chunks slice in BuildIndex's downstream pipeline.
+//
+// Parallelism shape (per ADR-029's Phase A architecture):
+//   - Walk produces the ordered file list (serial, cheap).
+//   - For each file: read bytes, chunk, (if model != nil) encode each
+//     chunk — all inside one worker. Per-file workers eliminate the
+//     queue depth + serialization that a stage-based pipeline would
+//     introduce.
+//   - Collector reassembles by file index.
+//   - Migration folding stays serial.
+//
+// Concurrency safety prerequisites (verified in parallelism Phase 1):
+//   - embed.StaticModel.Encode is goroutine-safe (TestEncodeConcurrent).
+//   - chunk.ChunkFile / sql.ParseFile are pure functions of their inputs.
+//   - The treesitter chunker's ParserPool is sync.Pool-backed by design
+//     (ADR-010); regex + line chunkers are stateless.
+//   - tokenizerPool (v0.8.6 / ADR-028) is sync.Pool, concurrency-safe.
 func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel, opts FSOptions) (
 	chunks []chunk.Chunk, vecs [][]float32, returnedModel *embed.StaticModel, migDirs map[string]bool, err error,
 ) {
@@ -245,9 +280,6 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 		return nil, nil, nil, nil, err
 	}
 
-	// Pre-classify migration dirs so the per-file path can skip SQL
-	// structural chunking for files in those dirs (we re-fold them
-	// holistically in the post-walk pass).
 	migDirs = map[string]bool{}
 	if !opts.DisableFoldMigrations {
 		seen := map[string]bool{}
@@ -266,26 +298,85 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 		}
 	}
 
-	for _, rel := range files {
-		data, err := fs.ReadFile(fsys, rel)
-		if err != nil {
-			return nil, nil, nil, nil, err
-		}
-		skipSQLStructural := migDirs[path.Dir(rel)]
-		cs, err := chunkOneFile(chunkerName, rel, data, skipSQLStructural)
-		if err != nil {
-			return nil, nil, nil, nil, err
-		}
-		for _, c := range cs {
-			chunks = append(chunks, c)
-			if model != nil {
-				vecs = append(vecs, model.Encode(c.Text))
+	type fileResult struct {
+		chunks []chunk.Chunk
+		vecs   [][]float32
+	}
+	results := make([]fileResult, len(files))
+
+	type job struct {
+		idx int
+		rel string
+	}
+	numWorkers := runtime.NumCPU()
+	jobs := make(chan job, numWorkers*2)
+	errCh := make(chan error, numWorkers)
+	var wg sync.WaitGroup
+
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				data, rerr := fs.ReadFile(fsys, j.rel)
+				if rerr != nil {
+					select {
+					case errCh <- fmt.Errorf("read %s: %w", j.rel, rerr):
+					default:
+					}
+					continue
+				}
+				skipSQLStructural := migDirs[path.Dir(j.rel)]
+				cs, cerr := chunkOneFile(chunkerName, j.rel, data, skipSQLStructural)
+				if cerr != nil {
+					select {
+					case errCh <- fmt.Errorf("chunk %s: %w", j.rel, cerr):
+					default:
+					}
+					continue
+				}
+				var localVecs [][]float32
+				if model != nil {
+					localVecs = make([][]float32, len(cs))
+					for i, c := range cs {
+						localVecs[i] = model.Encode(c.Text)
+					}
+				}
+				results[j.idx] = fileResult{chunks: cs, vecs: localVecs}
 			}
+		}()
+	}
+
+	for i, rel := range files {
+		jobs <- job{idx: i, rel: rel}
+	}
+	close(jobs)
+	wg.Wait()
+
+	// Surface the first worker error if any. Workers continue draining
+	// jobs after their first error so the wg.Wait above is unblocked;
+	// the errCh capacity (numWorkers) means later errors are dropped.
+	// That's fine — one root-cause error per build is all callers need.
+	select {
+	case e := <-errCh:
+		return nil, nil, nil, nil, e
+	default:
+	}
+
+	// Flatten in file index order — deterministic across runs because
+	// repo.WalkFS returns files in lexical order and worker results are
+	// indexed by job.idx, not arrival order.
+	for _, r := range results {
+		chunks = append(chunks, r.chunks...)
+		if model != nil {
+			vecs = append(vecs, r.vecs...)
 		}
 	}
 
 	// Migration-folding pass: deterministic order over the discovered
-	// dirs so the produced chunk order is stable across runs.
+	// dirs so the produced chunk order is stable across runs. Stays
+	// serial — small fraction of total cost, and the serial loop
+	// trivially preserves determinism without any extra machinery.
 	if len(migDirs) > 0 {
 		dirs := make([]string, 0, len(migDirs))
 		for d := range migDirs {
@@ -295,9 +386,6 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 		for _, d := range dirs {
 			folded, ferr := sql.FoldMigrations(fsys, d, opts.LogWriter)
 			if ferr != nil {
-				// Don't fail the build — log via the writer if available
-				// and fall back to the per-file behavior (already emitted
-				// since skipSQLStructural was set for these files).
 				if opts.LogWriter != nil {
 					fmt.Fprintf(opts.LogWriter, "search: FoldMigrations(%q): %v\n", d, ferr)
 				}
