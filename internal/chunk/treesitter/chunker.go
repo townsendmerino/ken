@@ -58,6 +58,7 @@ package treesitter
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
@@ -83,6 +84,59 @@ type Chunker struct {
 	lineOnce     sync.Once
 	lineCh       chunk.Chunker
 	lineLookupOK bool
+
+	// Per-reason fallback counters. Atomic-incremented at each of the
+	// four silent-fallback sites in Chunk so callers (`ken perf index`,
+	// the OSS-demo build-time validation per outputs/oss-demo-playbook.md)
+	// can quantify how many files actually got AST chunks vs degraded to
+	// the line chunker. Exposed via Stats(); zero allocations on the hot
+	// path. ADR-010 graceful-degradation behavior is unchanged.
+	total           atomic.Int64
+	unsupportedLang atomic.Int64
+	parseErr        atomic.Int64
+	nilRoot         atomic.Int64
+	invalidSpans    atomic.Int64
+}
+
+// Stats is a point-in-time snapshot of the treesitter chunker's
+// per-reason fallback counters since process start (or since the
+// Chunker was constructed). Read via Chunker.Stats(). Concurrency-safe:
+// each field is loaded with an atomic.Load, so the snapshot is
+// internally consistent for each counter but the four counters are not
+// captured atomically as a group — a few sub-microsecond skew across
+// fields is possible when reading mid-indexing. For the OSS-demo
+// validation use case (read once after FromFS returns), the snapshot
+// is point-stable.
+//
+// Fallback is the sum of the four per-reason counters and is what the
+// demo decision wants: "of the files we tried to AST-chunk, how many
+// silently degraded to line-chunking?"
+type Stats struct {
+	Total           int64 `json:"total"`
+	Fallback        int64 `json:"fallback"`
+	UnsupportedLang int64 `json:"unsupported_lang"`
+	ParseErr        int64 `json:"parse_err"`
+	NilRoot         int64 `json:"nil_root"`
+	InvalidSpans    int64 `json:"invalid_spans"`
+}
+
+// Stats returns a point-in-time snapshot of the chunker's per-reason
+// fallback counters. Safe to call from any goroutine while indexing is
+// in progress; safe to call multiple times (counters keep accumulating
+// across calls, so two snapshots N and N+1 let you compute a delta).
+func (c *Chunker) Stats() Stats {
+	unsupportedLang := c.unsupportedLang.Load()
+	parseErr := c.parseErr.Load()
+	nilRoot := c.nilRoot.Load()
+	invalidSpans := c.invalidSpans.Load()
+	return Stats{
+		Total:           c.total.Load(),
+		Fallback:        unsupportedLang + parseErr + nilRoot + invalidSpans,
+		UnsupportedLang: unsupportedLang,
+		ParseErr:        parseErr,
+		NilRoot:         nilRoot,
+		InvalidSpans:    invalidSpans,
+	}
 }
 
 // New returns a tree-sitter chunker. The internal caches are empty;
@@ -188,11 +242,17 @@ func (c *Chunker) Chunk(source []byte, language string, chunkSize int) ([]chunk.
 	if chunkSize <= 0 {
 		chunkSize = chunk.DefaultChunkSize
 	}
+	// Count this call as one "file attempted" for the Stats snapshot.
+	// The atomic add is negligible relative to parse cost; placing it
+	// after the len==0 guard so empty sources (which return nil chunks
+	// without doing any parsing) aren't included in the denominator.
+	c.total.Add(1)
 
 	pool := c.poolFor(language)
 	if pool == nil {
 		// Language unsupported or grammar unavailable. Degrade to
 		// the line chunker rather than emit a single whole-file chunk.
+		c.unsupportedLang.Add(1)
 		return c.fallback(source, language, chunkSize)
 	}
 
@@ -201,10 +261,12 @@ func (c *Chunker) Chunk(source []byte, language string, chunkSize int) ([]chunk.
 		// Parse errors here are tree-sitter's "I gave up" — typically
 		// a timeout firing on a pathological input. Fall back to the
 		// line chunker so the file still produces useful BM25 docs.
+		c.parseErr.Add(1)
 		return c.fallback(source, language, chunkSize)
 	}
 	root := tree.RootNode()
 	if root == nil {
+		c.nilRoot.Add(1)
 		return c.fallback(source, language, chunkSize)
 	}
 
@@ -216,6 +278,7 @@ func (c *Chunker) Chunk(source []byte, language string, chunkSize int) ([]chunk.
 	// start bytes aren't monotonic. If anything still looks wrong, fall
 	// back to the line chunker rather than panic in the slice op below.
 	if !spansValid(spans, uint32(len(source))) {
+		c.invalidSpans.Add(1)
 		return c.fallback(source, language, chunkSize)
 	}
 	out := make([]chunk.Chunk, len(spans))

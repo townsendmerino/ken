@@ -10,7 +10,16 @@ with pre-built binaries.
 
 ## [Unreleased]
 
-(no changes yet)
+### Added (treesitter chunker fallback observability)
+
+- **Per-reason fallback counters on the treesitter chunker.** `internal/chunk/treesitter.Chunker` now tracks four atomic counters — one per silent-fallback site in `Chunk` (unsupported language, `pool.Parse` error, nil root node, invalid spans) — plus a total-files-attempted counter. Exposed via `Chunker.Stats() Stats`. Thread-safe (`sync/atomic`); negligible hot-path cost (one atomic add per chunked file).
+- **`treesitter` field on `ken perf index` JSON output (omitempty).** When `--chunker=treesitter`, the perf record includes a `treesitter` object with `total`, `fallback`, and per-reason counts. Lets callers — primarily the OSS-demo build-time validation per `outputs/oss-demo-playbook.md` — quantify how many files in a corpus actually got AST-chunked vs silently degraded to the line chunker.
+
+### Calibration discipline
+
+This is **observability only**: a measurement gap closed. **NOT** a retrieval-quality change, **NOT** a recall change, **NOT** a search-ranking change, **NOT** a behavior change. The silent-fallback semantics ADR-010 chose are deliberately preserved — `ken index` / `ken-mcp` / library callers see byte-identical output and zero new stderr spam. The counters are introspection for callers who explicitly want them (`perf index`'s JSON consumer); every other caller is unaffected.
+
+Same calibration framing as v0.8.3's "cold-start optimization, NOT search-quality change" and v0.8.1's "Tier-1 chunk fidelity, NOT recall" entries.
 
 ## [0.8.3] — 2026-05-26
 
