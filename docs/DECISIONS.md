@@ -30,6 +30,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-022](#adr-022-rename-column--rename-constraint-folding-via-eager-application-v081-part-c) | RENAME COLUMN + RENAME CONSTRAINT folding via eager application (v0.8.1 Part C) | Accepted |
 | [ADR-023](#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome) | `gotreesitter` `grammar_subset` machinery + binary-size reduction outcome (v0.8.2 investigation outcome) | Accepted |
 | [ADR-024](#adr-024-pre-built-embedded-indices-for-mcprun-v083) | Pre-built embedded indices for `mcp.Run` (v0.8.3) | Accepted |
+| [ADR-026](#adr-026-paired-heap-refactor-for-annflatquery--bm25indextopk-v084) | Paired heap refactor for `ann.Flat.Query` + `bm25.Index.TopK` via shared `internal/topk` (v0.8.4) | Accepted |
 
 ---
 
@@ -1313,3 +1314,123 @@ Serialize the built `*search.Index` artifact (chunks slice + parallel embedding 
 - **No new third-party dependencies.** Custom binary serialization uses `encoding/binary`, `hash/crc32`, and the existing `io/fs` plumbing. The dep tree stays clean.
 
 - **v0.8.3 ready to tag after this lands.** Four-commit cadence on `v0.8.3-prebuilt-indices`: (1) serialize/deserialize primitives + walker prune, (2) `ken build-index` CLI subcommand, (3) `mcp.Run` auto-discovery + `Options.PrebuiltIndex`, (4) docs (this ADR + CHANGELOG + README + DESIGN.md). Closes [#10](https://github.com/townsendmerino/ken/issues/10).
+
+---
+
+## ADR-026: Paired heap refactor for `ann.Flat.Query` + `bm25.Index.TopK` (v0.8.4)
+
+**Status:** Accepted
+
+**Date:** 2026-05-26
+
+**Issue:** TBD (open a townsendmerino/ken issue for the v0.8.4 refactor + cross-link here on merge).
+
+**Extends:** ADR-025 perf-investigation outcome (currently in `outputs/adr-025-perf-investigation-outcome.md`, pending promotion to this file — ADR-026 references the empirical findings produced by that investigation).
+
+### Context
+
+[ADR-025](outputs/adr-025-perf-investigation-outcome.md)'s medium-scale (semble bench corpus, 378,524 chunks) CPU profile surfaced two adjacent hotspots that share the same structural defect:
+
+- **`ann.Flat.Query` is 78.56% of hybrid-regex search CPU at medium**, and **30.88% of that is `sort.Slice`** sorting all 378k candidate cosine-similarity scores to take K=10. Top-K-of-N via full sort is O(N log N).
+- **`bm25.Index.TopK` is 36% of bm25-regex search CPU at medium**, all in `sort.Slice` / `sort.pdqsort_func` / `sort.partition_func` over the positive-score candidate list. Same O(N log N) pattern.
+
+Both code paths use the same anti-pattern: score every candidate into a slice, sort by score descending, take the first K. Top-K via min-heap of size K is the canonical fix — O(N log K), which at K=10 and N=378k is roughly 50× cheaper in the asymptotic bound and produces the same K items in the same order (ties handled identically when the caller iterates input in natural index order, which both call sites do).
+
+The refactors are mechanically identical and ship together as a single PR + single ADR. The heap is shared via a new `internal/topk` leaf package so a future caller (a reranker, a `find_related` re-implementation, etc.) doesn't have to re-derive the same primitive.
+
+### Decision
+
+Replace sort-then-slice with min-heap-of-size-K in `ann.Flat.Query` and `bm25.Index.TopK`, sharing a new `internal/topk` package.
+
+**Three surfaces:**
+
+1. **`internal/topk` package** (NEW, leaf). Generic `Selector[T any]` with capacity K. `Push(item, score) bool` (strict `>` on at-capacity replace — see tie-breaking below); `Result() []ItemWithScore[T]` returns descending by score; `Len() int`. Hand-rolled `siftUp` / `siftDown` rather than `container/heap` because `heap.Interface` takes `interface{}` and would force boxing — defeating the perf goal.
+
+2. **`ann.Flat.Query` two-path refactor.** `k<=0 || k>=Len` keeps the existing full-sort path (preserves the documented "return all, sorted" escape hatch); `0 < k < Len` takes the heap. A `sort.SliceStable` at the end of the heap path imposes the documented ascending-Index tie-break that the heap on its own doesn't guarantee (K-sized stable sort is O(K log K), cheap at K=10).
+
+3. **`bm25.Index.TopK` two-path refactor.** `k<0` keeps the full-sort path (the original `if k >= 0 && k < len(res)` truncation gate's escape hatch); `k>=0` takes the heap. `k=0` selector returns empty, matching the original gate's k=0 behavior. Same `sort.SliceStable` tie-break for ascending Doc id.
+
+**Tie-breaking design.** The heap's `Push` uses strict `>` (not `>=`) on at-capacity replace, meaning a new item tying the current minimum's score is **discarded**. Both call sites iterate input in their natural index order (`for i, v := range f.vecs` / `for d, s := range scores`), so the first-seen-of-tied-group is naturally the smaller-index one — which the heap retains. The final `sort.SliceStable` re-orders any ties within the K result by ascending secondary key for deterministic output that matches the pre-refactor public contract.
+
+### Alternatives considered
+
+- **Quickselect / `container/heap` without a generic wrapper.** Rejected for code-template-reuse reasons. The two callers want the same primitive; sharing a small generic package keeps the heap logic in one place + lets future callers reuse it without re-deriving heap correctness. `container/heap` specifically also has the `interface{}` boxing problem ([ADR-001](#adr-001-pure-go-no-cgo)'s pure-Go-no-cgo discipline argues for letting generics handle this — Go 1.26 is the project's toolchain pin, generics are fully available).
+
+- **Partial sort.** Rejected because Go's stdlib doesn't have one. Implementing a partial sort would be more code than the min-heap, with no compensating benefit.
+
+- **Custom min-heap inlined in each caller.** Rejected for DRY. The heap logic is small but non-trivial (siftUp/siftDown correctness, tie-breaking semantics, the K-sized stable sort at the end). Duplicating it in `internal/ann` and `internal/bm25` would also duplicate the test surface and the future-maintenance burden.
+
+- **Pure-Go HNSW** (replacement for ANN flat). Rejected for v0.8.4 scope; documented future work in [docs/DESIGN.md §10](DESIGN.md#10-risk-register) and ADR-025 hotspot #6. The trigger to revisit: real user reports search latency on a 100k+ chunk corpus as actionable pain, OR a pure-Go HNSW dep emerges that meets the no-cgo bar with good maintenance signal. The heap refactor is complementary to eventual HNSW (every search algorithm needs a top-K selector); landing it now is not the same kind of work.
+
+- **Placing `topk` at `internal/search/topk`** rather than the standalone leaf `internal/topk`. Considered. Rejected because the heap utility has no business knowing about search internals; a future reranker or `find_related` re-implementation needing top-K shouldn't have to import from the search subsystem. Standalone leaf placement keeps the dependency direction one-way (concrete subsystems depend on the primitive, not the reverse).
+
+- **Push returns `bool` vs no return value.** Kept the bool return per the briefing. Rare but useful for callers that want to short-circuit expensive scoring on items that obviously won't make the cut (e.g., score = 0). Not applicable to the two production callers today; cheap to expose now if a future caller needs it.
+
+### Consequences
+
+**Measured impact** (Apple M1 Pro / Go 1.26.3 / darwin/arm64 / `CGO_ENABLED=0 -trimpath -ldflags='-s -w'`):
+
+- **`ann.Flat.Query` micro-benchmark** (`go test -bench BenchmarkFlatQuery -benchmem -count=10`, before = perf-investigation HEAD with sort-based code, after = this commit):
+
+  ```
+                   │ sort-based       │  heap-based                     │
+                   │   sec/op         │   sec/op       vs sort          │
+  FlatQuery/N1k    │ 182.3µs ± 1%     │ 103.2µs ± 1%   −43.4% (p=0.000) │
+  FlatQuery/N10k   │ 2.253ms ± 1%     │ 990.2µs ± 1%   −56.1% (p=0.000) │
+  FlatQuery/N50k   │ 12.297ms ± 1%    │ 4.926ms ± 0%   −59.9% (p=0.000) │
+
+                   │ B/op             │  B/op          vs sort          │
+  FlatQuery/N1k    │ 16,472 ± 0%      │ 728 ± 0%       −95.6% (p=0.000) │
+  FlatQuery/N10k   │ 163,928 ± 0%     │ 728 ± 0%       −99.6% (p=0.000) │
+  FlatQuery/N50k   │ 802,904 ± 0%     │ 728 ± 0%       −99.9% (p=0.000) │
+  ```
+
+- **`bm25.Index.TopK` micro-benchmark** (via `BenchmarkScore` which is dominated by TopK; same harness):
+
+  ```
+                   │ sort-based       │  heap-based                     │
+                   │   sec/op         │   sec/op       vs sort          │
+  Score/N100       │ 3.934µs ± 2%     │ 1.099µs ± 1%   −72.1% (p=0.000) │
+  Score/N1000      │ 8.782µs ± 2%     │ 1.995µs ± 1%   −77.3% (p=0.000) │
+
+                   │ B/op             │  B/op          vs sort          │
+  Score/N100       │ 2,711 ± 0%       │ 1,586 ± 0%     −41.5% (p=0.000) │
+  Score/N1000      │ 15,961 ± 0%      │ 5,961 ± 0%     −62.7% (p=0.000) │
+  ```
+
+- **End-to-end medium-corpus search latency** (`scripts/perf_collect.sh medium --modes=bm25,hybrid --chunkers=regex`, 1000 queries / k=10 against a warm 378,524-chunk semble medium index):
+
+  | combo | metric | sort-based | heap-based | Δ |
+  |---|---|---|---|---|
+  | bm25-regex SEARCH | p50 | 11.5 ms | **1.88 ms** | **−83.7%** |
+  | bm25-regex SEARCH | p95 | 23.2 ms | 5.14 ms | −77.8% |
+  | bm25-regex SEARCH | p99 | 31.4 ms | 20.58 ms | −34.5% |
+  | bm25-regex SEARCH | allocs/q | 8.7 MB | 2.89 MB | −66.8% |
+  | hybrid-regex SEARCH | p50 | 193 ms | **113.2 ms** | **−41.4%** |
+  | hybrid-regex SEARCH | p95 | 214 ms | 124 ms | −42.1% |
+  | hybrid-regex SEARCH | p99 | 391 ms | 141 ms | −64.0% |
+  | hybrid-regex SEARCH | allocs/q | 14.5 MB | 2.98 MB | −79.4% |
+
+  The hybrid p50 result hits the upper end of ADR-025's 25-40% projection; bm25 search came in well above projection because TopK was a larger fraction of bm25 search CPU than ann flat is of hybrid search CPU. **Index times unchanged** (bm25 index 55s → 59s, hybrid index 178s → 182s — within noise; the refactor only touches the search path, not indexing).
+
+- **NDCG@10 safety check** (semble bench corpus, 63 repos / 1251 tasks, all 3 modes, `--chunker regex` both sides for clean apples-to-apples):
+
+  | mode | sort-based NDCG@10 | heap-based NDCG@10 | Δ |
+  |---|---|---|---|
+  | bm25 | 0.6237 | 0.6237 | **0.0000** (exact) |
+  | semantic | 0.6469 | 0.6469 | **0.0000** (exact) |
+  | hybrid | 0.8418 | 0.8418 | **0.0000** (exact) |
+
+  Exact match in all three modes confirms the top-K determinism claim. The heap refactor changes search *latency*, not search *results* — the K items emerging in the K positions are identical. NDCG-bench wall times are dominated by per-repo index build (unchanged by this refactor) and vary within noise from machine load; the relevant signal is the NDCG@10 value, not the wall time.
+
+- **`internal/topk` is reusable.** A future caller (the rerank pipeline if/when it becomes hot at small scale per ADR-025 hotspot #7's small-scale finding; a `find_related` re-implementation; etc.) can take a dependency without re-deriving the heap correctness invariants.
+
+- **Net allocations per call go up by 3** (4 → 7 for ann, 5 → 8 for bm25). That's the `Selector` + result slice + scratch slice overhead. The aggregate *bytes* allocated drops by orders of magnitude because the full N-sized candidate slice is gone. Net GC pressure drops dramatically — visible as the per-query alloc bytes collapse in the end-to-end table above.
+
+- **No public API changes.** Both `ann.Flat.Query` and `bm25.Index.TopK` keep their existing signatures + documented tie-breaking semantics. Existing callers (`search.hybridSearch`, the rerank pipeline, etc.) integrate unchanged.
+
+- **No new third-party dependencies.** `internal/topk` is standard-library-only.
+
+- **Two-commit PR shape.** Commit 1 lands `internal/topk` + tests + micro-benchmark; commit 2 lands the two refactors + this ADR-026. Reviewers see the new utility in isolation before reading the integrations.
+
+- **Future perf work informed.** The remaining ADR-025 hotspots (BM25 tokenizer allocs at ~45% of indexing allocs, embed `weightedMeanPoolSafe` accumulator) will ship in subsequent rolling point releases (v0.8.5+) as the analysis from this work feeds back into the prioritization. Specifically, with search latency cut as documented above, the embed inference cost becomes a proportionally larger fraction of cold-start time on the giant-corpus workload that the planning Claude's Phase 1 medium re-run will benchmark next.

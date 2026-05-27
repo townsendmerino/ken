@@ -28,7 +28,11 @@
 //     containing search.Index can be swapped wholesale between queries.
 package ann
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/townsendmerino/ken/internal/topk"
+)
 
 // Hit is one scored item, highest Score (cosine similarity) first.
 type Hit struct {
@@ -57,8 +61,47 @@ func (f *Flat) Len() int { return len(f.vecs) }
 // Query returns the k highest cosine-similarity vectors to q, descending,
 // ties broken by ascending index for determinism. k<=0 or k>=Len returns
 // all, sorted.
+//
+// Two paths by design:
+//
+//   - k<=0 || k>=Len: full sort over every dot-product result. Preserves
+//     the documented "return all, sorted" semantic for callers that want
+//     the complete ranked list.
+//   - 0 < k < Len: min-heap of size K via internal/topk. O(N log K) vs
+//     the full-sort path's O(N log N) — at medium scale (~378k chunks,
+//     k=10) this was 30.88% of hybrid search CPU per ADR-025. Final
+//     sort.SliceStable imposes the ascending-Index tie-break the doc
+//     comment promises, which the heap on its own doesn't guarantee
+//     (heap only sorts by score; ties within result come out in
+//     heap-internal order). The K-sized stable sort is O(K log K) —
+//     cheap at K=10.
 func (f *Flat) Query(q []float32, k int) []Hit {
-	hits := make([]Hit, 0, len(f.vecs))
+	// Full-sort path: k<=0 returns everything; k>=Len would have nothing
+	// to discard anyway. Either way the heap buys us nothing.
+	if k <= 0 || k >= len(f.vecs) {
+		hits := make([]Hit, 0, len(f.vecs))
+		for i, v := range f.vecs {
+			if len(v) != len(q) {
+				continue // dimension mismatch ⇒ skip rather than panic
+			}
+			var dot float64
+			for j := range v {
+				dot += float64(v[j]) * float64(q[j])
+			}
+			hits = append(hits, Hit{Index: i, Score: dot})
+		}
+		sort.Slice(hits, func(a, b int) bool {
+			if hits[a].Score != hits[b].Score {
+				return hits[a].Score > hits[b].Score
+			}
+			return hits[a].Index < hits[b].Index
+		})
+		return hits
+	}
+
+	// Heap path: 0 < k < Len. Score every vector, push into the K-sized
+	// min-heap; the heap only retains the K highest seen so far.
+	sel := topk.New[int](k)
 	for i, v := range f.vecs {
 		if len(v) != len(q) {
 			continue // dimension mismatch ⇒ skip rather than panic
@@ -67,16 +110,20 @@ func (f *Flat) Query(q []float32, k int) []Hit {
 		for j := range v {
 			dot += float64(v[j]) * float64(q[j])
 		}
-		hits = append(hits, Hit{Index: i, Score: dot})
+		sel.Push(i, dot)
 	}
-	sort.Slice(hits, func(a, b int) bool {
-		if hits[a].Score != hits[b].Score {
-			return hits[a].Score > hits[b].Score
+	items := sel.Result() // descending by score; tie order is heap-internal
+	// Stable secondary sort by ascending Index to honor the doc-comment
+	// tie-break contract. K is small (typically 10), so this is cheap.
+	sort.SliceStable(items, func(a, b int) bool {
+		if items[a].Score != items[b].Score {
+			return items[a].Score > items[b].Score
 		}
-		return hits[a].Index < hits[b].Index
+		return items[a].Item < items[b].Item
 	})
-	if k > 0 && k < len(hits) {
-		hits = hits[:k]
+	hits := make([]Hit, len(items))
+	for j, s := range items {
+		hits[j] = Hit{Index: s.Item, Score: s.Score}
 	}
 	return hits
 }
