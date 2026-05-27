@@ -34,6 +34,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-026](#adr-026-paired-heap-refactor-for-annflatquery--bm25indextopk-v084) | Paired heap refactor for `ann.Flat.Query` + `bm25.Index.TopK` via shared `internal/topk` (v0.8.4) | Accepted |
 | [ADR-027](#adr-027-bm25-tokenizer-allocation-reduction--rune--byte--syncpool-scratch--lowercase-fast-path-v085) | BM25 tokenizer allocation reduction (`[]rune` → `[]byte` + `sync.Pool` scratch + lowercase fast-path) (v0.8.5) | Accepted |
 | [ADR-028](#adr-028-bm25-tokenizer-parts-slice-pooling-via-tokbuffers-struct-v086) | BM25 tokenizer `parts`-slice pooling via `tokBuffers` struct (v0.8.6) | Accepted |
+| [ADR-029](#adr-029-v08x-perf-campaign-capstone--allocationgc-ceiling-reached-indexing-is-single-threaded-parallelism-is-the-next-frontier) | v0.8.x perf campaign capstone — allocation/GC ceiling reached; indexing is single-threaded; parallelism is the next frontier | Accepted |
 
 ---
 
@@ -1847,3 +1848,150 @@ The correctness argument has three load-bearing pieces:
 - **The accumulating second-machine-confirmation debt** ([`docs/PERF.md`](PERF.md) acceptance threshold step 2): ADR-026, ADR-027, and now ADR-028 have all shipped with single-machine evidence (Apple M1 Pro / native arm64 darwin / Go 1.26.3). This is the THIRD perf release in the v0.8.x cycle without a second-machine confirmation, and the briefing explicitly flagged: "Don't let it slide silently a fourth time." Before any further perf release (v0.8.7+), we either set up a Linux x86_64 CI confirmation runner OR consciously decide single-machine evidence is sufficient for this class of change and amend the acceptance threshold accordingly. Token-set parity (which load-bears each of these releases) is machine-independent, so the safety check holds across architectures; the wall-time and alloc numbers do not, and that's where the debt accumulates.
 
 - **Future perf work informed.** Post-v0.8.6, the alloc_objects picture has shifted: `bm25.lowerString` is now the dominant flat frame at 66.47% (22.4M objects — these are the slow-path string allocations for tokens containing uppercase bytes; the byte-level lowercase work is the bottleneck). `bm25.Build` is 15.48% (5.2M — map insertions, the natural next target if RSS becomes a goal). The embed pipeline is unchanged and untouched by ADR-027 or ADR-028. Any v0.8.7+ briefing should rank against this updated profile, not the post-v0.8.5 one this ADR motivated against.
+
+---
+
+## ADR-029: v0.8.x perf campaign capstone — allocation/GC ceiling reached; indexing is single-threaded; parallelism is the next frontier
+
+**Status:** Accepted
+
+**Date:** 2026-05-27
+
+**Extends:** [ADR-025](#adr-025-perf-campaign-phase-1-investigation-outcome--hotspot-identification-across-small--medium-workloads) (the Phase 1 investigation that opened the campaign), [ADR-026](#adr-026-paired-heap-refactor-for-annflatquery--bm25indextopk-v084) / [ADR-027](#adr-027-bm25-tokenizer-allocation-reduction--rune--byte--syncpool-scratch--lowercase-fast-path-v085) / [ADR-028](#adr-028-bm25-tokenizer-parts-slice-pooling-via-tokbuffers-struct-v086) (the three rolling releases the campaign shipped).
+
+**Seeds:** a future indexing-parallelism campaign (the "Phase 2" this ADR scopes but does not undertake).
+
+### Context
+
+The v0.8.x rolling perf campaign opened with ADR-025's Phase 1 investigation and shipped three releases:
+
+- **v0.8.4 (ADR-026):** paired min-heap refactor of `ann.Flat.Query` + `bm25.Index.TopK`. Hybrid search p50 −41%, bm25 search p50 −84% at medium scale. Zero NDCG change.
+- **v0.8.5 (ADR-027):** BM25 tokenizer `[]rune`→`[]byte` + scratch-buffer pooling + lowercase fast-path. Indexing alloc bytes −10%, object count −56%. Zero NDCG change.
+- **v0.8.6 (ADR-028):** BM25 tokenizer `parts`-slice pooling. Indexing object count −60% cumulative (133.6M → 53.5M at medium). Zero NDCG change.
+
+After v0.8.6, ADR-028's forward-looking section identified `bm25.lowerString` as the dominant remaining flat-object allocator (66% of `alloc_objects`) and proposed it as a possible v0.8.7. **Before briefing that, we re-profiled on a quiet machine with a CPU profile** — and the CPU profile contradicted the object-count profile.
+
+#### The decisive measurement (post-v0.8.6, commit `b569d09`, M1 Pro / arm64 / Go 1.26.3, semble bench corpus, 378,524 chunks)
+
+**Clean bm25-regex index CPU profile (`go tool pprof -top -cum`):**
+
+```
+52.3%  search.FromFSWithOptions  (the whole index build)
+46.3%  runtime.systemstack
+38.3%  runtime.gcBgMarkWorker     ← GC mark phase
+37.8%  runtime.scanObject
+34.0%  search.BuildIndex
+25.9%  bm25.Build                 ← postings-map construction (real work)
+22.3%  runtime.(*mspan).typePointersOfUnchecked  (flat — GC pointer-walking)
+18.3%  search.walkAndChunkFS
+16.9%  syscall.syscalln           (file reads)
+```
+
+GC is ~38% of indexing CPU *even after v0.8.6 cut object count 60%*. The `alloc_objects` profile said `lowerString` (66% of allocation count) was the target. But the CPU profile shows the GC time is spent in `typePointersOfUnchecked` / `scanObject` — **marking the live, pointer-dense index structures** (`bm25.Build`'s `map[string][]postingEntry` + the chunks slice), not the transient tokenizer strings. `lowerString`'s allocations are pointer-light strings that die young, before a GC cycle scans them: high allocation *count*, low GC-scan *cost*.
+
+#### The GOGC probe — the load-bearing evidence
+
+To decide whether the 38% GC was a wall-time bottleneck worth attacking via the postings-map representation, we ran the cheapest possible discriminating experiment — collect 4× less often and see if wall time moves:
+
+| Run | `GOGC` | index wall | heap inuse |
+| --- | --- | --- | --- |
+| default | 100 | 37.4 s | 5.42 GB |
+| probe | 400 | 36.5 s | 9.62 GB |
+
+**Collecting 4× less often moved wall time ~2% (within noise) while ballooning heap 77%.** The 38% GC CPU is not on the wall-clock critical path — it runs on `gcBgMarkWorker` background threads concurrent with the mutator. The CPU sample ratio confirms why: **42.74 s samples / 37.73 s wall = 1.13× — indexing uses barely more than one core on an 8-core machine.** GC has 7 idle cores to run on; reducing its frequency just frees cores that were already idle. The wall-time critical path is the serial indexing pipeline, not GC.
+
+### Decision
+
+**Close the v0.8.x rolling allocation/GC perf campaign at its honest ceiling.** Three doors are now empirically shut:
+
+1. **`lowerString` reduction** — wrong target. High allocation count, low GC-scan cost (pointer-light, dies young). Cutting it would barely move GC time, which is spent marking live structures.
+2. **Postings-map GC-cost reduction** (the arena/slab or integer-term-ID refactor floated in ADR-028's alternatives) — the GOGC probe bounds its prize at ~2% wall time, because the postings-map GC mark work is concurrent and absorbed by idle cores. Not worth the core-indexing-refactor risk for ~2%.
+3. **`GOGC` as a shipped default** — 2% wall time for +77% heap is a bad trade; rejected as a default. (It remains available to operators as a knob; not blessed.)
+
+The allocation/GC line of attack is exhausted: ken's indexing wall time is no longer bound by allocations or GC. **It is bound by the serial pipeline running on ~1.13 of 8 cores.**
+
+### The next frontier: indexing pipeline parallelism
+
+The same profile that closed the allocation door opened a bigger one. Indexing is single-threaded; the seven idle cores are the largest unrealized wall-time win in the system — far larger than anything the allocation campaign delivered. This section scopes a future parallelism campaign in enough detail to start it deliberately.
+
+#### The opportunity + expected win bounds
+
+Indexing currently uses ~1.13 cores. The pipeline is `walk → chunk → tokenize → bm25.Build` (bm25 mode) or `walk → chunk → {tokenize→bm25.Build, embed}` (hybrid mode). If the parallelizable stages dominate and scale to N cores, Amdahl's law caps the win at `1 / (serial_fraction + parallel_fraction/N)`. With an 8-core box and a high parallel fraction, a realistic target is **3–5× indexing wall-time reduction for bm25 mode, potentially larger for hybrid mode** (where embed inference — fully parallel — is the dominant cost). These are ceilings; the serial walk, the merge step, and any serial bm25.Build portion set the floor.
+
+#### Pipeline stage parallelizability analysis
+
+| Stage | Cost (bm25 mode, from profile) | Parallelizable? | Notes |
+| --- | --- | --- | --- |
+| `repo.WalkFS` (directory traversal) | small (part of the 18% walkAndChunk) | **Serial by nature** | Produces the ordered file list. Cheap; leave serial. Order is the determinism anchor. |
+| `chunk.ChunkFile` (per-file chunking) | bulk of the 18% walkAndChunk + file I/O | **Embarrassingly parallel** | Each file is independent. The treesitter chunker's `ParserPool` is already `sync.Pool`-backed for concurrent use (ADR-010); the regex chunker is stateless. This is where most idle cores go. |
+| `bm25.Tokenize` (per-chunk) | part of BuildIndex | **Parallel** | Stateless per chunk (post-v0.8.5/6 it uses pooled buffers via `sync.Pool` — already concurrency-safe by construction). |
+| `bm25.Build` (postings map) | 25.9% | **Hard — shared mutable state** | The `map[string][]postingEntry` is shared. Options below. |
+| `embed.StaticModel.Encode` (hybrid/semantic) | dominant in hybrid mode | **Embarrassingly parallel** *(verify)* | Per-chunk, stateless inference. MUST verify `StaticModel.Encode` is goroutine-safe (the float64-accumulation invariant + read-only model tensors suggest yes, but it's unconfirmed — see Validation). |
+| `ann.Flat` build | small | Trivial | Just stores the vector matrix; fill by index. |
+
+#### The hard requirement: determinism
+
+The BM25 index must be **byte-deterministic** across runs for two reasons: (a) NDCG reproducibility (`docs/BENCH.md`'s parity contract), and (b) the pre-built-index format (ADR-024) requires byte-stable serialization for the embedded-corpus `mcp.Run` use case. So any parallel construction must produce a result *identical* to the serial build:
+
+- **Chunk order:** the chunks slice must be in deterministic order (lexical file order, then chunk order within file). Parallel chunking workers must tag results with their file index and a merge step must reassemble in that order before the index is built.
+- **Postings order:** `df`, posting lists, and `docLen` must be identical to the serial build. Since BM25's `Build` iterates the ordered chunks slice, if the chunks slice is deterministically ordered, a serial `Build` over it is automatically deterministic — which argues for parallelizing *chunking + embed* (the embarrassingly-parallel, cost-dominant stages) while keeping `Build` serial over the ordered result, at least initially.
+
+#### Architecture sketch (suggested phasing)
+
+A staged approach that captures most of the win while containing the determinism risk:
+
+**Phase A — parallelize chunking + embed, keep `bm25.Build` serial.**
+- Walk produces the ordered file list (serial, cheap).
+- Fan files out to a `GOMAXPROCS`-sized worker pool over a bounded channel (backpressure to cap in-flight memory). Each worker returns `(fileIndex, []chunk)`.
+- A collector reassembles chunks in `fileIndex` order → the deterministic chunks slice.
+- (Hybrid/semantic) embed the ordered chunks in parallel, filling the vector matrix by index.
+- `bm25.Build` runs serially over the ordered chunks slice — deterministic by construction, and it's only 26% of bm25-mode CPU, so leaving it serial still unlocks the chunking+embed parallelism (the bulk).
+- **Expected:** most of the parallel win, minimal determinism risk (Build unchanged; only chunking+embed parallelized, both with order-preserving merge).
+
+**Phase B (optional, later) — parallelize `bm25.Build`.**
+- Only if Phase A profiling shows serial `Build` is now the bottleneck.
+- Sharded construction: each shard builds a partial postings map over a contiguous chunk range, then a deterministic merge combines them (term lists concatenated in chunk order). Higher complexity + higher determinism risk; defer until proven necessary.
+
+#### Validation requirements (the parallelism campaign's calibration gauntlet)
+
+This is a bigger correctness surface than the tokenizer work. The campaign must establish, before shipping:
+
+1. **Byte-identical index parity:** build the same corpus serially and in parallel; assert the chunks slice, the BM25 postings (`df`, posting lists, `docLen`), and the embed matrix are identical. This is the load-bearing test — stronger than NDCG, machine-independent. A new `internal/search` test that builds both ways and `reflect.DeepEqual`s the resulting `*Index` internals.
+2. **NDCG@10 exact-match** on the semble bench corpus, all three modes — the downstream confirmation (must be exact, given index parity).
+3. **`embed.StaticModel.Encode` goroutine-safety audit:** confirm (via code read + a `-race` test) that concurrent `Encode` calls are safe. The CLAUDE.md notes `Flat.Query` is goroutine-safe by immutability; `StaticModel.Encode` must be similarly verified (read-only tensors, no shared mutable accumulator). If it's NOT safe, that's a prerequisite fix.
+4. **`-race` clean** across the new concurrent paths — mandatory, not optional, for concurrency work.
+5. **Determinism stress:** build the same corpus N times in parallel; assert byte-identical serialized index every time (catches order-dependent races the single-build parity test might miss).
+6. **benchstat + end-to-end wall-time** on a quiet machine (and finally — see below — a *second machine*), confirming the parallel speedup is real and not a measurement artifact.
+
+#### Why this is a campaign, not a point release
+
+The tokenizer work was contained (one file, byte-equality contract, existing parity suite). Pipeline parallelism touches `internal/search`'s core build path, introduces concurrency (a new class of bug — races, nondeterminism), and carries the determinism requirement that's load-bearing for both NDCG and the ADR-024 pre-built-index format. It deserves the full Phase-0/1 investigation shape the allocation campaign used: a plan with written-down predictions, a measurement harness extension (the `ken perf index` harness already exists and would measure it directly), and per-phase calibration. Enter it deliberately.
+
+### Second-machine confirmation debt — resolved by this closure
+
+ADR-026/027/028 each shipped single-machine (M1 Pro / arm64). ADR-028 flagged the accumulating debt and the "don't let it slide a fourth time" line. **This ADR resolves it by closing the campaign:** no v0.8.7 single-machine release accrues further debt, because there is no v0.8.7. The decision is recorded: the allocation/GC campaign ends here. If the parallelism campaign is undertaken, **second-machine confirmation (Linux x86_64) is part of its validation gauntlet from the start** — item 6 above — precisely because parallel speedup is the kind of result that can be a single-machine artifact (core count, scheduler, memory bandwidth all vary). The debt doesn't carry forward; it's retired by stopping, and pre-committed for the next campaign.
+
+### Alternatives considered
+
+- **Ship v0.8.7 = `lowerString` reduction.** Rejected. The CPU profile proves it targets allocation count, not GC-scan cost; the GOGC probe proves GC isn't the wall-time bottleneck anyway. It would be motion without progress — exactly the trap the re-profile (and ADR-025's "measure before optimize" discipline) exists to prevent. This is the second time a CPU re-profile reversed an object-count-profile conclusion (the first: `filePathPenalty` falsifying at medium scale in ADR-025).
+- **Ship the postings-map arena/slab refactor.** Rejected for v0.8.x. The GOGC probe bounds its prize at ~2% wall time (the GC cost it would reduce is concurrent/absorbed). High risk (core indexing + scoring path), bounded reward. If indexing parallelism (Phase B) ever makes `bm25.Build` the serial bottleneck, revisit then — but as part of the parallelism campaign, not standalone.
+- **Default `GOGC` higher.** Rejected as a default (2% wall for +77% heap). Documented as an available operator knob for memory-rich/latency-sensitive deployments; not blessed.
+- **Keep the rolling campaign going on diminishing targets.** Rejected by the calibration discipline. The campaign's value was three clean, measured wins; continuing past the point where measurement shows the remaining work won't move wall time would trade calibration credibility for activity. Knowing when to stop is the discipline working, not failing.
+
+### Consequences
+
+- **The v0.8.x rolling perf campaign is closed.** Three shipped releases (ADR-026/027/028), a documented ceiling, and a scoped successor. `docs/PERF.md`'s "Empirical findings" gets a closing subsection cross-referencing this ADR; the "Headline numbers" section stays empty (single-machine investigation evidence never met the publication bar — and now won't, because the campaign closed before a multi-machine publication pass).
+- **The parallelism campaign is seeded, not started.** This ADR is the seed; starting it is a separate decision with its own investigation plan. The trigger is explicit: the user's stated intent to pursue it "soon." When started, it begins with a Phase-0-style plan + predictions, mirroring the allocation campaign.
+- **`internal/perf` harness is reusable as-is.** `ken perf index` already measures cold-index wall time, which is exactly the parallelism campaign's headline metric. No harness work needed to start measuring.
+- **Second-machine debt retired.** No further single-machine releases; the next campaign pre-commits to second-machine confirmation.
+- **The `bm25.Build` / postings-map representation question is parked, not closed.** It re-opens only if parallelism Phase B makes serial `Build` the bottleneck — at which point the arena/slab work has both a clear motivation and a measured prize.
+
+### Open questions for the parallelism campaign (deliberately not resolved here)
+
+- **Is `embed.StaticModel.Encode` goroutine-safe today?** Unverified. The first task of the parallelism campaign's investigation phase. If not, it's a prerequisite fix and changes the effort estimate.
+- **What's the actual serial fraction?** The walk + merge + serial `bm25.Build` set the Amdahl floor. A quick experiment (parallelize just chunking, measure) would bound the realistic win before committing to the full architecture.
+- **Worker-pool memory ceiling.** Parallel chunking holds more chunks in flight; the bounded-channel backpressure design needs a memory budget, especially for the giant-corpus scale-out case ADR-025 flagged (where serial indexing already hit 7-8 GB heap pre-campaign).
+- **Does parallelism interact with the watch-mode incremental re-index path (ADR-012)?** The atomic-snapshot-swap model should be orthogonal, but the parallel builder must produce the same `*Index` shape the snapshot swap publishes. Verify during design.
+
+---
+
