@@ -22,6 +22,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/url"
@@ -35,6 +37,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/internal/embed"
 	// Side-effect imports: register every chunker the stock binary
 	// offers. internal/search blank-imports "regex" (the default), so
 	// we only need the optional chunkers here. The treesitter import
@@ -64,6 +67,93 @@ func modelAvailable(dir string) bool {
 	}
 	_, err := os.Stat(filepath.Join(dir, "model.safetensors"))
 	return err == nil
+}
+
+// prebuiltIndexPath is the ADR-024 convention for a pre-built index
+// baked next to a corpus: <dir>/.ken/index.bin. The walker prunes .ken/
+// so the file is never re-indexed into the corpus.
+func prebuiltIndexPath(dir string) string {
+	return filepath.Join(dir, ".ken", "index.bin")
+}
+
+// localPathHasPrebuilt reports whether dir is a local path carrying a
+// pre-built index at the conventional location. http(s) sources never
+// have one (they're shallow-cloned to a temp dir at request time).
+func localPathHasPrebuilt(dir string) bool {
+	if strings.HasPrefix(dir, "http://") || strings.HasPrefix(dir, "https://") {
+		return false
+	}
+	_, err := os.Stat(prebuiltIndexPath(dir))
+	return err == nil
+}
+
+// loadOrBuildWatched returns a WatchedIndex for dir, preferring a
+// pre-built <dir>/.ken/index.bin (ADR-024) over a live walk+chunk+embed
+// build. The pre-built path loads in ~1-2s and serves a frozen,
+// non-watching snapshot — the demo-appropriate shape (the OSS-demo
+// playbook mandates "never run watch-mode in the demo"), and the fix
+// for the cold-start blocker where a 44s treesitter build exceeded the
+// MCP client's tool-call timeout.
+//
+// Precedence + failure handling:
+//   - No pre-built file → live-index with the file watcher (unchanged
+//     v0.3+ behavior). Repos without a baked index keep working exactly
+//     as before.
+//   - Pre-built present, mode/chunker MISMATCH → hard error. The
+//     operator built the index with different `ken build-index` flags
+//     than the server's KEN_MCP_MODE/KEN_MCP_CHUNKER; serving it would
+//     silently return wrong-config results. The default-repo path turns
+//     this into a startup exit (see main); ad-hoc repo args surface it
+//     as a failed tool call.
+//   - Pre-built present, corrupt / incompatible format / missing model →
+//     warn and fall back to a live build. The file is unusable but the
+//     corpus is still indexable; a slower-but-correct result beats an
+//     outage. (Distinct from mismatch, which is a config error the
+//     operator must fix.)
+func loadOrBuildWatched(dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, logger *kenmcp.Logger) (*search.WatchedIndex, error) {
+	if data, err := os.ReadFile(prebuiltIndexPath(dir)); err == nil {
+		var model *embed.StaticModel
+		if mode != search.ModeBM25 {
+			m, mErr := embed.LoadFromFS(os.DirFS(modelDir), ".")
+			if mErr != nil {
+				logger.Logf(kenmcp.LogWarn, "pre-built index %s needs a model but loading %q failed (%v); live-indexing instead",
+					prebuiltIndexPath(dir), modelDir, mErr)
+				return liveWatched(dir, mode, chunker, modelDir, fsOpts, logger)
+			}
+			model = m
+		}
+		ix, lErr := search.LoadSerializedIndex(data, search.LoadOptions{
+			ExpectedMode:    modeStr,
+			ExpectedChunker: chunker,
+			Model:           model,
+		})
+		switch {
+		case lErr == nil:
+			logger.Logf(kenmcp.LogInfo, "loaded pre-built index %s (%d chunks, no watch)", prebuiltIndexPath(dir), ix.Len())
+			return search.WrapStatic(ix, dir, mode, chunker), nil
+		case errors.Is(lErr, search.ErrModeMismatch) || errors.Is(lErr, search.ErrChunkerMismatch):
+			// Config error — fail loud rather than serve wrong results.
+			return nil, fmt.Errorf("pre-built index %s: %w (server is mode=%s chunker=%s; rebuild with matching `ken build-index` flags or fix KEN_MCP_MODE/KEN_MCP_CHUNKER)",
+				prebuiltIndexPath(dir), lErr, modeStr, chunker)
+		default:
+			// Corrupt / format-version / model-required — fall back.
+			logger.Logf(kenmcp.LogWarn, "pre-built index %s unusable (%v); live-indexing instead", prebuiltIndexPath(dir), lErr)
+		}
+	}
+	return liveWatched(dir, mode, chunker, modelDir, fsOpts, logger)
+}
+
+// liveWatched is the original walk+chunk+embed build with the file
+// watcher enabled (v0.3+ behavior). Factored out so loadOrBuildWatched
+// has a single fallback call site.
+func liveWatched(dir string, mode search.Mode, chunker, modelDir string, fsOpts search.FSOptions, logger *kenmcp.Logger) (*search.WatchedIndex, error) {
+	logger.Logf(kenmcp.LogInfo, "indexing %s (live build, watching)", dir)
+	ix, err := search.NewWatchedIndexWithOptions(dir, mode, chunker, modelDir, true, fsOpts)
+	if err != nil {
+		return nil, err
+	}
+	logger.Logf(kenmcp.LogInfo, "indexed %s (%d chunks, watching)", dir, ix.Len())
+	return ix, nil
 }
 
 // runSubcommand dispatches one-shot CLI subcommands that exit before
@@ -148,11 +238,13 @@ func main() {
 	// in-place. mcp.NormalizeKey hands us either a canonical URL or an
 	// absolute path — we discriminate on the scheme prefix here.
 	//
-	// v0.3: returns *search.WatchedIndex. ken-mcp always watches (the
-	// in-process LRU otherwise serves stale results when an agent
-	// edits files mid-session). The cache calls wix.Close() before
-	// invoking the user cleanup, so the watcher's inotify fds drop
-	// before the temp clone dir is rm-rf'd.
+	// v0.3: returns *search.WatchedIndex. A live build watches (the
+	// in-process LRU otherwise serves stale results when an agent edits
+	// files mid-session); a pre-built index (ADR-024, <dir>/.ken/index.bin)
+	// is served frozen with no watcher via loadOrBuildWatched. The cache
+	// calls wix.Close() before invoking the user cleanup, so a live
+	// build's watcher fds drop before the temp clone dir is rm-rf'd
+	// (Close() is a no-op for the static pre-built case).
 	builder := func(ctx context.Context, source string) (*search.WatchedIndex, func(), error) {
 		var dir string
 		var cleanup func()
@@ -166,12 +258,11 @@ func main() {
 		} else {
 			dir = source
 		}
-		logger.Logf(kenmcp.LogInfo, "indexing %s (mode=%s)", dir, modeStr)
 		fsOpts := search.FSOptions{
 			DisableFoldMigrations: noAutoMigrations,
 			LogWriter:             os.Stderr,
 		}
-		ix, err := search.NewWatchedIndexWithOptions(dir, mode, chunker, modelDir, true, fsOpts)
+		ix, err := loadOrBuildWatched(dir, mode, modeStr, chunker, modelDir, fsOpts, logger)
 		if err != nil {
 			if cleanup != nil {
 				cleanup()
@@ -185,11 +276,24 @@ func main() {
 		ix.SetOnFlush(func(msg string) {
 			logger.Logf(kenmcp.LogInfo, "%s: %s", dir, msg)
 		})
-		logger.Logf(kenmcp.LogInfo, "indexed %s (%d chunks, watching)", dir, ix.Len())
 		return ix, cleanup, nil
 	}
 
 	cache := kenmcp.NewCache(size, builder)
+
+	// Eager pre-built-index validation for the default repo. If the
+	// operator placed a <repo>/.ken/index.bin, we want a mode/chunker
+	// mismatch to fail LOUDLY at startup (not silently fall back to a
+	// 44s live build on the first query, nor serve wrong-config results).
+	// Only fires when a pre-built file exists — repos without one stay
+	// fully lazy (no startup build cost). A successful eager Get also
+	// warms the cache so the first real query is instant.
+	if defaultRepo != "" && localPathHasPrebuilt(defaultRepo) {
+		if _, err := cache.Get(context.Background(), defaultRepo); err != nil {
+			logger.Logf(kenmcp.LogError, "default repo pre-built index unusable: %v", err)
+			os.Exit(1)
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
