@@ -10,6 +10,17 @@ with pre-built binaries.
 
 ## [Unreleased]
 
+### Added (ken-mcp pre-built-index cold-start)
+
+- **`ken-mcp` auto-loads a pre-built index at `<repo>/.ken/index.bin`.** The standalone `ken-mcp` binary now honors the same ADR-024 convention `mcp.Run` already did: when a corpus carries a pre-built index (from `ken build-index <repo> -o <repo>/.ken/index.bin`), the server loads it in ~1-2 s and serves it **frozen, with no file watcher** — instead of paying a full live walk+chunk+embed build on the first query. Repos without a baked index are unchanged (lazy live build + watcher, exactly as before).
+- **Eager startup validation for the default repo.** When `KEN_MCP_DEFAULT_REPO` points at a local path carrying `.ken/index.bin`, the index is loaded + validated at startup (warming the cache so the first query is instant). A **mode/chunker mismatch** between the pre-built index and the server's `KEN_MCP_MODE` / `KEN_MCP_CHUNKER` is a **hard startup failure** (exit 1) with a message naming both sides and the fix — we won't silently serve wrong-config results. Corrupt / incompatible-format / missing-model pre-built files **warn and fall back** to a live build (a slower-but-correct result beats an outage).
+
+  Motivation: a postgres+treesitter `ken-mcp` server hung on its first query during demo capture — three consecutive MCP `search` calls timed out at ~4 min and the server went unresponsive. Measured root cause (not the initially-suspected single-flight or watch-mode overhead — both were ruled out by reproduction): the binary always **live-indexes** the default repo on first query, and a treesitter build of postgres is ~44 s on a quiet machine. Under capture-time contention (three ken-mcp servers + the app on a 16 GB box) that 44 s exceeded the MCP client's tool-call timeout. Loading a pre-built index removes the build from the request path: measured **first cold `search` 44.6 s → 46.6 ms** on postgres+treesitter (real binary, `sdk.CommandTransport`).
+
+### Calibration discipline (cold-start)
+
+**Startup/transport only — NOT a retrieval-quality, recall, or ranking change, and NOT a change to what gets indexed.** A loaded pre-built index serves byte-identical chunks to what `ken build-index` produced for the same corpus + flags, so transcripts captured against a live index and against the pre-built index reflect the same retrieval. Single-flight (already present in `mcp/cache.go`) and watch-mode were both verified by reproduction to be working/irrelevant; no behavior changed there. Same framing as v0.8.3's "cold-start optimization, NOT search-quality change."
+
 ### Added (treesitter chunker fallback observability)
 
 - **Per-reason fallback counters on the treesitter chunker.** `internal/chunk/treesitter.Chunker` now tracks four atomic counters — one per silent-fallback site in `Chunk` (unsupported language, `pool.Parse` error, nil root node, invalid spans) — plus a total-files-attempted counter. Exposed via `Chunker.Stats() Stats`. Thread-safe (`sync/atomic`); negligible hot-path cost (one atomic add per chunked file).

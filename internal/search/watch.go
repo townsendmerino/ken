@@ -122,6 +122,38 @@ type WatchedIndex struct {
 	// or an existing one no longer qualifies). On a flush touching any
 	// file in one of these dirs, the WHOLE dir is re-folded.
 	migrationDirs map[string]bool
+
+	// static marks a WatchedIndex created by WrapStatic — a frozen
+	// pre-built index (ADR-024) with no watcher and no live corpus
+	// (chunks/vecs/model are empty because the index was loaded from
+	// serialized bytes, not built from a walk). SetExtraChunks guards
+	// on this so the DB-Tier-2 union-rebuild path can't replace the
+	// loaded snapshot with one built from an empty corpus.
+	static bool
+}
+
+// WrapStatic wraps an already-built *Index (typically from
+// LoadSerializedIndex — ADR-024's pre-built-index path) in a
+// WatchedIndex that never watches, never re-publishes, and owns no
+// fsnotify state. This is the cache.Builder-compatible shape for serving
+// a frozen on-disk index: the ken-mcp binary loads <corpus>/.ken/index.bin
+// in ~1-2s instead of paying the full walk+chunk+embed build, and the
+// frozen index is exactly the demo-appropriate behavior (no watcher).
+//
+// Close() is a no-op (done is pre-closed; there's no goroutine to stop).
+// SetExtraChunks is a guarded no-op (see its doc) because a static index
+// has no live corpus to union against.
+func WrapStatic(ix *Index, root string, mode Mode, chunkerName string) *WatchedIndex {
+	wi := &WatchedIndex{
+		root:        root,
+		mode:        mode,
+		chunkerName: chunkerName,
+		done:        make(chan struct{}),
+		static:      true,
+	}
+	wi.ix.Store(ix)
+	close(wi.done) // no watcher goroutine; Close()'s <-w.done returns immediately
+	return wi
 }
 
 // NewWatchedIndex builds the initial snapshot via FromPath, then (if
@@ -482,6 +514,17 @@ func (w *WatchedIndex) buildUnionedIndexLocked() *Index {
 // acceptable — DB refreshes are infrequent (startup, periodic ≥1m,
 // SIGHUP) and embedding cost is bounded by chunk count.
 func (w *WatchedIndex) SetExtraChunks(chunks []chunk.Chunk) {
+	// A static (pre-built) index has no live corpus in w.chunks/w.vecs —
+	// the snapshot was loaded from serialized bytes. buildUnionedIndexLocked
+	// would rebuild from an empty corpus ∪ extras, silently dropping the
+	// entire loaded index. Guard against that: pre-built + DB-Tier-2 is an
+	// unsupported combination (bake DB chunks in at `ken build-index` time
+	// instead), so the right behavior is to keep serving the loaded index
+	// and ignore the extras rather than corrupt the snapshot.
+	if w.static {
+		return
+	}
+
 	w.corpusMu.Lock()
 	defer w.corpusMu.Unlock()
 
