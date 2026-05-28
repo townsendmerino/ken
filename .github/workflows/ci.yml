@@ -53,7 +53,7 @@ jobs:
       # platforms and there's no value in running it twice).
       - name: golangci-lint
         if: matrix.os == 'ubuntu-latest'
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.11.4
 
