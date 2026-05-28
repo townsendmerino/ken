@@ -1,0 +1,7 @@
+# Demo binaries embed a large pre-built index + the Model2Vec model.
+# These are generated at build time (see demos/README), not committed —
+# they'd add ~470 MB of binary blobs to ken's git history.
+*/index.bin
+*/model/
+# Built demo binaries
+ken-demo-*
