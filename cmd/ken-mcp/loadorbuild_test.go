@@ -53,7 +53,7 @@ func TestLoadOrBuild_NoPrebuilt_LiveBuilds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadOrBuildWatched: %v", err)
 	}
-	defer wi.Close()
+	defer func() { _ = wi.Close() }()
 	if wi.Len() == 0 {
 		t.Errorf("live build produced an empty index")
 	}
@@ -67,7 +67,7 @@ func TestLoadOrBuild_Prebuilt_Matching_Loads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadOrBuildWatched: %v", err)
 	}
-	defer wi.Close()
+	defer func() { _ = wi.Close() }()
 	if wi.Len() == 0 {
 		t.Errorf("loaded pre-built index is empty")
 	}
