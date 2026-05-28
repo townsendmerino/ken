@@ -29,7 +29,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 )
 
 // mysqlIntDisplayWidth matches the legacy integer display-width suffix

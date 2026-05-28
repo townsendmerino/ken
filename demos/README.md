@@ -11,9 +11,9 @@ Downloadable, self-contained `ken-mcp` servers for popular OSS codebases. Each i
 
 Captured agent conversations against these binaries — the actual deliverable the demo write-up draws from — live in [`transcripts/`](transcripts/) (3 questions per codebase; postgres has both a regex and a treesitter arm for the A/B comparison). [`transcript-audit-rubric.md`](transcript-audit-rubric.md) is the rubric each transcript was graded against (grounding, citation accuracy, retrieval quality).
 
-## Why in-tree (not separate repos)
+## Why in-tree
 
-The postgres demo needs the **treesitter** chunker, which lives at `internal/chunk/treesitter` — Go forbids importing `internal/` packages across module boundaries, so a separate module can't register it. Living inside the ken module is what lets `demos/postgres` import it. (The k8s demo only needs `regex`, registered transitively via `internal/search`.)
+Originally the postgres demo *had* to live in-tree: the **treesitter** chunker was at `internal/chunk/treesitter`, and Go forbids importing `internal/` packages across module boundaries. [ADR-032](../docs/DECISIONS.md) promoted the chunker package to a public path (`chunk/treesitter`), so that constraint is gone — the demos could now be separate modules. They stay in-tree for a single paired launch and shared build tooling, not out of necessity. (The k8s demo only needs `regex`, registered transitively via `internal/search`.)
 
 ## Build tag + gitignored assets
 

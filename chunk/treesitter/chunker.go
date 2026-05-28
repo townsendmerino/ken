@@ -3,7 +3,18 @@
 // determined by the cAST split-then-merge algorithm (arXiv 2506.15655 —
 // the same algorithm Chonkie uses). Registers itself as "treesitter" in
 // the chunk registry on import; blank-imported from internal/search like
-// the regex chunker is.
+// the regex chunker is. External mcp.Run authors can blank-import this
+// package to register the chunker before calling mcp.Run (ADR-032).
+//
+// STABILITY (ADR-032): this is a public package, but a BEST-EFFORT one.
+// The exact chunk boundaries it produces are backed by the pre-1.0,
+// single-maintainer gotreesitter dep (bus-factor 1, ADR-010) and the
+// 1-second per-parse timeout (parseTimeoutMicros), which can yield
+// slightly different parses under machine load — chunk counts wobble by
+// ~0.1% across rebuilds on large corpora (ken#35). The stable, 1.0-
+// committed surface is the chunk.Chunker interface, NOT this chunker's
+// byte-for-byte output. Don't pin behavior to a specific boundary; do
+// rely on "it produces valid, contiguous, byte-faithful chunks."
 //
 // Why this exists (docs/DESIGN.md §2 + §10): v0.1.0 measured a 0.012
 // hybrid NDCG@10 gap vs semble (0.842 vs 0.854) localized to languages
@@ -63,7 +74,7 @@ import (
 	"github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 )
 
 // Chunker implements chunk.Chunker over gotreesitter grammars + cAST.

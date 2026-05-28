@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 )
 
 // buildRerankCorpus builds a synthetic chunks slice with realistic shape:

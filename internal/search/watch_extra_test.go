@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 )
 
 // TestSetExtraChunks_UnionsFSAndDBChunks confirms the v0.7.0 snapshot-

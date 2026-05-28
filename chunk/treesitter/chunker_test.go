@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 )
 
 // TestByteFidelity is the load-bearing invariant for every ken chunker:

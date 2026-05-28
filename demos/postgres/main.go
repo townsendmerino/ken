@@ -20,9 +20,10 @@
 //	    "command": "/path/to/ken-demo-postgres" } } }
 //
 // chunker=treesitter (real C AST boundaries; ken's regex chunker has no
-// C ruleset). The import of internal/chunk/treesitter below is why this
-// lives in-tree rather than as a separate module — internal/ packages
-// aren't importable across module boundaries.
+// C ruleset). As of ADR-032 the treesitter chunker is a public package
+// (chunk/treesitter), so this demo could live in its own module — it
+// stays in-tree alongside ken/demos/kubernetes for a single paired
+// launch, not out of necessity.
 package main
 
 import (
@@ -36,8 +37,8 @@ import (
 	// Register the treesitter chunker so mcp.Run's ChunkerName validation
 	// accepts "treesitter" and the pre-built index's chunker matches.
 	// (regex + line come transitively via internal/search; treesitter is
-	// opt-in and only importable from inside the ken module.)
-	_ "github.com/townsendmerino/ken/internal/chunk/treesitter"
+	// opt-in — now a public package per ADR-032, importable from any module.)
+	_ "github.com/townsendmerino/ken/chunk/treesitter"
 )
 
 //go:embed index.bin

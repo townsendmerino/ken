@@ -40,10 +40,10 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/townsendmerino/ken/chunk"
+	_ "github.com/townsendmerino/ken/chunk/regex" // registers the default "regex" chunker
 	"github.com/townsendmerino/ken/internal/ann"
 	"github.com/townsendmerino/ken/internal/bm25"
-	"github.com/townsendmerino/ken/internal/chunk"
-	_ "github.com/townsendmerino/ken/internal/chunk/regex" // registers the default "regex" chunker
 	// NOTE: treesitter and markdown are NOT blank-imported here. Binaries
 	// that want them must blank-import them explicitly — e.g. cmd/ken-mcp
 	// and cmd/ken-mcp-docs do, but the embedded-corpus demo binary
