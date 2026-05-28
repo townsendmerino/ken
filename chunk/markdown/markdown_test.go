@@ -6,8 +6,8 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/townsendmerino/ken/internal/chunk"
-	_ "github.com/townsendmerino/ken/internal/chunk/regex" // unused here but registered alongside markdown in real builds
+	"github.com/townsendmerino/ken/chunk"
+	_ "github.com/townsendmerino/ken/chunk/regex" // unused here but registered alongside markdown in real builds
 )
 
 // ============================================================================

@@ -11,7 +11,7 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 	"github.com/townsendmerino/ken/internal/embed"
 	"github.com/townsendmerino/ken/internal/search"
 )

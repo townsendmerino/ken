@@ -18,6 +18,17 @@ const DefaultChunkSize = 1500
 // Chunk.File; a chunker only needs the language to pick rules). docs/DESIGN.md §2
 // originally sketched a ctx parameter; it was dropped because nothing in
 // Option C needs it and Options B/A can adopt this same shape (see §2).
+//
+// STABILITY (ADR-032): this interface — plus Register/Get/Names, ChunkFile,
+// and the Chunk struct — is ken's PUBLIC, 1.0-committed chunker surface.
+// External mcp.Run authors implement Chunker (or import one of ken's
+// registered chunkers) and Register it before calling mcp.Run. The
+// interface is small and dependency-free on purpose; it is the swap-out
+// boundary ADR-010 designed for. The CONCRETE chunkers ken ships behind
+// it (especially chunk/treesitter, which is backed by the pre-1.0
+// gotreesitter dep) are best-effort: their exact chunk boundaries may
+// shift across versions. Depend on the interface, not on a specific
+// chunker's byte-for-byte output.
 type Chunker interface {
 	// Chunk partitions source into chunks. The returned chunks are
 	// contiguous and non-overlapping so concatenating their Text in order
@@ -34,8 +45,10 @@ var registry = map[string]Chunker{}
 
 // Register adds a chunker under name. Called from init() — the "line"
 // chunker registers itself in this package; "regex" registers from
-// internal/chunk/regex (blank-imported by internal/search to avoid an
-// import cycle: chunk must not import its own sub-chunkers).
+// chunk/regex (blank-imported by internal/search to avoid an import
+// cycle: chunk must not import its own sub-chunkers). External mcp.Run
+// authors call this directly to register a custom or ken-provided
+// chunker before invoking mcp.Run (ADR-032).
 func Register(name string, c Chunker) { registry[name] = c }
 
 // Get returns the registered chunker, or an error listing what is available.

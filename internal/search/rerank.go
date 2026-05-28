@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 )
 
 // Query-type boosts — ported verbatim from semble ranking/boosting.py and

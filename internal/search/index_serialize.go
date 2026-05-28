@@ -65,7 +65,7 @@ import (
 	"io/fs"
 	"math"
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 	"github.com/townsendmerino/ken/internal/embed"
 )
 

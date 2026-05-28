@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/townsendmerino/ken/internal/chunk"
-	_ "github.com/townsendmerino/ken/internal/chunk/regex" // registers "regex"
+	"github.com/townsendmerino/ken/chunk"
+	_ "github.com/townsendmerino/ken/chunk/regex" // registers "regex"
 )
 
 func TestRegistry(t *testing.T) {

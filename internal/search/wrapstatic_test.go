@@ -3,7 +3,7 @@ package search
 import (
 	"testing"
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 )
 
 // TestWrapStatic covers the pre-built-index wrapper used by the ken-mcp

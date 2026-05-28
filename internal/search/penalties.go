@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 )
 
 // Path penalties + top-k selection — ported verbatim from semble

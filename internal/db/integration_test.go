@@ -26,7 +26,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 )
 
 func dsnOrSkip(t *testing.T) string {

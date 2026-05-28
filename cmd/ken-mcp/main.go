@@ -36,7 +36,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 	"github.com/townsendmerino/ken/internal/embed"
 	// Side-effect imports: register every chunker the stock binary
 	// offers. internal/search blank-imports "regex" (the default), so
@@ -47,8 +47,8 @@ import (
 	// — desired for the code-search use case but explicitly skipped
 	// by cmd/ken-mcp-docs. Per ADR-023 the bundle is monolithic at
 	// the embed layer so per-language gating doesn't shrink it.
-	_ "github.com/townsendmerino/ken/internal/chunk/markdown"
-	_ "github.com/townsendmerino/ken/internal/chunk/treesitter"
+	_ "github.com/townsendmerino/ken/chunk/markdown"
+	_ "github.com/townsendmerino/ken/chunk/treesitter"
 	"github.com/townsendmerino/ken/internal/search"
 	kenmcp "github.com/townsendmerino/ken/mcp"
 	mcpdb "github.com/townsendmerino/ken/mcp/db"

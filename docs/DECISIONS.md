@@ -37,6 +37,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-029](#adr-029-v08x-perf-campaign-capstone--allocationgc-ceiling-reached-indexing-is-single-threaded-parallelism-is-the-next-frontier) | v0.8.x perf campaign capstone — allocation/GC ceiling reached; indexing is single-threaded; parallelism is the next frontier | Accepted (extended by ADR-030) |
 | [ADR-030](#adr-030-indexing-pipeline-parallelism--phase-a-per-file-workers-for-chunk--embed-v087) | Indexing pipeline parallelism — Phase A (per-file workers for chunk + embed) (v0.8.7) | Accepted |
 | [ADR-031](#adr-031-mysql-introspection-sample-loop-parallelism-postgres-deferred-with-trigger-v088) | MySQL introspection sample-loop parallelism; Postgres deferred-with-trigger (v0.8.8) | Accepted |
+| [ADR-032](#adr-032-promote-the-chunk-package-to-public-chunk--chunkers-chunker-interface-is-the-10-boundary) | Promote the chunk package to public (`chunk/` + chunkers); Chunker interface is the 1.0 boundary | Accepted |
 
 ---
 
@@ -2260,3 +2261,52 @@ Phase B re-opens if:
 - The harness's full-introspection median climbs past 100 ms on a representative workload — meaning per-table parallelism has shipped its win and the next layer is worth investigating.
 
 Without one of those triggers, the parallelism work closes at v0.8.8.
+
+
+---
+
+## ADR-032: Promote the chunk package to public (chunk/ + chunkers); Chunker interface is the 1.0 boundary
+
+**Status:** Accepted
+
+**Date:** 2026-05-28
+
+**Issue:** Closes [#36](https://github.com/townsendmerino/ken/issues/36).
+
+**Extends:** [ADR-005](#adr-005-chunker-interface-with-three-pluggable-options-ship-c-first) (the Chunker interface this promotes to public), [ADR-010](#adr-010-tree-sitter-via-gotreesitter-instead-of-wazerowasm) (the gotreesitter-backed treesitter chunker, whose pre-1.0 dep this ADR keeps behind a best-effort tier), [ADR-016](#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) + [ADR-024](#adr-024-pre-built-embedded-indices-for-mcprun-v083) (the `mcp.Run` embedded-corpus pattern this unblocks for external authors).
+
+### Context
+
+The OSS-demo binaries (`demos/v0.1.0`) surfaced a real gap by dogfooding: `mcp.Run`'s `Options.ChunkerName` documents `"treesitter"` as a choice "requires importing internal/chunk/treesitter for side-effect registration" — but that package lived at `internal/chunk/treesitter`, and **Go forbids importing `internal/` packages across module boundaries**. So any *external* `mcp.Run` author wanting treesitter (or any non-default chunker) was structurally blocked. The postgres demo only worked because it lives inside the ken module (`ken/demos/postgres`); an external SDK author following the documented pattern would hit the wall. Filed as #36.
+
+The fix the issue recommended: move the chunker to a non-`internal` path. A subtler middle path was also considered (make only the registration mechanism public, keep the chunkers internal — authors bring their own chunker). We chose the fuller move.
+
+### Decision
+
+**Promote the entire `internal/chunk` subtree to a public top-level `chunk/` package** (matching the existing public `mcp/` package; ken doesn't use `pkg/`):
+
+- `internal/chunk` → `chunk` (the `Chunker` interface, `Register`/`Get`/`Names`, `ChunkFile`, the `Chunk` struct, `Language`, `DefaultChunkSize`)
+- `internal/chunk/{regex,treesitter,markdown}` → `chunk/{regex,treesitter,markdown}`
+
+The `chunk` base package is a clean leaf (no other `internal/` dependency), so the move is self-contained — no other internal package had to come along. All ~48 importing files were updated; package names are unchanged (only import paths moved).
+
+**Two stability tiers, documented in the code:**
+
+1. **Hard, 1.0-committed:** the `chunk.Chunker` interface (`Chunk()` + `SupportedLanguages()` + `Name()`), `Register`/`Get`/`Names`, `ChunkFile`, and the `Chunk` struct's `File`/`StartLine`/`EndLine`/`Text` fields. Small and dependency-free on purpose — this is the swap-out boundary ADR-010 designed for. External authors implement or register against this.
+2. **Best-effort:** the concrete chunkers behind the interface — especially `chunk/treesitter`, backed by the pre-1.0, single-maintainer `gotreesitter` dep (bus-factor 1) and the 1-second per-parse timeout. Their exact chunk boundaries may shift across versions (chunk counts wobble ~0.1% under load — [#35](https://github.com/townsendmerino/ken/issues/35)). The promise is "valid, contiguous, byte-faithful chunks," not byte-for-byte boundary stability.
+
+This split is the whole point of choosing the fuller move while bounding the commitment: external authors get ken's actual treesitter chunker (the demo-proven value), and ken's hard 1.0 promise stays on the tiny dep-free interface, not on gotreesitter's behavior.
+
+### Alternatives considered
+
+- **Registration-mechanism-only (the middle path): make `chunk` public but keep the chunkers internal.** Rejected as near-theater for #36's actual case. To get treesitter, an external author would have to reimplement ken's `chunker.go` + `cast.go` + the gotreesitter dep + the fallback logic just to register it — nobody does that. It would help only authors who already have a fully custom chunker (rare), without delivering the value #36 is about (getting *ken's* treesitter). Note both this path and the chosen one require promoting `chunk` itself, because `treesitter` imports `chunk`; the only delta is whether the concrete chunkers come too.
+- **`pkg/chunk/...`.** Rejected for consistency: ken already exposes its one public package at the top level (`mcp/`), and uses `internal/` for everything private. A top-level `chunk/` matches; `pkg/` would be a lone exception.
+- **Keep it internal; promise treesitter stability too (full hard-commit A).** Rejected. Promising byte-for-byte treesitter boundaries across 1.0 would lock ken to gotreesitter's exact output forever — exactly the coupling ADR-010 firewalled. The interface-only hard tier keeps the swap-out path open.
+
+### Consequences
+
+- **External `mcp.Run` authors can now use treesitter (and any chunker).** Blank-import `github.com/townsendmerino/ken/chunk/treesitter` (or implement `chunk.Chunker` + `chunk.Register`) before calling `mcp.Run`. The documented embedded-corpus pattern (ADR-016/ADR-024) is finally true for out-of-module authors. Closes #36.
+- **The demos no longer *need* to be in-tree.** `ken/demos/{kubernetes,postgres}` stay in-tree for a single paired launch + shared build tooling, not out of necessity. They could move to separate repos later (the campaign's original Path-A preference) with no code change beyond the module boundary.
+- **One leaky field in the public surface:** `Chunk.Tombstoned` is an internal incremental-indexing detail (the watch path marks chunks tombstoned in-place before compaction) that now rides in the public struct. Documented as "external Chunker implementations leave it false." Living with it beats splitting `Chunk` into public/internal variants.
+- **No behavior change, no API removal.** Pure package relocation + doc tiers. `go build ./...` / `go vet` / `gofmt` clean; full `go test ./...` (incl. `-race` on the chunk + search packages) green after the move. Package names unchanged; only import paths moved.
+- **Historical references in earlier ADRs/docs that say `internal/chunk` describe the pre-ADR-032 layout** and are left as point-in-time records; CLAUDE.md (the live guide) was updated to `chunk`.

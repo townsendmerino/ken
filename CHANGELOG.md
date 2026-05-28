@@ -10,6 +10,13 @@ with pre-built binaries.
 
 ## [Unreleased]
 
+### Changed (public chunk package — ADR-032)
+
+- **`internal/chunk` → `chunk` (public).** The chunker package — the `Chunker` interface, `Register`/`Get`/`Names`, `ChunkFile`, the `Chunk` struct — and the concrete chunkers (`chunk/regex`, `chunk/treesitter`, `chunk/markdown`) moved out of `internal/` to the top-level `chunk/` path. External `mcp.Run` authors can now blank-import `github.com/townsendmerino/ken/chunk/treesitter` (or implement + `chunk.Register` their own) before calling `mcp.Run` — previously impossible, since `internal/` packages can't be imported across module boundaries. Closes [#36](https://github.com/townsendmerino/ken/issues/36).
+- **Two documented stability tiers.** The `chunk.Chunker` interface (+ `Register`/`Get`/`Names` + the `Chunk` struct's `File`/`StartLine`/`EndLine`/`Text` fields) is the **hard, 1.0-committed** surface — small and dependency-free, the swap-out boundary from ADR-010. The concrete chunkers behind it — especially `chunk/treesitter`, backed by the pre-1.0 `gotreesitter` dep — are **best-effort**: valid contiguous byte-faithful chunks guaranteed, exact boundaries not (they wobble ~0.1% under load, [#35](https://github.com/townsendmerino/ken/issues/35)).
+
+**Not a behavior change.** Pure package relocation + doc tiers; package names unchanged, only import paths moved. No API removed. `go build ./...` / `go vet` / `gofmt` clean; full `go test ./...` (with `-race` on chunk + search) green. See [ADR-032](docs/DECISIONS.md#adr-032-promote-the-chunk-package-to-public-chunk--chunkers-chunker-interface-is-the-10-boundary).
+
 ### Added (ken-mcp pre-built-index cold-start)
 
 - **`ken-mcp` auto-loads a pre-built index at `<repo>/.ken/index.bin`.** The standalone `ken-mcp` binary now honors the same ADR-024 convention `mcp.Run` already did: when a corpus carries a pre-built index (from `ken build-index <repo> -o <repo>/.ken/index.bin`), the server loads it in ~1-2 s and serves it **frozen, with no file watcher** — instead of paying a full live walk+chunk+embed build on the first query. Repos without a baked index are unchanged (lazy live build + watcher, exactly as before).

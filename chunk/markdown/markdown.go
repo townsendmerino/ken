@@ -36,7 +36,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 )
 
 // Chunker implements chunk.Chunker for Markdown documents.

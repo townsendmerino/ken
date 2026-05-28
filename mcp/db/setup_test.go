@@ -12,7 +12,7 @@ import (
 
 	_ "modernc.org/sqlite" // empty-sqlite-file harness for the happy-path tests
 
-	"github.com/townsendmerino/ken/internal/chunk"
+	"github.com/townsendmerino/ken/chunk"
 )
 
 // TestSetup_EmptyDSN_ReturnsNil pins the documented safety net: an

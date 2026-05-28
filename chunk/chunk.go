@@ -28,6 +28,13 @@ package chunk
 
 // Chunk is one indexed unit of a source file. Line numbers are 1-based and
 // inclusive on both ends, matching how editors and grep report positions.
+//
+// Chunk is part of the public chunker surface (ADR-032). The File /
+// StartLine / EndLine / Text fields are the stable contract a Chunker
+// implementation fills in. Tombstoned is a leakier case: it's an
+// internal incremental-indexing detail (see below) exposed here only
+// because the same struct round-trips through the watch path —
+// external Chunker implementations should leave it false.
 type Chunk struct {
 	File      string // path relative to the index root
 	StartLine int    // 1-based, inclusive
