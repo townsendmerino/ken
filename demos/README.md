@@ -7,6 +7,10 @@ Downloadable, self-contained `ken-mcp` servers for popular OSS codebases. Each i
 | [`kubernetes`](kubernetes/) | kubernetes source (vendor + generated excluded) | regex | hybrid | 59,795 |
 | [`postgres`](postgres/) | postgres source (doc + test fixtures excluded) | treesitter | hybrid | 64,506 |
 
+## Demo transcripts
+
+Captured agent conversations against these binaries — the actual deliverable the demo write-up draws from — live in [`transcripts/`](transcripts/) (3 questions per codebase; postgres has both a regex and a treesitter arm for the A/B comparison). [`transcript-audit-rubric.md`](transcript-audit-rubric.md) is the rubric each transcript was graded against (grounding, citation accuracy, retrieval quality).
+
 ## Why in-tree (not separate repos)
 
 The postgres demo needs the **treesitter** chunker, which lives at `internal/chunk/treesitter` — Go forbids importing `internal/` packages across module boundaries, so a separate module can't register it. Living inside the ken module is what lets `demos/postgres` import it. (The k8s demo only needs `regex`, registered transitively via `internal/search`.)
