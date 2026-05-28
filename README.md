@@ -79,6 +79,19 @@ Your `main.go` is unchanged from the v0.6.0 baseline — `mcp.Run` auto-discover
 
 Design and rationale: [ADR-024](docs/DECISIONS.md#adr-024-pre-built-embedded-indices-for-mcprun-v083).
 
+### Live demos (v0.1.0)
+
+Two downloadable `mcp.Run` binaries that use this pattern against real codebases, with full audit transcripts:
+
+- **`ken-demo-kubernetes`** — Kubernetes v1.31.0 source, `regex` chunker (Go AST-tracking). 59,795 chunks, 216 MB binary, ≈ 3.9 s to ready, ~60 ms first query.
+- **`ken-demo-postgres`** — PostgreSQL 17.0 source, `treesitter` chunker (real C AST, 0% silent fallback verified). 64,506 chunks, 265 MB binary, ≈ 3.5 s to ready, ~30 ms first query.
+
+The 4-second startup is "loads a pre-built index," not "instant" — the writeup linked below has the honest measurement breakdown and the audit that caught two bugs in ken itself before publication.
+
+- Download: [`demos/v0.1.0` release](https://github.com/townsendmerino/ken/releases/tag/demos/v0.1.0) — `darwin/arm64`, `darwin/amd64`, `linux/amd64`, `linux/arm64`.
+- Audit transcripts: [`demos/transcripts/`](demos/transcripts) (nine captured agent conversations) + [`demos/transcript-audit-rubric.md`](demos/transcript-audit-rubric.md).
+- Writeup: [*I shipped two downloadable code search binaries. The audit caught two bugs.*](https://townsendmerino.github.io/ken/demos-audit/)
+
 ### Why this is interesting
 
 - **Zero-infrastructure distribution.** No backend, no vector DB, no per-query cloud calls. The binary IS the corpus.
