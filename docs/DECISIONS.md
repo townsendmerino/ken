@@ -38,6 +38,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-030](#adr-030-indexing-pipeline-parallelism--phase-a-per-file-workers-for-chunk--embed-v087) | Indexing pipeline parallelism — Phase A (per-file workers for chunk + embed) (v0.8.7) | Accepted |
 | [ADR-031](#adr-031-mysql-introspection-sample-loop-parallelism-postgres-deferred-with-trigger-v088) | MySQL introspection sample-loop parallelism; Postgres deferred-with-trigger (v0.8.8) | Accepted |
 | [ADR-032](#adr-032-promote-the-chunk-package-to-public-chunk--chunkers-chunker-interface-is-the-10-boundary) | Promote the chunk package to public (`chunk/` + chunkers); Chunker interface is the 1.0 boundary | Accepted |
+| [ADR-033](#adr-033-adopt-gotreesitter-grammarsubset-slim-release-binaries-v0200-rc2) | Adopt gotreesitter `grammar_subset`; slim release binaries (v0.20.0-rc2) | Accepted (resolves ADR-023) |
 
 ---
 
@@ -2310,3 +2311,51 @@ This split is the whole point of choosing the fuller move while bounding the com
 - **One leaky field in the public surface:** `Chunk.Tombstoned` is an internal incremental-indexing detail (the watch path marks chunks tombstoned in-place before compaction) that now rides in the public struct. Documented as "external Chunker implementations leave it false." Living with it beats splitting `Chunk` into public/internal variants.
 - **No behavior change, no API removal.** Pure package relocation + doc tiers. `go build ./...` / `go vet` / `gofmt` clean; full `go test ./...` (incl. `-race` on the chunk + search packages) green after the move. Package names unchanged; only import paths moved.
 - **Historical references in earlier ADRs/docs that say `internal/chunk` describe the pre-ADR-032 layout** and are left as point-in-time records; CLAUDE.md (the live guide) was updated to `chunk`.
+
+
+---
+
+## ADR-033: Adopt gotreesitter grammar_subset; slim release binaries (v0.20.0-rc2)
+
+**Status:** Accepted
+
+**Date:** 2026-05-28
+
+**Resolves:** [ADR-023](#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome) (the v0.8.2 investigation that named the exact upstream change needed). **Extends:** [ADR-010](#adr-010-tree-sitter-via-gotreesitter-instead-of-wazerowasm), [ADR-016](#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function), [ADR-032](#adr-032-promote-the-chunk-package-to-public-chunk--chunkers-chunker-interface-is-the-10-boundary).
+
+### Context
+
+ADR-023 (v0.8.2) audited gotreesitter v0.18.0 and reached a precise conclusion: the `grammar_subset` build-tag machinery worked at the *registration* layer but **not the embed layer** — the embedded blobs were one monolithic `//go:embed grammar_blobs/*.bin` glob, and Go's linker can't dead-code-eliminate `embed.FS` payloads, so no tag combination shrank the binary. ADR-023 named the upstream change that would unblock ken and left it as a deferred-with-trigger.
+
+That change landed as upstream PR #92 (issue #88), which gates the all-grammars wildcard off under `grammar_subset` and adds per-language `embed.FS` blobs selected by `grammar_subset_<lang>` tags. The upstream author left #88 open to get ken to confirm the API fits the `mcp.Run` use case.
+
+A throwaway measurement spike (2026-05-28) confirmed everything before committing:
+
+- **API fits, zero source changes** — `go build ./...` green on the new version.
+- **The feature is in a tag**, not just `main`: `go get @<#92 commit>` resolves to **`v0.20.0-rc2`** (it carries `blob_source_subset_embedded.go` + 206 per-language embed files).
+- **Measured size deltas** (M1 Pro, `CGO_ENABLED=0`): `ken-mcp` 52.3 → 38.3 MB (−14.0 MB), `ken` 36.0 → 22.0 MB (−14.0 MB); the C-only `ken-demo-postgres` 265.9 → 243.8 MB binary (tarball 163 → 147 MB).
+- **No silent fallback** — on a mixed corpus the slim build (17 langs) produced byte-identical treesitter chunks to the fat build (`total=5, fallback=0` both); a C-only control correctly line-fell-back on the other languages (`unsupported_lang=5`), proving the tags gate cleanly and never crash.
+
+### Decision
+
+**Bump to `v0.20.0-rc2` and make ken's own release binaries slim** (embed only the 17 grammars `chunk/treesitter`'s `kenToTreeSitter` dispatches), while the library `go build` / `mcp.Run` stays all-grammars.
+
+- **`.goreleaser.yml` is the single source of truth** for the subset: the `ken` and `ken-mcp` builds carry the 18-token `tags:` list (`grammar_subset` master gate + 17 `grammar_subset_<lang>`). `scripts/subset-tags.sh` derives the slim local/CI build from that file; no second copy.
+- **Drift guard** (`chunk/treesitter`'s `TestSubsetTagsMatchKenToTreeSitter`, runs in the default build): asserts the goreleaser tag set equals `kenToTreeSitter`'s values in both directions (missing tag → silent fallback; extra tag → wasted bytes), and `TestKenToTreeSitterGrammarsResolve` asserts every mapped grammar still exists in the pinned dep (catches an upstream rename/drop). A CI compile-smoke builds the slim binaries on every PR.
+- **csharp / shell stay omitted** (DESIGN.md §10 grammar-quality reasons) — they're simply not embedded under subset, which is the desired behavior.
+- **`go.mod` pins `v0.20.0-rc2`** — an rc, accepted deliberately (see below); also a parser-correctness improvement over v0.19.1.
+
+### Alternatives considered
+
+- **Wait for stable v0.20.0 before adopting.** Rejected for now: the rc carries the feature + the API-fit confirmation #88 asked for, the spike verified it fully, and the win (slimmer binaries + smaller demo downloads) is wanted now. **Trade-off accepted:** pinning an rc bends ADR-010's "pin at major.minor" rule. Mitigation: bump to stable `v0.20.0` when it cuts (tracked); the rc is functionally identical for ken's use.
+- **Pin a raw `main` pseudo-version.** Unnecessary — `v0.20.0-rc2` is a real tag containing #92, strictly cleaner than a pseudo-version.
+- **Add slim as parallel artifacts, keep fat as the release default.** Rejected: ken only ever dispatches the 17 mapped languages, so shipping all 206 in the *release binaries* is pure waste. Slim-default for ken's releases + fat for the library is the right split.
+- **Keep the orphaned `internal/parser/grammars_subset.go` scaffolding.** Deleted (it was untracked local cruft from the v0.8.2 spike, imported nowhere); `chunk/treesitter`'s `SupportedLanguages()` ← `kenToTreeSitter` is the single source of truth.
+
+### Consequences
+
+- **ken's release binaries shrink ~14 MB each** with no behavior change for the 17 dispatched languages; the demo binaries can be rebuilt slim (C-only postgres saves ~16 MB of download).
+- **Library consumers are unaffected** — build tags are set by whoever compiles, not by importers; an `mcp.Run` author who `go build`s without the tags gets all 206 grammars.
+- **The #88 collaboration thread closes** with ken's confirmation + the measured numbers.
+- **DESIGN.md §2/§10's "the embed bundle is monolithic at the source layer" statements are now historical** (annotated to point here); the embed layer is selectable as of this ADR.
+- **rc-pin debt:** revisit when stable v0.20.0 ships.

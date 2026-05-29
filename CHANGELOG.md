@@ -10,6 +10,14 @@ with pre-built binaries.
 
 ## [Unreleased]
 
+### Changed (slim release binaries via gotreesitter grammar_subset — ADR-033)
+
+- **gotreesitter `v0.19.1` → `v0.20.0-rc2`**, and ken's release binaries (`ken`, `ken-mcp`) now build **slim** — embedding only the 17 tree-sitter grammars `chunk/treesitter` actually dispatches (per `kenToTreeSitter`) instead of all 206 — via the `grammar_subset` build tags in `.goreleaser.yml`. Measured: `ken-mcp` 52.3 → 38.3 MB, `ken` 36.0 → 22.0 MB (−14 MB each, M1 Pro / `CGO_ENABLED=0`). The C-only `ken-demo-postgres` similarly drops ~16 MB of download. Resolves the embed-layer limitation [ADR-023](docs/DECISIONS.md#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome) flagged in v0.8.2 and confirms the upstream API for [odvcencio/gotreesitter#88](https://github.com/odvcencio/gotreesitter/issues/88).
+- **Library `go build` / `mcp.Run` is unaffected** — build tags are set by whoever compiles, not by importers, so external embedded-corpus authors who don't pass the tags still get all 206 grammars. Slim is opt-in to ken's own release pipeline.
+- **Drift guard:** `chunk/treesitter`'s `TestSubsetTagsMatchKenToTreeSitter` asserts the `.goreleaser.yml` subset tag set equals `kenToTreeSitter` (both directions), and `TestKenToTreeSitterGrammarsResolve` asserts every mapped grammar still exists in the pinned dep. A CI compile-smoke builds the slim binaries on every PR. `.goreleaser.yml` is the single source of truth (`scripts/subset-tags.sh` derives local/CI builds from it).
+
+**Calibration:** no behavior change for the 17 dispatched languages — slim and fat produce byte-identical treesitter chunks (verified on a mixed corpus: `fallback=0` both). csharp/shell stay omitted (DESIGN.md §10). The `v0.20.0-rc2` pin bends ADR-010's "pin at major.minor" rule deliberately (the feature isn't in a stable tag yet); tracked to re-pin at stable `v0.20.0`. See [ADR-033](docs/DECISIONS.md#adr-033-adopt-gotreesitter-grammarsubset-slim-release-binaries-v0200-rc2).
+
 ### Changed (public chunk package — ADR-032)
 
 - **`internal/chunk` → `chunk` (public).** The chunker package — the `Chunker` interface, `Register`/`Get`/`Names`, `ChunkFile`, the `Chunk` struct — and the concrete chunkers (`chunk/regex`, `chunk/treesitter`, `chunk/markdown`) moved out of `internal/` to the top-level `chunk/` path. External `mcp.Run` authors can now blank-import `github.com/townsendmerino/ken/chunk/treesitter` (or implement + `chunk.Register` their own) before calling `mcp.Run` — previously impossible, since `internal/` packages can't be imported across module boundaries. Closes [#36](https://github.com/townsendmerino/ken/issues/36).
