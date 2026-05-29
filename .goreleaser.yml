@@ -1,6 +1,18 @@
 # GoReleaser config for ken — invoked by .github/workflows/release.yml on
 # pushed tags matching `v*`. Builds `ken` and `ken-mcp` for macOS + Linux,
 # arm64 + amd64, archives them with LICENSE / NOTICE / README / DESIGN.
+#
+# SLIM RELEASE BUILDS (ADR-033): both binaries are compiled with the
+# gotreesitter `grammar_subset` build tags below, which embed ONLY the 17
+# grammars ken's treesitter chunker actually dispatches (chunk/treesitter
+# kenToTreeSitter) instead of all 206. Saves ~14 MB per binary. This `tags`
+# list is the SINGLE SOURCE OF TRUTH for the subset — `scripts/subset-tags.sh`
+# derives the slim local/CI build from it, and chunk/treesitter's drift-guard
+# test (TestSubsetTagsMatchKenToTreeSitter) asserts this exact set equals
+# kenToTreeSitter's values. To add a language: add it to kenToTreeSitter AND
+# the list here; the test fails until both agree. csharp/shell are
+# deliberately excluded (DESIGN.md §10). The library `go build` / mcp.Run
+# stays all-grammars (no tags) — only ken's own release binaries are slim.
 
 version: 2
 
@@ -18,6 +30,25 @@ builds:
     goarch: [amd64, arm64]
     flags:
       - -trimpath
+    tags: &subset_tags
+      - grammar_subset
+      - grammar_subset_go
+      - grammar_subset_python
+      - grammar_subset_typescript
+      - grammar_subset_javascript
+      - grammar_subset_java
+      - grammar_subset_rust
+      - grammar_subset_c
+      - grammar_subset_cpp
+      - grammar_subset_ruby
+      - grammar_subset_php
+      - grammar_subset_swift
+      - grammar_subset_kotlin
+      - grammar_subset_scala
+      - grammar_subset_haskell
+      - grammar_subset_elixir
+      - grammar_subset_lua
+      - grammar_subset_zig
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}}
 
@@ -30,6 +61,7 @@ builds:
     goarch: [amd64, arm64]
     flags:
       - -trimpath
+    tags: *subset_tags
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}}
 

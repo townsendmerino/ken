@@ -34,7 +34,7 @@ jobs:
 
       - name: gofmt -l (must print nothing)
         run: |
-          out=$(gofmt -l cmd internal mcp)
+          out=$(gofmt -l chunk cmd demos internal mcp)
           if [ -n "$out" ]; then
             echo "gofmt found unformatted files:"
             echo "$out"
@@ -59,6 +59,19 @@ jobs:
 
       - name: go build ./...
         run: go build ./...
+
+      # ADR-033: the release binaries are built slim (only the grammars
+      # ken's treesitter chunker dispatches) via the grammar_subset tags
+      # in .goreleaser.yml. Compile-smoke that exact slim build here so a
+      # broken subset build is caught at PR time, not at release time.
+      # The drift between this tag set and kenToTreeSitter is guarded by
+      # chunk/treesitter's TestSubsetTagsMatchKenToTreeSitter (default build).
+      - name: slim build compile-smoke (grammar_subset)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          tags="$(scripts/subset-tags.sh)"
+          echo "subset tags: $tags"
+          CGO_ENABLED=0 go build -tags "$tags" -o /dev/null ./cmd/ken ./cmd/ken-mcp
 
       # The golden embed tests in internal/embed/golden_test.go skip
       # themselves cleanly when testdata/model/ is absent (it is —
