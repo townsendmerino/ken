@@ -27,7 +27,7 @@ import (
 
     "github.com/townsendmerino/ken/mcp"
 
-    _ "github.com/townsendmerino/ken/internal/chunk/markdown"
+    _ "github.com/townsendmerino/ken/chunk/markdown"
 )
 
 //go:embed docs/*.md
@@ -577,7 +577,7 @@ For test fixtures, `testing/fstest.MapFS` works the same way: `search.FromFS(fst
 ken ships with **two chunkers** behind the same `--chunker=` flag (CLI) / `KEN_MCP_CHUNKER=` env var (MCP):
 
 - **`regex`** *(default)* — hand-rolled per-language regex rules for Python / Go / TypeScript / Java / Rust with a line-window fallback for everything else.
-- **`treesitter`** *(opt-in)* — pure-Go tree-sitter via [`gotreesitter`](https://github.com/odvcencio/gotreesitter), running the cAST split-then-merge algorithm from [arXiv 2506.15655](https://arxiv.org/html/2506.15655). Its 206 embedded grammars are ~19 MB on-disk (gotreesitter's `embed.FS` payload); importing the chunker adds ~26 MB to the linked binary (parser runtime + embed payload + symbol bookkeeping; measured darwin/arm64). Importing is per-binary at compile time — `cmd/ken` and `cmd/ken-mcp` blank-import it; `cmd/ken-mcp-docs` deliberately doesn't. Once imported, chunker choice is a runtime flag (`--chunker=treesitter` / `KEN_MCP_CHUNKER=treesitter`). (v0.8.2 investigated per-grammar build-tag gating to shrink this; the embed layer is monolithic upstream so build tags don't actually reduce the binary today — see [ADR-023](docs/DECISIONS.md#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome) and its [calibration amendment](docs/DECISIONS.md#calibration-amendment-post-v083-audit).)
+- **`treesitter`** *(opt-in)* — pure-Go tree-sitter via [`gotreesitter`](https://github.com/odvcencio/gotreesitter), running the cAST split-then-merge algorithm from [arXiv 2506.15655](https://arxiv.org/html/2506.15655). Its 206 embedded grammars are ~19 MB on-disk (gotreesitter's `embed.FS` payload); importing the chunker adds ~26 MB to the linked binary (parser runtime + embed payload + symbol bookkeeping; measured darwin/arm64). Importing is per-binary at compile time — `cmd/ken` and `cmd/ken-mcp` blank-import it; `cmd/ken-mcp-docs` deliberately doesn't. Once imported, chunker choice is a runtime flag (`--chunker=treesitter` / `KEN_MCP_CHUNKER=treesitter`). (v0.8.2 found per-grammar build-tag gating couldn't shrink the binary because the embed layer was a monolithic upstream glob; gotreesitter v0.20.0-rc2 fixed that, so as of [ADR-033](docs/DECISIONS.md#adr-033-adopt-gotreesitter-grammarsubset-slim-release-binaries-v0200-rc2) ken's *release* binaries build slim — embedding only the 17 dispatched grammars (~14 MB lighter) — while the library `go build` stays all-grammars. History in [ADR-023](docs/DECISIONS.md#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome) and its [calibration amendment](docs/DECISIONS.md#calibration-amendment-post-v083-audit).)
 
 **TL;DR:** stay on `regex` unless you index one of the languages where treesitter measurably wins.
 
@@ -626,7 +626,7 @@ The full per-language NDCG breakdown plus the empirical findings that informed t
 | NDCG@10 on CoIR-CSN-Python (external) | (not measured; semble doesn't run this bench) | **0.8743 bm25 / 0.7839 hybrid** ([see why](#benchmarks--external-reference-coir-csn-python))†† |
 | Median tokens to recall@10 on agent queries | (not measured; semble doesn't run this bench) | **4,269 tok @ 82% recall** on semble NL queries — vs grep+Read's 189,591 tok @ 99.9% (44× cheaper at 17 pp lower recall)††† |
 | MCP server | yes | yes — drop-in compatible (same tool schemas, same wire format) |
-| Binary size | n/a (Python env) | `ken` ~36 MB · `ken-mcp` ~54 MB (treesitter grammars + parser runtime ~26 MB; DB drivers + Model2Vec runtime + standard-library bookkeeping the rest; measured darwin/arm64 at v0.8.3 — see [Choosing a chunker](#choosing-a-chunker) and [ADR-023's calibration amendment](docs/DECISIONS.md#calibration-amendment-post-v083-audit)) |
+| Binary size | n/a (Python env) | release (slim) `ken` ~22 MB · `ken-mcp` ~38 MB; default `go build` (all 206 grammars) `ken` ~36 MB · `ken-mcp` ~54 MB. Slim embeds only the 17 dispatched grammars via `grammar_subset` build tags ([ADR-033](docs/DECISIONS.md#adr-033-adopt-gotreesitter-grammarsubset-slim-release-binaries-v0200-rc2)); measured darwin/arm64 — see [Choosing a chunker](#choosing-a-chunker) |
 | Requires `huggingface-cli` for model | yes | **no** — `ken download-model` fetches direct from HF (or skip and use `--mode bm25`) |
 
 † **Measured at v0.1.0 / v0.2.0 against semble's published benchmark** (63 repos, 1251 queries, semble's own `benchmarks.metrics.ndcg_at_k` + `target_rank`). Reproduce: see [`docs/BENCH.md`](docs/BENCH.md). Ablation breakdown vs semble's published raw retrieval numbers:
