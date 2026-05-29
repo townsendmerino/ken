@@ -618,9 +618,9 @@ The full per-language NDCG breakdown plus the empirical findings that informed t
 | Language | Python | Go |
 | Distribution | `uvx` / `pip install` | single static binary |
 | Cold start | (Python interpreter + `import numpy` + model load: ~500 ms per [semble README](https://github.com/MinishLab/semble#benchmarks)) | ~10–20 ms `ken search` over a tiny index (measured, M2 Mac) |
-| Index this repo (542 chunks, hybrid w/ model) | (not measured locally) | **0.45 s** (measured) |
-| Index `/tmp/semble` checkout (hybrid w/ model) | (not measured locally) | **1.80 s** (measured) |
-| Index this repo (BM25 only) | (not measured locally) | **0.06 s** (measured) |
+| Index this repo (1,710 chunks, hybrid w/ model) | (not measured locally) | **0.36 s** (measured‡) |
+| Index `/tmp/semble` checkout (1,151 chunks, hybrid w/ model) | (not measured locally) | **1.27 s** (measured‡) |
+| Index this repo (1,710 chunks, BM25 only) | (not measured locally) | **0.06 s** (measured‡) |
 | Retrieval algorithm | reference implementation | verbatim port (constants and pipeline order ported from `search.py` + `ranking/*.py`) |
 | NDCG@10 on semble's benchmark | 0.854 ([semble README](https://github.com/MinishLab/semble#benchmarks)) | **0.842 hybrid** (gap 0.012, full corpus 63 repos × 1251 queries)† |
 | NDCG@10 on CoIR-CSN-Python (external) | (not measured; semble doesn't run this bench) | **0.8743 bm25 / 0.7839 hybrid** ([see why](#benchmarks--external-reference-coir-csn-python))†† |
@@ -643,7 +643,9 @@ The full per-language NDCG breakdown plus the empirical findings that informed t
 
 ††† Measured at v0.3.0 against semble's 63-repo benchmark (914 NL queries from semble's 1,251-query corpus, ranked by ken's regex chunker, K=10). The honest framing: ken trades ~17 percentage points of recall for ~44× fewer agent-input tokens. Exhaustive enumeration (refactors, pre-rename audits) still belongs to grep — ken is for "find the chunk that answers this." Full per-query-class table (symbol + NL) and the methodology + caveats are in [`docs/BENCH.md`](docs/BENCH.md#token-budget-recall--agent-side-efficiency).
 
-semble timings cited above are from semble's own [README "Benchmarks" section](https://github.com/MinishLab/semble#benchmarks); ken's are measured on the included `testdata/repo` polyglot fixture and on a sibling shallow clone of `/tmp/semble`. Cold-start was timed by `/usr/bin/time -p ken search testdata/repo "validate" -k 1 --mode bm25` over three trials (M2 MacBook Air, Go 1.26.3, darwin/amd64 build under Rosetta).
+‡ **Indexing times re-measured 2026-05-29** at commit `fe53e91` (post-perf-campaign: v0.8.5–v0.8.7 tokenizer-allocation reduction + indexing-pipeline parallelism, [ADR-027](docs/DECISIONS.md#adr-027-bm25-tokenizer-allocation-reduction--rune--byte--syncpool-scratch--lowercase-fast-path-v085)/[ADR-030](docs/DECISIONS.md#adr-030-indexing-pipeline-parallelism--phase-a-per-file-workers-for-chunk--embed-v087)), via `ken perf index <path> --mode …` (darwin/arm64, Go 1.26.3, 8 cores). "This repo" is the ken repo root — it grew from 542 to 1,710 chunks (3.2×) since the prior measurement, yet hybrid indexing *dropped* from 0.45 s to 0.36 s and BM25 held at 0.06 s for 3.2× the work.
+
+semble timings cited above are from semble's own [README "Benchmarks" section](https://github.com/MinishLab/semble#benchmarks); ken's are measured on the ken repo root and on a sibling shallow clone of `/tmp/semble`. Cold-start was timed by `/usr/bin/time -p ken search testdata/repo "validate" -k 1 --mode bm25` over three trials (M2 MacBook Air, Go 1.26.3, darwin/amd64 build under Rosetta).
 
 ## Benchmarks — external reference (CoIR-CSN-Python)
 
