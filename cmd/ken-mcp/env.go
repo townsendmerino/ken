@@ -49,6 +49,23 @@ func envEnum(name string, allowed []string, fallback string, l *kenmcp.Logger) s
 	return kenmcp.ValidateEnum(name, os.Getenv(name), allowed, fallback, l)
 }
 
+// envFloat parses a float64 env var. Empty/unset returns fallback;
+// invalid input warns and returns fallback. Range-checking is the
+// caller's responsibility (KEN_MCP_RERANK_BETA clamps to [0,1] via
+// search.WithRerankBlendBeta, for example).
+func envFloat(name string, fallback float64, l *kenmcp.Logger) float64 {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		l.Logf(kenmcp.LogWarn, "invalid %s=%q: %v — using default %v", name, raw, err, fallback)
+		return fallback
+	}
+	return v
+}
+
 // envPath returns the env var unchanged but warns if it is set and not
 // a readable directory. The downstream caller still gets the value so
 // any existing auto-downgrade logic (e.g. KEN_MCP_MODEL_DIR missing ⇒

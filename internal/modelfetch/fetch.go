@@ -36,6 +36,24 @@ import (
 // changing the default would mean re-running the golden fixture.
 const DefaultModel = "minishlab/potion-code-16M"
 
+// DefaultRerankModel is the CodeRankEmbed checkpoint the M4 NeuralReranker
+// expects (~547 MB, see outputs/m1-results.md and m2-results.md). Ships
+// the same 3 files Model2Vec does (model.safetensors / tokenizer.json /
+// config.json) — the trust_remote_code .py files in the snapshot are
+// only needed for the Python reference path, NOT ken's pure-Go loader.
+const DefaultRerankModel = "nomic-ai/CodeRankEmbed"
+
+// DefaultRerankDest returns the conventional location ($HOME/.ken/rerank-model)
+// the rest of ken's tooling expects when no explicit --rerank-model flag
+// is given. Mirrors DefaultDest's $HOME-unset contract.
+func DefaultRerankDest() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving $HOME: %w", err)
+	}
+	return filepath.Join(home, ".ken", "rerank-model"), nil
+}
+
 // DefaultBaseURL is HuggingFace's public CDN. Overridable via Options
 // for testing; production callers should leave it empty.
 const DefaultBaseURL = "https://huggingface.co"

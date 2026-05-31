@@ -39,6 +39,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/townsendmerino/ken/chunk"
 	_ "github.com/townsendmerino/ken/chunk/regex" // registers the default "regex" chunker
@@ -89,6 +90,13 @@ const (
 	ModeBM25 Mode = iota
 	ModeSemantic
 	ModeHybrid
+	// ModeHybridRerank is ModeHybrid + a second-stage neural reranker
+	// (M4; see outputs/m3-results.md and m4-results.md). Requires both
+	// an embedding model (for stage-1 hybrid) AND a reranker injected
+	// via Index.SetReranker; SearchMode downgrades transparently to
+	// ModeHybrid when the reranker is absent, mirroring the existing
+	// "missing model ⇒ downgrade to bm25" pattern.
+	ModeHybridRerank
 )
 
 // ParseMode maps a CLI string to a Mode.
@@ -100,16 +108,22 @@ func ParseMode(s string) (Mode, error) {
 		return ModeSemantic, nil
 	case "hybrid":
 		return ModeHybrid, nil
+	case "hybrid-rerank":
+		return ModeHybridRerank, nil
 	}
 	return 0, fmt.Errorf("search: unknown mode %q (want %v)", s, ModeNames())
 }
 
 // ModeNames returns the CLI strings accepted by ParseMode, in CLI-flag
-// order (bm25, semantic, hybrid). Callers building allowed-value lists
-// for env-var / flag validation should use this rather than hardcoding.
-func ModeNames() []string { return []string{"bm25", "semantic", "hybrid"} }
+// order. Callers building allowed-value lists for env-var / flag
+// validation should use this rather than hardcoding.
+func ModeNames() []string {
+	return []string{"bm25", "semantic", "hybrid", "hybrid-rerank"}
+}
 
-func (m Mode) needsModel() bool { return m == ModeSemantic || m == ModeHybrid }
+func (m Mode) needsModel() bool {
+	return m == ModeSemantic || m == ModeHybrid || m == ModeHybridRerank
+}
 
 // Result is one ranked chunk.
 type Result struct {
@@ -137,6 +151,14 @@ type Index struct {
 	// the cache pre-warm path, where the WatchedIndex holds its own
 	// vecs slice).
 	vecs [][]float32
+
+	// M4 neural reranker (optional; nil = ModeHybridRerank downgrades
+	// to ModeHybrid). Set via SetReranker after FromFS so the heavy
+	// reranker dep (internal/coderank) doesn't leak into every Index
+	// build path. Reranker implementations are goroutine-safe; the
+	// rerankCfg defaults to (rerankN=50, β=0.25) per M0 amendments.
+	reranker  Reranker
+	rerankCfg rerankerConfig
 }
 
 // FromFS walks fsys, chunks every indexable file with the named chunker,
@@ -265,7 +287,9 @@ func walkAndChunkFS(fsys fs.FS, mode Mode, chunkerName, modelDir string, opts FS
 func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel, opts FSOptions) (
 	chunks []chunk.Chunk, vecs [][]float32, returnedModel *embed.StaticModel, migDirs map[string]bool, err error,
 ) {
-	if mode != ModeBM25 && mode != ModeSemantic && mode != ModeHybrid {
+	// ModeHybridRerank uses the same build-time pipeline as ModeHybrid
+	// (M4: the reranker is layered on at query time, not at index build).
+	if mode != ModeBM25 && mode != ModeSemantic && mode != ModeHybrid && mode != ModeHybridRerank {
 		return nil, nil, nil, nil, fmt.Errorf("search: unknown mode %d", mode)
 	}
 	if _, err := chunk.Get(chunkerName); err != nil {
@@ -637,6 +661,23 @@ func (ix *Index) FindRelated(filePath string, line, k int) ([]Result, error) {
 	return out, nil
 }
 
+// SetReranker attaches a neural reranker for ModeHybridRerank queries.
+// Reranker implementations are goroutine-safe; the same instance can
+// be shared across snapshot swaps (the LRU cache is content-hashed,
+// so stale entries simply never get hit). Pass nil to detach — future
+// ModeHybridRerank queries will then transparently downgrade to
+// ModeHybrid.
+//
+// Optional knobs (default rerankN=50, β=0.25 per M0): WithRerankN,
+// WithRerankBlendBeta.
+func (ix *Index) SetReranker(r Reranker, opts ...RerankerOption) {
+	ix.reranker = r
+	ix.rerankCfg = defaultRerankerConfig
+	for _, o := range opts {
+		o(&ix.rerankCfg)
+	}
+}
+
 // Search returns the top-k chunks for query under the index's
 // build-time mode. Thin wrapper around SearchMode for callers that
 // don't need per-call mode overrides (the historical signature, kept
@@ -644,6 +685,79 @@ func (ix *Index) FindRelated(filePath string, line, k int) ([]Result, error) {
 func (ix *Index) Search(query string, k int) []Result {
 	results, _ := ix.SearchMode(query, k, ix.mode)
 	return results
+}
+
+// SearchModeWithTelemetry is SearchMode with a per-query timing
+// breakdown. Returns the same (results, effective-mode) plus a
+// populated *Telemetry. Used by `ken search --verbose`, `ken bench`,
+// ken-mcp's info-level logging, and the optional MCP _telemetry
+// response field. The Telemetry struct is documented in
+// telemetry.go; zero-value fields mean "stage didn't run" or
+// "instrumentation not available for this mode."
+//
+// Non-rerank modes (bm25 / semantic / hybrid) record only TotalWall.
+// ModeHybridRerank records Stage1Wall / RerankWall / BlendWall plus
+// the reranker sub-breakdown (via NeuralReranker.RerankWithTelemetry).
+func (ix *Index) SearchModeWithTelemetry(query string, k int, mode Mode) ([]Result, Mode, Telemetry) {
+	tel := Telemetry{}
+	t0 := time.Now()
+
+	// Reuse the existing dispatch when there's nothing extra to time.
+	// For ModeHybridRerank we run an instrumented duplicate of the
+	// hot path below; everything else delegates to SearchMode.
+	if mode != ModeHybridRerank || ix.reranker == nil {
+		results, effMode := ix.SearchMode(query, k, mode)
+		tel.TotalWall = time.Since(t0)
+		return results, effMode, tel
+	}
+	if ix.flat == nil || ix.model == nil {
+		// Same defensive downgrade as SearchMode.
+		results, effMode := ix.SearchMode(query, k, ModeBM25)
+		tel.TotalWall = time.Since(t0)
+		return results, effMode, tel
+	}
+
+	// Stage 1: hybrid retrieval (instrumented).
+	fetch := ix.rerankCfg.rerankN
+	if fetch < k {
+		fetch = k
+	}
+	s1 := time.Now()
+	ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, fetch, -1)
+	results := make([]Result, 0, len(ranked))
+	for _, r := range ranked {
+		c := ix.chunks[r.idx]
+		if c.Tombstoned {
+			continue
+		}
+		results = append(results, Result{Chunk: c, Score: r.score})
+	}
+	tel.Stage1Wall = time.Since(s1)
+
+	// Stage 2: neural rerank (instrumented via the reranker's
+	// optional RerankWithTelemetry method when supported).
+	s2 := time.Now()
+	results = applyRerankerWithTelemetry(ix.reranker, query, results, ix.rerankCfg, &tel)
+	// applyRerankerWithTelemetry's wall is mostly the rerank model
+	// work; the blend (sort + minmax) is a tiny tail. Bookkeep:
+	tel.RerankWall = time.Since(s2)
+	// BlendWall is the difference between the outer rerank wall and
+	// the reranker-internal compute time, if available.
+	if tel.RerankerQueryEncode > 0 || tel.RerankerCandidateEncode > 0 {
+		modelWall := tel.RerankerQueryEncode
+		if tel.RerankerCandidateEncode > modelWall {
+			modelWall = tel.RerankerCandidateEncode // pipelined max, not sum
+		}
+		if tel.RerankWall > modelWall {
+			tel.BlendWall = tel.RerankWall - modelWall
+		}
+	}
+
+	if len(results) > k {
+		results = results[:k]
+	}
+	tel.TotalWall = time.Since(t0)
+	return results, ModeHybridRerank, tel
 }
 
 // SearchMode runs Search with the supplied mode override. Returns the
@@ -673,6 +787,13 @@ func (ix *Index) SearchMode(query string, k int, mode Mode) ([]Result, Mode) {
 		// with model==nil — caught earlier by ErrModelRequired in v0.8.3,
 		// but defense-in-depth here) shouldn't panic.
 		mode = ModeBM25
+	}
+	// M4: ModeHybridRerank ⇒ ModeHybrid when no reranker is attached,
+	// same "downgrade rather than error" ethos as the no-model case
+	// above. The plan §9.3 calls this out explicitly: "transparently
+	// downgrade … mirroring the existing model-missing downgrade pattern."
+	if mode == ModeHybridRerank && ix.reranker == nil {
+		mode = ModeHybrid
 	}
 	overFetch := k + ix.tombstoneCount()
 	switch mode {
@@ -707,6 +828,33 @@ func (ix *Index) SearchMode(query string, k int, mode Mode) ([]Result, Mode) {
 			}
 		}
 		return out, mode
+	case ModeHybridRerank:
+		// M4: deep over-fetch (rerankN, default 50) from stage-1 hybrid,
+		// then neural rerank + score-blend (β=0.25 per M0). Truncate to
+		// k AFTER the rerank so the user's k can be smaller than rerankN
+		// without losing the reranker's reordering effect on positions
+		// 1..k. The reranker pre-check above already downgraded if nil,
+		// so ix.reranker is guaranteed non-nil here.
+		fetch := ix.rerankCfg.rerankN
+		if fetch < k {
+			fetch = k
+		}
+		ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, fetch, -1)
+		// Tombstone-filter BEFORE the neural pass so the rerank
+		// budget isn't spent encoding chunks that'll be dropped.
+		results := make([]Result, 0, len(ranked))
+		for _, r := range ranked {
+			c := ix.chunks[r.idx]
+			if c.Tombstoned {
+				continue
+			}
+			results = append(results, Result{Chunk: c, Score: r.score})
+		}
+		results = applyReranker(ix.reranker, query, results, ix.rerankCfg)
+		if len(results) > k {
+			results = results[:k]
+		}
+		return results, mode
 	default: // ModeBM25 — raw lexical (Stage 1 behavior, no rerank)
 		hits := ix.bm.TopK(bm25.Tokenize(query), overFetch)
 		out := make([]Result, 0, k)

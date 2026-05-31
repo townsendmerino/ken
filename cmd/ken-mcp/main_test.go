@@ -550,6 +550,101 @@ func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 	}
 }
 
+// TestBinary_StdoutIsCleanJSONRPC_WithRerank is the M5 variant: boots
+// ken-mcp with KEN_MCP_RERANK=on and a valid CodeRankEmbed snapshot,
+// drives a hybrid-rerank query, and asserts the stdout/stderr contract
+// still holds — the M4 NeuralReranker's model load and forward passes
+// must NEVER write to stdout, otherwise the JSON-RPC channel gets
+// corrupted.
+//
+// Skipped without both models symlinked: testdata/model (Model2Vec for
+// stage-1 hybrid) AND testdata/coderank-model (for the reranker).
+func TestBinary_StdoutIsCleanJSONRPC_WithRerank(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess MCP rerank test in -short mode")
+	}
+
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hybridModel := filepath.Join(repoRoot, "testdata", "model")
+	rerankModel := filepath.Join(repoRoot, "testdata", "coderank-model")
+	for _, p := range []string{
+		filepath.Join(hybridModel, "model.safetensors"),
+		filepath.Join(rerankModel, "model.safetensors"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Skipf("missing %s — both testdata/model + testdata/coderank-model symlinks required", p)
+		}
+	}
+
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "ken-mcp")
+	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
+	}
+
+	fixture := filepath.Join(repoRoot, "testdata", "repo")
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binPath)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"KEN_MCP_MODE=hybrid-rerank",
+		"KEN_MCP_CHUNKER=regex",
+		"KEN_MCP_LOG_LEVEL=info", // so we can verify rerank=on lands on stderr
+		"KEN_MCP_DEFAULT_REPO=" + fixture,
+		"KEN_MCP_MODEL_DIR=" + hybridModel,
+		"KEN_MCP_RERANK=on",
+		"KEN_MCP_RERANK_MODEL_DIR=" + rerankModel,
+		"KEN_MCP_RERANK_TOP_N=10", // small head keeps the test fast
+		"KEN_MCP_RERANK_BETA=0.25",
+	}
+	var stderr safeBuf
+	cmd.Stderr = &stderr
+
+	cli := sdk.NewClient(&sdk.Implementation{Name: "ken-mcp-rerank-test", Version: "0"}, nil)
+	sess, err := cli.Connect(ctx, &sdk.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v\n--stderr--\n%s", err, stderr.String())
+	}
+	defer sess.Close()
+
+	// Drive a hybrid-rerank query — exercises the M4 NeuralReranker
+	// forward pass end-to-end through the MCP JSON-RPC channel.
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query": "validate user credentials",
+			"mode":  "hybrid-rerank",
+			"top_k": 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search, mode=hybrid-rerank): %v\n--stderr--\n%s", err, stderr.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	t.Logf("=== hybrid-rerank 'validate user credentials' top-3 ===\n%s", txt)
+	if !strings.Contains(txt, "Search results for:") {
+		t.Errorf("search output missing header\n--- got ---\n%s", txt)
+	}
+
+	// Pin the M5 startup-log discipline: the rerank=on status MUST
+	// appear on stderr (proves the model loaded), and the load line
+	// MUST mention the snapshot dir.
+	errStr := stderr.String()
+	if !strings.Contains(errStr, "rerank=on") {
+		t.Errorf("startup log missing rerank=on; stderr:\n%s", errStr)
+	}
+	if !strings.Contains(errStr, "rerank: loaded") {
+		t.Errorf("startup log missing 'rerank: loaded' line; stderr:\n%s", errStr)
+	}
+}
+
 // TestBinary_StdoutIsCleanJSONRPC_WithDB is the v0.7.0 variant: same
 // load-bearing stdout-cleanliness check, but with all KEN_DB_* env vars
 // set so the Tier-2 code path (DB introspection, Refresher, SIGHUP

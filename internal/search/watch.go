@@ -130,6 +130,16 @@ type WatchedIndex struct {
 	// on this so the DB-Tier-2 union-rebuild path can't replace the
 	// loaded snapshot with one built from an empty corpus.
 	static bool
+
+	// M4/M5: the neural reranker re-applied to every published snapshot.
+	// nil = no reranker; SearchMode then downgrades ModeHybridRerank to
+	// ModeHybrid transparently. Held under corpusMu so SetReranker
+	// serializes against the flush path that publishes new snapshots.
+	// The reranker's own LRU cache is content-hashed and survives
+	// snapshot swaps, so re-applying the same instance carries the
+	// warm cache forward across rebuilds.
+	reranker  Reranker
+	rerankCfg rerankerConfig
 }
 
 // WrapStatic wraps an already-built *Index (typically from
@@ -484,20 +494,62 @@ func (w *WatchedIndex) refoldMigrationDir(dir string) {
 // snapshot republishes that only changed the extras — important for
 // any reader holding chunk indices across calls (none currently, but
 // the invariant is cheap to preserve).
+//
+// M5: re-applies the watched-level reranker (if any) to every newly
+// built snapshot. The reranker instance is shared across rebuilds so
+// its content-hash LRU cache carries forward.
 func (w *WatchedIndex) buildUnionedIndexLocked() *Index {
+	var ix *Index
 	if len(w.extraChunks) == 0 {
-		return BuildIndex(w.chunks, w.vecs, w.mode, w.model)
+		ix = BuildIndex(w.chunks, w.vecs, w.mode, w.model)
+	} else {
+		merged := make([]chunk.Chunk, 0, len(w.chunks)+len(w.extraChunks))
+		merged = append(merged, w.chunks...)
+		merged = append(merged, w.extraChunks...)
+		var mergedVecs [][]float32
+		if w.vecs != nil || w.extraVecs != nil {
+			mergedVecs = make([][]float32, 0, len(w.vecs)+len(w.extraVecs))
+			mergedVecs = append(mergedVecs, w.vecs...)
+			mergedVecs = append(mergedVecs, w.extraVecs...)
+		}
+		ix = BuildIndex(merged, mergedVecs, w.mode, w.model)
 	}
-	merged := make([]chunk.Chunk, 0, len(w.chunks)+len(w.extraChunks))
-	merged = append(merged, w.chunks...)
-	merged = append(merged, w.extraChunks...)
-	var mergedVecs [][]float32
-	if w.vecs != nil || w.extraVecs != nil {
-		mergedVecs = make([][]float32, 0, len(w.vecs)+len(w.extraVecs))
-		mergedVecs = append(mergedVecs, w.vecs...)
-		mergedVecs = append(mergedVecs, w.extraVecs...)
+	if w.reranker != nil {
+		ix.reranker = w.reranker
+		ix.rerankCfg = w.rerankCfg
 	}
-	return BuildIndex(merged, mergedVecs, w.mode, w.model)
+	return ix
+}
+
+// SetReranker attaches a neural reranker to this WatchedIndex. The
+// reranker is re-applied to every newly published snapshot (live
+// flushes, SetExtraChunks rebuilds, etc.) so its content-hash LRU
+// cache survives snapshot swaps — the per-snapshot cost is zero, only
+// the field is re-pointed.
+//
+// Pass nil to detach. ken-mcp calls this once at startup with the
+// boot-time NeuralReranker; production code does NOT call this from
+// hot paths because it takes the corpus lock briefly.
+//
+// Goroutine-safe; serializes against the flush path via corpusMu.
+func (w *WatchedIndex) SetReranker(r Reranker, opts ...RerankerOption) {
+	w.corpusMu.Lock()
+	defer w.corpusMu.Unlock()
+	w.reranker = r
+	if r == nil {
+		w.rerankCfg = rerankerConfig{}
+	} else {
+		w.rerankCfg = defaultRerankerConfig
+		for _, o := range opts {
+			o(&w.rerankCfg)
+		}
+	}
+	// Also attach to the currently-published snapshot so the change
+	// takes effect immediately, without waiting for the next flush.
+	if cur := w.ix.Load(); cur != nil {
+		cur.reranker = r
+		cur.rerankCfg = w.rerankCfg
+	}
 }
 
 // SetExtraChunks replaces the orchestrator-injected extra chunks and

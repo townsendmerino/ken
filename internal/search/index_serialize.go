@@ -189,7 +189,9 @@ type LoadOptions struct {
 // Internally a thin wrapper around walkAndChunkFSWithModel +
 // serializeIndex — propagates any build error verbatim.
 func BuildAndSerializeIndex(fsys fs.FS, opts BuildOptions) ([]byte, error) {
-	if opts.Mode != ModeBM25 && opts.Mode != ModeSemantic && opts.Mode != ModeHybrid {
+	// ModeHybridRerank serializes identically to ModeHybrid (rerank
+	// state is per-process, attached post-load via SetReranker).
+	if opts.Mode != ModeBM25 && opts.Mode != ModeSemantic && opts.Mode != ModeHybrid && opts.Mode != ModeHybridRerank {
 		return nil, fmt.Errorf("search: BuildAndSerializeIndex: unknown mode %d", opts.Mode)
 	}
 	if opts.Mode.needsModel() && opts.Model == nil {
@@ -220,7 +222,9 @@ func LoadSerializedIndex(data []byte, opts LoadOptions) (*Index, error) {
 // slice. Called by BuildAndSerializeIndex; exported in the package for
 // testability (the determinism regression test calls it directly).
 func serializeIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, chunkerName string) ([]byte, error) {
-	if mode != ModeBM25 && mode != ModeSemantic && mode != ModeHybrid {
+	// Same allow-list as BuildAndSerializeIndex (ModeHybridRerank shares
+	// ModeHybrid's serialization shape — reranker is per-process state).
+	if mode != ModeBM25 && mode != ModeSemantic && mode != ModeHybrid && mode != ModeHybridRerank {
 		return nil, fmt.Errorf("search: serializeIndex: unknown mode %d", mode)
 	}
 	// Sanity check: vecs and chunks must align in semantic / hybrid
@@ -356,7 +360,7 @@ func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
 		return nil, fmt.Errorf("%w: read mode: %v", ErrCorrupt, err)
 	}
 	mode := Mode(modeByte)
-	if mode != ModeBM25 && mode != ModeSemantic && mode != ModeHybrid {
+	if mode != ModeBM25 && mode != ModeSemantic && mode != ModeHybrid && mode != ModeHybridRerank {
 		return nil, fmt.Errorf("%w: invalid mode byte %d", ErrCorrupt, modeByte)
 	}
 

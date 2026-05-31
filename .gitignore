@@ -64,3 +64,13 @@ bench_out/
 # campaign plans drafted alongside the perf-investigation work. Not
 # part of the published repo.
 outputs/
+
+# Bench stderr captures from M0/M6 rerank investigation runs.
+# Reproducible from scripts/m0_ceiling.py + bench/semble/run_ken.py;
+# never committed.
+*.err
+
+# CodeRankEmbed model snapshot — large, downloaded per-machine
+# (typically a symlink into ~/.cache/huggingface), never committed.
+# Companion to testdata/model/ above.
+testdata/coderank-model

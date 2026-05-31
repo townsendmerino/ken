@@ -678,6 +678,11 @@ Consolidated deferred items. Each entry: the item, then the trigger that would u
 - **Persistent on-disk index cache.** Per-process MCP cache only today; semble has none either. **Trigger:** a usage pattern where rebuild cost across process restarts dominates. Distinct from incremental indexing below — this item just skips a rebuild when the corpus is unchanged across processes; it does not handle file-level deltas.
 - **Incremental indexing — landed in v0.3 via fsnotify + atomic snapshot swap.** `internal/search/watch.go` wraps an `*Index` in a `WatchedIndex` whose `atomic.Pointer[Index]` is published anew every 2 seconds of edit activity. Readers do one atomic load per Search/FindRelated/ResolveChunk call; writers build a new snapshot off to the side. No reader-side lock; in-flight queries see consistent snapshots. ken-mcp watches always; `ken index --watch` is the default (`--no-watch` is the v0.2-compatible opt-out). Tombstone-deletes-no-compaction: deleted files leave their chunks in the slice with `Tombstoned=true`, and query paths skip them. **Open v0.3.x trigger:** compaction. Memory grows monotonically with cumulative edit volume; multi-day agent sessions on a heavily-edited corpus could hit pressure. **Bonus opportunity (deferred):** `gotreesitter` supports incremental reparsing (~666 ns vs ~2 ms), but the treesitter chunker still discards the parse tree per file. Keeping the tree around would let us reparse only changed byte ranges — orthogonal to v0.3's incremental indexing, would land as v0.3.x optimization. See [`DECISIONS.md` ADR-012](DECISIONS.md#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap) for the full design.
 - **Private-repo auth in ken-mcp.** Out of scope for v1 (semble matches). **Trigger:** a user explicitly asks for it; pick an auth model (PAT env? `gh auth` shell-out?) and the corresponding test surface.
+1- **Pure-Go Generation (Stage 6).** Adding a small generative model for query refinement or summarization. **Trigger:** Adoption of a Stage-5 reranker creates a need for higher-level query understanding.
+  - *Option A:* `wazero` + Wasm-compiled inference engine (llama.wasm).
+  - *Option B:* `Hugot` pure-Go backend for ONNX.
+  - *Option C:* Hand-rolled transformer forward pass (Gonum-backed).
+  - **Constraint:** Must remain 100% cgo-free and single-binary.
 
 ## Sources
 

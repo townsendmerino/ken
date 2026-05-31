@@ -146,6 +146,9 @@ def run_repo(
     top_k: int,
     latency_runs: int,
     verbose: bool,
+    rerank_model: Path | None = None,
+    rerank_top_n: int | None = None,
+    rerank_beta: float | None = None,
 ) -> RepoOutcome:
     """Run all queries for one repo through ken bench; return per-task NDCG@10 + median p50."""
     # Send each query latency_runs times so we can take the median of warm-
@@ -171,6 +174,15 @@ def run_repo(
     ]
     if model_dir is not None:
         args.extend(["--model", str(model_dir)])
+    # M5/M6: forward the rerank flags to `ken bench` when --mode=hybrid-rerank.
+    # Pass-through only when set; the Go side defaults match plan/M0 (top_n=50,
+    # β=0.25). For an M0 CoIR-style sweep use --rerank-beta=1.0 explicitly.
+    if rerank_model is not None:
+        args.extend(["--rerank-model", str(rerank_model)])
+    if rerank_top_n is not None:
+        args.extend(["--rerank-top-n", str(rerank_top_n)])
+    if rerank_beta is not None:
+        args.extend(["--rerank-beta", str(rerank_beta)])
 
     proc = subprocess.run(
         args,
@@ -251,15 +263,33 @@ def main() -> int:
     )
     p.add_argument(
         "--mode",
-        choices=["bm25", "semantic", "hybrid"],
+        choices=["bm25", "semantic", "hybrid", "hybrid-rerank"],
         default="hybrid",
-        help="ken retrieval mode (default: hybrid). bm25 needs no model.",
+        help="ken retrieval mode (default: hybrid). bm25 needs no model. "
+        "hybrid-rerank requires both --model AND --rerank-model.",
     )
     p.add_argument("--chunker", default="regex", help="ken chunker (default: regex).")
     p.add_argument(
         "--model",
         default=os.environ.get("KEN_MODEL_DIR", str(Path.home() / ".ken" / "model")),
         help="ken Model2Vec model dir (default: ~/.ken/model or $KEN_MODEL_DIR). ignored when --mode=bm25.",
+    )
+    # M5/M6: rerank knobs forwarded to `ken bench`. Only used when --mode=hybrid-rerank.
+    p.add_argument(
+        "--rerank-model",
+        default=os.environ.get("KEN_RERANK_MODEL_DIR", str(Path.home() / ".ken" / "rerank-model")),
+        help="CodeRankEmbed dir (default: ~/.ken/rerank-model or $KEN_RERANK_MODEL_DIR). "
+        "ignored unless --mode=hybrid-rerank.",
+    )
+    p.add_argument(
+        "--rerank-top-n", type=int, default=None,
+        help="rerank head depth (Go default: 50; M0 used 100 for CoIR-style sweeps).",
+    )
+    p.add_argument(
+        "--rerank-beta", type=float, default=None,
+        help="score-blend weight β: final = β·rerankCos + (1-β)·fusedScore. "
+        "Go default: 0.25 (M0-validated for natural NL workloads); use 1.0 for "
+        "M0 CoIR-style pure-replacement comparison.",
     )
     p.add_argument("--ken", default="ken", help="path to the ken binary (default: ken on $PATH).")
     p.add_argument("--top-k", type=int, default=10)
@@ -284,6 +314,16 @@ def main() -> int:
                 f"--mode={args.mode} but no model.safetensors at {model_dir}\n"
                 "  download: huggingface-cli download minishlab/potion-code-16M "
                 "tokenizer.json config.json model.safetensors --local-dir ~/.ken/model"
+            )
+
+    # M5/M6: hybrid-rerank also needs the CodeRankEmbed snapshot.
+    rerank_model: Path | None = None
+    if args.mode == "hybrid-rerank":
+        rerank_model = Path(args.rerank_model).expanduser().resolve()
+        if not (rerank_model / "model.safetensors").exists():
+            sys.exit(
+                f"--mode=hybrid-rerank but no model.safetensors at {rerank_model}\n"
+                "  download: `ken download-model --rerank` (fetches ~547 MB to ~/.ken/rerank-model)"
             )
 
     repo_specs = available_repo_specs()
@@ -323,6 +363,9 @@ def main() -> int:
             top_k=args.top_k,
             latency_runs=args.latency_runs,
             verbose=args.verbose,
+            rerank_model=rerank_model,
+            rerank_top_n=args.rerank_top_n,
+            rerank_beta=args.rerank_beta,
         )
         outcomes.append(o)
         sys.stderr.write(

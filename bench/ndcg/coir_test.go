@@ -39,6 +39,7 @@ import (
 	// bench can exercise it. As of v0.6.0 internal/search no longer
 	// transitively pulls in optional chunkers.
 	_ "github.com/townsendmerino/ken/chunk/treesitter"
+	"github.com/townsendmerino/ken/internal/coderank"
 	"github.com/townsendmerino/ken/internal/search"
 )
 
@@ -136,11 +137,44 @@ func TestCoIR_CSNPython(t *testing.T) {
 	}
 	var results []result
 
-	for _, mode := range []search.Mode{search.ModeBM25, search.ModeSemantic, search.ModeHybrid} {
+	// M6: optional hybrid-rerank row. Skipped unless a CodeRankEmbed
+	// snapshot is resolvable AND the user explicitly opts in via
+	// KEN_RERANK=1 (the rerank run takes 10-30× longer than hybrid on
+	// the full corpus, so we don't pay that cost on routine bench runs).
+	rerankModelDir := os.Getenv("KEN_RERANK_MODEL_DIR")
+	if rerankModelDir == "" {
+		rerankModelDir = filepath.Join(os.Getenv("HOME"), ".ken", "rerank-model")
+	}
+	rerankEnabled := os.Getenv("KEN_RERANK") == "1"
+	rerankTopN := 100 // M0 used N=100 for the headline CoIR lift (+0.165)
+	if v := os.Getenv("KEN_RERANK_TOP_N"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			rerankTopN = n
+		}
+	}
+	rerankBeta := 1.0 // M0 used β=1.0 (pure replacement) on CoIR — chunk-sized targets
+	if v := os.Getenv("KEN_RERANK_BETA"); v != "" {
+		if b, err := strconv.ParseFloat(v, 64); err == nil && b >= 0 && b <= 1 {
+			rerankBeta = b
+		}
+	}
+
+	modesToRun := []search.Mode{search.ModeBM25, search.ModeSemantic, search.ModeHybrid}
+	if rerankEnabled {
+		modesToRun = append(modesToRun, search.ModeHybridRerank)
+	}
+	for _, mode := range modesToRun {
 		modeStr := modeString(mode)
 		if mode != search.ModeBM25 {
 			if _, err := os.Stat(filepath.Join(modelDir, "model.safetensors")); err != nil {
 				t.Logf("[%s] skipped — no model available", modeStr)
+				continue
+			}
+		}
+		if mode == search.ModeHybridRerank {
+			if _, err := os.Stat(filepath.Join(rerankModelDir, "model.safetensors")); err != nil {
+				t.Logf("[%s] skipped — no rerank model at %s (run `ken download-model --rerank`)",
+					modeStr, rerankModelDir)
 				continue
 			}
 		}
@@ -152,6 +186,26 @@ func TestCoIR_CSNPython(t *testing.T) {
 			t.Fatalf("[%s] FromPath: %v", modeStr, err)
 		}
 		t.Logf("[%s] indexed %d chunks in %.1fs", modeStr, ix.Len(), time.Since(tBuild).Seconds())
+
+		// M6: attach the neural reranker for ModeHybridRerank. The
+		// rerankN + β knobs default to the M0 CoIR configuration
+		// (N=100, β=1.0) so the headline number reproduces M0's
+		// +0.165 lift; KEN_RERANK_TOP_N / KEN_RERANK_BETA override
+		// for sweeping the curve.
+		if mode == search.ModeHybridRerank {
+			tLoad := time.Now()
+			rm, err := coderank.Load(rerankModelDir)
+			if err != nil {
+				t.Fatalf("[%s] coderank.Load: %v", modeStr, err)
+			}
+			t.Logf("[%s] loaded rerank model in %.1fs (top_n=%d β=%v)",
+				modeStr, time.Since(tLoad).Seconds(), rerankTopN, rerankBeta)
+			ix.SetReranker(
+				search.NewNeuralReranker(rm),
+				search.WithRerankN(rerankTopN),
+				search.WithRerankBlendBeta(rerankBeta),
+			)
+		}
 
 		tQuery := time.Now()
 		perQuery := make([]float64, 0, len(keep))

@@ -24,14 +24,28 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"runtime"
+	"syscall"
 	"unsafe"
 )
 
 // SafetensorsFile is a parsed safetensors file. Tensor payloads are slices
 // into the underlying file bytes — no copy. Goroutine-safe for reads.
+//
+// Lifetime: callers must keep the SafetensorsFile alive for as long as
+// any tensor returned by Tensor() is in use. With the heap-loaded path
+// (OpenSafetensors / OpenSafetensorsFromFS) the underlying []byte stays
+// in Go's heap until SafetensorsFile is GC'd. With the mmap-loaded path
+// (OpenSafetensorsMmap, M8) the underlying region is munmap'd via a
+// runtime.SetFinalizer attached at Open time — Close() forces it earlier.
 type SafetensorsFile struct {
 	data    []byte
 	tensors map[string]Tensor
+
+	// mmapped is non-nil iff the file was loaded via OpenSafetensorsMmap
+	// (and Close hasn't run). Identical underlying storage to data; the
+	// separate field exists so Close knows whether to syscall.Munmap.
+	mmapped []byte
 }
 
 // Tensor is a single named tensor within a SafetensorsFile.
@@ -80,6 +94,79 @@ func OpenSafetensorsFromFS(fsys fs.FS, name string) (*SafetensorsFile, error) {
 		return nil, fmt.Errorf("read safetensors: %w", err)
 	}
 	return parseSafetensors(data)
+}
+
+// OpenSafetensorsMmap mmaps path into memory (read-only, MAP_PRIVATE)
+// and parses the safetensors header from the mapped region. Tensor
+// slices alias the mapping; resident memory cost is shared via the OS
+// page cache instead of the Go heap.
+//
+// This is the M8 path for large models — CodeRankEmbed's 547 MB
+// checkpoint would otherwise dominate ken-mcp's RSS. The mapping is
+// released via syscall.Munmap when the SafetensorsFile is GC'd
+// (runtime.SetFinalizer) or when Close() is called explicitly.
+//
+// IMPORTANT: tensor data returned by Tensor() aliases the mapped
+// region. Callers must keep the SafetensorsFile alive for as long as
+// any such tensor is in use. After Close(), tensor accesses dereference
+// unmapped memory — undefined behavior.
+//
+// Platform: works on darwin/linux/bsd via syscall.Mmap. Not supported
+// on Windows; the embed package's primary deployments are macOS/Linux.
+func OpenSafetensorsMmap(path string) (*SafetensorsFile, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close() // fd no longer needed after mmap
+
+	st, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat %s: %w", path, err)
+	}
+	sz := st.Size()
+	if sz < 8 {
+		return nil, fmt.Errorf("safetensors %s: file too small (%d bytes)", path, sz)
+	}
+	if sz > int64(int(^uint(0)>>1)) {
+		return nil, fmt.Errorf("safetensors %s: file too large for this platform (%d bytes)", path, sz)
+	}
+	data, err := syscall.Mmap(int(f.Fd()), 0, int(sz), syscall.PROT_READ, syscall.MAP_PRIVATE)
+	if err != nil {
+		return nil, fmt.Errorf("mmap %s: %w", path, err)
+	}
+	sf, err := parseSafetensors(data)
+	if err != nil {
+		_ = syscall.Munmap(data)
+		return nil, err
+	}
+	sf.mmapped = data
+	// Finalizer guards the common case where callers forget Close().
+	// The model lifetime is process-lifetime in ken-mcp so this matters
+	// mostly for test/CLI flows that build and discard models repeatedly.
+	runtime.SetFinalizer(sf, func(s *SafetensorsFile) {
+		if s.mmapped != nil {
+			_ = syscall.Munmap(s.mmapped)
+			s.mmapped = nil
+		}
+	})
+	return sf, nil
+}
+
+// Close releases the underlying mmap, if any. No-op on heap-loaded
+// SafetensorsFile (OpenSafetensors / OpenSafetensorsFromFS). Idempotent.
+//
+// After Close, any Tensor() returns alias unmapped memory — accessing
+// them is undefined behavior. Callers MUST stop using the model and any
+// downstream objects that hold tensor data before calling Close.
+func (sf *SafetensorsFile) Close() error {
+	if sf.mmapped == nil {
+		return nil
+	}
+	m := sf.mmapped
+	sf.mmapped = nil
+	runtime.SetFinalizer(sf, nil)
+	return syscall.Munmap(m)
 }
 
 // parseSafetensors is the shared safetensors-bytes parser used by both

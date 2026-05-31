@@ -232,6 +232,54 @@ func (t *Tokenizer) VocabSize() int { return len(t.vocab) }
 // UnkID is the integer ID of the [UNK] token.
 func (t *Tokenizer) UnkID() int32 { return t.unkID }
 
+// SpecialID returns the ID of an added-token literal (e.g. "[CLS]",
+// "[SEP]", "[PAD]"). Returns (0, false) if the literal isn't in the
+// tokenizer's added_tokens table. Used by EncodeWithSpecials and by
+// downstream models that need to wrap inputs with BERT-style specials.
+func (t *Tokenizer) SpecialID(literal string) (int32, bool) {
+	id, ok := t.addedTokens[literal]
+	return id, ok
+}
+
+// EncodeWithSpecials runs Encode and wraps the result as
+//
+//	[CLS] ++ Encode(text) ++ [SEP]
+//
+// truncating from the right if necessary so the full sequence is at
+// most maxLen tokens (preserving the leading [CLS] and the trailing
+// [SEP]). maxLen ≤ 2 yields exactly [CLS], [SEP].
+//
+// This is the canonical BERT input shape and the one CodeRankEmbed's
+// reference (and tokenizer.json's TemplateProcessing post-processor)
+// produces. The base Encode is unchanged so potion-code-16M parity
+// stays byte-identical — this method is additive.
+//
+// Returns an error iff [CLS] or [SEP] is missing from the tokenizer's
+// added_tokens. For tokenizers without those specials (potion), call
+// Encode directly.
+func (t *Tokenizer) EncodeWithSpecials(text string, maxLen int) ([]int32, error) {
+	cls, ok := t.addedTokens["[CLS]"]
+	if !ok {
+		return nil, fmt.Errorf("tokenizer: [CLS] missing from added_tokens")
+	}
+	sep, ok := t.addedTokens["[SEP]"]
+	if !ok {
+		return nil, fmt.Errorf("tokenizer: [SEP] missing from added_tokens")
+	}
+	if maxLen < 2 {
+		return []int32{cls, sep}, nil
+	}
+	body := t.Encode(text)
+	if len(body) > maxLen-2 {
+		body = body[:maxLen-2]
+	}
+	out := make([]int32, 0, len(body)+2)
+	out = append(out, cls)
+	out = append(out, body...)
+	out = append(out, sep)
+	return out, nil
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // BertNormalizer
 // ──────────────────────────────────────────────────────────────────────────────

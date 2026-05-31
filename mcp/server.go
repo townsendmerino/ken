@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -102,6 +104,44 @@ type Config struct {
 	// the same *mcp/db.Refresher; mcp.Run's Start callback updates
 	// an atomic.Pointer[search.Index] via WithExtraChunks.
 	DB DBIntegration
+
+	// TelemetryLog, when non-nil, is called once per search tool
+	// invocation with the per-query timing breakdown. Used by
+	// cmd/ken-mcp to emit an info-level stderr line per query when
+	// the log level permits. The callback runs on the request
+	// goroutine BEFORE the response is returned, so it should be
+	// cheap (a single Logf is fine).
+	//
+	// Setting this knob also enables telemetry collection in the
+	// search code path — leave nil to opt out of the (small) per-
+	// query timing overhead.
+	TelemetryLog func(query string, t search.Telemetry)
+
+	// TelemetryInResponse, when true, appends a "[telemetry]" line
+	// to the search tool response body so the agent can see timing
+	// alongside results. Off by default — adding fields to the agent-
+	// facing wire format is a behavior change and should be opt-in
+	// (cmd/ken-mcp gates this behind KEN_MCP_RERANK_TELEMETRY=1).
+	//
+	// Setting this knob also enables telemetry collection. Like
+	// TelemetryLog, leave false to skip the overhead.
+	TelemetryInResponse bool
+
+	// UsageRecorder, when non-nil, receives one Record call per
+	// successful search / find_related invocation. cmd/ken-mcp wires
+	// a *usage.Recorder writing to ~/.ken/savings.jsonl by default;
+	// nil disables tracking (no file writes, no per-call overhead).
+	// See internal/usage for the privacy contract — only counts and
+	// timestamps are persisted, never query text or file paths.
+	UsageRecorder UsageRecorder
+}
+
+// UsageRecorder is the minimal seam mcp/server.go uses to log a
+// successful tool call. The concrete implementation lives in
+// internal/usage to keep that package's deps + privacy contract
+// isolated from the MCP wire layer.
+type UsageRecorder interface {
+	Record(callType string, results, snippetChars, fileChars int)
 }
 
 // NewServer returns an MCP server with `search` and `find_related`
@@ -136,7 +176,9 @@ func NewServer(cfg Config) *sdk.Server {
 		Description: "Search a codebase with a natural-language or code query. " +
 			"Pass a git URL or local path as `repo` to index it on demand; indexes are cached for the session. " +
 			"Use this to find where something is implemented, understand a library, or locate related code.",
-	}, func(ctx context.Context, _ *sdk.CallToolRequest, args SearchArgs) (*sdk.CallToolResult, any, error) {
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args SearchArgs) (*sdk.CallToolResult, any, error) {
+		stop := startProgressHeartbeat(ctx, req, "ken search")
+		defer stop()
 		return handleSearch(ctx, &cfg, args)
 	})
 
@@ -145,7 +187,9 @@ func NewServer(cfg Config) *sdk.Server {
 		Description: "Find code chunks semantically similar to a specific location in a file. " +
 			"Use after `search` to explore related implementations or callers. " +
 			"Pass file_path and line from a prior search result.",
-	}, func(ctx context.Context, _ *sdk.CallToolRequest, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
+		stop := startProgressHeartbeat(ctx, req, "ken find_related")
+		defer stop()
 		return handleFindRelated(ctx, &cfg, args)
 	})
 
@@ -222,7 +266,11 @@ func handleSearch(ctx context.Context, cfg *Config, args SearchArgs) (*sdk.CallT
 	if err != nil {
 		return textResult(fmt.Sprintf("Failed to index %q: %s", source, err.Error())), nil, nil
 	}
-	return runSearch(wi.Load(), args)
+	// sourceRoot for usage stats: only meaningful for local-path
+	// sources where the chunk's relative path can be stat()ed for
+	// file size. http(s) clones land in a temp dir under TMPDIR;
+	// passing that root is fine — the stats are best-effort.
+	return runSearchWithTelemetry(wi.Load(), args, cfg.TelemetryLog, cfg.TelemetryInResponse, cfg.UsageRecorder, source)
 }
 
 func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
@@ -237,7 +285,7 @@ func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (
 	if err != nil {
 		return textResult(fmt.Sprintf("Failed to index %q: %s", source, err.Error())), nil, nil
 	}
-	return runFindRelated(wi.Load(), args)
+	return runFindRelatedWithUsage(wi.Load(), args, cfg.UsageRecorder, source)
 }
 
 // runSearch executes a search against a resolved Index — independent of
@@ -253,6 +301,19 @@ func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (
 // hybrid against a BM25-only index sees "mode=bm25" in the header
 // (capability downgrade is visible, not silent).
 func runSearch(ix *search.Index, args SearchArgs) (*sdk.CallToolResult, any, error) {
+	return runSearchWithTelemetry(ix, args, nil, false, nil, "")
+}
+
+// runSearchWithTelemetry is the runSearch variant that optionally
+// collects + surfaces per-query telemetry and records usage stats.
+// Called by handleSearch with the Config knobs; the pure runSearch
+// above keeps the zero-config path overhead-free (no time.Now
+// bookkeeping in the search code path, no file stats).
+//
+// recorder: when non-nil, one Record call is appended on each
+// successful search (len(results) > 0). sourceRoot scopes file_chars
+// computation — file paths in results are joined to it before stat.
+func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query string, t search.Telemetry), includeInResponse bool, recorder UsageRecorder, sourceRoot string) (*sdk.CallToolResult, any, error) {
 	requestedMode := ix.Mode()
 	if args.Mode != "" {
 		parsed, perr := search.ParseMode(args.Mode)
@@ -265,18 +326,84 @@ func runSearch(ix *search.Index, args SearchArgs) (*sdk.CallToolResult, any, err
 	if topK <= 0 {
 		topK = DefaultTopK
 	}
-	results, effectiveMode := ix.SearchMode(args.Query, topK, requestedMode)
+	collect := log != nil || includeInResponse
+	var (
+		results       []search.Result
+		effectiveMode search.Mode
+		tel           search.Telemetry
+	)
+	if collect {
+		results, effectiveMode, tel = ix.SearchModeWithTelemetry(args.Query, topK, requestedMode)
+	} else {
+		results, effectiveMode = ix.SearchMode(args.Query, topK, requestedMode)
+	}
+	if log != nil {
+		log(args.Query, tel)
+	}
 	if len(results) == 0 {
 		return textResult("No results found."), nil, nil
 	}
+	recordSearchUsage(recorder, "search", results, sourceRoot)
 	header := fmt.Sprintf("Search results for: %q (mode=%s)",
 		args.Query, search.ModeNames()[int(effectiveMode)])
-	return textResult(FormatResults(header, results)), nil, nil
+	body := FormatResults(header, results)
+	if includeInResponse {
+		body += "\n\n" + formatTelemetryLine(tel)
+	}
+	return textResult(body), nil, nil
+}
+
+// recordSearchUsage computes snippet_chars + file_chars (the unique-
+// file-set's on-disk size) from results and appends one Record. No-op
+// if recorder is nil. Stat failures are silent — the count missing a
+// file is a smaller wrong than failing the whole tool call over a
+// race with the file watcher.
+func recordSearchUsage(rec UsageRecorder, callType string, results []search.Result, sourceRoot string) {
+	if rec == nil || len(results) == 0 {
+		return
+	}
+	snippetChars := 0
+	uniqueFiles := make(map[string]struct{}, len(results))
+	for _, r := range results {
+		snippetChars += len(r.Chunk.Text)
+		if r.Chunk.File != "" {
+			uniqueFiles[r.Chunk.File] = struct{}{}
+		}
+	}
+	fileChars := 0
+	for f := range uniqueFiles {
+		path := f
+		if sourceRoot != "" && !filepath.IsAbs(path) {
+			path = filepath.Join(sourceRoot, path)
+		}
+		if info, err := os.Stat(path); err == nil {
+			fileChars += int(info.Size())
+		}
+	}
+	rec.Record(callType, len(results), snippetChars, fileChars)
+}
+
+// formatTelemetryLine renders a Telemetry as the single "[telemetry]"
+// line appended to MCP search responses when TelemetryInResponse is on.
+// Matches the format ken search --verbose emits so an operator can grep
+// across both surfaces with the same pattern.
+func formatTelemetryLine(t search.Telemetry) string {
+	return fmt.Sprintf("[telemetry] total=%s stage1=%s rerank=%s blend=%s n=%d cache=%d/%d q_enc=%s cand_enc=%s",
+		t.TotalWall, t.Stage1Wall, t.RerankWall, t.BlendWall,
+		t.RerankerN, t.RerankerCacheHits, t.RerankerCacheMisses,
+		t.RerankerQueryEncode, t.RerankerCandidateEncode)
 }
 
 // runFindRelated executes a find_related against a resolved Index. The
 // caller has already validated args.FilePath and args.Line.
 func runFindRelated(ix *search.Index, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
+	return runFindRelatedWithUsage(ix, args, nil, "")
+}
+
+// runFindRelatedWithUsage is runFindRelated + optional usage recording.
+// recorder=nil disables tracking; otherwise one Record call is appended
+// per successful response. sourceRoot scopes file_chars computation.
+func runFindRelatedWithUsage(ix *search.Index, args FindRelatedArgs, recorder UsageRecorder, sourceRoot string) (*sdk.CallToolResult, any, error) {
 	topK := args.TopK
 	if topK <= 0 {
 		topK = DefaultTopK
@@ -293,6 +420,7 @@ func runFindRelated(ix *search.Index, args FindRelatedArgs) (*sdk.CallToolResult
 	if len(results) == 0 {
 		return textResult(fmt.Sprintf("No related chunks found for %s:%d.", args.FilePath, args.Line)), nil, nil
 	}
+	recordSearchUsage(recorder, "find_related", results, sourceRoot)
 	header := fmt.Sprintf("Chunks related to %s:%d", args.FilePath, args.Line)
 	return textResult(FormatResults(header, results)), nil, nil
 }

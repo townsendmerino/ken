@@ -30,9 +30,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/townsendmerino/ken/internal/coderank"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -50,6 +53,7 @@ import (
 	_ "github.com/townsendmerino/ken/chunk/markdown"
 	_ "github.com/townsendmerino/ken/chunk/treesitter"
 	"github.com/townsendmerino/ken/internal/search"
+	"github.com/townsendmerino/ken/internal/usage"
 	kenmcp "github.com/townsendmerino/ken/mcp"
 	mcpdb "github.com/townsendmerino/ken/mcp/db"
 )
@@ -212,6 +216,135 @@ func main() {
 	// folding (sql.FoldMigrations). Default is "folding enabled".
 	noAutoMigrations := envBool("KEN_SQL_NO_AUTO_MIGRATIONS", false, logger)
 
+	// M5: neural reranker (M4 NeuralReranker + ModeHybridRerank). Opt-in
+	// while it's new; default off. The model is loaded ONCE at startup
+	// and shared across every WatchedIndex via wi.SetReranker, so the
+	// content-hash LRU cache (plan §8 perf keystone) survives both per-
+	// source rebuilds and snapshot swaps from the live watcher.
+	//
+	// Failure mode is "warn + leave reranker nil". Combined with the
+	// SearchMode transparent downgrade (M4), this means:
+	//   - KEN_MCP_RERANK=off                       ⇒ reranker never loaded
+	//   - KEN_MCP_RERANK=on  + model dir resolvable ⇒ reranker active
+	//   - KEN_MCP_RERANK=on  + model dir missing    ⇒ warn, reranker nil,
+	//                                                  hybrid-rerank queries
+	//                                                  silently downgrade to hybrid
+	rerankEnabled := envBool("KEN_MCP_RERANK", false, logger)
+	var (
+		neuralReranker  *search.NeuralReranker
+		rerankerOptions []search.RerankerOption
+		// M9 persistent doc cache: populated after the reranker loads
+		// successfully; the shutdown goroutine writes the LRU back to
+		// this path. Empty path = persistence disabled.
+		rerankCachePath  string
+		rerankCacheScope string
+		rerankCacheDim   int
+	)
+	if rerankEnabled {
+		rerankModelDir := envPath("KEN_MCP_RERANK_MODEL_DIR", logger)
+		rerankTopN := envInt("KEN_MCP_RERANK_TOP_N", 50, logger)
+		rerankCacheSize := envInt("KEN_MCP_RERANK_CACHE_SIZE", search.DefaultRerankerCacheSize, logger)
+		rerankBeta := envFloat("KEN_MCP_RERANK_BETA", 0.25, logger)
+		rerankQuant := envEnum("KEN_MCP_RERANK_QUANT", []string{"f32", "int8"}, "f32", logger)
+		// M8d adaptive: "THRESHOLD:MINN" (e.g. "0.30:10"). Empty disables.
+		// On confident-stage-1 queries (top-1 margin > threshold), rerank
+		// only the top minN instead of full top_n. 2-5× win on the typical
+		// agent workload where most queries have unambiguous stage-1.
+		rerankAdaptive := strings.TrimSpace(os.Getenv("KEN_MCP_RERANK_ADAPTIVE"))
+		var adaptiveThreshold float64
+		var adaptiveMinN int
+		if rerankAdaptive != "" {
+			parts := strings.SplitN(rerankAdaptive, ":", 2)
+			if len(parts) == 2 {
+				if t, terr := strconv.ParseFloat(parts[0], 64); terr == nil {
+					if m, merr := strconv.Atoi(parts[1]); merr == nil {
+						adaptiveThreshold = t
+						adaptiveMinN = m
+					}
+				}
+			}
+			if adaptiveThreshold == 0 || adaptiveMinN == 0 {
+				logger.Logf(kenmcp.LogWarn,
+					"invalid KEN_MCP_RERANK_ADAPTIVE=%q: expected THRESHOLD:MINN (e.g. 0.30:10) — adaptive disabled",
+					rerankAdaptive)
+			}
+		}
+		if rerankModelDir == "" {
+			logger.Logf(kenmcp.LogWarn,
+				"KEN_MCP_RERANK=on but KEN_MCP_RERANK_MODEL_DIR is empty — "+
+					"hybrid-rerank queries will downgrade to hybrid "+
+					"(set KEN_MCP_RERANK_MODEL_DIR to a CodeRankEmbed snapshot; "+
+					"`ken download-model --rerank` fetches one to ~/.ken/rerank-model)")
+		} else if !modelAvailable(rerankModelDir) {
+			logger.Logf(kenmcp.LogWarn,
+				"no CodeRankEmbed model at KEN_MCP_RERANK_MODEL_DIR=%q — "+
+					"hybrid-rerank queries will downgrade to hybrid", rerankModelDir)
+		} else {
+			var (
+				enc     coderank.Encoder
+				loadErr error
+			)
+			switch rerankQuant {
+			case "int8":
+				enc, loadErr = coderank.LoadQ8(rerankModelDir)
+			default:
+				enc, loadErr = coderank.Load(rerankModelDir)
+			}
+			if loadErr != nil {
+				logger.Logf(kenmcp.LogWarn,
+					"failed to load rerank model from %q (quant=%s): %v — "+
+						"hybrid-rerank queries will downgrade to hybrid", rerankModelDir, rerankQuant, loadErr)
+			} else {
+				neuralReranker = search.NewNeuralReranker(enc, search.WithCacheSize(rerankCacheSize))
+				rerankerOptions = []search.RerankerOption{
+					search.WithRerankN(rerankTopN),
+					search.WithRerankBlendBeta(rerankBeta),
+				}
+				if adaptiveThreshold > 0 && adaptiveMinN > 0 {
+					rerankerOptions = append(rerankerOptions,
+						search.WithAdaptiveRerankN(adaptiveThreshold, adaptiveMinN))
+				}
+
+				// M9 persistent doc cache. Default ~/.ken/rerank-cache-<quant>.bin
+				// — the per-quant filename keeps an f32 cache and an int8
+				// cache side-by-side (otherwise swapping KEN_MCP_RERANK_QUANT
+				// across boots logs ErrCacheScopeMismatch on every restart).
+				// Override path via KEN_MCP_RERANK_CACHE; KEN_MCP_RERANK_CACHE=""
+				// (explicit empty) disables persistence entirely.
+				rerankCacheDim = enc.HiddenDim()
+				rerankCacheScope = search.CacheScopeKey(filepath.Base(rerankModelDir), rerankQuant, rerankCacheDim)
+				if raw, set := os.LookupEnv("KEN_MCP_RERANK_CACHE"); set {
+					rerankCachePath = strings.TrimSpace(raw)
+				} else {
+					home, _ := os.UserHomeDir()
+					if home != "" {
+						rerankCachePath = filepath.Join(home, ".ken", fmt.Sprintf("rerank-cache-%s.bin", rerankQuant))
+					}
+				}
+				if rerankCachePath != "" {
+					loaded, lerr := search.LoadCacheFromFile(neuralReranker, rerankCachePath, rerankCacheScope, rerankCacheDim)
+					switch {
+					case lerr == nil:
+						logger.Logf(kenmcp.LogInfo, "rerank cache: loaded %d entries from %s", loaded, rerankCachePath)
+					case errors.Is(lerr, os.ErrNotExist):
+						logger.Logf(kenmcp.LogInfo, "rerank cache: %s not present yet (first run); starting cold", rerankCachePath)
+					case errors.Is(lerr, search.ErrCacheScopeMismatch), errors.Is(lerr, search.ErrCacheEmbedDimMismatch):
+						logger.Logf(kenmcp.LogWarn, "rerank cache: %s scope/dim mismatch (%v); starting cold, next save will overwrite", rerankCachePath, lerr)
+					case errors.Is(lerr, search.ErrCacheCorrupt), errors.Is(lerr, search.ErrCacheFormatVersion):
+						logger.Logf(kenmcp.LogWarn, "rerank cache: %s unusable (%v); starting cold, next save will overwrite", rerankCachePath, lerr)
+					default:
+						logger.Logf(kenmcp.LogWarn, "rerank cache: load failed (%v); starting cold", lerr)
+					}
+				}
+
+				logger.Logf(kenmcp.LogInfo,
+					"rerank: loaded %s (quant=%s top_n=%d cache_size=%d beta=%v adaptive=%v:%d cache_path=%q)",
+					rerankModelDir, rerankQuant, rerankTopN, rerankCacheSize, rerankBeta,
+					adaptiveThreshold, adaptiveMinN, rerankCachePath)
+			}
+		}
+	}
+
 	// modeStr is now guaranteed to be one of ModeNames(); ParseMode can
 	// never fail here. Keep the call so a future ParseMode addition
 	// (e.g. a new mode wired into ModeNames before the parser) is caught.
@@ -231,8 +364,14 @@ func main() {
 		modeStr = "bm25"
 		modelDir = ""
 	}
-	logger.Logf(kenmcp.LogInfo, "starting (mode=%s chunker=%s cache_size=%d default_repo=%q fold_migrations=%v)",
-		modeStr, chunker, size, defaultRepo, !noAutoMigrations)
+	rerankStatus := "off"
+	if neuralReranker != nil {
+		rerankStatus = "on"
+	} else if rerankEnabled {
+		rerankStatus = "on-but-unavailable"
+	}
+	logger.Logf(kenmcp.LogInfo, "starting (mode=%s chunker=%s cache_size=%d default_repo=%q fold_migrations=%v rerank=%s)",
+		modeStr, chunker, size, defaultRepo, !noAutoMigrations, rerankStatus)
 
 	// Builder: clone http(s) URLs to a temp dir; index local paths
 	// in-place. mcp.NormalizeKey hands us either a canonical URL or an
@@ -268,6 +407,14 @@ func main() {
 				cleanup()
 			}
 			return nil, nil, err
+		}
+		// M5: attach the boot-time NeuralReranker (if any) to this
+		// WatchedIndex. The same instance is shared across every repo's
+		// WatchedIndex AND survives the watcher's snapshot republishes,
+		// so the content-hash LRU stays warm regardless of file churn or
+		// switching between repos.
+		if neuralReranker != nil {
+			ix.SetReranker(neuralReranker, rerankerOptions...)
 		}
 		// Log reindex activity at info-level so warn-default runs stay
 		// quiet but `KEN_MCP_LOG_LEVEL=info` shows agents the file
@@ -316,6 +463,48 @@ func main() {
 	// with FS-only rather than crashing startup).
 	refresher, dbCleanup := wireDBTier2(ctx, logger, cache, defaultRepo)
 
+	// M8d telemetry wiring. Two independent gates:
+	//   - log: ON when reranker is loaded AND log level ≤ info. Emits
+	//     a per-query [telemetry] line to stderr (operator-visible only;
+	//     never reaches the agent or pollutes stdout JSON-RPC).
+	//   - response body: ON when KEN_MCP_RERANK_TELEMETRY=1. Appends
+	//     the same line to the search tool result text. Opt-in because
+	//     adding fields to the agent-facing wire format is a behavior
+	//     change.
+	// Either gate enables collection in the search code path; both off
+	// means the zero-config path (no time.Now bookkeeping).
+	telemetryInResponse := envBool("KEN_MCP_RERANK_TELEMETRY", false, logger)
+	var telemetryLog func(query string, t search.Telemetry)
+	if neuralReranker != nil && logger.Level <= kenmcp.LogInfo {
+		telemetryLog = func(query string, t search.Telemetry) {
+			logger.Logf(kenmcp.LogInfo,
+				"search %q total=%s stage1=%s rerank=%s blend=%s n=%d cache=%d/%d q_enc=%s cand_enc=%s",
+				query, t.TotalWall, t.Stage1Wall, t.RerankWall, t.BlendWall,
+				t.RerankerN, t.RerankerCacheHits, t.RerankerCacheMisses,
+				t.RerankerQueryEncode, t.RerankerCandidateEncode)
+		}
+	}
+
+	// M9 usage stats. Default: track to ~/.ken/savings.jsonl (semble's
+	// behavior). Opt out via KEN_NO_USAGE_STATS=1; override the path
+	// with KEN_USAGE_STATS_PATH=/custom.jsonl.
+	//
+	// Privacy: internal/usage NEVER records query text or file paths.
+	// Only ts + call type + result count + char counts are persisted.
+	var usageRecorder *usage.Recorder
+	if envBool("KEN_NO_USAGE_STATS", false, logger) {
+		logger.Logf(kenmcp.LogInfo, "usage stats: tracking disabled via KEN_NO_USAGE_STATS=1")
+	} else {
+		usagePath := strings.TrimSpace(os.Getenv("KEN_USAGE_STATS_PATH"))
+		if usagePath == "" {
+			usagePath = usage.DefaultPath()
+		}
+		if usagePath != "" {
+			usageRecorder = usage.NewRecorder(usagePath)
+			logger.Logf(kenmcp.LogInfo, "usage stats: appending to %s (counts + chars only; query text NEVER logged; opt out via KEN_NO_USAGE_STATS=1)", usagePath)
+		}
+	}
+
 	srv := kenmcp.NewServer(kenmcp.Config{
 		Cache:       cache,
 		DefaultRepo: defaultRepo,
@@ -326,13 +515,31 @@ func main() {
 		// registered (tools/list stays honest for FS-only deployments).
 		// The chunk-integration callback was already wired inside
 		// wireDBTier2's Start call against the WatchedIndex.
-		DB: refresher,
+		DB:                  refresher,
+		TelemetryLog:        telemetryLog,
+		TelemetryInResponse: telemetryInResponse,
+		UsageRecorder:       usageRecorder,
 	})
 
 	// Signal-driven cleanup: when the agent disconnects (Ctrl-C or pipe
 	// close), drop temp clone directories so we don't leak disk.
+	//
+	// M9: also persist the rerank LRU to disk so the next ken-mcp
+	// launch starts warm. Best-effort — a save failure logs warn and
+	// the cleanup continues (the alternative — failing shutdown — would
+	// leak clone dirs and accomplish nothing useful since the user is
+	// already terminating).
 	go func() {
 		<-ctx.Done()
+		if neuralReranker != nil && rerankCachePath != "" {
+			if _, _, sz := neuralReranker.CacheStats(); sz > 0 {
+				if serr := search.SaveCacheToFile(neuralReranker, rerankCachePath, rerankCacheScope, rerankCacheDim); serr != nil {
+					logger.Logf(kenmcp.LogWarn, "rerank cache: save to %s failed: %v", rerankCachePath, serr)
+				} else {
+					logger.Logf(kenmcp.LogInfo, "rerank cache: saved %d entries to %s", sz, rerankCachePath)
+				}
+			}
+		}
 		if dbCleanup != nil {
 			dbCleanup()
 		}
