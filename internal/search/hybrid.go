@@ -1,9 +1,9 @@
 package search
 
 import (
-	"github.com/townsendmerino/ken/chunk"
-	"github.com/townsendmerino/ken/internal/ann"
-	"github.com/townsendmerino/ken/internal/bm25"
+	"github.com/townsendmerino/aikit/ann"
+	"github.com/townsendmerino/aikit/bm25"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // Hybrid retrieval — ported from semble search.py:search_hybrid.

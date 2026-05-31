@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // TestParseMode_hybridRerank: the new mode parses through the standard

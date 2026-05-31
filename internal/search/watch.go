@@ -15,8 +15,8 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/townsendmerino/ken/chunk"
-	"github.com/townsendmerino/ken/internal/embed"
+	"github.com/townsendmerino/aikit/chunk"
+	"github.com/townsendmerino/aikit/embed"
 	"github.com/townsendmerino/ken/internal/repo"
 	"github.com/townsendmerino/ken/internal/sql"
 )

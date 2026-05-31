@@ -10,7 +10,7 @@ import (
 	"github.com/townsendmerino/ken/internal/search"
 	kenmcp "github.com/townsendmerino/ken/mcp"
 
-	_ "github.com/townsendmerino/ken/chunk/regex"
+	_ "github.com/townsendmerino/aikit/chunk/regex"
 )
 
 // writeCorpus lays down a tiny bm25-indexable corpus and returns its dir.

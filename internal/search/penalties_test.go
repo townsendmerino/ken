@@ -3,7 +3,7 @@ package search
 import (
 	"testing"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 func TestFilePathPenalty(t *testing.T) {

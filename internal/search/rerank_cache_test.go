@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // TestSaveLoadCache_roundtrip: write a cache to disk, read it back,

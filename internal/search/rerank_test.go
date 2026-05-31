@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 func TestSplitIdentifier(t *testing.T) {

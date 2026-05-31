@@ -10,9 +10,9 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/odvcencio/gotreesitter v0.20.0-rc2
 	github.com/pkoukk/tiktoken-go v0.1.8
+	github.com/townsendmerino/aikit v0.1.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.20.0
-	golang.org/x/text v0.37.0
 	modernc.org/sqlite v1.51.0
 )
 
@@ -50,6 +50,7 @@ require (
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

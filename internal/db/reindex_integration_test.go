@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // TestReindexDB_IntegrationE2E exercises the same code path the

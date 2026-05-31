@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // Refresher orchestrates the three reindex paths Tier 2 supports

@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/townsendmerino/ken/chunk"
-	"github.com/townsendmerino/ken/internal/coderank"
+	"github.com/townsendmerino/aikit/chunk"
+	"github.com/townsendmerino/aikit/encoder"
 )
 
 // DefaultRerankerCacheSize bounds the per-reranker doc-embedding LRU.
@@ -33,7 +33,7 @@ const DefaultRerankerCacheSize = 4096
 // M1 Pro for f32; ModelQ8 lands ~similar (single-thread) or marginally
 // faster (multi-thread; see outputs/m8b-results.md).
 type NeuralReranker struct {
-	model coderank.Encoder
+	model encoder.Encoder
 	cache *embeddingLRU
 }
 
@@ -56,11 +56,11 @@ func WithCacheSize(n int) NeuralRerankerOption {
 	}
 }
 
-// NewNeuralReranker wraps a loaded encoder (coderank.Model f32 or
-// coderank.ModelQ8 int8) as a search.Reranker. Construction is cheap
+// NewNeuralReranker wraps a loaded encoder (encoder.Model f32 or
+// encoder.ModelQ8 int8) as a search.Reranker. Construction is cheap
 // (the encoder is already loaded); the only allocation here is the
 // empty LRU.
-func NewNeuralReranker(model coderank.Encoder, opts ...NeuralRerankerOption) *NeuralReranker {
+func NewNeuralReranker(model encoder.Encoder, opts ...NeuralRerankerOption) *NeuralReranker {
 	cfg := neuralRerankerConfig{cacheSize: DefaultRerankerCacheSize}
 	for _, o := range opts {
 		o(&cfg)

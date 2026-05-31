@@ -38,8 +38,8 @@ import (
 	// Side-effect import: register the treesitter chunker so this
 	// bench can exercise it. As of v0.6.0 internal/search no longer
 	// transitively pulls in optional chunkers.
-	_ "github.com/townsendmerino/ken/chunk/treesitter"
-	"github.com/townsendmerino/ken/internal/coderank"
+	_ "github.com/townsendmerino/aikit/chunk/treesitter"
+	"github.com/townsendmerino/aikit/encoder"
 	"github.com/townsendmerino/ken/internal/search"
 )
 
@@ -194,9 +194,9 @@ func TestCoIR_CSNPython(t *testing.T) {
 		// for sweeping the curve.
 		if mode == search.ModeHybridRerank {
 			tLoad := time.Now()
-			rm, err := coderank.Load(rerankModelDir)
+			rm, err := encoder.Load(rerankModelDir)
 			if err != nil {
-				t.Fatalf("[%s] coderank.Load: %v", modeStr, err)
+				t.Fatalf("[%s] encoder.Load: %v", modeStr, err)
 			}
 			t.Logf("[%s] loaded rerank model in %.1fs (top_n=%d β=%v)",
 				modeStr, time.Since(tLoad).Seconds(), rerankTopN, rerankBeta)

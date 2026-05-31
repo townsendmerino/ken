@@ -220,7 +220,7 @@ ken download-model --rerank   # CodeRankEmbed    → ~/.ken/rerank-model    (~54
 
 # CoIR with hybrid-rerank (opt-in via KEN_RERANK=1).
 # Defaults: KEN_RERANK_TOP_N=100, KEN_RERANK_BETA=1.0  (M0 CoIR config).
-KEN_RERANK=1 KEN_RERANK_MODEL_DIR=$PWD/testdata/coderank-model \
+KEN_RERANK=1 KEN_RERANK_MODEL_DIR=$PWD/testdata/encoder-model \
 KEN_COIR_QUERY_LIMIT=15 KEN_RERANK_TOP_N=25 \
   go test -tags=bench ./bench/ndcg/ -run TestCoIR_CSNPython -v -timeout 60m
 

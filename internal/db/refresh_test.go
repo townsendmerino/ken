@@ -12,7 +12,7 @@ import (
 
 	_ "modernc.org/sqlite" // empty-SQLite-file harness for TryRefresh tests
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // TestNewRefresher_RequiresDSN — Tier 2 is disabled when DSN is empty,

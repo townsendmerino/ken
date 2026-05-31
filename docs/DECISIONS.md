@@ -2359,3 +2359,68 @@ A throwaway measurement spike (2026-05-28) confirmed everything before committin
 - **The #88 collaboration thread closes** with ken's confirmation + the measured numbers.
 - **DESIGN.md §2/§10's "the embed bundle is monolithic at the source layer" statements are now historical** (annotated to point here); the embed layer is selectable as of this ADR.
 - **rc-pin debt:** revisit when stable v0.20.0 ships.
+
+
+---
+
+## ADR-034: Extract reusable algorithm packages into a separate `aikit` module
+
+**Status:** Accepted
+
+**Date:** 2026-05-30
+
+**Extends:** [ADR-032](#adr-032-promote-the-chunk-package-to-public-chunk--chunkers-chunker-interface-is-the-10-boundary) (which already promoted `chunk` to a public 1.0-stable surface).
+
+### Context
+
+Every reusable algorithm package in ken lives under `internal/`, which Go's compiler forbids any other module from importing. The packages that could legitimately be shared with other projects — generic top-K selector, flat brute-force ANN, BM25 lexical index, Model2Vec inference, CodeRankEmbed transformer encoder, language-aware code chunkers — were trapped behind the `internal/` boundary.
+
+ADR-032 promoted `chunk` to a public path (`github.com/townsendmerino/ken/chunk`) but that's still inside the ken module. A second project wanting to reuse `embed` or `bm25` still couldn't.
+
+### Decision
+
+**Extract `topk`, `ann`, `bm25`, `embed`, `coderank`, and `chunk` (+ subpackages) into a new module `github.com/townsendmerino/aikit`. ken consumes it as a dependency.**
+
+**End state:**
+
+- `aikit` lives at [`github.com/townsendmerino/aikit`](https://github.com/townsendmerino/aikit), independent module.
+- Eight aikit packages: `topk` · `ann` · `bm25` · `embed` · `encoder` · `chunk` (+ `regex` / `markdown` / `treesitter`).
+- `coderank` renamed to `encoder` on the move — the package is a transformer encoder, not a PageRank-style ranker; the old name misled. Done at the only moment it's free (every import line was being rewritten anyway).
+- ken's go.mod adds `require github.com/townsendmerino/aikit v0.1.0`. All former `internal/{topk,ann,bm25,embed,coderank}` and `chunk/*` imports point at `aikit/...`. App glue (`internal/search`, `internal/db`, `internal/sql`, `internal/repo`, `internal/usage`, `mcp/*`, `cmd/*`) is unchanged in behavior.
+- `chunk/treesitter`'s drift-guard test (`TestSubsetTagsMatchKenToTreeSitter`) moved to `ken/internal/buildchecks/subset_test.go` because it's a ken release-config guard, not a chunk package concern. `kenToTreeSitter` was uppercased to `KenToTreeSitter` so the test can reach it from outside its package.
+- Public-API break for `chunk` (ADR-032's promotion was only 2 days old, never tagged in a release, zero external consumers found via GitHub code search): hard-break, no shim. Path moved from `github.com/townsendmerino/ken/chunk` to `github.com/townsendmerino/aikit/chunk`.
+
+### Alternatives considered
+
+- **In-repo `kit/` curation.** Cheaper but doesn't actually solve the problem — packages still can't be imported by another module.
+- **Multi-module monorepo** (second `go.mod` under `ken/aikit/`). Avoids the second repo but drags ken's history + deps into every consumer of `aikit`, and makes the "reusable by another project" narrative awkward.
+- **Status quo + manual cp/paste for the next project.** Highest cost long-term; rejected.
+- **Skip the `coderank → encoder` rename.** Adversarial review noted the rename costs ~50 string sites (panic prefixes, scripts, testdata path conventions, gitignore, ADR text). Did the rename anyway: the moment is free, the name is more accurate, and future readers of `aikit/encoder` aren't asked to know that the package is named for an unrelated algorithm.
+
+### Migration mechanics (executed 2026-05-30 in one session)
+
+Leaf-first per-stage moves under `go.work`, each stage left both modules green at every commit:
+
+1. **Stage A:** init `aikit/` (LICENSE + NOTICE + THIRD_PARTY_LICENSES + README + .gitignore + go.mod), `go.work` at the parent.
+2. **Stage B1:** atomic move of `topk` + `ann` + `bm25` + ken-side consumer rewrites (`internal/search/{hybrid,index}.go` + `bench/tokens/grep_baseline.go` + tests).
+3. **Stage B2:** atomic move of `embed` + `testdata/golden.json` + `scripts/{pin_inference,parity_dump}.py` + ken consumer rewrites (`internal/coderank` still in ken, `internal/search/{watch,index,index_serialize}`, `mcp/run`, `cmd/ken/build_index`, `cmd/ken-mcp`, all relevant tests).
+4. **Stage B3:** atomic move + RENAME `coderank → encoder`. Updated package decl, panic prefixes, error strings, scripts (`pin_coderank.py → pin_encoder.py`, `coderank_model.py → encoder_model.py`, `m0_ceiling.py` also moved), testdata convention (`testdata/coderank-model → testdata/encoder-model`), `testdata/coderank_golden.json → testdata/encoder_golden.json`, ken's `.gitignore` line, and the 5 ken-side selector edits (`coderank.Foo → encoder.Foo`).
+5. **Stage B4:** atomic move of `chunk` + all 3 subpackages + drift-guard test relocation + `kenToTreeSitter → KenToTreeSitter` export + 53-file consumer rewrite (every `internal/{search,db,sql}`, `mcp/*`, `cmd/*`, and `demos/*` import path).
+6. **Stage D:** tag `aikit v0.1.0`, push, replace ken's go.work require with `v0.1.0`, verify `GOWORK=off go build ./... && go test ./...` green against the tagged version.
+
+### Verification
+
+- `gofmt -l` clean in both modules.
+- `go vet ./...` clean in both modules.
+- `go test ./...` green in both modules. `aikit/encoder` golden cosine = **1.000000** preserved on all 18 fixtures (bit-identical to PyTorch+MPS reference). `TestForwardBatch_matchesSingle` exact. `TestMatmulBT_blockedMatchesNaive` exact on all 8 shapes.
+- ADR-033's drift guard (now `ken/internal/buildchecks/subset_test.go`) still passes — `KenToTreeSitter` ↔ `.goreleaser.yml` parity.
+- `mcp/binary_contract_test.go` v0.6.0 binary-size contract still satisfied (aikit imports don't trigger any forbidden DB-driver patterns).
+
+### Consequences
+
+- **External consumers of `chunk` would break** — but ADR-032 was never released (latest ken tag v0.8.8 still has `internal/chunk`); GitHub code search returns zero downstream consumers. The break is purely against unreleased main.
+- **ken's release path now depends on aikit's:** ken cannot ship a release with `require aikit v0.0.0`; aikit must have a tagged release available before ken cuts its next tag. Bounded by Stage D — ~minutes per release-pair, not a calendar gap.
+- **`go.work` stays in `.gitignore`'d state**; CI continues to build with the module-tagged require. `GOWORK=off` is the canonical release-path build.
+- **Stability tiers carry over** to `aikit` per its README — hard-1.0-committed surface matches ADR-032 + the documented `aikit/embed`/`aikit/encoder` boundaries; concrete chunkers + Q8 paths + mmap variant stay best-effort.
+- **License chain intact:** LICENSE + NOTICE + THIRD_PARTY_LICENSES.md copied to aikit (Model2Vec + semble + gotreesitter + x/text attributions travel with `embed`/`bm25`/`encoder`/`chunk`).
+- **Pre-execution evaluation:** five-angle parallel review (build correctness, public-API impact, testdata portability, adversarial gaps, sequencing) ran before any code moved. Every reviewer returned `proceed-with-fixes`; concerns were folded into the executed plan (test files added to worklist, atomic per-Stage-B commits, drift-guard relocation, scripts also moved with their packages). Two findings stayed unfixed in this migration: dead markdown links in historical CHANGELOG entries (accepted as docs cost; the prose narrative still reads correctly), and pre-existing-broken bench fixture paths in chunk subpackages (already silently skipped today; fix folded into the move via path-depth correction).

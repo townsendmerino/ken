@@ -558,7 +558,7 @@ func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 // corrupted.
 //
 // Skipped without both models symlinked: testdata/model (Model2Vec for
-// stage-1 hybrid) AND testdata/coderank-model (for the reranker).
+// stage-1 hybrid) AND testdata/encoder-model (for the reranker).
 func TestBinary_StdoutIsCleanJSONRPC_WithRerank(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping subprocess MCP rerank test in -short mode")
@@ -569,13 +569,13 @@ func TestBinary_StdoutIsCleanJSONRPC_WithRerank(t *testing.T) {
 		t.Fatal(err)
 	}
 	hybridModel := filepath.Join(repoRoot, "testdata", "model")
-	rerankModel := filepath.Join(repoRoot, "testdata", "coderank-model")
+	rerankModel := filepath.Join(repoRoot, "testdata", "encoder-model")
 	for _, p := range []string{
 		filepath.Join(hybridModel, "model.safetensors"),
 		filepath.Join(rerankModel, "model.safetensors"),
 	} {
 		if _, err := os.Stat(p); err != nil {
-			t.Skipf("missing %s — both testdata/model + testdata/coderank-model symlinks required", p)
+			t.Skipf("missing %s — both testdata/model + testdata/encoder-model symlinks required", p)
 		}
 	}
 

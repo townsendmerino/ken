@@ -35,12 +35,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/townsendmerino/ken/internal/coderank"
+	"github.com/townsendmerino/aikit/encoder"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/townsendmerino/ken/chunk"
-	"github.com/townsendmerino/ken/internal/embed"
+	"github.com/townsendmerino/aikit/chunk"
+	"github.com/townsendmerino/aikit/embed"
 	// Side-effect imports: register every chunker the stock binary
 	// offers. internal/search blank-imports "regex" (the default), so
 	// we only need the optional chunkers here. The treesitter import
@@ -50,8 +50,8 @@ import (
 	// — desired for the code-search use case but explicitly skipped
 	// by cmd/ken-mcp-docs. Per ADR-023 the bundle is monolithic at
 	// the embed layer so per-language gating doesn't shrink it.
-	_ "github.com/townsendmerino/ken/chunk/markdown"
-	_ "github.com/townsendmerino/ken/chunk/treesitter"
+	_ "github.com/townsendmerino/aikit/chunk/markdown"
+	_ "github.com/townsendmerino/aikit/chunk/treesitter"
 	"github.com/townsendmerino/ken/internal/search"
 	"github.com/townsendmerino/ken/internal/usage"
 	kenmcp "github.com/townsendmerino/ken/mcp"
@@ -281,14 +281,14 @@ func main() {
 					"hybrid-rerank queries will downgrade to hybrid", rerankModelDir)
 		} else {
 			var (
-				enc     coderank.Encoder
+				enc     encoder.Encoder
 				loadErr error
 			)
 			switch rerankQuant {
 			case "int8":
-				enc, loadErr = coderank.LoadQ8(rerankModelDir)
+				enc, loadErr = encoder.LoadQ8(rerankModelDir)
 			default:
-				enc, loadErr = coderank.Load(rerankModelDir)
+				enc, loadErr = encoder.Load(rerankModelDir)
 			}
 			if loadErr != nil {
 				logger.Logf(kenmcp.LogWarn,

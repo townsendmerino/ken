@@ -42,7 +42,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // Options configures Tier-2 DB indexing. The zero value is a valid

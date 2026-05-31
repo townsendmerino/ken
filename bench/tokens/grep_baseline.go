@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/townsendmerino/ken/internal/bm25"
+	"github.com/townsendmerino/aikit/bm25"
 	"github.com/townsendmerino/ken/internal/repo"
 )
 

@@ -61,7 +61,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // Migration-directory detection (migrationPatterns, classifyMigrationName,

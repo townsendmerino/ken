@@ -14,7 +14,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // makeExtras constructs a deterministic chunk slice for tests. The

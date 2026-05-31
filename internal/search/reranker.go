@@ -3,7 +3,7 @@ package search
 import (
 	"sort"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // Reranker scores stage-1 candidates against a query. Higher score =

@@ -24,7 +24,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/townsendmerino/ken/internal/embed"
+	"github.com/townsendmerino/aikit/embed"
 	"github.com/townsendmerino/ken/internal/search"
 )
 

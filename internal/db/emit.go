@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // maxViewBodyLines mirrors internal/sql/emit.go: caps a view body so a

@@ -20,9 +20,9 @@ import (
 	// Side-effect imports: register every chunker the CLI exposes.
 	// internal/search blank-imports "regex" (the default); the optional
 	// chunkers are listed here so the binary always exposes them.
-	_ "github.com/townsendmerino/ken/chunk/markdown"
-	_ "github.com/townsendmerino/ken/chunk/treesitter"
-	"github.com/townsendmerino/ken/internal/coderank"
+	_ "github.com/townsendmerino/aikit/chunk/markdown"
+	_ "github.com/townsendmerino/aikit/chunk/treesitter"
+	"github.com/townsendmerino/aikit/encoder"
 	"github.com/townsendmerino/ken/internal/modelfetch"
 	"github.com/townsendmerino/ken/internal/search"
 	usagepkg "github.com/townsendmerino/ken/internal/usage"
@@ -92,7 +92,7 @@ func fileExists(p string) bool {
 //  2. $KEN_RERANK_MODEL_DIR, unconditional if set.
 //  3. $HOME/.ken/rerank-model — the canonical end-user location, IF
 //     model.safetensors exists there.
-//  4. ./testdata/coderank-model — repo-developer fallback, IF
+//  4. ./testdata/encoder-model — repo-developer fallback, IF
 //     model.safetensors exists there.
 //
 // If none resolve, returns the canonical end-user path so the
@@ -111,7 +111,7 @@ func resolveRerankModelDir(flagValue string) string {
 			return homeCandidate
 		}
 	}
-	repoCandidate := filepath.Join("testdata", "coderank-model")
+	repoCandidate := filepath.Join("testdata", "encoder-model")
 	if fileExists(filepath.Join(repoCandidate, "model.safetensors")) {
 		return repoCandidate
 	}
@@ -168,7 +168,7 @@ Run 'ken download-model' to populate ~/.ken/model. bm25 mode needs no model.
 
 hybrid-rerank mode also needs a CodeRankEmbed rerank-model dir; resolved as
 --rerank-model <DIR> → $KEN_RERANK_MODEL_DIR → ~/.ken/rerank-model →
-./testdata/coderank-model. Run 'ken download-model --rerank' to populate it.
+./testdata/encoder-model. Run 'ken download-model --rerank' to populate it.
 Defaults: --rerank-top-n 50, --rerank-beta 0.25 (M0-validated blend).
 `)
 }
@@ -480,16 +480,16 @@ func attachRerankerIfNeeded(ix *search.Index, mode search.Mode, rerankModelFlag,
 	if !fileExists(filepath.Join(dir, "model.safetensors")) {
 		return nil, fmt.Errorf("rerank model not found at %s — run `ken download-model --rerank` (downloads ~547 MB to ~/.ken/rerank-model) or pass --rerank-model DIR", dir)
 	}
-	var enc coderank.Encoder
+	var enc encoder.Encoder
 	switch quant {
 	case "", "f32":
-		m, lerr := coderank.Load(dir)
+		m, lerr := encoder.Load(dir)
 		if lerr != nil {
 			return nil, fmt.Errorf("loading rerank model from %s: %w", dir, lerr)
 		}
 		enc = m
 	case "int8":
-		m, lerr := coderank.LoadQ8(dir)
+		m, lerr := encoder.LoadQ8(dir)
 		if lerr != nil {
 			return nil, fmt.Errorf("loading rerank model (int8) from %s: %w", dir, lerr)
 		}

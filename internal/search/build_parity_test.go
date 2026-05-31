@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/townsendmerino/ken/internal/embed"
+	"github.com/townsendmerino/aikit/embed"
 )
 
 // TestBuildDeterminism_CrossRun is the in-tree regression net for the

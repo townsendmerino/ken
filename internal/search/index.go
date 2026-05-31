@@ -41,10 +41,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/townsendmerino/ken/chunk"
-	_ "github.com/townsendmerino/ken/chunk/regex" // registers the default "regex" chunker
-	"github.com/townsendmerino/ken/internal/ann"
-	"github.com/townsendmerino/ken/internal/bm25"
+	"github.com/townsendmerino/aikit/ann"
+	"github.com/townsendmerino/aikit/bm25"
+	"github.com/townsendmerino/aikit/chunk"
+	_ "github.com/townsendmerino/aikit/chunk/regex" // registers the default "regex" chunker
 	// NOTE: treesitter and markdown are NOT blank-imported here. Binaries
 	// that want them must blank-import them explicitly — e.g. cmd/ken-mcp
 	// and cmd/ken-mcp-docs do, but the embedded-corpus demo binary
@@ -56,7 +56,7 @@ import (
 	// per-language gating doesn't shrink it. The chunker registry is
 	// the seam: side-effect imports happen at the binary's main
 	// package, not in this shared library layer.
-	"github.com/townsendmerino/ken/internal/embed"
+	"github.com/townsendmerino/aikit/embed"
 	"github.com/townsendmerino/ken/internal/repo"
 	"github.com/townsendmerino/ken/internal/sql"
 )
@@ -154,7 +154,7 @@ type Index struct {
 
 	// M4 neural reranker (optional; nil = ModeHybridRerank downgrades
 	// to ModeHybrid). Set via SetReranker after FromFS so the heavy
-	// reranker dep (internal/coderank) doesn't leak into every Index
+	// reranker dep (aikit/encoder) doesn't leak into every Index
 	// build path. Reranker implementations are goroutine-safe; the
 	// rerankCfg defaults to (rerankN=50, β=0.25) per M0 amendments.
 	reranker  Reranker

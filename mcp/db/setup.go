@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 	"github.com/townsendmerino/ken/internal/db"
 	"github.com/townsendmerino/ken/mcp"
 )

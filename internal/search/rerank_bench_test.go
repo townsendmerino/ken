@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // buildRerankCorpus builds a synthetic chunks slice with realistic shape:

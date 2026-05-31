@@ -18,7 +18,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // SetupTier2 orchestrates the full Tier-2 lifecycle:

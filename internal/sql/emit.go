@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // maxViewBodyLines caps the rendered length of a CREATE VIEW body. Long

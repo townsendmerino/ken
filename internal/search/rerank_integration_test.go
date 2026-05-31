@@ -8,9 +8,9 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/townsendmerino/ken/chunk"
-	_ "github.com/townsendmerino/ken/chunk/regex"
-	"github.com/townsendmerino/ken/internal/coderank"
+	"github.com/townsendmerino/aikit/chunk"
+	_ "github.com/townsendmerino/aikit/chunk/regex"
+	"github.com/townsendmerino/aikit/encoder"
 )
 
 // Tiny corpus used by the integration tests below. Distinct enough to
@@ -119,26 +119,26 @@ func TestSearchMode_hybridRerankBetaZeroEqualsHybrid(t *testing.T) {
 	}
 }
 
-// TestNeuralReranker_endToEnd: load the REAL coderank.Model, attach it
+// TestNeuralReranker_endToEnd: load the REAL encoder.Model, attach it
 // as a reranker, run a query, confirm: (1) it produces results,
 // (2) cache miss-then-hit counters move on repeat queries, (3) result
 // order matches NeuralReranker.Rerank's intent (cosine on L2-normed
-// vectors). Skipped when the coderank model isn't symlinked.
+// vectors). Skipped when the encoder model isn't symlinked.
 //
 // This is the slow one (model load ~150ms + a handful of forward
-// passes); gated by -short and by the coderank model dir.
+// passes); gated by -short and by the encoder model dir.
 func TestNeuralReranker_endToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end NeuralReranker test runs ~5s; skipped under -short")
 	}
-	coderankModelDir := "../../testdata/coderank-model"
-	if _, err := os.Stat(filepath.Join(coderankModelDir, "model.safetensors")); errors.Is(err, fs.ErrNotExist) {
-		t.Skipf("no coderank model at %s — symlink HF snapshot to enable", coderankModelDir)
+	encoderModelDir := "../../testdata/encoder-model"
+	if _, err := os.Stat(filepath.Join(encoderModelDir, "model.safetensors")); errors.Is(err, fs.ErrNotExist) {
+		t.Skipf("no encoder model at %s — symlink HF snapshot to enable", encoderModelDir)
 	}
 	ix := loadHybridIndex(t)
-	rm, err := coderank.Load(coderankModelDir)
+	rm, err := encoder.Load(encoderModelDir)
 	if err != nil {
-		t.Fatalf("coderank.Load: %v", err)
+		t.Fatalf("encoder.Load: %v", err)
 	}
 	// Keep max_seq_length small so the test stays fast.
 	rm.SetMaxSeqLength(128)

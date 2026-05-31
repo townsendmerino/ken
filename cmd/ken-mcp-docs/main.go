@@ -49,7 +49,7 @@ import (
 	// 206 grammar blobs, plus parser runtime) for zero benefit on a
 	// docs-only corpus. See ADR-023 for the per-language-gating
 	// investigation outcome.
-	_ "github.com/townsendmerino/ken/chunk/markdown"
+	_ "github.com/townsendmerino/aikit/chunk/markdown"
 )
 
 // docsFS embeds every .md file under cmd/ken-mcp-docs/docs/ at build

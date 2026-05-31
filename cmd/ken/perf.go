@@ -29,8 +29,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/townsendmerino/ken/chunk"
-	"github.com/townsendmerino/ken/chunk/treesitter"
+	"github.com/townsendmerino/aikit/chunk"
+	"github.com/townsendmerino/aikit/chunk/treesitter"
 	"github.com/townsendmerino/ken/internal/perf"
 	"github.com/townsendmerino/ken/internal/search"
 )

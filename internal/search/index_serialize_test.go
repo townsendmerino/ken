@@ -11,7 +11,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/townsendmerino/ken/internal/embed"
+	"github.com/townsendmerino/aikit/embed"
 )
 
 // tinyCorpus is the shared fixture: three files with distinctive

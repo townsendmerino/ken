@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // Path penalties + top-k selection — ported verbatim from semble

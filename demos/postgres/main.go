@@ -38,7 +38,7 @@ import (
 	// accepts "treesitter" and the pre-built index's chunker matches.
 	// (regex + line come transitively via internal/search; treesitter is
 	// opt-in — now a public package per ADR-032, importable from any module.)
-	_ "github.com/townsendmerino/ken/chunk/treesitter"
+	_ "github.com/townsendmerino/aikit/chunk/treesitter"
 )
 
 //go:embed index.bin

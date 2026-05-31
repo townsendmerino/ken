@@ -28,7 +28,7 @@ import (
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (sql.Open("sqlite", ...))
 
-	"github.com/townsendmerino/ken/chunk"
+	"github.com/townsendmerino/aikit/chunk"
 )
 
 // sqliteDB is the engine label used in the freshness header

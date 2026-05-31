@@ -65,8 +65,8 @@ import (
 	"io/fs"
 	"math"
 
-	"github.com/townsendmerino/ken/chunk"
-	"github.com/townsendmerino/ken/internal/embed"
+	"github.com/townsendmerino/aikit/chunk"
+	"github.com/townsendmerino/aikit/embed"
 )
 
 const (
