@@ -34,7 +34,10 @@ jobs:
 
       - name: gofmt -l (must print nothing)
         run: |
-          out=$(gofmt -l chunk cmd demos internal mcp)
+          # `chunk` moved into the aikit module per ADR-034, so it
+          # is no longer a directory in this repo. The list below is
+          # every top-level Go directory that lives in `ken/`.
+          out=$(gofmt -l bench cmd demos internal mcp)
           if [ -n "$out" ]; then
             echo "gofmt found unformatted files:"
             echo "$out"
