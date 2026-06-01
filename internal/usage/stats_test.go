@@ -153,7 +153,9 @@ func TestBuildSummary_skipsMalformedLines(t *testing.T) {
 	writeRecord(t, path, "search", 1, 100, 1000, now)
 	// Inject a corrupt line.
 	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
-	f.WriteString("this is not json\n")
+	if _, err := f.WriteString("this is not json\n"); err != nil {
+		t.Fatalf("inject corrupt line: %v", err)
+	}
 	f.Close()
 	writeRecord(t, path, "search", 1, 200, 2000, now)
 
@@ -231,5 +233,7 @@ func writeRecord(t *testing.T, path, call string, results, snippet, file int, ts
 		t.Fatal(err)
 	}
 	defer f.Close()
-	f.Write(line)
+	if _, err := f.Write(line); err != nil {
+		t.Fatalf("write savings record: %v", err)
+	}
 }

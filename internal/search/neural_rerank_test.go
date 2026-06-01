@@ -74,8 +74,11 @@ func TestEmbeddingLRU_putRefreshesExistingKey(t *testing.T) {
 }
 
 func TestFnvHash_stableAndDistinct(t *testing.T) {
-	// Stable across calls.
-	if fnvHash("hello") != fnvHash("hello") {
+	// Stable across calls. Indirect through a local so staticcheck
+	// SA4000 doesn't read it as a tautology — fnvHash returning the
+	// same value for the same input twice IS the test, not noise.
+	first := fnvHash("hello")
+	if first != fnvHash("hello") {
 		t.Error("fnvHash should be deterministic")
 	}
 	// Distinct for distinct inputs (trivial collision check).
