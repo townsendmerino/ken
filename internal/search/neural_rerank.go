@@ -12,10 +12,22 @@ import (
 )
 
 // DefaultRerankerCacheSize bounds the per-reranker doc-embedding LRU.
-// 4096 chunks × 768 f32 ≈ 12 MB resident — cheap compared to the 547
-// MB model itself. Plan §8 calls the cache "the perf keystone";
-// matching ken-mcp's KEN_MCP_RERANK_CACHE_SIZE default in plan §10.
-const DefaultRerankerCacheSize = 4096
+// 32768 chunks × 768 f32 ≈ 100 MB resident at full occupancy — still
+// cheap compared to the 547 MB model itself, but big enough to hold
+// every chunk of a 20k-chunk repo without eviction. The LRU only
+// allocates on insert (capacity is the eviction threshold, not a
+// pre-allocation), so a small-repo session that never fills the cap
+// pays only for actual entries.
+//
+// The previous value (4096) was undersized for real production repos:
+// the Stage-7a HyDE M0 bench surfaced that a single rerank cell over
+// 1000 queries thrashes against 4096 (each query's top-50 candidate
+// set adds ~30 fresh chunks under heavy duplication), so users hitting
+// more than a few thousand unique candidates in a session pay the
+// ~600ms-per-encode cost repeatedly. Plan §8 calls the cache "the
+// perf keystone"; ken-mcp's KEN_MCP_RERANK_CACHE_SIZE env var still
+// overrides this default for operators who want to tune up or down.
+const DefaultRerankerCacheSize = 32768
 
 // NeuralReranker scores candidates with the CodeRankEmbed forward
 // pass. Holds an Encoder interface so the caller can supply either the
@@ -45,7 +57,7 @@ type neuralRerankerConfig struct {
 }
 
 // WithCacheSize overrides the LRU bound (default
-// DefaultRerankerCacheSize = 4096). 0 disables caching (every call
+// DefaultRerankerCacheSize = 32768). 0 disables caching (every call
 // re-encodes every candidate); useful for tests but a perf disaster
 // in production.
 func WithCacheSize(n int) NeuralRerankerOption {
