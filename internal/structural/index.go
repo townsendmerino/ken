@@ -1,0 +1,384 @@
+// Package structural builds a name-based structural index over a code
+// corpus, using gotreesitter as the parser. It is the shared foundation
+// for ken's Stage 8 work:
+//
+//  1. Retrieval enrichment (Track 1): produces deterministic per-chunk
+//     label prefixes — function name + calls + raises + (optionally)
+//     callers / imports / signature / siblings — that get prepended to
+//     chunks at index time. Lifts recall by surfacing structurally-
+//     related identifiers into the indexed text.
+//
+//  2. Exact-answer MCP tools (Track 2): exposes `definition`,
+//     `references` / `callers`, `outline`, `symbols` over the same
+//     index. Fast structural navigation, ranked best-guess, no LSP
+//     required.
+//
+// **Tree-sitter-grade, not compiler-grade.** All resolution is by
+// identifier name; we do not do type inference, cross-file overload
+// resolution, or scope-precise shadow analysis. For repos with
+// name collisions, a single name may resolve to multiple definition
+// sites — results are ranked and clearly labeled as ambiguous.
+// This is the same relevance-over-completeness trade ken makes for
+// retrieval; honest in both directions.
+//
+// Stage 8 v0 supports Python only. Adding other languages is a new
+// extract_<lang>.go file + a row in the kenLangToTSLang map; the
+// surface stays the same. Languages whose grammar fails (the
+// gotreesitter v0.18.0 C#/bash failure modes already documented in
+// aikit/chunk/treesitter/languages.go) silently fall through — the
+// structural index simply lacks entries for unsupported files, which
+// is the right thing.
+package structural
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
+)
+
+// FileStruct captures the structural facts a single corpus file
+// contains. One per file. For Stage 8 v0 each Python file in the bench
+// corpus IS one chunk (CSN convention); for multi-chunk-per-file
+// repos a future revision will split FileStruct per-chunk.
+type FileStruct struct {
+	// Path is the file path relative to the corpus root. The corpus
+	// root prefix is the caller's responsibility — Build() always
+	// stores paths as the relative form it walked.
+	Path string
+
+	// Functions: every function or method defined in this file, in
+	// AST order. Includes both top-level defs and methods nested
+	// inside class bodies.
+	Functions []FuncDef
+
+	// Classes: every class defined in this file. Each Class.Methods
+	// duplicates the corresponding FuncDef entries from Functions
+	// (with the same Name); the duplication keeps "list a class's
+	// members" a single lookup rather than requiring a re-scan.
+	Classes []ClassDef
+
+	// Imports: every imported module / symbol referenced from this
+	// file's import statements. Both `import foo` and `from foo
+	// import X` contribute; the value is the leaf name as it appears
+	// in the local namespace (X in the latter case, foo in the
+	// former).
+	Imports []string
+
+	// Calls: every distinct callee name invoked anywhere in this
+	// file. Captures both `foo(...)` (ast.Call with Name func) and
+	// `obj.bar(...)` (ast.Call with Attribute func: stored as "bar",
+	// not "obj.bar", because the bare attribute matches the BM25
+	// tokenizer's split). Dedup'd; order matches first occurrence.
+	Calls []string
+
+	// Raises: every exception type the file's `raise X(...)`
+	// statements name. Dedup'd; order matches first occurrence.
+	Raises []string
+}
+
+// FuncDef is one function or method definition.
+type FuncDef struct {
+	Name           string
+	Params         []string // parameter names, in declaration order
+	ReturnType     string   // text of the return-type annotation, "" if none
+	IsMethod       bool     // true if defined inside a class body
+	EnclosingClass string   // name of the enclosing class, "" if top-level
+}
+
+// ClassDef is one class definition.
+type ClassDef struct {
+	Name    string
+	Methods []FuncDef
+}
+
+// CallSite represents one file calling a particular name. Used by the
+// reverse call-graph index.
+type CallSite struct {
+	File string
+}
+
+// Index is the corpus-wide structural index. Goroutine-safe for reads
+// after Build returns; mutation only happens during Build.
+type Index struct {
+	files map[string]*FileStruct // path → struct
+
+	// Reverse call graph: callee name → files that contain a call
+	// to that name. Sorted by file path for stable iteration.
+	callers map[string][]CallSite
+
+	// Definition lookup: name → files where this name is defined.
+	// Sorted by file path. Used by the Track 2 `definition` tool
+	// and by Enrich() when surfacing "callers" of a function defined
+	// in the current file.
+	defs map[string][]string
+}
+
+// EnrichOptions toggles which structural facts each variant arm
+// surfaces in the per-chunk label. Arm B (the M0d winner) maps to
+// EnrichOptions{} — all-false except for the always-on baseline of
+// func/calls/raises. Each additional arm in Track 1 sets exactly one
+// of the booleans below.
+//
+// The combined-survivors arm sets multiple booleans true after Track 1
+// determines which additions earned their place.
+type EnrichOptions struct {
+	// Callers prepends "called by: A, B, C" (the reverse call graph
+	// — files that call this file's defining functions). Brings
+	// caller-vocabulary into the doc.
+	Callers bool
+
+	// Imports prepends "imports: foo, bar". Brings dependency
+	// vocabulary into the doc — useful when the query mentions a
+	// library or downstream concept the function uses.
+	Imports bool
+
+	// Signature prepends "params: a, b, c | returns: T". Surfaces
+	// the interface vocabulary (parameter names, return type) that
+	// callers will reference by name.
+	Signature bool
+
+	// Siblings prepends "siblings: method_a, method_b" — other
+	// members of the same enclosing class. Class-cohesion
+	// vocabulary; only fires for methods (top-level functions
+	// have no siblings).
+	Siblings bool
+}
+
+// kenLangToTSLang maps file extensions to gotreesitter grammar names.
+// Stage 8 v0 covers Python only; extending to other languages is a
+// matter of adding extract_<lang>.go and adding rows here.
+var kenLangToTSLang = map[string]string{
+	".py": "python",
+}
+
+// langExtractor maps a gotreesitter grammar name to its AST-walking
+// extractor. Stage 8 v0 has only Python; adding a new language is a
+// new function that fills FileStruct and a new entry here.
+//
+// The extractor receives the source bytes, the root *gotreesitter.Node,
+// the *gotreesitter.Language handle (needed for every Type() and
+// ChildByFieldName() call — gotreesitter requires the language to
+// resolve node type names + field-name indices), and the FileStruct
+// to populate.
+var langExtractor = map[string]func([]byte, *gotreesitter.Node, *gotreesitter.Language, *FileStruct){
+	"python": extractPython,
+}
+
+// langCache holds the pool + language handle per grammar. Both are
+// needed at extraction time: pool.Parse(...) returns the tree, and
+// nodes' Type()/ChildByFieldName() calls all take *Language. Cached
+// together so the extractor doesn't re-resolve the grammar.
+type langCache struct {
+	pool *gotreesitter.ParserPool
+	lang *gotreesitter.Language
+}
+
+// parserPools caches one langCache per grammar across the process.
+// sync.Map for the read-heavy access pattern (same shape as the
+// treesitter chunker — allocating a fresh parser per file is
+// measurably expensive on real corpora).
+var (
+	parserPools sync.Map // map[string]*langCache
+)
+
+// parseTimeoutMicros caps any single file's parse time. Matches the
+// treesitter chunker's value; pathological grammars (C#, some bash)
+// can hang forever otherwise. Set on the pool via
+// WithParserPoolTimeoutMicros; a timeout makes pool.Parse return an
+// error, which we treat as "skip this file" — same graceful-degrade
+// pattern as the chunker.
+const parseTimeoutMicros uint64 = 1_000_000
+
+// langCacheFor returns the cached pool + language handle for a
+// grammar, or nil if the grammar isn't registered. Lazy-initialized.
+// Same pattern as aikit/chunk/treesitter/chunker.go's poolFor, but
+// also caches the *Language handle that all node-API methods need.
+func langCacheFor(grammarName string) *langCache {
+	if v, ok := parserPools.Load(grammarName); ok {
+		return v.(*langCache)
+	}
+	entry := grammars.DetectLanguageByName(grammarName)
+	if entry == nil {
+		return nil
+	}
+	lang := entry.Language()
+	if lang == nil {
+		return nil
+	}
+	c := &langCache{
+		pool: gotreesitter.NewParserPool(lang,
+			gotreesitter.WithParserPoolTimeoutMicros(parseTimeoutMicros),
+		),
+		lang: lang,
+	}
+	actual, _ := parserPools.LoadOrStore(grammarName, c)
+	return actual.(*langCache)
+}
+
+// Build walks corpusDir, parses every supported source file, and
+// returns the populated index. Errors propagate up only for the
+// directory walk itself; per-file parse failures are silently
+// recorded as missing entries (same graceful-degrade as the
+// treesitter chunker).
+func Build(corpusDir string) (*Index, error) {
+	ix := &Index{
+		files:   make(map[string]*FileStruct),
+		callers: make(map[string][]CallSite),
+		defs:    make(map[string][]string),
+	}
+
+	// Sorted file order so the build is deterministic across runs.
+	var paths []string
+	err := filepath.WalkDir(corpusDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if _, supported := kenLangToTSLang[filepath.Ext(path)]; !supported {
+			return nil
+		}
+		paths = append(paths, path)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("structural.Build: walk %s: %w", corpusDir, err)
+	}
+	sort.Strings(paths)
+
+	// Pass 1: parse + extract per-file structure.
+	for _, p := range paths {
+		rel, err := filepath.Rel(corpusDir, p)
+		if err != nil {
+			rel = p
+		}
+		ext := filepath.Ext(p)
+		gram, ok := kenLangToTSLang[ext]
+		if !ok {
+			continue
+		}
+		lc := langCacheFor(gram)
+		if lc == nil {
+			continue // grammar unavailable; skip silently
+		}
+		src, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		tree, err := lc.pool.Parse(src)
+		if err != nil {
+			continue // parse timed out or errored
+		}
+		if tree == nil {
+			continue
+		}
+		root := tree.RootNode()
+		if root == nil {
+			continue
+		}
+		fs := &FileStruct{Path: rel}
+		langExtractor[gram](src, root, lc.lang, fs)
+		ix.files[rel] = fs
+	}
+
+	// Pass 2: reverse call graph + defs index.
+	// `defs`: for each top-level function/class, record the file that
+	// defines it. Methods of a class are NOT stored under the bare
+	// method name because that would conflate methods across classes
+	// — but they ARE counted as definitions of their fully-qualified
+	// name (class.method) elsewhere if needed.
+	// `callers`: for each callee name a file invokes, append that
+	// file. The "what calls foo" query just reads back the slice.
+	for path, fs := range ix.files {
+		for _, fn := range fs.Functions {
+			if !fn.IsMethod {
+				ix.defs[fn.Name] = append(ix.defs[fn.Name], path)
+			}
+		}
+		for _, cls := range fs.Classes {
+			ix.defs[cls.Name] = append(ix.defs[cls.Name], path)
+		}
+		seen := make(map[string]struct{}, len(fs.Calls))
+		for _, callee := range fs.Calls {
+			if _, dup := seen[callee]; dup {
+				continue
+			}
+			seen[callee] = struct{}{}
+			ix.callers[callee] = append(ix.callers[callee], CallSite{File: path})
+		}
+	}
+
+	// Sort the slices for stable iteration.
+	for k := range ix.defs {
+		sort.Strings(ix.defs[k])
+	}
+	for k := range ix.callers {
+		sort.Slice(ix.callers[k], func(i, j int) bool {
+			return ix.callers[k][i].File < ix.callers[k][j].File
+		})
+	}
+
+	return ix, nil
+}
+
+// Files returns the per-file structures the index contains, keyed by
+// path. Read-only.
+func (ix *Index) Files() map[string]*FileStruct { return ix.files }
+
+// File returns the per-file struct for path, or nil if the index has
+// no entry for it (unsupported language, parse failure, etc.).
+func (ix *Index) File(path string) *FileStruct { return ix.files[path] }
+
+// Callers returns the files that call the given name, sorted by path.
+// Used by the Track 1 "callers" enrichment and the Track 2
+// `references` tool.
+func (ix *Index) Callers(name string) []CallSite { return ix.callers[name] }
+
+// Defs returns the files that define the given top-level name, sorted
+// by path. Used by the Track 2 `definition` tool.
+func (ix *Index) Defs(name string) []string { return ix.defs[name] }
+
+// Stats reports per-language fall-through counts and total files
+// indexed, for the bench memo's cost ledger.
+type Stats struct {
+	TotalFiles    int
+	IndexedFiles  int
+	UniqueSymbols int // distinct names with at least one definition
+	UniqueCallees int // distinct names called by at least one file
+}
+
+func (ix *Index) Stats() Stats {
+	return Stats{
+		IndexedFiles:  len(ix.files),
+		UniqueSymbols: len(ix.defs),
+		UniqueCallees: len(ix.callers),
+	}
+}
+
+// dedupAppend is a small helper used by the Python extractor and the
+// Enrich path to keep slice order stable while filtering duplicates.
+func dedupAppend(dst []string, s string) []string {
+	for _, t := range dst {
+		if t == s {
+			return dst
+		}
+	}
+	return append(dst, s)
+}
+
+// trimAndJoin truncates a comma-joined identifier list to at most n
+// entries and returns the joined string. Used by Enrich to keep label
+// lines bounded even on chunks with hundreds of callees.
+func trimAndJoin(items []string, n int) string {
+	if len(items) > n {
+		items = items[:n]
+	}
+	return strings.Join(items, ", ")
+}
