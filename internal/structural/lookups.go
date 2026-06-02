@@ -432,9 +432,5 @@ func (ix *Index) FilesUnderPath(path string) []string {
 // forward slashes regardless of OS — the MCP wire format and the
 // index are both unix-shaped.
 func NormalizePath(p string) string {
-	p = filepath.ToSlash(filepath.Clean(p))
-	if strings.HasPrefix(p, "./") {
-		p = p[2:]
-	}
-	return p
+	return strings.TrimPrefix(filepath.ToSlash(filepath.Clean(p)), "./")
 }

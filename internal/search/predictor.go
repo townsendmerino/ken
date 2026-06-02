@@ -23,11 +23,12 @@ type Predictor interface {
 	Predict(query string) []string
 }
 
-// predictedSymbolBoostScale is the discount applied to the boost a
-// predicted identifier earns relative to a query-embedded one. Reuses
-// the existing embeddedSymbolBoostScale (0.5) — a predicted name is
-// treated identically to a name the user happened to put inline.
-// Lower values (e.g. 0.25) would penalize wrong predictions less but
-// also reward right ones less; left as a tuning knob for the production
-// wiring once M0c picks a winning predictor.
-const predictedSymbolBoostScale = embeddedSymbolBoostScale
+// NOTE: predicted identifiers ride the same boost scale as
+// query-embedded symbols (embeddedSymbolBoostScale = 0.5 in
+// internal/search/rerank.go). A separate predictedSymbolBoostScale
+// constant existed earlier as a placeholder for a tuning knob, but
+// was unused — the current implementation in boostEmbeddedSymbols
+// folds predicted names into the existing scale. If a future
+// predictor wants a different discount (e.g. 0.25 to penalize
+// noisier predictions less), reintroduce the constant and route
+// it through a separate boost loop.
