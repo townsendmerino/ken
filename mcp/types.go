@@ -55,6 +55,64 @@ type FindRelatedArgs struct {
 // parameters.
 type ReindexDBArgs struct{}
 
+// === Stage 8 Track 2 — exact-answer tool argument schemas ===
+//
+// Surface: definition, references, outline, symbols. All structural
+// tools share one resolution discipline: tree-sitter-grade
+// name-based lookup, NOT compiler-grade type analysis. Tool
+// descriptions on each AddTool registration spell this out so
+// agents calibrate ("ranked likely definitions; name-resolved,
+// not type-resolved" — see cmd/ken-mcp/main.go for the registered
+// strings).
+//
+// callers / callees are deliberately NOT included in v0 per the
+// planning instance's Stage 8 review: Track 1's negative result
+// showed callers floods the label, but DID NOT separately validate
+// call-edge precision (resolving "X calls Y" across files and
+// name collisions is the tree-sitter-grade-≠-compiler-grade hard
+// part). callers/callees ship only after a sampled-correctness
+// check on ~50 hand-verified call edges publishes a precision
+// number. references is honest because it makes no resolution
+// claim — "here are the places this name appears" — so it ships now.
+
+// DefinitionArgs is the argument schema for the `definition` tool.
+// Returns the file(s) where a top-level symbol (function or class)
+// is defined. For name collisions (same symbol defined in multiple
+// files), all sites are returned in ranked order; the tool
+// description tells the agent the ranking is alphabetical-by-path
+// (not confidence-weighted) for stage-1 honesty.
+type DefinitionArgs struct {
+	Symbol string `json:"symbol" jsonschema:"The symbol name to locate (function or class name as written in source — exact match; no fuzzy matching, no qualification)."`
+	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+}
+
+// ReferencesArgs is the argument schema for the `references` tool.
+// Returns every file where a name appears in a recognized syntactic
+// context (call site, import, raise). Tree-sitter-grade: same name
+// in different files collapses into one result list; no type
+// resolution.
+type ReferencesArgs struct {
+	Symbol string `json:"symbol" jsonschema:"The name to find references for (function, class, or any identifier — exact match)."`
+	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+}
+
+// OutlineArgs is the argument schema for the `outline` tool.
+// Returns the structural outline of a file (top-level functions,
+// classes, and their methods). For directory paths, returns the
+// outline for every indexed file under the directory.
+type OutlineArgs struct {
+	Path string `json:"path" jsonschema:"File path (relative to repo root) or directory path. A file returns just that file's outline; a directory returns outlines for every indexed file under it."`
+	Repo string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+}
+
+// SymbolsArgs is the argument schema for the `symbols` tool.
+// Returns every top-level symbol (function or class) defined in
+// the repo, optionally filtered to a subdirectory prefix.
+type SymbolsArgs struct {
+	Path string `json:"path,omitempty" jsonschema:"Optional path prefix (relative to repo root) to filter the symbol list. Empty/omitted returns every top-level symbol in the repo."`
+	Repo string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+}
+
 // FormatResults mirrors semble utils._format_results: a header, then each
 // result as a numbered, fenced code block with score=X.XXX. Returning a
 // preformatted string keeps wire compatibility with semble — agents see

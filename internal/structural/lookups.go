@@ -110,45 +110,96 @@ func (ix *Index) References(name string) []Reference {
 	return out
 }
 
-// DefinitionSite is one location where a top-level name (function or
-// class) is defined. Returned by Index.Definition for the Track 2
+// DefinitionSite is one location where a name (function, class, or
+// method) is defined. Returned by Index.Definition for the Track 2
 // `definition` MCP tool.
+//
+// For methods (Kind == DefinitionKindMethod), QName carries the
+// qualified Type.method form (e.g. "User.Login") so the agent can
+// disambiguate when the same bare method name lives on multiple
+// types. For top-level functions and classes, QName is empty (the
+// bare name uniquely identifies the definition within a file).
 type DefinitionSite struct {
-	File string
-	Kind DefinitionKind
+	File  string
+	Kind  DefinitionKind
+	QName string // qualified Type.method name; empty for non-methods
 }
 
-// DefinitionKind tags whether the defined name is a function or a
-// class.
+// DefinitionKind tags what kind of definition was found at a site.
 type DefinitionKind uint8
 
 const (
 	// DefinitionKindUnknown is the zero value.
 	DefinitionKindUnknown DefinitionKind = iota
+	// DefinitionKindFunction: a top-level function (no receiver
+	// type / no enclosing class).
 	DefinitionKindFunction
+	// DefinitionKindClass: a class (Python) or named type
+	// (Go struct/interface/etc).
 	DefinitionKindClass
+	// DefinitionKindMethod: a method defined on a class/type.
+	// Stage 8 v0+: methods are queryable by bare name OR
+	// qualified Type.method form. A site returned with Method
+	// kind carries the qualified form in DefinitionSite.QName.
+	DefinitionKindMethod
 )
 
-// Definition returns the file(s) where the top-level name is
-// defined. Tree-sitter-grade: collisions (same name defined in
-// multiple files) return all definition sites; ordering is by file
-// path. The MCP tool surfaces these in the same order so an agent
-// can read down the list as a ranked best-guess (best = first; in
-// future iterations we may add a confidence score derived from
-// stage-1 hybrid retrieval on the symbol-name-as-query, but Stage 8
-// v0 just returns alphabetical file order so the result is stable
-// and explainable).
+// Definition returns the site(s) where the name is defined. Stage 8
+// v0+ supports three lookup forms:
+//
+//   - Bare name like "Login": returns ALL definition sites — top-
+//     level functions/classes with that name AND every method named
+//     Login across the corpus's classes. Per-site Kind labels
+//     distinguish (Function / Class / Method); for methods, QName
+//     carries the "Type.method" form.
+//   - Qualified name like "User.Login": returns ONLY the method
+//     sites where the enclosing class is User and the method is
+//     Login. The dotted form disambiguates when the same bare
+//     method name exists on multiple types.
+//   - Top-level type/function name: returns Function or Class sites
+//     same as before; methods of unrelated types are NOT included
+//     (the bare match is restricted to exact-name).
+//
+// Tree-sitter-grade: name-resolved, NOT type-resolved. Collisions
+// across files (two unrelated classes both with a "User" type, two
+// modules both defining a top-level "parse" function) return all
+// matching sites in alphabetical-by-file order. Ordering does NOT
+// reflect confidence; the agent reading the list cannot assume
+// "first result is the right one." The MCP tool description spells
+// this out.
 func (ix *Index) Definition(name string) []DefinitionSite {
-	files := ix.defs[name]
-	if len(files) == 0 {
-		return nil
+	// For qualified names ("Type.method"), only the methods map can
+	// match — defs holds bare names. Short-circuit so we don't
+	// accidentally pick up a top-level function or class whose
+	// literal text happens to contain a dot (which can't happen in
+	// any of Stage 8 v0's supported grammars, but is defensive).
+	if dot := indexOfDot(name); dot >= 0 {
+		var out []DefinitionSite
+		for _, f := range ix.methods[name] {
+			out = append(out, DefinitionSite{
+				File:  f,
+				Kind:  DefinitionKindMethod,
+				QName: name,
+			})
+		}
+		return out
 	}
-	out := make([]DefinitionSite, 0, len(files))
-	for _, f := range files {
-		// Look up whether the name is a function or class in
-		// this specific file. A name like `User` might be a
-		// function in one file and a class in another — return
-		// the actual kind per-file.
+
+	// Bare name: merge top-level defs + method sites. Same file
+	// may appear in both (e.g. file foo.go defines top-level
+	// `Login()` AND class User with method Login). Dedup on
+	// (File, Kind) so the response shows distinct kinds even when
+	// they share a file; same (File, Kind) tuple at most once.
+	type key struct {
+		file string
+		kind DefinitionKind
+	}
+	seen := make(map[key]string) // (file, kind) → QName (empty for non-methods)
+	var ordered []key
+
+	// Top-level defs first. Kind is Function unless the file's
+	// Classes table claims `name` as a class.
+	for _, f := range ix.defs[name] {
 		kind := DefinitionKindFunction
 		if fs := ix.files[f]; fs != nil {
 			for _, cls := range fs.Classes {
@@ -158,9 +209,84 @@ func (ix *Index) Definition(name string) []DefinitionSite {
 				}
 			}
 		}
-		out = append(out, DefinitionSite{File: f, Kind: kind})
+		k := key{file: f, kind: kind}
+		if _, dup := seen[k]; !dup {
+			seen[k] = ""
+			ordered = append(ordered, k)
+		}
+	}
+
+	// Methods (bare-name lookup). The methods map under a bare
+	// key holds files containing ≥1 method by that name; the
+	// specific qualified form (which class's method) requires a
+	// per-file walk of fs.Functions. Multiple classes in one
+	// file can each have a method with this bare name — emit
+	// one DefinitionSite per (file, class.method) pair so the
+	// agent sees all of them.
+	for _, f := range ix.methods[name] {
+		fs := ix.files[f]
+		if fs == nil {
+			continue
+		}
+		for _, fn := range fs.Functions {
+			if !fn.IsMethod || fn.Name != name {
+				continue
+			}
+			// Could be a method whose qualified name is
+			// "User.Login" with EnclosingClass="User". Emit
+			// the qualified form so the agent can route a
+			// follow-up call to a specific class's method.
+			qname := name
+			if fn.EnclosingClass != "" {
+				qname = fn.EnclosingClass + "." + name
+			}
+			k := key{file: f, kind: DefinitionKindMethod}
+			// Multiple methods with same bare name in the
+			// same file collapse to one site (rare; would
+			// require two classes in one file both defining
+			// the same-named method). The first
+			// EnclosingClass wins under that collision —
+			// acceptable for v0; could split later.
+			if _, dup := seen[k]; !dup {
+				seen[k] = qname
+				ordered = append(ordered, k)
+			}
+		}
+	}
+
+	if len(ordered) == 0 {
+		return nil
+	}
+
+	// Stable alphabetical-by-file order. The MCP tool's response
+	// emits this order so reads are reproducible across calls.
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].file != ordered[j].file {
+			return ordered[i].file < ordered[j].file
+		}
+		return ordered[i].kind < ordered[j].kind
+	})
+
+	out := make([]DefinitionSite, 0, len(ordered))
+	for _, k := range ordered {
+		out = append(out, DefinitionSite{
+			File:  k.file,
+			Kind:  k.kind,
+			QName: seen[k],
+		})
 	}
 	return out
+}
+
+// indexOfDot returns the index of the first '.' in s, or -1. Tiny
+// helper kept here to avoid a strings import for a 4-line check.
+func indexOfDot(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '.' {
+			return i
+		}
+	}
+	return -1
 }
 
 // OutlineEntry is one item in a file's structural outline. Functions

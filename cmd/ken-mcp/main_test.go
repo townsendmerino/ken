@@ -524,7 +524,11 @@ func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 		have[tl.Name] = true
 		t.Logf("tool: %s — %s", tl.Name, tl.Description)
 	}
-	for _, name := range []string{"search", "find_related"} {
+	// Stage 8 Track 2: all six tools must be registered (search +
+	// find_related from v0.6; definition, references, outline,
+	// symbols from Stage 8). reindex_db remains hidden when DB is
+	// unset (separate ADR-020 invariant).
+	for _, name := range []string{"search", "find_related", "definition", "references", "outline", "symbols"} {
 		if !have[name] {
 			t.Errorf("missing tool %q (have %v)", name, have)
 		}
@@ -547,6 +551,52 @@ func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 		if !strings.Contains(txt, want) {
 			t.Errorf("search output missing %q\n--- got ---\n%s", want, txt)
 		}
+	}
+
+	// Stage 8 Track 2 structural-tool invocations. Each call should
+	// (a) succeed, (b) NOT pollute stdout (the SDK session would
+	// fail to parse the next JSON-RPC reply otherwise — that's
+	// what makes the stdout-clean contract self-enforcing). The
+	// testdata/repo fixture has one Python file (auth.py); the
+	// structural index picks it up and these calls land non-empty
+	// responses.
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+		want string // a substring present in either the success or empty-result response shape
+	}{
+		// `symbols`: testdata/repo has one .py file (auth.py)
+		// defining validate_user, User, etc. — the header always
+		// appears.
+		{"symbols", map[string]any{}, "Symbols"},
+		// `definition`: validate_user is a top-level def in auth.py.
+		{"definition", map[string]any{"symbol": "validate_user"}, "Definition"},
+		// `references`: validate_user is defined but not called in
+		// this fixture, so the response is the "No references found
+		// for..." text. Both shapes contain the symbol name; check
+		// for that as the catch-all.
+		{"references", map[string]any{"symbol": "validate_user"}, "validate_user"},
+		// `outline`: auth.py defines class User and func
+		// validate_user, so the outline is non-empty.
+		{"outline", map[string]any{"path": "auth.py"}, "Outline"},
+	} {
+		t.Run("structural_"+tc.name, func(t *testing.T) {
+			res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+				Name:      tc.name,
+				Arguments: tc.args,
+			})
+			if err != nil {
+				t.Fatalf("CallTool(%s): %v\n--stderr--\n%s", tc.name, err, stderr.String())
+			}
+			if len(res.Content) == 0 {
+				t.Fatalf("CallTool(%s): empty content", tc.name)
+			}
+			txt := res.Content[0].(*sdk.TextContent).Text
+			t.Logf("=== %s response ===\n%s", tc.name, txt)
+			if !strings.Contains(txt, tc.want) {
+				t.Errorf("%s output missing %q\n--- got ---\n%s", tc.name, tc.want, txt)
+			}
+		})
 	}
 }
 

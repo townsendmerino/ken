@@ -13,27 +13,53 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/townsendmerino/ken/internal/search"
+	"github.com/townsendmerino/ken/internal/structural"
 )
 
 // DefaultCacheSize is the LRU bound when KEN_MCP_CACHE_SIZE is unset.
 const DefaultCacheSize = 16
 
-// Builder constructs an Index for an already-normalized source identifier
-// (either a canonical http(s) URL or an absolute filesystem path). The
-// returned cleanup is called when the entry is evicted from the cache —
-// used to rm -rf temp clone dirs; pass nil for local-path entries.
+// RepoBundle is the per-repo data the cache holds: the retrieval-side
+// WatchedIndex (BM25 + dense + reranker) plus the Stage-8 structural
+// index over the same corpus. Structural may be nil when the
+// structural build was skipped or failed — tool handlers must
+// defend against nil so a structural-tool call on a corpus the
+// extractor doesn't support (or that failed to parse) degrades to
+// a clean error rather than panicking.
 //
-// As of v0.3, the returned *search.WatchedIndex wraps the index plus a
-// file-watcher goroutine. The cache calls (*WatchedIndex).Close() on
-// eviction (and on Cache.Close()) to stop the watcher before invoking
-// the user-supplied cleanup; without this the goroutine outlives the
-// cache entry and the temp clone dir gets rm-rf'd while the watcher
-// holds inotify fds pointing into it.
-type Builder func(ctx context.Context, source string) (*search.WatchedIndex, func(), error)
+// Lifecycle: the cache owns both indices. Index.Close() is called
+// on eviction to stop the watcher goroutine; Structural needs no
+// teardown (it's plain maps that GC).
+type RepoBundle struct {
+	Index      *search.WatchedIndex
+	Structural *structural.Index
+}
+
+// Builder constructs the per-repo state for an already-normalized
+// source identifier (either a canonical http(s) URL or an absolute
+// filesystem path). The returned cleanup is called when the entry
+// is evicted from the cache — used to rm -rf temp clone dirs;
+// pass nil for local-path entries.
+//
+// As of v0.3, the returned *search.WatchedIndex wraps the index plus
+// a file-watcher goroutine. The cache calls (*WatchedIndex).Close()
+// on eviction (and on Cache.Close()) to stop the watcher before
+// invoking the user-supplied cleanup; without this the goroutine
+// outlives the cache entry and the temp clone dir gets rm-rf'd while
+// the watcher holds inotify fds pointing into it.
+//
+// As of Stage 8 the Builder also returns a *structural.Index built
+// eagerly over the same corpus directory. Eager-build was the
+// planning-instance steer: the structural build's wall is in the
+// noise next to the embedding pass the WatchedIndex already pays
+// for, and the resulting "ix.Structural() returns immediately"
+// property avoids lazy-build/singleflight synchronization for the
+// Track 2 tools.
+type Builder func(ctx context.Context, source string) (*RepoBundle, func(), error)
 
 type cacheEntry struct {
 	key     string
-	ix      *search.WatchedIndex
+	bundle  *RepoBundle
 	cleanup func()
 }
 
@@ -120,12 +146,34 @@ func NormalizeKey(source string) (string, bool, error) {
 }
 
 // Get returns a cached WatchedIndex for source, building it once on
-// first access. Concurrent first-access calls for the same key share a
-// single build via singleflight. The returned *WatchedIndex is shared
-// across all callers and across subsequent Get calls until evicted;
-// callers MUST NOT call wix.Close() themselves — the cache owns the
-// lifecycle.
+// first access. Concurrent first-access calls for the same key share
+// a single build via singleflight. The returned *WatchedIndex is
+// shared across all callers and across subsequent Get calls until
+// evicted; callers MUST NOT call wix.Close() themselves — the cache
+// owns the lifecycle.
+//
+// Back-compat: returns just the WatchedIndex from the cached bundle,
+// matching the pre-Stage-8 signature. Tool handlers that also need
+// the structural index call GetBundle instead.
 func (c *Cache) Get(ctx context.Context, source string) (*search.WatchedIndex, error) {
+	b, err := c.GetBundle(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	return b.Index, nil
+}
+
+// GetBundle returns the cached RepoBundle (WatchedIndex + structural
+// index) for source, building both eagerly on first access. Used by
+// Track 2 tool handlers that need the structural index alongside the
+// retrieval one.
+//
+// Cache + lifecycle semantics are identical to Get — singleflight on
+// first build, LRU eviction, c.closed observed during in-flight
+// builds. Bundle.Structural may be nil if the structural build
+// produced no entries (unsupported corpus language); handlers must
+// defend against that.
+func (c *Cache) GetBundle(ctx context.Context, source string) (*RepoBundle, error) {
 	key, _, err := NormalizeKey(source)
 	if err != nil {
 		return nil, err
@@ -138,14 +186,14 @@ func (c *Cache) Get(ctx context.Context, source string) (*search.WatchedIndex, e
 	}
 	if e, ok := c.items[key]; ok {
 		c.ll.MoveToFront(e)
-		ix := e.Value.(*cacheEntry).ix
+		b := e.Value.(*cacheEntry).bundle
 		c.mu.Unlock()
-		return ix, nil
+		return b, nil
 	}
 	c.mu.Unlock()
 
 	v, err, _ := c.sf.Do(key, func() (any, error) {
-		ix, cleanup, err := c.build(ctx, key)
+		bundle, cleanup, err := c.build(ctx, key)
 		if err != nil {
 			return nil, err
 		}
@@ -156,7 +204,7 @@ func (c *Cache) Get(ctx context.Context, source string) (*search.WatchedIndex, e
 		// built watcher + cleanup get reaped right here so they
 		// don't outlive the cache.
 		if c.closed {
-			_ = ix.Close()
+			_ = bundle.Index.Close()
 			if cleanup != nil {
 				cleanup()
 			}
@@ -167,12 +215,12 @@ func (c *Cache) Get(ctx context.Context, source string) (*search.WatchedIndex, e
 		// If we lost the race, close the just-built watcher AND run
 		// its cleanup — the cache already has a usable entry.
 		if e, ok := c.items[key]; ok {
-			_ = ix.Close()
+			_ = bundle.Index.Close()
 			if cleanup != nil {
 				cleanup()
 			}
 			c.ll.MoveToFront(e)
-			return e.Value.(*cacheEntry).ix, nil
+			return e.Value.(*cacheEntry).bundle, nil
 		}
 		for len(c.items) >= c.max {
 			tail := c.ll.Back()
@@ -181,19 +229,19 @@ func (c *Cache) Get(ctx context.Context, source string) (*search.WatchedIndex, e
 			}
 			ev := c.ll.Remove(tail).(*cacheEntry)
 			delete(c.items, ev.key)
-			_ = ev.ix.Close()
+			_ = ev.bundle.Index.Close()
 			if ev.cleanup != nil {
 				ev.cleanup()
 			}
 		}
-		ent := &cacheEntry{key: key, ix: ix, cleanup: cleanup}
+		ent := &cacheEntry{key: key, bundle: bundle, cleanup: cleanup}
 		c.items[key] = c.ll.PushFront(ent)
-		return ix, nil
+		return bundle, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return v.(*search.WatchedIndex), nil
+	return v.(*RepoBundle), nil
 }
 
 // Close releases every cached entry. Stops the watcher goroutine for
@@ -212,7 +260,7 @@ func (c *Cache) Close() {
 	c.closed = true
 	for e := c.ll.Front(); e != nil; e = e.Next() {
 		ent := e.Value.(*cacheEntry)
-		_ = ent.ix.Close()
+		_ = ent.bundle.Index.Close()
 		if ent.cleanup != nil {
 			ent.cleanup()
 		}

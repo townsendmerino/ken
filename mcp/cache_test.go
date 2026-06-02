@@ -21,7 +21,7 @@ import (
 func makeFakeBuilder(t *testing.T) (Builder, *atomic.Int64, *atomic.Int64) {
 	t.Helper()
 	var builds, cleanups atomic.Int64
-	b := func(_ context.Context, _ string) (*search.WatchedIndex, func(), error) {
+	b := func(_ context.Context, _ string) (*RepoBundle, func(), error) {
 		builds.Add(1)
 		// Build a trivial BM25-only WatchedIndex over a tiny tempdir.
 		// watch=true so the cache exercises the Close-on-eviction
@@ -31,7 +31,7 @@ func makeFakeBuilder(t *testing.T) (Builder, *atomic.Int64, *atomic.Int64) {
 		if err != nil {
 			return nil, nil, err
 		}
-		return ix, func() { cleanups.Add(1) }, nil
+		return &RepoBundle{Index: ix}, func() { cleanups.Add(1) }, nil
 	}
 	return b, &builds, &cleanups
 }
@@ -60,12 +60,12 @@ func TestCache_HitMiss(t *testing.T) {
 func TestCache_SingleflightDedupesConcurrentBuilds(t *testing.T) {
 	var builds atomic.Int64
 	start := make(chan struct{})
-	b := func(ctx context.Context, _ string) (*search.WatchedIndex, func(), error) {
+	b := func(ctx context.Context, _ string) (*RepoBundle, func(), error) {
 		builds.Add(1)
 		<-start // hold until both goroutines are in-flight
 		dir := t.TempDir()
 		ix, _ := search.NewWatchedIndex(dir, search.ModeBM25, "line", "", true)
-		return ix, nil, nil
+		return &RepoBundle{Index: ix}, nil, nil
 	}
 	c := NewCache(8, b)
 	t.Cleanup(c.Close)
@@ -123,7 +123,7 @@ func TestCache_CloseDuringBuild_ReapsStraggler(t *testing.T) {
 	releaseBuild := make(chan struct{})
 	closeFired := make(chan struct{})
 	var builtCleanups atomic.Int64
-	b := func(ctx context.Context, _ string) (*search.WatchedIndex, func(), error) {
+	b := func(ctx context.Context, _ string) (*RepoBundle, func(), error) {
 		<-releaseBuild // hold until Close() has run
 		dir := t.TempDir()
 		ix, _ := search.NewWatchedIndex(dir, search.ModeBM25, "line", "", true)
@@ -131,7 +131,7 @@ func TestCache_CloseDuringBuild_ReapsStraggler(t *testing.T) {
 		// fires (proving the straggler-reap path ran) AND that no
 		// stale entry remains in the cache.
 		cleanup := func() { builtCleanups.Add(1) }
-		return ix, cleanup, nil
+		return &RepoBundle{Index: ix}, cleanup, nil
 	}
 	c := NewCache(8, b)
 	path := t.TempDir()

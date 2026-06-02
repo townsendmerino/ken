@@ -210,6 +210,68 @@ func NewServer(cfg Config) *sdk.Server {
 		})
 	}
 
+	// Stage 8 Track 2: exact-answer structural tools. Always
+	// registered — every repo has *some* structural index (Python
+	// files at least; the extractor is extensible to other
+	// languages). On repos with no supported source files the
+	// tools return a clear "no structural index available" text
+	// response rather than failing the call.
+	//
+	// Honest framing in each description: tree-sitter-grade,
+	// name-resolved, NOT type-resolved. The agent reads these
+	// strings; the calibration that "the same name in different
+	// files may collapse into one result" is part of the wire
+	// contract.
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: "definition",
+		Description: "Locate where a function, class, or method is defined. " +
+			"Bare `symbol` (\"Login\") returns ALL definition sites — top-level functions/classes " +
+			"with that name AND every method named Login on any class across the corpus. " +
+			"Qualified `symbol` (\"User.Login\") returns ONLY methods on the named type. " +
+			"Tree-sitter-grade: name-resolved, not type-resolved. Each result is labeled " +
+			"function / class / method; method results carry their qualified `Type.method` " +
+			"form in parentheses so an agent can disambiguate when the bare name lives on " +
+			"multiple types. Collisions return all sites in alphabetical-by-file order; " +
+			"ordering does NOT reflect confidence ranking.",
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, args DefinitionArgs) (*sdk.CallToolResult, any, error) {
+		return handleDefinition(ctx, &cfg, args)
+	})
+
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: "references",
+		Description: "Find every file referencing a name. " +
+			"Returns the file(s) where `symbol` appears in a recognized syntactic context: " +
+			"call sites, import statements, and raise statements. " +
+			"Tree-sitter-grade: name-resolved, not type-resolved — same-spelled identifiers " +
+			"in different files collapse into a single result list with no semantic " +
+			"disambiguation. Use this for `where is X used` style questions, not for " +
+			"compiler-grade rename refactors.",
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, args ReferencesArgs) (*sdk.CallToolResult, any, error) {
+		return handleReferences(ctx, &cfg, args)
+	})
+
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: "outline",
+		Description: "Show the structural outline of a file or directory. " +
+			"For a file path: returns every top-level function, class, and method " +
+			"(with parameter names) defined in that file. " +
+			"For a directory path: returns the outline of every indexed file under it. " +
+			"Fast structural overview for understanding what a file or package contains " +
+			"without reading the source.",
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, args OutlineArgs) (*sdk.CallToolResult, any, error) {
+		return handleOutline(ctx, &cfg, args)
+	})
+
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: "symbols",
+		Description: "List every top-level symbol (function or class) defined in the repo, " +
+			"optionally filtered by a subdirectory `path` prefix. " +
+			"Useful as a starting point: `what's in this package?` or `what does this repo export?`. " +
+			"Names only — pair with `definition` or `outline` to get locations + structure.",
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, args SymbolsArgs) (*sdk.CallToolResult, any, error) {
+		return handleSymbols(ctx, &cfg, args)
+	})
+
 	return srv
 }
 

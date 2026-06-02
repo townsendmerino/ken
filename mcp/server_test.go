@@ -22,8 +22,8 @@ func newInMemoryServerClient(t *testing.T) (context.Context, *sdk.ClientSession,
 	if err != nil {
 		t.Fatalf("NewWatchedIndex: %v", err)
 	}
-	cache := NewCache(4, func(context.Context, string) (*search.WatchedIndex, func(), error) {
-		return ix, nil, nil
+	cache := NewCache(4, func(context.Context, string) (*RepoBundle, func(), error) {
+		return &RepoBundle{Index: ix}, nil, nil
 	})
 	srv := NewServer(Config{Cache: cache, DefaultRepo: "../testdata/repo"})
 
@@ -48,7 +48,7 @@ func newInMemoryServerClient(t *testing.T) (context.Context, *sdk.ClientSession,
 	return ctx, sess, cleanup
 }
 
-func TestServer_ListsBothTools(t *testing.T) {
+func TestServer_ListsRegisteredTools(t *testing.T) {
 	ctx, sess, cleanup := newInMemoryServerClient(t)
 	defer cleanup()
 
@@ -56,24 +56,34 @@ func TestServer_ListsBothTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	// Default fixture wires Reindex=nil → reindex_db is NOT registered,
-	// so the agent sees only the two v0.6.0 tools. v0.8.0 Part 2 keeps
-	// tools/list honest by hiding tools that would return "no DB" 100%
-	// of the time.
-	if len(res.Tools) != 2 {
-		t.Fatalf("got %d tools, want 2 (Reindex unset → reindex_db not registered)", len(res.Tools))
+	// Default fixture wires DB=nil → reindex_db is NOT registered,
+	// so the agent sees the two v0.6.0 retrieval tools plus the four
+	// Stage 8 Track 2 structural tools (always registered).
+	// v0.8.0 Part 2 keeps tools/list honest by hiding tools that
+	// would return "no DB" 100% of the time.
+	wantNames := map[string]bool{
+		"search":       true,
+		"find_related": true,
+		"definition":   true,
+		"references":   true,
+		"outline":      true,
+		"symbols":      true,
+	}
+	if len(res.Tools) != len(wantNames) {
+		t.Fatalf("got %d tools, want %d (DB unset → reindex_db not registered)",
+			len(res.Tools), len(wantNames))
 	}
 	got := map[string]bool{}
 	for _, tl := range res.Tools {
 		got[tl.Name] = true
 	}
-	for _, want := range []string{"search", "find_related"} {
+	for want := range wantNames {
 		if !got[want] {
 			t.Errorf("missing tool %q (have %v)", want, got)
 		}
 	}
 	if got["reindex_db"] {
-		t.Errorf("reindex_db should NOT be listed when Config.Reindex is nil")
+		t.Errorf("reindex_db should NOT be listed when Config.DB is nil")
 	}
 }
 
@@ -165,8 +175,8 @@ func newReindexServerClient(t *testing.T, dbi DBIntegration) (context.Context, *
 	if err != nil {
 		t.Fatalf("NewWatchedIndex: %v", err)
 	}
-	cache := NewCache(4, func(context.Context, string) (*search.WatchedIndex, func(), error) {
-		return ix, nil, nil
+	cache := NewCache(4, func(context.Context, string) (*RepoBundle, func(), error) {
+		return &RepoBundle{Index: ix}, nil, nil
 	})
 	srv := NewServer(Config{Cache: cache, DefaultRepo: "../testdata/repo", DB: dbi})
 
@@ -327,7 +337,7 @@ func TestDefaultInstructions_ContainsRecallGuidance(t *testing.T) {
 	// exhaustive operations. Sanity check the surfaced text contains
 	// the load-bearing tokens of that framing — not the exact phrasing
 	// (which can drift), but the planner-visible cues.
-	cache := NewCache(2, func(context.Context, string) (*search.WatchedIndex, func(), error) {
+	cache := NewCache(2, func(context.Context, string) (*RepoBundle, func(), error) {
 		t.Fatal("builder should not be invoked just to read instructions")
 		return nil, nil, nil
 	})
@@ -376,7 +386,7 @@ func TestDefaultInstructions_ContainsRecallGuidance(t *testing.T) {
 func TestServer_NoRepoNoDefault_ReturnsValidationText(t *testing.T) {
 	// Build a server WITHOUT a default repo. Tools should reject a call
 	// that also omits `repo` — as text, not a protocol error.
-	cache := NewCache(2, func(context.Context, string) (*search.WatchedIndex, func(), error) {
+	cache := NewCache(2, func(context.Context, string) (*RepoBundle, func(), error) {
 		t.Fatal("builder should not be invoked when repo is missing")
 		return nil, nil, nil
 	})

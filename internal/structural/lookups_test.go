@@ -3,6 +3,7 @@ package structural
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +71,109 @@ def use():
 	}
 	if !hasCallInImports {
 		t.Errorf("References missing Call in imports_authenticate.py; got %+v", refs)
+	}
+}
+
+// TestDefinition_MethodIndexing pins the Stage 8 v0+ behavior:
+// methods are indexed under both their bare name AND the qualified
+// Type.method form. Bare lookup returns all methods + any top-level
+// matches; qualified lookup returns ONLY the targeted class's
+// method. Kind labels distinguish function / class / method, and
+// method sites carry QName for disambiguation.
+func TestDefinition_MethodIndexing(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		// Top-level function named Login + a User class with a
+		// method named Login. Bare "Login" should return both;
+		// qualified "User.Login" should return only the method.
+		"a.py": `
+def Login():
+    pass
+
+class User:
+    def Login(self):
+        pass
+`,
+		// Different class with same bare method name. Bare
+		// "Login" should also include this; qualified
+		// "Admin.Login" should return only this.
+		"b.py": `
+class Admin:
+    def Login(self):
+        pass
+`,
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Bare "Login": want 3 sites (top-level Login in a.py +
+	// User.Login in a.py + Admin.Login in b.py)
+	bare := ix.Definition("Login")
+	if len(bare) != 3 {
+		t.Fatalf("Definition(Login) = %d sites, want 3 (top-level + 2 methods); got %+v", len(bare), bare)
+	}
+	// One should be a Function, two should be Methods.
+	var fnCount, methodCount int
+	for _, s := range bare {
+		switch s.Kind {
+		case DefinitionKindFunction:
+			fnCount++
+		case DefinitionKindMethod:
+			methodCount++
+			if s.QName == "" {
+				t.Errorf("method site missing QName; got %+v", s)
+			}
+		}
+	}
+	if fnCount != 1 {
+		t.Errorf("Definition(Login) function count = %d, want 1", fnCount)
+	}
+	if methodCount != 2 {
+		t.Errorf("Definition(Login) method count = %d, want 2", methodCount)
+	}
+
+	// Qualified "User.Login": want 1 method site
+	qualUser := ix.Definition("User.Login")
+	if len(qualUser) != 1 {
+		t.Fatalf("Definition(User.Login) = %d sites, want 1; got %+v", len(qualUser), qualUser)
+	}
+	if qualUser[0].Kind != DefinitionKindMethod {
+		t.Errorf("Definition(User.Login) Kind = %v, want Method", qualUser[0].Kind)
+	}
+	if qualUser[0].QName != "User.Login" {
+		t.Errorf("Definition(User.Login) QName = %q, want User.Login", qualUser[0].QName)
+	}
+	if qualUser[0].File != "a.py" {
+		t.Errorf("Definition(User.Login) File = %q, want a.py", qualUser[0].File)
+	}
+
+	// Qualified "Admin.Login": want 1 method site, in b.py
+	qualAdmin := ix.Definition("Admin.Login")
+	if len(qualAdmin) != 1 || qualAdmin[0].File != "b.py" {
+		t.Errorf("Definition(Admin.Login) = %+v, want [b.py]", qualAdmin)
+	}
+
+	// Symbols() must NOT include methods or qualified names —
+	// the symbol list stays top-level-only to keep agent-visible
+	// vocabulary clean. Methods are reachable via Definition or
+	// Outline.
+	all := ix.Symbols()
+	for _, n := range all {
+		if n == "Login" {
+			// Login top-level WAS a function in a.py, so its
+			// bare form IS in defs and SHOULD be listed.
+			continue
+		}
+		if strings.Contains(n, ".") {
+			t.Errorf("Symbols() leaked a qualified name %q (qualified forms should NOT appear in the symbol list)", n)
+		}
 	}
 }
 

@@ -53,6 +53,7 @@ import (
 	_ "github.com/townsendmerino/aikit/chunk/markdown"
 	_ "github.com/townsendmerino/aikit/chunk/treesitter"
 	"github.com/townsendmerino/ken/internal/search"
+	"github.com/townsendmerino/ken/internal/structural"
 	"github.com/townsendmerino/ken/internal/usage"
 	kenmcp "github.com/townsendmerino/ken/mcp"
 	mcpdb "github.com/townsendmerino/ken/mcp/db"
@@ -384,7 +385,7 @@ func main() {
 	// calls wix.Close() before invoking the user cleanup, so a live
 	// build's watcher fds drop before the temp clone dir is rm-rf'd
 	// (Close() is a no-op for the static pre-built case).
-	builder := func(ctx context.Context, source string) (*search.WatchedIndex, func(), error) {
+	builder := func(ctx context.Context, source string) (*kenmcp.RepoBundle, func(), error) {
 		var dir string
 		var cleanup func()
 		if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
@@ -423,7 +424,29 @@ func main() {
 		ix.SetOnFlush(func(msg string) {
 			logger.Logf(kenmcp.LogInfo, "%s: %s", dir, msg)
 		})
-		return ix, cleanup, nil
+
+		// Stage 8: eager structural-index build per the planning-
+		// instance's (a) steer. The build wall is in the noise vs
+		// the embedding pass loadOrBuildWatched already paid for;
+		// the eager-build property lets Track 2 tool handlers
+		// resolve ix.Structural() with no lazy-build coordination.
+		// On failure (unsupported language, parse errors), we log
+		// a stderr warning and leave Bundle.Structural=nil — the
+		// Track 2 tools handle nil gracefully (degrade to a clear
+		// "no structural index available" message).
+		var sIdx *structural.Index
+		if six, sErr := structural.Build(dir); sErr != nil {
+			logger.Logf(kenmcp.LogWarn, "structural index build failed for %s: %v "+
+				"(track 2 tools will report no structure available)", dir, sErr)
+		} else {
+			sIdx = six
+			stats := six.Stats()
+			logger.Logf(kenmcp.LogInfo,
+				"structural index built for %s: %d files, %d symbols, %d unique callees",
+				dir, stats.IndexedFiles, stats.UniqueSymbols, stats.UniqueCallees)
+		}
+
+		return &kenmcp.RepoBundle{Index: ix, Structural: sIdx}, cleanup, nil
 	}
 
 	cache := kenmcp.NewCache(size, builder)

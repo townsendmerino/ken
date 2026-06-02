@@ -40,6 +40,8 @@ import (
 
 	"github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
+
+	"github.com/townsendmerino/ken/internal/repo"
 )
 
 // FileStruct captures the structural facts a single corpus file
@@ -112,11 +114,23 @@ type Index struct {
 	// to that name. Sorted by file path for stable iteration.
 	callers map[string][]CallSite
 
-	// Definition lookup: name → files where this name is defined.
-	// Sorted by file path. Used by the Track 2 `definition` tool
-	// and by Enrich() when surfacing "callers" of a function defined
-	// in the current file.
+	// Top-level definition lookup: name → files where the name is
+	// defined as a top-level function or class. Sorted by file
+	// path. Symbols() and SymbolsInPath() iterate this map ONLY —
+	// methods are tracked separately so they don't pollute the
+	// symbol-list output.
 	defs map[string][]string
+
+	// Method definition lookup: name → files where the name is
+	// defined as a method. Keyed by BOTH the bare method name
+	// ("Login") AND the qualified Type.method form ("User.Login").
+	// The qualified key disambiguates when the same bare method
+	// name lives on multiple types in the same file.
+	//
+	// Stage 8 v0+: methods are queryable by either form. Bare
+	// lookup returns every class's method with that name across
+	// the corpus; qualified lookup pins down a single type.
+	methods map[string][]string
 }
 
 // EnrichOptions toggles which structural facts each variant arm
@@ -151,15 +165,16 @@ type EnrichOptions struct {
 }
 
 // kenLangToTSLang maps file extensions to gotreesitter grammar names.
-// Stage 8 v0 covers Python only; extending to other languages is a
-// matter of adding extract_<lang>.go and adding rows here.
+// Extending to other languages is a matter of adding extract_<lang>.go
+// and adding rows here.
 var kenLangToTSLang = map[string]string{
 	".py": "python",
+	".go": "go",
 }
 
 // langExtractor maps a gotreesitter grammar name to its AST-walking
-// extractor. Stage 8 v0 has only Python; adding a new language is a
-// new function that fills FileStruct and a new entry here.
+// extractor. Adding a new language is a new function that fills
+// FileStruct and a new entry here.
 //
 // The extractor receives the source bytes, the root *gotreesitter.Node,
 // the *gotreesitter.Language handle (needed for every Type() and
@@ -168,6 +183,7 @@ var kenLangToTSLang = map[string]string{
 // to populate.
 var langExtractor = map[string]func([]byte, *gotreesitter.Node, *gotreesitter.Language, *FileStruct){
 	"python": extractPython,
+	"go":     extractGo,
 }
 
 // langCache holds the pool + language handle per grammar. Both are
@@ -226,40 +242,37 @@ func langCacheFor(grammarName string) *langCache {
 // directory walk itself; per-file parse failures are silently
 // recorded as missing entries (same graceful-degrade as the
 // treesitter chunker).
+//
+// Walk semantics: uses internal/repo.WalkFS, the SAME gitignore-
+// respecting walker the regex+treesitter chunkers use. This is a
+// real change from the v0 prototype that called filepath.WalkDir
+// directly — that walked every file including build artifacts,
+// node_modules, and (the discovery case) ken's own gitignored
+// testdata/bench/* corpora of 400k+ tiny .py files. Honoring
+// gitignore aligns the structural index's notion of "this repo"
+// with what the chunker already considers it to be.
 func Build(corpusDir string) (*Index, error) {
 	ix := &Index{
 		files:   make(map[string]*FileStruct),
 		callers: make(map[string][]CallSite),
 		defs:    make(map[string][]string),
+		methods: make(map[string][]string),
 	}
 
-	// Sorted file order so the build is deterministic across runs.
-	var paths []string
-	err := filepath.WalkDir(corpusDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if _, supported := kenLangToTSLang[filepath.Ext(path)]; !supported {
-			return nil
-		}
-		paths = append(paths, path)
-		return nil
-	})
+	// Gitignore-aware walk via the same internal/repo.WalkFS path
+	// the chunker uses. WalkFS returns repo-relative slash paths
+	// in deterministic lexical order; binary files and oversized
+	// files are already skipped at the walker layer.
+	relPaths, err := repo.WalkFS(os.DirFS(corpusDir), repo.Options{})
 	if err != nil {
 		return nil, fmt.Errorf("structural.Build: walk %s: %w", corpusDir, err)
 	}
-	sort.Strings(paths)
 
-	// Pass 1: parse + extract per-file structure.
-	for _, p := range paths {
-		rel, err := filepath.Rel(corpusDir, p)
-		if err != nil {
-			rel = p
-		}
-		ext := filepath.Ext(p)
+	// Pass 1: parse + extract per-file structure. The walker
+	// already filtered to repo-tracked files; here we further
+	// gate by file extension against the supported grammars.
+	for _, rel := range relPaths {
+		ext := filepath.Ext(rel)
 		gram, ok := kenLangToTSLang[ext]
 		if !ok {
 			continue
@@ -268,7 +281,8 @@ func Build(corpusDir string) (*Index, error) {
 		if lc == nil {
 			continue // grammar unavailable; skip silently
 		}
-		src, err := os.ReadFile(p)
+		abs := filepath.Join(corpusDir, rel)
+		src, err := os.ReadFile(abs)
 		if err != nil {
 			continue
 		}
@@ -288,17 +302,36 @@ func Build(corpusDir string) (*Index, error) {
 		ix.files[rel] = fs
 	}
 
-	// Pass 2: reverse call graph + defs index.
-	// `defs`: for each top-level function/class, record the file that
-	// defines it. Methods of a class are NOT stored under the bare
-	// method name because that would conflate methods across classes
-	// — but they ARE counted as definitions of their fully-qualified
-	// name (class.method) elsewhere if needed.
-	// `callers`: for each callee name a file invokes, append that
-	// file. The "what calls foo" query just reads back the slice.
+	// Pass 2: build the lookup maps.
+	//
+	//   defs[name]      → files where `name` is a top-level def
+	//                     (function or class). Used by Symbols(),
+	//                     SymbolsInPath(), and the unqualified
+	//                     Definition() path for top-level matches.
+	//   methods[name]   → files where `name` is a method. Indexed
+	//                     under BOTH the bare method name AND the
+	//                     qualified Type.method form. Methods are
+	//                     queryable by either; the qualified form
+	//                     disambiguates when the bare name lives
+	//                     on multiple types.
+	//   callers[name]   → files that invoke `name` (call graph
+	//                     reverse). Bare callee names; selector
+	//                     expressions like `obj.foo()` contribute
+	//                     under "foo".
+	//
+	// Stage 8 v0+ (this Build): methods land in the methods map so
+	// the Track 2 `definition` tool can resolve method lookups.
+	// Same file may appear under both bare and qualified keys —
+	// the Definition() reader dedupes across the two when merging.
 	for path, fs := range ix.files {
 		for _, fn := range fs.Functions {
-			if !fn.IsMethod {
+			if fn.IsMethod {
+				ix.methods[fn.Name] = append(ix.methods[fn.Name], path)
+				if fn.EnclosingClass != "" {
+					qual := fn.EnclosingClass + "." + fn.Name
+					ix.methods[qual] = append(ix.methods[qual], path)
+				}
+			} else {
 				ix.defs[fn.Name] = append(ix.defs[fn.Name], path)
 			}
 		}
@@ -315,9 +348,16 @@ func Build(corpusDir string) (*Index, error) {
 		}
 	}
 
-	// Sort the slices for stable iteration.
+	// Sort + dedupe the slices for stable iteration and to
+	// collapse same-file double-indexing (e.g. a method indexed
+	// under both bare and qualified keys lands one file once per
+	// key by construction; defs/methods cross-collision would
+	// dedupe here).
 	for k := range ix.defs {
-		sort.Strings(ix.defs[k])
+		ix.defs[k] = uniqStringsSorted(ix.defs[k])
+	}
+	for k := range ix.methods {
+		ix.methods[k] = uniqStringsSorted(ix.methods[k])
 	}
 	for k := range ix.callers {
 		sort.Slice(ix.callers[k], func(i, j int) bool {
@@ -326,6 +366,22 @@ func Build(corpusDir string) (*Index, error) {
 	}
 
 	return ix, nil
+}
+
+// uniqStringsSorted sorts the slice and removes consecutive
+// duplicates in place. Returns a slice of length ≤ len(in).
+func uniqStringsSorted(in []string) []string {
+	if len(in) <= 1 {
+		return in
+	}
+	sort.Strings(in)
+	out := in[:1]
+	for i := 1; i < len(in); i++ {
+		if in[i] != in[i-1] {
+			out = append(out, in[i])
+		}
+	}
+	return out
 }
 
 // Files returns the per-file structures the index contains, keyed by
