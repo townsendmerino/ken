@@ -44,10 +44,7 @@ import (
 )
 
 const (
-	benchDir    = "../../testdata/bench/coir-csn-python"
-	corpusDir   = benchDir + "/corpus"
-	queriesPath = benchDir + "/queries.jsonl"
-	qrelsPath   = benchDir + "/qrels.jsonl"
+	defaultBenchDir = "../../testdata/bench/coir-csn-python"
 
 	// Over-fetch a healthy number of chunks per query so the
 	// passage→doc aggregation has room: even after dedup-by-file,
@@ -56,6 +53,18 @@ const (
 	// retrieval if every file is 1 chunk).
 	candidatesPerQuery = 100
 )
+
+// benchPaths returns the corpus / queries / qrels paths for a bench
+// dir. Env var KEN_BENCH_DIR overrides the default (set by the Stage
+// 8 CosQA realism gate to point at testdata/bench/cosqa-python or
+// cosqa-python-heur).
+func benchPaths() (benchDir, corpusDir, queriesPath, qrelsPath string) {
+	benchDir = os.Getenv("KEN_BENCH_DIR")
+	if benchDir == "" {
+		benchDir = defaultBenchDir
+	}
+	return benchDir, benchDir + "/corpus", benchDir + "/queries.jsonl", benchDir + "/qrels.jsonl"
+}
 
 type queryRow struct {
 	QueryID string `json:"query_id"`
@@ -69,6 +78,7 @@ type qrelRow struct {
 }
 
 func TestCoIR_CSNPython(t *testing.T) {
+	_, corpusDir, queriesPath, qrelsPath := benchPaths()
 	mustExist := []string{corpusDir, queriesPath, qrelsPath}
 	for _, p := range mustExist {
 		if _, err := os.Stat(p); err != nil {

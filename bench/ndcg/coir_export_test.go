@@ -50,6 +50,7 @@ func TestCoIR_ExportShortlist(t *testing.T) {
 	if os.Getenv("KEN_COIR_EXPORT") != "1" {
 		t.Skip("set KEN_COIR_EXPORT=1 to export the rerank shortlist")
 	}
+	benchDir, corpusDir, queriesPath, qrelsPath := benchPaths()
 	for _, p := range []string{corpusDir, queriesPath, qrelsPath} {
 		if _, err := os.Stat(p); err != nil {
 			t.Skipf("missing %s — run scripts/bench_coir.py first", p)
