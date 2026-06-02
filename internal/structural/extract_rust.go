@@ -152,16 +152,60 @@ func extractRustFunc(src []byte, n *gotreesitter.Node, lang *gotreesitter.Langua
 		IsMethod:       enclosingClass != "",
 		EnclosingClass: enclosingClass,
 	}
+	// Resolve name. gotreesitter v0.18.0 sometimes drops field
+	// labels on function_item subtrees parsed in certain contexts
+	// (observed: trait-impl methods like `fn fmt(...)` inside
+	// `impl Display for X`, and free functions preceded by doc
+	// comments). In those cases ChildByFieldName("name") returns
+	// nil even though the identifier child is right there.
+	// Fall back to the first identifier named child — for
+	// function_item / function_signature_item, that's always the
+	// function name (the only earlier named children would be a
+	// visibility_modifier or attribute, neither of which has type
+	// `identifier`).
 	if name := n.ChildByFieldName("name", lang); name != nil {
 		fn.Name = nodeText(src, name)
+	} else {
+		fn.Name = rustFirstNamedIdentifier(src, n, lang)
 	}
 	if params := n.ChildByFieldName("parameters", lang); params != nil {
 		fn.Params = extractRustParams(src, params, lang)
+	} else if p := rustFirstNamedChildOfType(n, lang, "parameters"); p != nil {
+		fn.Params = extractRustParams(src, p, lang)
 	}
 	if ret := n.ChildByFieldName("return_type", lang); ret != nil {
 		fn.ReturnType = nodeText(src, ret)
 	}
 	return fn
+}
+
+// rustFirstNamedIdentifier returns the text of the first child of n
+// whose type is "identifier". Used as a fallback when field-label
+// lookup (ChildByFieldName) fails because gotreesitter dropped the
+// labels for this subtree.
+func rustFirstNamedIdentifier(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language) string {
+	nc := n.NamedChildCount()
+	for i := 0; i < nc; i++ {
+		c := n.NamedChild(i)
+		if c != nil && c.Type(lang) == "identifier" {
+			return nodeText(src, c)
+		}
+	}
+	return ""
+}
+
+// rustFirstNamedChildOfType returns the first named child whose Type
+// matches typeName, or nil. Field-label-fallback companion to
+// rustFirstNamedIdentifier.
+func rustFirstNamedChildOfType(n *gotreesitter.Node, lang *gotreesitter.Language, typeName string) *gotreesitter.Node {
+	nc := n.NamedChildCount()
+	for i := 0; i < nc; i++ {
+		c := n.NamedChild(i)
+		if c != nil && c.Type(lang) == typeName {
+			return c
+		}
+	}
+	return nil
 }
 
 func extractRustParams(src []byte, params *gotreesitter.Node, lang *gotreesitter.Language) []string {
@@ -321,7 +365,18 @@ func rustIsBuiltinOrNoise(name string) bool {
 		"clone", "to_string", "to_owned", "into", "as_ref", "as_str", "as_bytes",
 		"len", "is_empty", "iter", "into_iter",
 		"unwrap", "expect", "ok", "err", "some", "none",
-		"push", "pop", "insert", "remove":
+		"push", "pop", "insert", "remove",
+		// Dogfood-surfaced additions (BurntSushi/ripgrep):
+		// constructors and iterator-chain methods that dominate
+		// the top-calls list without carrying user vocabulary.
+		"Ok", "Err", "Some", "None",
+		"new", "from", "default", "build", "parse", "map", "collect",
+		"map_err", "and_then", "or_else", "unwrap_or", "unwrap_or_else",
+		"is_some", "is_none", "is_ok", "is_err",
+		"as_mut", "as_slice", "as_path",
+		"add", "sub", "mul", "div",
+		"debug", "info", "warn", "trace", "log",
+		"start", "end":
 		return true
 	}
 	return false

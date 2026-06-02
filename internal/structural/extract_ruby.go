@@ -243,7 +243,17 @@ func rubyIsBuiltinOrNoise(name string) bool {
 		"each", "map", "select", "reject", "reduce", "inject",
 		"size", "length", "empty", "include",
 		"send", "respond_to", "instance_of", "kind_of", "is_a",
-		"add", "delete", "push", "pop", "shift", "unshift":
+		"add", "delete", "push", "pop", "shift", "unshift",
+		// Dogfood-surfaced additions (jekyll/jekyll):
+		// the `?` predicate forms + common idioms / log calls.
+		"nil?", "empty?", "is_a?", "kind_of?", "respond_to?",
+		"key?", "include?", "any?", "all?", "none?", "one?",
+		"frozen?", "blank?", "present?",
+		"tap", "freeze", "extend", "dup", "clone",
+		"warn", "error", "debug", "info", "log",
+		"raise", "fail",
+		"join", "split", "gsub", "sub", "match", "scan",
+		"Array", "Hash", "String", "Integer", "Float":
 		return true
 	}
 	return false

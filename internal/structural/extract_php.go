@@ -75,15 +75,20 @@ func walkPhp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, encl
 		recurseChildrenPhp(src, n, lang, enclosingClass, fs)
 	case "member_call_expression":
 		// `$obj->method(...)` — `name` field is the method.
-		if name := n.ChildByFieldName("name", lang); name != nil {
+		// Dynamic dispatch (`$obj->$method()` / `$obj->{$expr}()`)
+		// surfaces the name child as a variable_name or
+		// dynamic_variable_name, which we skip — the literal
+		// `$method` isn't a real method identifier.
+		if name := n.ChildByFieldName("name", lang); name != nil && phpIsStaticName(name, lang) {
 			if s := nodeText(src, name); s != "" && !phpIsBuiltinOrNoise(s) {
 				fs.Calls = dedupAppend(fs.Calls, s)
 			}
 		}
 		recurseChildrenPhp(src, n, lang, enclosingClass, fs)
 	case "scoped_call_expression":
-		// `Foo::bar(...)` — `name` field is the method.
-		if name := n.ChildByFieldName("name", lang); name != nil {
+		// `Foo::bar(...)` — `name` field is the method. Same
+		// dynamic-dispatch carve-out (`Foo::$method()`).
+		if name := n.ChildByFieldName("name", lang); name != nil && phpIsStaticName(name, lang) {
 			if s := nodeText(src, name); s != "" && !phpIsBuiltinOrNoise(s) {
 				fs.Calls = dedupAppend(fs.Calls, s)
 			}
@@ -393,8 +398,27 @@ func phpIsBuiltinOrNoise(name string) bool {
 		"implode", "explode", "strlen", "strpos", "str_replace",
 		"is_array", "is_string", "is_null", "is_numeric", "isset",
 		"empty", "unset", "var_dump", "print_r", "echo", "print",
-		"in_array", "array_search", "sort", "asort", "ksort":
+		"in_array", "array_search", "sort", "asort", "ksort",
+		// Dogfood-surfaced additions (laravel framework):
+		"array_merge", "array_combine", "array_diff", "array_intersect",
+		"sprintf", "method_exists", "function_exists", "class_exists",
+		"call_user_func", "call_user_func_array",
+		"get_class", "get_parent_class",
+		"str_contains", "str_starts_with", "str_ends_with",
+		"trim", "ltrim", "rtrim", "strtolower", "strtoupper":
 		return true
 	}
 	return false
+}
+
+// phpIsStaticName returns false if the given call-name node is a
+// dynamic-dispatch expression (variable_name / dynamic_variable_name)
+// — those reference a runtime variable, not a known method
+// identifier, so their text (`$method`) is meaningless to fs.Calls.
+func phpIsStaticName(n *gotreesitter.Node, lang *gotreesitter.Language) bool {
+	switch n.Type(lang) {
+	case "variable_name", "dynamic_variable_name", "parenthesized_expression":
+		return false
+	}
+	return true
 }

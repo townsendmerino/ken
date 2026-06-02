@@ -354,6 +354,15 @@ func cppIsBuiltinOrNoise(name string) bool {
 		"front", "back", "at", "data",
 		"c_str", "string", "to_string",
 		"make_unique", "make_shared", "move", "forward",
+		// C++ casts (modeled as call_expression by the grammar
+		// even though they're keywords) + assertion macros that
+		// reach the AST as ordinary calls. Dogfood-surfaced from
+		// google/leveldb.
+		"static_cast", "dynamic_cast", "reinterpret_cast", "const_cast",
+		"assert", "static_assert",
+		"ASSERT_EQ", "ASSERT_NE", "ASSERT_TRUE", "ASSERT_FALSE",
+		"ASSERT_GT", "ASSERT_LT", "ASSERT_GE", "ASSERT_LE",
+		"EXPECT_EQ", "EXPECT_NE", "EXPECT_TRUE", "EXPECT_FALSE",
 		// C stdlib basics — shared with extractC (same walker)
 		// because the names below are universal in C programs and
 		// add no user-vocabulary signal.

@@ -99,16 +99,16 @@ fn log_event(msg: &str) {
 		}
 	}
 
-	// Calls: verify_token (free) + new (HashMap::new — scoped),
-	// but `new` is NOT in our noise filter and IS valuable to
-	// surface as a constructor call. `insert`, `clone`, `println`
-	// are all noise-filtered.
-	for _, want := range []string{"verify_token", "new"} {
+	// Calls: verify_token (free) is the canonical user-vocab call.
+	// `new`, `insert`, `clone`, `println` are all in the noise
+	// filter (constructor / iterator / mutator / macro idioms that
+	// dominated the dogfood top-calls list).
+	for _, want := range []string{"verify_token"} {
 		if !contains(fs.Calls, want) {
 			t.Errorf("Calls missing %q; have %v", want, fs.Calls)
 		}
 	}
-	for _, noise := range []string{"insert", "clone", "println"} {
+	for _, noise := range []string{"new", "insert", "clone", "println"} {
 		if contains(fs.Calls, noise) {
 			t.Errorf("Calls should NOT contain %q (filtered by rustIsBuiltinOrNoise); have %v", noise, fs.Calls)
 		}
