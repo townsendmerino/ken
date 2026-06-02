@@ -150,3 +150,53 @@ func TestBuild_JavaScriptExtVariants(t *testing.T) {
 		}
 	}
 }
+
+// TestBuild_JavaScriptRequire confirms the CommonJS-require carve-out
+// in the call_expression handler: `require('mod')` lands in
+// fs.Imports (bound name = path basename, scope/extension stripped),
+// NOT in fs.Calls.
+func TestBuild_JavaScriptRequire(t *testing.T) {
+	dir := t.TempDir()
+	src := `const express = require('express');
+const path = require('node:path');
+const helpers = require('./util/helpers');
+const subPkg = require('@org/lib/sub');
+
+function setup() {
+	express();
+	path.join('a', 'b');
+	return helpers.run();
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "app.js"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := ix.File("app.js")
+	if fs == nil {
+		t.Fatal("app.js not indexed")
+	}
+
+	// Imports: bound names from each require call.
+	wantImports := []string{"express", "path", "helpers", "sub"}
+	for _, want := range wantImports {
+		if !contains(fs.Imports, want) {
+			t.Errorf("Imports missing %q; have %v", want, fs.Imports)
+		}
+	}
+
+	// fs.Calls MUST NOT contain "require" — the CommonJS carve-out
+	// routes require() calls to Imports instead. (If this fails it
+	// means a require() leaked through to tsCalleeName.)
+	if contains(fs.Calls, "require") {
+		t.Errorf("Calls should NOT contain 'require' (CommonJS imports are routed to fs.Imports); have %v", fs.Calls)
+	}
+
+	// Non-require calls still fire — express() and run() above.
+	if !contains(fs.Calls, "run") {
+		t.Errorf("Calls missing 'run'; have %v", fs.Calls)
+	}
+}

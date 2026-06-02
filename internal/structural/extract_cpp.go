@@ -1,6 +1,8 @@
 package structural
 
 import (
+	"strings"
+
 	"github.com/odvcencio/gotreesitter"
 )
 
@@ -117,7 +119,14 @@ func walkCpp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, encl
 		}
 		recurseChildrenCpp(src, n, lang, enclosingClass, fs)
 	case "preproc_include":
-		// Skip — not a "bound name" the way other langs are.
+		// `#include <foo.h>` / `#include "bar.h"` — surface the
+		// header's basename (sans extension) as an import. C/C++
+		// have no module-name binding the way Python or JS do;
+		// the file basename is the closest analog and is what an
+		// agent searching "where is foo.h used" would type.
+		if name := cppIncludeBoundName(src, n, lang); name != "" {
+			fs.Imports = dedupAppend(fs.Imports, name)
+		}
 		return
 	default:
 		recurseChildrenCpp(src, n, lang, enclosingClass, fs)
@@ -344,6 +353,55 @@ func cppScopeLeaf(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language)
 		}
 	}
 	return ""
+}
+
+// cppIncludeBoundName resolves a preproc_include node to the
+// agent-searchable name. Strips wrapping <>/"" + directory prefix +
+// extension, so `#include <std/vector.h>` → "vector",
+// `#include "redis/foo.h"` → "foo".
+func cppIncludeBoundName(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language) string {
+	nc := n.NamedChildCount()
+	for i := 0; i < nc; i++ {
+		c := n.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type(lang) {
+		case "system_lib_string":
+			// Raw text is "<foo.h>" or "<foo/bar.h>".
+			t := nodeText(src, c)
+			t = strings.TrimPrefix(t, "<")
+			t = strings.TrimSuffix(t, ">")
+			return includeBasename(t)
+		case "string_literal":
+			// Quoted form `#include "foo.h"`. Drill to
+			// string_content for the bare path; fall back to
+			// stripping quotes from the raw text.
+			cc := c.NamedChildCount()
+			for j := 0; j < cc; j++ {
+				inner := c.NamedChild(j)
+				if inner != nil && inner.Type(lang) == "string_content" {
+					return includeBasename(nodeText(src, inner))
+				}
+			}
+			t := nodeText(src, c)
+			t = strings.Trim(t, `"`)
+			return includeBasename(t)
+		}
+	}
+	return ""
+}
+
+// includeBasename strips the directory prefix and file extension
+// from an #include path. `redis/foo.h` → `foo`.
+func includeBasename(path string) string {
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		path = path[i+1:]
+	}
+	if i := strings.LastIndex(path, "."); i >= 0 {
+		path = path[:i]
+	}
+	return path
 }
 
 func cppIsBuiltinOrNoise(name string) bool {

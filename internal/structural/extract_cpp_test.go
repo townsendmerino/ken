@@ -109,6 +109,14 @@ void fail() {
 		t.Errorf("Raises missing 'AuthError'; have %v", fs.Raises)
 	}
 
+	// Imports: `#include <vector>` → "vector", `#include <string>` →
+	// "string" (system headers; no extension to strip).
+	for _, want := range []string{"vector", "string"} {
+		if !contains(fs.Imports, want) {
+			t.Errorf("Imports missing %q; have %v", want, fs.Imports)
+		}
+	}
+
 	// Definition lookups: SessionManager (class), qualified method.
 	defs := ix.Definition("SessionManager")
 	if len(defs) < 1 {

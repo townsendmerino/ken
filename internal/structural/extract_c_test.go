@@ -95,6 +95,15 @@ void log_event(const char* msg) {
 		t.Errorf("Calls should NOT contain 'printf' (filtered as C stdlib); have %v", fs.Calls)
 	}
 
+	// Imports: #include surfaces as bound names — `<stdlib.h>` →
+	// "stdlib" (system_lib_string), `"user.h"` → "user"
+	// (string_literal). Directory prefix + extension stripped.
+	for _, want := range []string{"stdlib", "user"} {
+		if !contains(fs.Imports, want) {
+			t.Errorf("Imports missing %q; have %v", want, fs.Imports)
+		}
+	}
+
 	// Definition lookups.
 	if defs := ix.Definition("authenticate"); len(defs) != 1 || defs[0].Kind != DefinitionKindFunction {
 		t.Errorf("Definition(authenticate) = %+v, want one Function site", defs)

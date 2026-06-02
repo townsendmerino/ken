@@ -1,6 +1,8 @@
 package structural
 
 import (
+	"strings"
+
 	"github.com/odvcencio/gotreesitter"
 )
 
@@ -86,7 +88,14 @@ func walkTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 			fs.Classes = append(fs.Classes, ClassDef{Name: nodeText(src, name)})
 		}
 	case "call_expression":
-		if name := tsCalleeName(src, n, lang); name != "" && !tsIsBuiltinOrNoise(name) {
+		// Node CommonJS `require('module')` doesn't use the
+		// import_statement node — it's a normal call_expression
+		// whose function is the bare identifier `require`. Bind
+		// it on the import side instead of letting "require"
+		// pollute fs.Calls.
+		if mod := jsExtractRequire(src, n, lang); mod != "" {
+			fs.Imports = dedupAppend(fs.Imports, mod)
+		} else if name := tsCalleeName(src, n, lang); name != "" && !tsIsBuiltinOrNoise(name) {
 			fs.Calls = dedupAppend(fs.Calls, name)
 		}
 		recurseChildrenTS(src, n, lang, enclosingClass, fs)
@@ -364,6 +373,77 @@ func findChildByType(n *gotreesitter.Node, lang *gotreesitter.Language, typeName
 		}
 	}
 	return nil
+}
+
+// jsExtractRequire returns the bound-name basename when the given
+// call_expression is a Node CommonJS `require('modulePath')` call;
+// returns "" otherwise. Detection is strict:
+//
+//   - function field is the bare identifier `require`
+//   - first argument is a string literal
+//
+// Both filters together avoid matching `require.resolve(...)`
+// (function = member_expression, not identifier) and
+// `require(varName)` (arg = identifier, not string). The bound name
+// is the rightmost segment of the module path, with extension /
+// scope-prefix stripped:
+//
+//	require('lodash')           → "lodash"
+//	require('node:path')        → "path"
+//	require('@my/foo/bar')      → "bar"
+//	require('./util/helpers')   → "helpers"
+//
+// This shape only appears in JavaScript codebases (TS uses
+// import_statement) but the same walker covers both, so the check
+// runs regardless — TS code that doesn't use require() simply
+// never triggers it.
+func jsExtractRequire(src []byte, callNode *gotreesitter.Node, lang *gotreesitter.Language) string {
+	fn := callNode.ChildByFieldName("function", lang)
+	if fn == nil || fn.Type(lang) != "identifier" {
+		return ""
+	}
+	if nodeText(src, fn) != "require" {
+		return ""
+	}
+	args := callNode.ChildByFieldName("arguments", lang)
+	if args == nil || args.NamedChildCount() == 0 {
+		return ""
+	}
+	arg0 := args.NamedChild(0)
+	if arg0 == nil || arg0.Type(lang) != "string" {
+		return ""
+	}
+	// The string node holds a string_fragment child with the
+	// quote-stripped path; fall back to trimming the raw text if
+	// the shape varies.
+	var path string
+	cc := arg0.NamedChildCount()
+	for j := 0; j < cc; j++ {
+		inner := arg0.NamedChild(j)
+		if inner != nil && inner.Type(lang) == "string_fragment" {
+			path = nodeText(src, inner)
+			break
+		}
+	}
+	if path == "" {
+		path = strings.Trim(nodeText(src, arg0), "\"'`")
+	}
+	return jsModuleBoundName(path)
+}
+
+// jsModuleBoundName collapses a module path to the agent-searchable
+// bound name. Strips a `node:` / scope prefix and any directory
+// segments, returning the rightmost path component.
+func jsModuleBoundName(path string) string {
+	// `node:path` → `path`
+	if i := strings.LastIndex(path, ":"); i >= 0 {
+		path = path[i+1:]
+	}
+	// `@scope/pkg/sub` → `sub`; `./util/helpers` → `helpers`
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		path = path[i+1:]
+	}
+	return path
 }
 
 func tsIsBuiltinOrNoise(name string) bool {
