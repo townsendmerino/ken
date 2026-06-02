@@ -31,6 +31,12 @@ func rrfScores(order []int) map[int]float64 {
 
 // hybridSearch runs the full semble hybrid pipeline and returns ranked
 // (chunkIndex, score) pairs. alphaOverride < 0 ⇒ auto-detect from query.
+//
+// predicted, when non-empty, is the Stage-7a transform #2 vocab-gap
+// expansion: identifiers predicted from the NL query (oracle, PRF,
+// encoder, etc.). They are appended to the BM25 token bag and passed
+// to the boost path so the existing embedded-symbol heuristics light
+// up on them. Empty/nil predicted is a no-op (the M0 baseline path).
 func hybridSearch(
 	query string,
 	qVec []float32,
@@ -39,6 +45,7 @@ func hybridSearch(
 	chunks []chunk.Chunk,
 	topK int,
 	alphaOverride float64,
+	predicted []string,
 ) []rankedItem {
 	alpha := resolveAlpha(query, alphaOverride)
 	candidateCount := topK * 5
@@ -49,8 +56,19 @@ func hybridSearch(
 		semOrder = append(semOrder, h.Index)
 	}
 	// BM25 candidates, excluding zero-score (semble drops score≤0).
+	// Predicted identifiers extend the query token bag (canonicalized
+	// via the same tokenizer the index used, so camel/snake/acronym
+	// splits match). No down-weighting at the BM25 layer in v0 — IDF
+	// implicitly down-weights frequent terms; if M0c shows runaway
+	// lost-cases we'll add a dual-retrieval RRF blend.
+	bmTerms := bm25.Tokenize(query)
+	if len(predicted) > 0 {
+		for _, p := range predicted {
+			bmTerms = append(bmTerms, bm25.Tokenize(p)...)
+		}
+	}
 	var bmOrder []int
-	for _, r := range bm.TopK(bm25.Tokenize(query), candidateCount) {
+	for _, r := range bm.TopK(bmTerms, candidateCount) {
 		if r.Score > 0 {
 			bmOrder = append(bmOrder, r.Doc)
 		}
@@ -68,6 +86,6 @@ func hybridSearch(
 	}
 
 	boostMultiChunkFiles(combined, chunks)
-	combined = applyQueryBoost(combined, query, chunks)
+	combined = applyQueryBoost(combined, query, chunks, predicted)
 	return rerankTopK(combined, chunks, topK, alpha < 1.0)
 }

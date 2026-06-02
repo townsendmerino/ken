@@ -35,7 +35,7 @@ func TestHybridSearch_EndToEnd(t *testing.T) {
 	flat := ann.New([][]float32{{1, 0}, {0.8, 0.6}, {0, 1}})
 	q := []float32{1, 0}
 
-	ranked := hybridSearch("getUser", q, flat, bm, chunks, 5, -1) // symbol ⇒ alpha 0.3, penalties on
+	ranked := hybridSearch("getUser", q, flat, bm, chunks, 5, -1, nil) // symbol ⇒ alpha 0.3, penalties on
 	if len(ranked) == 0 {
 		t.Fatal("hybridSearch returned nothing")
 	}

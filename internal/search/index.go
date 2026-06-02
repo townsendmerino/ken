@@ -592,6 +592,30 @@ func (ix *Index) Chunks() []chunk.Chunk { return ix.chunks }
 // "hybrid" assumption.
 func (ix *Index) Mode() Mode { return ix.mode }
 
+// Model returns the embedding model the index was built with, or nil
+// for ModeBM25 indices. Exposed so bench harnesses (and the Stage-7a
+// HyDE query-fusion path) can encode arbitrary text with the same
+// model the corpus was encoded with — required for the fused-vector
+// shape that SearchWithQVec expects. Read-only; the model is
+// goroutine-safe.
+func (ix *Index) Model() *embed.StaticModel { return ix.model }
+
+// BM25 returns the underlying BM25 index. Exposed so bench harnesses
+// can call IDF / DF on individual terms — used by the Stage-7a
+// transform #2 oracle and PRF predictors to rank candidate
+// identifiers by corpus distinctiveness and filter near-hapax
+// tokens. Never nil for any non-degenerate index. Read-only;
+// bm25.Index is goroutine-safe for queries.
+func (ix *Index) BM25() *bm25.Index { return ix.bm }
+
+// Vecs returns the per-chunk potion embeddings. Same length and
+// order as Chunks(). nil for ModeBM25 indices. Exposed so bench
+// harnesses (M0d encoder-cosine predictor) can build per-identifier
+// context centroids over the already-encoded chunk vectors — a
+// free aggregation that requires no new compute at index time.
+// Read-only; the caller MUST NOT mutate.
+func (ix *Index) Vecs() [][]float32 { return ix.vecs }
+
 // ResolveChunk returns the chunk that contains the 1-indexed line in
 // filePath, or nil if there is none. Mirrors semble utils._resolve_chunk:
 // prefer an interior hit (line < end_line); fall back to a boundary
@@ -723,7 +747,7 @@ func (ix *Index) SearchModeWithTelemetry(query string, k int, mode Mode) ([]Resu
 		fetch = k
 	}
 	s1 := time.Now()
-	ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, fetch, -1)
+	ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, fetch, -1, nil)
 	results := make([]Result, 0, len(ranked))
 	for _, r := range ranked {
 		c := ix.chunks[r.idx]
@@ -815,7 +839,7 @@ func (ix *Index) SearchMode(query string, k int, mode Mode) ([]Result, Mode) {
 	case ModeHybrid:
 		// hybridSearch already over-fetches by k*5 internally for its
 		// rerank pipeline; tombstones are filtered there.
-		ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, k, -1)
+		ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, k, -1, nil)
 		out := make([]Result, 0, k)
 		for _, r := range ranked {
 			c := ix.chunks[r.idx]
@@ -839,7 +863,7 @@ func (ix *Index) SearchMode(query string, k int, mode Mode) ([]Result, Mode) {
 		if fetch < k {
 			fetch = k
 		}
-		ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, fetch, -1)
+		ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, fetch, -1, nil)
 		// Tombstone-filter BEFORE the neural pass so the rerank
 		// budget isn't spent encoding chunks that'll be dropped.
 		results := make([]Result, 0, len(ranked))
@@ -870,6 +894,189 @@ func (ix *Index) SearchMode(query string, k int, mode Mode) ([]Result, Mode) {
 		}
 		return out, mode
 	}
+}
+
+// SearchWithQVec runs the same retrieval pipeline as SearchMode but
+// uses a caller-supplied dense query vector for the semantic side
+// instead of ix.model.Encode(query). BM25 still tokenizes the original
+// query text; α auto-detection and every downstream stage (RRF fuse,
+// file-coherence + query boost, path penalties, optional Stage-6
+// neural rerank) is unchanged.
+//
+// Purpose:
+//   - Stage 7a HyDE bench harness (bench/ndcg/hyde_test.go) — fuses
+//     the real query vector with potion(snippet) before retrieval.
+//   - Future Stage 7a M5 production wiring — QueryAnalyzer surfaces
+//     a HyDE doc, the calling layer fuses, and hands the fused vector
+//     to this method.
+//
+// qVec MUST have the model's expected dimension (m.Dim()) and SHOULD
+// be L2-normalized — the flat ANN computes raw dot products that are
+// cosine only when both sides are unit-norm. Caller-side normalization
+// after any blend is part of the contract.
+//
+// Capability downgrades mirror SearchMode exactly: requesting
+// semantic/hybrid/hybrid-rerank against a BM25-only index falls back
+// to ModeBM25 (qVec is unused in that case); ModeHybridRerank with no
+// attached reranker downgrades to ModeHybrid.
+func (ix *Index) SearchWithQVec(query string, qVec []float32, k int, mode Mode) ([]Result, Mode) {
+	return ix.SearchWithQVecPredicted(query, qVec, nil, k, mode)
+}
+
+// SearchWithQVecPredicted is SearchWithQVec plus the Stage-7a
+// transform #2 vocab-gap expansion: predicted identifiers from the
+// NL query (oracle, PRF, encoder, ...) appended to the BM25 token bag
+// and threaded into the embedded-symbol boost path. nil/empty
+// predicted is a no-op and reduces to SearchWithQVec semantics.
+//
+// The neural rerank stage (when mode == ModeHybridRerank) does not
+// consume predicted directly — it re-scores stage-1 candidates from
+// its own forward pass. So transform #2's only mechanism on the
+// default `hybrid+rerank` config is "pull more relevant chunks into
+// the stage-1 shortlist." outputs/m0b-phase-b-results.md has the
+// reasoning; m0c-results.md will have the numbers.
+func (ix *Index) SearchWithQVecPredicted(query string, qVec []float32, predicted []string, k int, mode Mode) ([]Result, Mode) {
+	if mode != ModeBM25 && (ix.flat == nil || ix.model == nil) {
+		mode = ModeBM25
+	}
+	if mode == ModeHybridRerank && ix.reranker == nil {
+		mode = ModeHybrid
+	}
+	overFetch := k + ix.tombstoneCount()
+	switch mode {
+	case ModeSemantic:
+		hits := ix.flat.Query(qVec, overFetch)
+		out := make([]Result, 0, k)
+		for _, h := range hits {
+			c := ix.chunks[h.Index]
+			if c.Tombstoned {
+				continue
+			}
+			out = append(out, Result{Chunk: c, Score: h.Score})
+			if len(out) >= k {
+				break
+			}
+		}
+		return out, mode
+	case ModeHybrid:
+		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, k, -1, predicted)
+		out := make([]Result, 0, k)
+		for _, r := range ranked {
+			c := ix.chunks[r.idx]
+			if c.Tombstoned {
+				continue
+			}
+			out = append(out, Result{Chunk: c, Score: r.score})
+			if len(out) >= k {
+				break
+			}
+		}
+		return out, mode
+	case ModeHybridRerank:
+		fetch := ix.rerankCfg.rerankN
+		if fetch < k {
+			fetch = k
+		}
+		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, fetch, -1, predicted)
+		results := make([]Result, 0, len(ranked))
+		for _, r := range ranked {
+			c := ix.chunks[r.idx]
+			if c.Tombstoned {
+				continue
+			}
+			results = append(results, Result{Chunk: c, Score: r.score})
+		}
+		results = applyReranker(ix.reranker, query, results, ix.rerankCfg)
+		if len(results) > k {
+			results = results[:k]
+		}
+		return results, mode
+	default: // ModeBM25 — qVec ignored
+		hits := ix.bm.TopK(bm25.Tokenize(query), overFetch)
+		out := make([]Result, 0, k)
+		for _, h := range hits {
+			c := ix.chunks[h.Doc]
+			if c.Tombstoned {
+				continue
+			}
+			out = append(out, Result{Chunk: c, Score: h.Score})
+			if len(out) >= k {
+				break
+			}
+		}
+		return out, mode
+	}
+}
+
+// SearchWithQVecTelemetry mirrors SearchModeWithTelemetry but uses a
+// caller-supplied dense query vector for the semantic side, identical
+// to SearchWithQVec's contract. Used by bench/ndcg/hyde_test.go to
+// attribute per-query wall to stage-1 retrieval vs neural rerank vs
+// reranker query/candidate encode vs cache hit/miss — without this
+// the harness can only time the whole call and is blind to where the
+// slowdown lives.
+//
+// Behavior parity with SearchWithQVec: same capability downgrades
+// (bm25-only ⇒ ModeBM25 regardless of mode; reranker-missing
+// ModeHybridRerank ⇒ ModeHybrid), same qVec contract (model.Dim()
+// length, caller L2-normalizes after any blend).
+func (ix *Index) SearchWithQVecTelemetry(query string, qVec []float32, k int, mode Mode) ([]Result, Mode, Telemetry) {
+	return ix.SearchWithQVecPredictedTelemetry(query, qVec, nil, k, mode)
+}
+
+// SearchWithQVecPredictedTelemetry is SearchWithQVecTelemetry plus
+// transform #2's predicted-identifier expansion (see
+// SearchWithQVecPredicted). nil/empty predicted reduces to
+// SearchWithQVecTelemetry semantics.
+func (ix *Index) SearchWithQVecPredictedTelemetry(query string, qVec []float32, predicted []string, k int, mode Mode) ([]Result, Mode, Telemetry) {
+	tel := Telemetry{}
+	t0 := time.Now()
+
+	if mode != ModeHybridRerank || ix.reranker == nil {
+		results, effMode := ix.SearchWithQVecPredicted(query, qVec, predicted, k, mode)
+		tel.TotalWall = time.Since(t0)
+		return results, effMode, tel
+	}
+	if ix.flat == nil || ix.model == nil {
+		results, effMode := ix.SearchWithQVecPredicted(query, qVec, predicted, k, ModeBM25)
+		tel.TotalWall = time.Since(t0)
+		return results, effMode, tel
+	}
+
+	fetch := ix.rerankCfg.rerankN
+	if fetch < k {
+		fetch = k
+	}
+	s1 := time.Now()
+	ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, fetch, -1, predicted)
+	results := make([]Result, 0, len(ranked))
+	for _, r := range ranked {
+		c := ix.chunks[r.idx]
+		if c.Tombstoned {
+			continue
+		}
+		results = append(results, Result{Chunk: c, Score: r.score})
+	}
+	tel.Stage1Wall = time.Since(s1)
+
+	s2 := time.Now()
+	results = applyRerankerWithTelemetry(ix.reranker, query, results, ix.rerankCfg, &tel)
+	tel.RerankWall = time.Since(s2)
+	if tel.RerankerQueryEncode > 0 || tel.RerankerCandidateEncode > 0 {
+		modelWall := tel.RerankerQueryEncode
+		if tel.RerankerCandidateEncode > modelWall {
+			modelWall = tel.RerankerCandidateEncode
+		}
+		if tel.RerankWall > modelWall {
+			tel.BlendWall = tel.RerankWall - modelWall
+		}
+	}
+
+	if len(results) > k {
+		results = results[:k]
+	}
+	tel.TotalWall = time.Since(t0)
+	return results, ModeHybridRerank, tel
 }
 
 // tombstoneCount returns how many entries in ix.chunks have

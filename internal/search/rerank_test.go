@@ -91,7 +91,7 @@ func TestApplyQueryBoost_SymbolDefinition(t *testing.T) {
 		mkChunk("util.go", "// calls validateToken somewhere"),                  // 1 no def
 	}
 	combined := map[int]float64{0: 0.5, 1: 0.4}
-	out := applyQueryBoost(combined, "ValidateToken", chunks) // symbol query
+	out := applyQueryBoost(combined, "ValidateToken", chunks, nil) // symbol query
 	if !(out[0] > out[1]) || !approx(out[0], 0.5+0.5*definitionBoostMultiplier) {
 		t.Errorf("symbol-defining chunk not boosted: out=%v (want out[0]=%v)",
 			out, 0.5+0.5*definitionBoostMultiplier)
@@ -100,7 +100,7 @@ func TestApplyQueryBoost_SymbolDefinition(t *testing.T) {
 		t.Errorf("non-defining chunk changed: %v want 0.4", out[1])
 	}
 	// Negative: NL query that matches nothing leaves scores untouched.
-	flat := applyQueryBoost(map[int]float64{0: 0.5, 1: 0.4}, "zzz qqq vvv", chunks)
+	flat := applyQueryBoost(map[int]float64{0: 0.5, 1: 0.4}, "zzz qqq vvv", chunks, nil)
 	if flat[0] != 0.5 || flat[1] != 0.4 {
 		t.Errorf("unrelated NL query changed scores: %v", flat)
 	}
@@ -112,7 +112,7 @@ func TestApplyQueryBoost_EmbeddedSymbolAndStem(t *testing.T) {
 		mkChunk("misc.go", "// unrelated"),                        // 1
 	}
 	// NL query containing a PascalCase symbol ⇒ embedded-symbol boost.
-	out := applyQueryBoost(map[int]float64{0: 0.5, 1: 0.5}, "how does StateManager work", chunks)
+	out := applyQueryBoost(map[int]float64{0: 0.5, 1: 0.5}, "how does StateManager work", chunks, nil)
 	if !(out[0] > 0.5) {
 		t.Errorf("embedded-symbol chunk not boosted: %v", out)
 	}
@@ -120,7 +120,7 @@ func TestApplyQueryBoost_EmbeddedSymbolAndStem(t *testing.T) {
 		t.Errorf("non-defining chunk changed: %v", out[1])
 	}
 	// Stem match: NL query words matching the file stem.
-	st := applyQueryBoost(map[int]float64{0: 1.0}, "manage state lifecycle", chunks)
+	st := applyQueryBoost(map[int]float64{0: 1.0}, "manage state lifecycle", chunks, nil)
 	if !(st[0] > 1.0) {
 		t.Errorf("file-stem match not boosted: %v", st)
 	}

@@ -286,7 +286,13 @@ func boostMultiChunkFiles(scores map[int]float64, chunks []chunk.Chunk) {
 
 // applyQueryBoost is semble boosting.apply_query_boost. Returns a new map
 // (may contain non-candidate chunk indices the scans injected).
-func applyQueryBoost(combined map[int]float64, query string, chunks []chunk.Chunk) map[int]float64 {
+//
+// predicted, when non-empty, is the Stage-7a transform #2 vocab-gap
+// expansion. Predicted identifiers participate in the embedded-symbol
+// boost path at predictedSymbolBoostScale (== embeddedSymbolBoostScale
+// in v0), letting a good prediction reward chunks whose stem/definition
+// matches the predicted name. nil/empty is a no-op.
+func applyQueryBoost(combined map[int]float64, query string, chunks []chunk.Chunk, predicted []string) map[int]float64 {
 	if len(combined) == 0 {
 		return combined
 	}
@@ -297,7 +303,7 @@ func applyQueryBoost(combined map[int]float64, query string, chunks []chunk.Chun
 		boostSymbolDefinitions(boosted, query, ms, chunks)
 	} else {
 		boostStemMatches(boosted, query, ms, chunks)
-		boostEmbeddedSymbols(boosted, query, ms, chunks)
+		boostEmbeddedSymbols(boosted, query, ms, chunks, predicted)
 	}
 	return boosted
 }
@@ -320,8 +326,14 @@ func boostSymbolDefinitions(boosted map[int]float64, query string, ms float64, c
 	})
 }
 
-func boostEmbeddedSymbols(boosted map[int]float64, query string, ms float64, chunks []chunk.Chunk) {
+func boostEmbeddedSymbols(boosted map[int]float64, query string, ms float64, chunks []chunk.Chunk, predicted []string) {
 	names := dedupe(embeddedSymbolRE.FindAllString(query, -1))
+	// Stage-7a transform #2: appended predicted identifiers ride the
+	// same embedded-symbol scale. dedupe again so a name that's both
+	// in the query and in the prediction list doesn't double-boost.
+	if len(predicted) > 0 {
+		names = dedupe(append(names, predicted...))
+	}
 	if len(names) == 0 {
 		return
 	}
