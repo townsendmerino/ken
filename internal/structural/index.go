@@ -168,8 +168,26 @@ type EnrichOptions struct {
 // Extending to other languages is a matter of adding extract_<lang>.go
 // and adding rows here.
 var kenLangToTSLang = map[string]string{
-	".py": "python",
-	".go": "go",
+	".py":   "python",
+	".go":   "go",
+	".ts":   "typescript",
+	".tsx":  "typescript",
+	".js":   "javascript",
+	".jsx":  "javascript",
+	".mjs":  "javascript",
+	".cjs":  "javascript",
+	".java": "java",
+	".rs":   "rust",
+	".cpp":  "cpp",
+	".cc":   "cpp",
+	".cxx":  "cpp",
+	".hpp":  "cpp",
+	".hh":   "cpp",
+	".hxx":  "cpp",
+	".c":    "c",
+	".h":    "c",
+	".php":  "php",
+	".rb":   "ruby",
 }
 
 // langExtractor maps a gotreesitter grammar name to its AST-walking
@@ -182,8 +200,16 @@ var kenLangToTSLang = map[string]string{
 // resolve node type names + field-name indices), and the FileStruct
 // to populate.
 var langExtractor = map[string]func([]byte, *gotreesitter.Node, *gotreesitter.Language, *FileStruct){
-	"python": extractPython,
-	"go":     extractGo,
+	"python":     extractPython,
+	"go":         extractGo,
+	"typescript": extractTypeScript,
+	"javascript": extractTypeScript,
+	"java":       extractJava,
+	"rust":       extractRust,
+	"cpp":        extractCpp,
+	"c":          extractCpp,
+	"php":        extractPhp,
+	"ruby":       extractRuby,
 }
 
 // langCache holds the pool + language handle per grammar. Both are
