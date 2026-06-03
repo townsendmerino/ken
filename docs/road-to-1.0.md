@@ -103,9 +103,13 @@ invocations).
   replacing the current kubernetes + postgres demos. E.g. "ken
   indexes the Go standard library, ask it questions" — instantly
   understandable to anyone who's written Go.
-- 🟡 **Document the recommended Claude-Code-with-ken workflow**.
-  `ultracode` / `ultrareview` are Claude Code skills, not ken
-  features, but they're the easiest dogfood path.
+- 🟢 **Document the recommended Claude-Code-with-ken workflow** —
+  shipped 2026-06-03 at [`docs/claude-code-workflow.md`](claude-code-workflow.md).
+  Four-layer framing: routine (just ken) → local `/review` →
+  `/code-review ultra` before merging load-bearing diffs → ultracode
+  sideways for genuinely parallel work. Honest about cost / time on
+  the cloud-side skills and consistent with USERS.md's existing
+  ken-vs-grep decision matrix.
 - 🟢 **Aikit's 1.0** — coordination ongoing. ken pins `aikit v0.2.0`
   in go.mod (bumped from v0.1.1 on 2026-06-03 in commit `b3ea116`).
   v0.2.0 added the generative half — pure-Go `decoder` + `tokenizer`
