@@ -38,6 +38,7 @@ import (
 	"path"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,6 +60,7 @@ import (
 	"github.com/townsendmerino/aikit/embed"
 	"github.com/townsendmerino/ken/internal/repo"
 	"github.com/townsendmerino/ken/internal/sql"
+	"github.com/townsendmerino/ken/internal/structural"
 )
 
 // FSOptions configures the FromFSWithOptions / NewWatchedIndexWithOptions
@@ -81,6 +83,27 @@ type FSOptions struct {
 	// sql.FoldMigrations. nil discards. Wired by cmd/ken-mcp from its
 	// leveled logger's stderr writer.
 	LogWriter io.Writer
+
+	// DisableEnrichment turns off the Stage 8 Arm B structural-
+	// enrichment prefix that the indexer prepends to each chunk's
+	// Text before BM25/embed (the `# func: NAME | calls: A |
+	// raises: X\n` line). When true, chunks pass through unchanged
+	// (v0.5/v0.6/v0.7 behavior). When false (the zero-value
+	// default), the indexer extracts per-file structural data via
+	// structural.ExtractFile + structural.EnrichFromFileStruct and
+	// prepends the label to every chunk's Text. Files whose
+	// extension has no registered extractor are no-op pass-through
+	// regardless of the flag.
+	//
+	// Default-on is the kickoff's product decision: enrichment is
+	// a deterministic, pure-Go, no-extra-model improvement validated
+	// on stripped-CSN (+0.0100 NDCG@10, +0.0160 R@50, p=0.04 at
+	// M0d) and CoSQA dev (+0.0342 hybrid / +0.0696 semantic /
+	// +0.0412 bm25 at Stage 8 Gate 1). The opt-out is for
+	// back-compat / debugging / corpora whose extractor misbehaves;
+	// FromPath/FromFS additionally read KEN_ENRICH=off as an env
+	// shortcut.
+	DisableEnrichment bool
 }
 
 // Mode selects the retrieval strategy.
@@ -181,7 +204,23 @@ type Index struct {
 // re-chunk / re-embed work — it shouldn't re-walk the tree just to
 // rebuild the index struct.
 func FromFS(fsys fs.FS, mode Mode, chunkerName, modelDir string) (*Index, error) {
-	return FromFSWithOptions(fsys, mode, chunkerName, modelDir, FSOptions{})
+	return FromFSWithOptions(fsys, mode, chunkerName, modelDir, defaultFSOptions())
+}
+
+// defaultFSOptions returns the FSOptions the no-knob entry points
+// (FromFS, FromPath, FromFSWithModel) thread through to the walker.
+// Honors the KEN_ENRICH env shortcut: any of "0", "off", "false",
+// "no" (case-insensitive) disables Arm B enrichment; all other
+// values (including unset and the explicit "on") leave it enabled.
+// Callers that want explicit control should construct FSOptions
+// themselves and call FromFSWithOptions.
+func defaultFSOptions() FSOptions {
+	opts := FSOptions{}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KEN_ENRICH"))) {
+	case "0", "off", "false", "no":
+		opts.DisableEnrichment = true
+	}
+	return opts
 }
 
 // FromFSWithOptions is FromFS plus the v0.7.1 FSOptions knob — currently
@@ -358,6 +397,30 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 					default:
 					}
 					continue
+				}
+				// Arm B enrichment (Stage 8): per-file structural
+				// extract → format the M0d label (`# func: NAME |
+				// calls: A | raises: X\n`) → prepend to every chunk's
+				// Text before BM25 tokenization / embedding. The
+				// label gets BOTH the lexical-side (BM25 sees the
+				// tokens) and semantic-side (the embed encoder sees
+				// them) of the production retrieval signal — same
+				// shape as the M0d/Gate-1 materialized corpora that
+				// validated the +0.0100 NDCG@10 win. ExtractFile
+				// returns nil silently when the extension has no
+				// extractor (no label = chunks pass through
+				// unchanged, which is the correct no-op behavior
+				// for unsupported languages). DisableEnrichment
+				// opts out entirely.
+				if !opts.DisableEnrichment {
+					if efs := structural.ExtractFile(j.rel, data); efs != nil {
+						label := structural.EnrichFromFileStruct(efs, structural.EnrichOptions{})
+						if label != "" {
+							for i := range cs {
+								cs[i].Text = label + cs[i].Text
+							}
+						}
+					}
 				}
 				var localVecs [][]float32
 				if model != nil {

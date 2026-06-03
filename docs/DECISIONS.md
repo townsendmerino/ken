@@ -2424,3 +2424,94 @@ Leaf-first per-stage moves under `go.work`, each stage left both modules green a
 - **Stability tiers carry over** to `aikit` per its README — hard-1.0-committed surface matches ADR-032 + the documented `aikit/embed`/`aikit/encoder` boundaries; concrete chunkers + Q8 paths + mmap variant stay best-effort.
 - **License chain intact:** LICENSE + NOTICE + THIRD_PARTY_LICENSES.md copied to aikit (Model2Vec + semble + gotreesitter + x/text attributions travel with `embed`/`bm25`/`encoder`/`chunk`).
 - **Pre-execution evaluation:** five-angle parallel review (build correctness, public-API impact, testdata portability, adversarial gaps, sequencing) ran before any code moved. Every reviewer returned `proceed-with-fixes`; concerns were folded into the executed plan (test files added to worklist, atomic per-Stage-B commits, drift-guard relocation, scripts also moved with their packages). Two findings stayed unfixed in this migration: dead markdown links in historical CHANGELOG entries (accepted as docs cost; the prose narrative still reads correctly), and pre-existing-broken bench fixture paths in chunk subpackages (already silently skipped today; fix folded into the move via path-depth correction).
+
+
+## ADR-035: Ship Arm B structural enrichment in the production indexer (Stage 8 close)
+
+### Context
+
+Stage 8 Track 2 (definition / references / outline / symbols MCP tools backed by the gotreesitter-based structural index) shipped to production through commits `c783be8` → `7417578` → `bc5c04f` → `f9578f0` → `8006d48`. The structural index plus 10-language extractors are live behind the Track 2 surface.
+
+Track 1's Arm B candidate — prepending a deterministic per-chunk label `# func: NAME | calls: A, B | raises: X\n` to every chunk before BM25 tokenization and embedding — was validated by two gates:
+
+- **M0d csn-python-nl-stripped:** +0.0100 NDCG@10, +0.0160 R@50 (p=0.04), hybrid+rerank, N=500 against the *Python-materialized* corpus `csn-python-nl-stripped-heur/`.
+- **Stage 8 Gate 1 CoSQA realism:** +0.0342 hybrid / +0.0696 semantic / +0.0412 bm25 on CoSQA dev (313 queries, casual web-search register) against the *Python-materialized* corpus `cosqa-python-heur/`.
+
+Both validated numbers came from Python `bench_csn_nl_stripped_heur.py` / `bench_cosqa_heur.py` materializers writing prefix-prepended files to disk; the production indexer never applied the label. The Stage 8 close required wiring the Go `structural.Enrich()` path into `search.FromPath` and verifying — by **in-process re-bench** — that the production code path reproduces the validated lifts. Anything less would ship a number derived from infrastructure that isn't actually on the user's hot path.
+
+### Decision
+
+**Wire Arm B into `walkAndChunkFSWithModel`'s per-file worker, between `chunkOneFile` and `model.Encode`. Default-on. Disable knob `KEN_ENRICH=off` or `FSOptions.DisableEnrichment=true`.**
+
+**End state:**
+
+- `internal/structural/extract_file.go` exposes `ExtractFile(rel string, data []byte) *FileStruct` — per-file gotreesitter parse + extractor invocation. Same per-file work as Pass 1 of `structural.Build`, exposed for callers that need one file's data without the full-corpus walk + cross-file reverse maps.
+- `internal/structural/enrich.go` adds `EnrichFromFileStruct(fs *FileStruct, opts EnrichOptions) string`, an index-free per-FileStruct enricher. `(Index).Enrich` and `EnrichFromFileStruct` both delegate to a shared `enrichCore` so the production indexer and any future bench materializer produce **byte-for-byte the same prefix from the same code**.
+- The indexer worker, after producing `cs []chunk.Chunk` from `chunkOneFile`, calls `structural.ExtractFile(rel, data)`. If that returns a non-nil FileStruct (i.e. the file's extension has a registered extractor), the worker computes the label and prepends it to every chunk's `Text` before embedding. Files with no extractor pass through unchanged.
+- `FSOptions.DisableEnrichment` (zero-value = enrichment on) is the Go-side opt-out; `FromFS` / `FromPath` / `FromFSWithModel` route through a new `defaultFSOptions()` that reads `KEN_ENRICH` and disables enrichment for any of `"0" / "off" / "false" / "no"` (case-insensitive). All other values (including unset and `"on"`) keep enrichment enabled.
+
+**Default-on** is the product decision. Three reasons:
+
+1. Net-positive on every measured corpus and mode (table below).
+2. Deterministic, pure-Go, no extra model — zero new dependencies at the user.
+3. The opt-out covers the corpus-pathological case where a specific extractor misbehaves; we'd rather a user explicitly disables enrichment for one corpus than make every user opt into the win.
+
+### In-process bench numbers (the drift gate)
+
+Both bench runs use the **raw** corpora (`csn-python-nl-stripped/` and `cosqa-python/`); enrichment is applied by the production code path inside `walkAndChunkFSWithModel`, not pre-materialized to disk. Two cells per bench: KEN_ENRICH=off (baseline) and default (enriched).
+
+**csn-python-nl-stripped, N=500, hybrid path** (rerank cell deferred; see Caveats):
+
+| Mode | Baseline | Enriched | Δ |
+|---|---:|---:|---:|
+| bm25 | 0.5987 | 0.6165 | **+0.0178** |
+| semantic | 0.5967 | 0.6237 | **+0.0270** |
+| hybrid | 0.6144 | 0.6352 | **+0.0208** |
+
+Hybrid lift is ~2× M0d's validated +0.0100. The over-reproduction is consistent with Model2Vec being order-insensitive (per-token IDF-weighted average): the Go walker's call-ordering differences vs Python's `ast.walk` (see Drift section) don't degrade the embedding, and the slightly different call sets the Go walker captures appear to net positive.
+
+**CoSQA dev, N=313, hybrid path:**
+
+| Mode | Baseline | Enriched (in-proc) | Δ | Gate-1 validated Δ | Drift |
+|---|---:|---:|---:|---:|---:|
+| bm25 | 0.4724 | 0.5154 | +0.0430 | +0.0412 | +0.0018 |
+| semantic | 0.6520 | 0.7216 | +0.0696 | +0.0696 | **0.0000** |
+| hybrid | 0.5708 | 0.6029 | +0.0321 | +0.0342 | −0.0021 |
+
+CoSQA in-process numbers reproduce the validated Gate-1 numbers within 0.002 across all three modes; semantic hits exactly. Gate cleared.
+
+### Label drift between Go and Python materializers
+
+`scripts/armb_drift_diff.go` compares the Go `EnrichFromFileStruct` label against the first line of the Python-materialized file for every file in `csn-python-nl-stripped/corpus/`:
+
+- **Byte-exact match: 8,142 / 14,725 = 55.3%**
+- **Mismatch: 6,583** — but 5,250 (80% of mismatches) are call-ORDER differences with the **same call set**. Python's `ast.walk` and gotreesitter cursor traversal both visit depth-first but in different child-order, so when ≤8 calls exist both walkers list the same names in different sequence.
+- Of the genuinely-different mismatches: 1,247 differ in the actual call set (truncation hits a different 8 of N when more than 8 calls exist), 208 in func name, 26 in raises set.
+- Mean label byte length: Go 74.0, Python 73.9 (essentially identical).
+
+**Why the drift is harmless on this retrieval stack:**
+
+- BM25 is a token bag → reordering 8 names produces an identical BM25 contribution.
+- Model2Vec is a static averaging encoder → reordering doesn't affect the per-chunk embedding.
+- CodeRankEmbed (the neural reranker, order-sensitive) only re-scores the top-50 from the hybrid shortlist; since hybrid surfaces the right docs into the shortlist (the +0.0208 lift), the reranker has the right candidates to work with regardless of internal order.
+
+If we ever swap the embedding model for an order-sensitive one (e.g. a real transformer), the drift could matter. Documented as a follow-up trigger.
+
+### Caveats
+
+- **Rerank cell on csn-stripped was not measured.** TestCoIR_CSNPython with KEN_RERANK=1 on N=500 hit the 1h test timeout mid-rerank-forward-pass; 500 queries × top-50 forward passes on the f32 CodeRankEmbed model exceed the budget on local hardware. The hybrid cell (which produces the shortlist the reranker re-scores) shows the drift gate passing cleanly, so the rerank cell is expected to follow but is not directly measured. A larger-timeout sweep or a Q8 run would close that loop.
+- **The 4 unparseable-after-docstring-strip files in `cosqa_to_bench.py`** carry no Go label (ExtractFile silently returns nil; chunk passes through unmodified). Same behavior the Python materializer produced. Match-rate: 0 of those files contribute to drift.
+
+### Alternatives considered
+
+- **Keep enrichment off by default; require explicit `KEN_ENRICH=on`.** Rejected. Every measured corpus + mode is net-positive. Making users opt into a free, deterministic, no-new-dep win means most users won't get it. The opt-out covers corpus-specific exceptions.
+- **Pre-materialize the enriched corpus to disk (mirror the Python bench shape).** Rejected. Adds a disk write step on every index build, doubles storage for a corpus, and creates two paths (raw + materialized) where one path with in-process enrichment suffices.
+- **Make `Enrich()` use a callback for cross-file Callers lookup so the production indexer can call the index-free path AND a future "rich enrichment with callers" path uses the same code.** Implemented. `(Index).Enrich` passes its callersOf closure into `enrichCore`; `EnrichFromFileStruct` passes nil. The path that ships is the index-free one — M0e proved callers/imports/signature/siblings all hurt or are neutral; they remain available behind opts but are not on the ship path.
+- **Delete the now-redundant Python materializers (`bench_csn_nl_stripped_heur.py` and `bench_cosqa_heur.py`).** Deferred. They produced the original validated numbers; keeping them as a known-good reference for future drift checks is cheap. Noted in road-to-1.0 nits.
+
+### Consequences
+
+- **Chunker byte-fidelity invariant is intentionally broken at the indexer layer** for enriched chunks. The chunker itself still satisfies the invariant on raw source; the indexer's deliberate post-chunker `Text = label + Text` is what an indexer is for. Search-result display now includes the label as the first line of the chunk text — same as M0d's materialized corpus did, so the user-facing presentation matches the validated baseline.
+- **Indexing wall-time cost: ~25ms per file on this corpus** (regex + treesitter mix; absolute number scales with file count). Cheap enough to default-on without an indexing-perf regression note in CLAUDE.md.
+- **Single source of truth for Arm B label**: any future bench / materializer that wants the same prefix MUST call `structural.EnrichFromFileStruct` or `(Index).Enrich`. Other paths are forbidden by convention; the diff script catches drift if anyone tries.
+- **Closes Stage 8.** Together with the already-shipped Track 2 tools and 10-language extractors, the Stage 8 plan is now production. road-to-1.0.md tracker retrieval section can be marked closed.

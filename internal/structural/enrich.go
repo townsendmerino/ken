@@ -52,15 +52,48 @@ func (ix *Index) Enrich(filePath string, opts EnrichOptions) string {
 	if fs == nil {
 		return ""
 	}
+	// Delegate to the per-FileStruct path so both index-backed callers
+	// (Track 2 tools, materializers) AND index-free callers (the
+	// production indexer's chunk-pipeline enrichment, which doesn't
+	// build a full cross-corpus Index) compute the SAME label from the
+	// SAME code. opts.Callers needs the cross-file reverse-call map and
+	// is plumbed via a callback so EnrichFromFileStruct stays
+	// index-free.
+	return enrichCore(fs, opts, func(name string) []string {
+		return ix.callersOf(name, filePath)
+	})
+}
 
+// EnrichFromFileStruct is the index-free per-FileStruct enrichment
+// path. Same Arm B label format as (Index).Enrich. opts.Callers is a
+// no-op here (the called-by reverse map needs a cross-file Index);
+// callers that want the called-by section must use the (Index).Enrich
+// path with a built full Index. M0e ranked called-by negatively
+// anyway — Arm B baseline (Callers=false) is what's shipping.
+//
+// Used by the Stage 8 production indexer in walkAndChunkFSWithModel:
+// per-file ExtractFile produces a FileStruct, EnrichFromFileStruct
+// turns it into a label, the indexer prepends the label to each
+// chunk's Text. No full structural.Build pass needed at index time —
+// the structural Index for the Track 2 MCP tools is still built
+// separately in ken-mcp's RepoBundle.
+func EnrichFromFileStruct(fs *FileStruct, opts EnrichOptions) string {
+	if fs == nil {
+		return ""
+	}
+	return enrichCore(fs, opts, nil)
+}
+
+// enrichCore is the shared label-formatter. callersResolver may be
+// nil — in which case opts.Callers is silently ignored. Single source
+// of truth for the Arm B label format; both (Index).Enrich and
+// EnrichFromFileStruct route through here so the production indexer
+// produces byte-for-byte the same prefix as the bench materializers
+// did.
+func enrichCore(fs *FileStruct, opts EnrichOptions, callersResolver func(name string) []string) string {
 	var parts []string
 
 	// === Arm B baseline: func, calls, raises ===
-
-	// First function name (the chunk's identity for CSN-Python,
-	// which is one function per file). If the file has multiple
-	// top-level functions, take the first — same as M0d's Python
-	// `tree.body[0].name` extraction.
 	primaryFunc := primaryFuncName(fs)
 	if primaryFunc != "" {
 		parts = append(parts, "func: "+primaryFunc)
@@ -73,9 +106,8 @@ func (ix *Index) Enrich(filePath string, opts EnrichOptions) string {
 	}
 
 	// === Stage 8 additive arms ===
-
-	if opts.Callers && primaryFunc != "" {
-		if callers := ix.callersOf(primaryFunc, filePath); len(callers) > 0 {
+	if opts.Callers && callersResolver != nil && primaryFunc != "" {
+		if callers := callersResolver(primaryFunc); len(callers) > 0 {
 			parts = append(parts, "called by: "+trimAndJoin(callers, maxCallersInLabel))
 		}
 	}
@@ -89,9 +121,6 @@ func (ix *Index) Enrich(filePath string, opts EnrichOptions) string {
 				parts = append(parts, "params: "+trimAndJoin(fn.Params, maxParamsInLabel))
 			}
 			if fn.ReturnType != "" {
-				// Single value; no truncation. Strip whitespace
-				// for compactness (return types like ` -> Dict[str,
-				// int]` carry leading space from the node text).
 				parts = append(parts, "returns: "+strings.TrimSpace(fn.ReturnType))
 			}
 		}

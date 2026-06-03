@@ -524,6 +524,24 @@ Training-dataset licenses (CornStack `nomic-ai/cornstack-*`) don't encumber the 
 
 Ported verbatim from semble's live source (`search.py`, `ranking/{boosting,penalties,weighting}.py`, `tokens.py`), which diverged materially from the scoping reconstruction.
 
+### Arm B chunk-level enrichment (Stage 8 close, ADR-035)
+
+Before BM25 tokenization and embedding, every chunk produced from a file with a registered gotreesitter extractor gets a deterministic per-file label line prepended:
+
+```
+# func: <name> | calls: <up-to-8, comma-sep> | raises: <up-to-4, comma-sep>
+<original chunk body>
+```
+
+Sections present only when non-empty (a function with no calls produces no `calls:` clause). The label is computed by `structural.EnrichFromFileStruct` from a `structural.FileStruct` returned by `structural.ExtractFile(rel, data)` — single per-file gotreesitter parse + extractor invocation. Files with no registered extractor pass through unchanged.
+
+**Validated lift (in-process, production code path):**
+
+- csn-python-nl-stripped N=500: bm25 +0.0178, semantic +0.0270, hybrid **+0.0208** NDCG@10 (vs M0d Python-materialized +0.0100; over-reproduces because Model2Vec is order-insensitive)
+- CoSQA dev N=313: bm25 +0.0430, semantic **+0.0696**, hybrid +0.0321 NDCG@10 (within 0.002 of Gate-1 numbers across all three modes)
+
+**Default-on**, opt-out via `KEN_ENRICH=off` or `FSOptions.DisableEnrichment=true`. The Python materializers `scripts/bench_csn_nl_stripped_heur.py` and `scripts/bench_cosqa_heur.py` are bench-only fallbacks retained as drift references; production indexing goes through the Go path.
+
 ### Pipeline order
 
 ```
