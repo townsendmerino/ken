@@ -21,10 +21,10 @@
 // This is the same relevance-over-completeness trade ken makes for
 // retrieval; honest in both directions.
 //
-// Stage 8 supports eleven languages via dedicated extractors:
+// Stage 8 supports twelve languages via dedicated extractors:
 // Python, Go, TypeScript, JavaScript, Java, Rust, C, C++, PHP, Ruby,
-// Kotlin. Adding another language is a new extract_<lang>.go file
-// plus a row in the kenLangToTSLang and langExtractor maps; the
+// Kotlin, Dart. Adding another language is a new extract_<lang>.go
+// file plus a row in the kenLangToTSLang and langExtractor maps; the
 // surface stays the same. Languages whose grammar fails — C#
 // (unbounded recursion in the post-parse namespace recovery pass),
 // Swift (lexer misparses real-world header comments), bash
@@ -195,6 +195,7 @@ var kenLangToTSLang = map[string]string{
 	".rb":   "ruby",
 	".kt":   "kotlin",
 	".kts":  "kotlin",
+	".dart": "dart",
 	// .swift intentionally OMITTED — the gotreesitter v0.20.0-rc3
 	// tree-sitter-swift grammar misparses real-world Swift (header
 	// comments containing common words like "and" / "software" /
@@ -233,6 +234,7 @@ var langExtractor = map[string]func([]byte, *gotreesitter.Node, *gotreesitter.La
 	"php":        extractPhp,
 	"ruby":       extractRuby,
 	"kotlin":     extractKotlin,
+	"dart":       extractDart,
 	// "swift": extractSwift — registered but parked; see the
 	// kenLangToTSLang block above. Uncomment when the grammar
 	// is fixed upstream.

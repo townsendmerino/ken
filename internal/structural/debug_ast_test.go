@@ -191,6 +191,40 @@ class SessionManager {
 	}
 }
 `
+	case "dart":
+		return `
+import 'dart:async';
+import 'package:flutter/material.dart';
+
+class SessionManager {
+  final TokenStore store;
+  final List<User> active = [];
+
+  SessionManager(this.store);
+
+  Future<bool> login(User u, String password) async {
+    if (!verifyToken(u.id, password)) {
+      throw AuthException('denied');
+    }
+    active.add(u);
+    return true;
+  }
+
+  void logout(User u) {
+    active.remove(u);
+  }
+}
+
+abstract class Authenticator {
+  bool authenticate(User u, String pwd);
+}
+
+mixin Greetable {
+  String greet(String name) => 'Hello $name';
+}
+
+bool verifyToken(String id, String pwd) => true;
+`
 	case "kotlin":
 		return `
 package com.example.auth

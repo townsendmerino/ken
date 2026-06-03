@@ -52,6 +52,8 @@ var targets = []target{
 	{"jekyll", "https://github.com/jekyll/jekyll.git", "Ruby", "lib"},
 	{"okhttp", "https://github.com/square/okhttp.git", "Kotlin", ""},
 	{"alamofire", "https://github.com/Alamofire/Alamofire.git", "Swift", "Source"},
+	{"flutter-samples", "https://github.com/flutter/samples.git", "Dart", ""},
+	{"dart_style", "https://github.com/dart-lang/dart_style.git", "Dart", "lib"},
 }
 
 func main() {
