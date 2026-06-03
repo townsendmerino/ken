@@ -122,10 +122,16 @@ invocations).
   generative-half packages would currently be best-effort under
   that requirement — a coordination point, not a blocker for ken's
   1.0 release.
-- 🟡 **Performance expectations doc.** ADRs 026–030 set baselines.
-  "What should ken feel like" — "indexing the Linux kernel takes
-  ~X minutes, queries are sub-Y ms" — sets user expectations and
-  catches regressions.
+- 🟢 **Performance expectations doc** — shipped 2026-06-03 at
+  [`docs/PERF-expectations.md`](PERF-expectations.md). User-facing
+  "what should ken feel like" layer above PERF.md's measurement
+  methodology. Cold-start budget split (M2 + M4 wins from ADR-036
+  cited inline), warm-search p50 sub-ms claim, cold vs warm-cache
+  rerank latency (from the v0.9.1 neural rerank bench), six
+  concrete regression red flags with the exact bench/script to
+  re-check each. Honest about what's NOT measured: no published
+  Linux-kernel number (extrapolation only), no x86_64 second-
+  machine pass, no huge-monorepo memory data.
 
 ## Honest summary
 
