@@ -4,6 +4,7 @@ import (
 	"github.com/townsendmerino/aikit/ann"
 	"github.com/townsendmerino/aikit/bm25"
 	"github.com/townsendmerino/aikit/chunk"
+	"github.com/townsendmerino/aikit/fuse"
 )
 
 // Hybrid retrieval — ported from semble search.py:search_hybrid.
@@ -15,19 +16,11 @@ import (
 //   - RRF rank is 1-indexed: 1/(k+rank), rank ∈ {1,2,…}, k=60.
 //   - order of operations: file-coherence boost → query boost → penalties.
 //   - path penalties run only when α < 1.0 (skipped for pure semantic).
-
-const rrfK = 60
-
-// rrfScores converts a retriever's already-rank-ordered hits to RRF scores
-// 1/(k+rank), rank 1-indexed (semble search._rrf_scores; the inputs are
-// pre-sorted descending so position is the rank).
-func rrfScores(order []int) map[int]float64 {
-	out := make(map[int]float64, len(order))
-	for pos, idx := range order {
-		out[idx] = 1.0 / float64(rrfK+pos+1)
-	}
-	return out
-}
+//
+// As of aikit v0.2.0 the RRF math lives in aikit/fuse.RRFWeighted —
+// numerically identical to the prior ken-local rrfScores helper (same
+// 1-indexed `w/(k+rank)`), but now shared with other consumers of the
+// toolkit. k=60 stays explicit at the call site (= fuse.DefaultK).
 
 // hybridSearch runs the full semble hybrid pipeline and returns ranked
 // (chunkIndex, score) pairs. alphaOverride < 0 ⇒ auto-detect from query.
@@ -74,15 +67,10 @@ func hybridSearch(
 		}
 	}
 
-	semRRF := rrfScores(semOrder)
-	bmRRF := rrfScores(bmOrder)
-
-	combined := map[int]float64{}
-	for idx := range semRRF {
-		combined[idx] = alpha * semRRF[idx]
-	}
-	for idx, v := range bmRRF {
-		combined[idx] += (1.0 - alpha) * v
+	fused := fuse.RRFWeighted(fuse.DefaultK, []float64{alpha, 1.0 - alpha}, semOrder, bmOrder)
+	combined := make(map[int]float64, len(fused))
+	for _, r := range fused {
+		combined[r.Key] = r.Score
 	}
 
 	boostMultiChunkFiles(combined, chunks)

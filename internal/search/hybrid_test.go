@@ -8,19 +8,6 @@ import (
 	"github.com/townsendmerino/aikit/chunk"
 )
 
-func TestRRFScores(t *testing.T) {
-	got := rrfScores([]int{5, 2, 9}) // rank 1-indexed: 1/(60+rank)
-	want := map[int]float64{5: 1.0 / 61, 2: 1.0 / 62, 9: 1.0 / 63}
-	for k, w := range want {
-		if !approx(got[k], w) {
-			t.Errorf("rrf[%d] = %v, want %v", k, got[k], w)
-		}
-	}
-	if rrfScores(nil) == nil {
-		t.Error("rrfScores(nil) should return an empty (non-nil) map")
-	}
-}
-
 func TestHybridSearch_EndToEnd(t *testing.T) {
 	chunks := []chunk.Chunk{
 		{File: "user.go", Text: "func getUser() string { return userName }", StartLine: 1, EndLine: 1},
