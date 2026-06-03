@@ -866,10 +866,7 @@ func mysqlAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot,
 // defensive — on a 2-core box, 8 workers would still serialize at the
 // scheduler anyway. ADR-031 documents the rationale.
 func sampleWorkers() int {
-	n := min(runtime.NumCPU(), 8)
-	if n < 1 {
-		n = 1
-	}
+	n := max(min(runtime.NumCPU(), 8), 1)
 	return n
 }
 

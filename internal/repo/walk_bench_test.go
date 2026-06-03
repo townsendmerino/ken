@@ -25,7 +25,7 @@ func buildSyntheticTree(b *testing.B, numFiles int) string {
 	dirsTotal := max(numFiles/100, 1)
 	// Pre-create every subdirectory so the WriteFile loop never races
 	// the directory existence check.
-	for d := 0; d < dirsTotal; d++ {
+	for d := range dirsTotal {
 		if err := os.MkdirAll(filepath.Join(root, fmt.Sprintf("dir%04d", d)), 0o755); err != nil {
 			b.Fatalf("mkdir: %v", err)
 		}
