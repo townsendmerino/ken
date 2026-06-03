@@ -119,6 +119,11 @@ var scpishURL = regexp.MustCompile(`^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:.+`)
 // (producing a junky absolute path that confused the Builder error).
 // The scheme allow-list is now the security boundary: anything URL-
 // shaped that isn't https/http is rejected with a typed error.
+//
+// Stability: best-effort (NOT part of the 1.0 hard-committed
+// surface). External consumers writing custom Cache Builders can
+// use it; semantics may evolve if the source-key scheme grows
+// (e.g. SSH URLs, registry-shaped paths).
 func NormalizeKey(source string) (string, bool, error) {
 	src := strings.TrimSpace(source)
 	if src == "" {

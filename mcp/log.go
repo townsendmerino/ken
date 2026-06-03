@@ -83,6 +83,11 @@ func (lg *Logger) Logf(at LogLevel, format string, args ...any) {
 //
 // Case-sensitive on purpose: "Hybrid" should be a loud "fix your config"
 // rather than a silent acceptance — matches ADR-009.
+//
+// Stability: best-effort (NOT part of the 1.0 public surface). This is
+// a configuration-validation helper for ken-mcp's own env parsing.
+// External consumers should not depend on it — the signature may
+// shift if env-var validation evolves.
 func ValidateEnum(name, raw string, allowed []string, fallback string, lg *Logger) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

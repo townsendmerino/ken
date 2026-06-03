@@ -57,6 +57,12 @@ const envAllowPrivateClone = "KEN_ALLOW_PRIVATE_CLONE_TARGETS"
 // reasonable ctx timeouts at the MCP layer, run ken-mcp in a
 // network-bandwidth-limited container if the input source is
 // untrusted.
+//
+// Stability: best-effort (NOT part of the 1.0 hard-committed
+// surface). The function signature is stable; the temp-dir naming
+// scheme + the SSRF guard's allow-list may evolve. External
+// consumers writing custom Builders can use it; just expect minor
+// semantic shifts between releases.
 func CloneShallow(ctx context.Context, urlStr string) (string, func(), error) {
 	if !privateCloneAllowed() {
 		if err := guardCloneTarget(urlStr); err != nil {

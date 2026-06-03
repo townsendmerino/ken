@@ -141,13 +141,38 @@ ken's exported packages and their 1.0 stability commitment.
 - `Config{Cache, DB, DefaultRepo, TelemetryLog,
   TelemetryInResponse, UsageRecorder}` — server configuration.
 - `Cache`, `NewCache(max, builder)`, `RepoBundle{Index,
-  Structural}` — repo cache used by tools.
-- `DBIntegration` interface — DB tier-2 integration.
+  Structural}`, `Builder` — repo cache used by tools.
+- `Cache.{Get, GetBundle, Len, Capacity, Close}` — cache
+  read/write surface.
+- `DBIntegration` interface, `ReindexResult` — DB tier-2 integration.
+- `UsageRecorder` interface — savings-store hook.
 - All `*Args` types (`SearchArgs`, `DefinitionArgs`, etc.).
 - All `*Response` JSON types
   ([mcp/json_responses.go](../mcp/json_responses.go)).
 - `FormatResults(header, results) string` — semble-compatible
   markdown shape.
+- `Logger`, `LogLevel`, `NewLogger`, `ParseLogLevel`,
+  `LogLevelNames` — logging seam used by `Options.LogWriter`
+  consumers.
+- `DefaultTopK`, `DefaultCacheSize`,
+  `DefaultRecentlyChangedCommits`, `MaxRecentlyChangedCommits` —
+  default constants; values may tune across minors but the
+  symbols stay.
+- `ErrPrivateCloneTarget` — typed error for SSRF-blocked clone
+  targets; callers may check via `errors.Is`.
+
+**`github.com/townsendmerino/ken/mcp`** — Best-effort (signatures
+stable, semantics may evolve between minors):
+
+- `CloneShallow(ctx, url)` — go-git shallow clone with the
+  SSRF guard. Useful for custom `Builder` implementations; the
+  temp-dir scheme + allow-list may shift.
+- `NormalizeKey(source)` — cache key normalization (URL vs
+  local path). Same caveat — useful for custom Builders, may
+  evolve if the source-key scheme grows.
+- `ValidateEnum(name, raw, allowed, fallback, lg)` — env-var
+  validation helper. Internal to ken-mcp's own config parsing;
+  external consumers should not depend on it.
 
 **`github.com/townsendmerino/ken/mcp/db`** — Hard, 1.0-committed:
 
