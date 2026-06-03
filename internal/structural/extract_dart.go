@@ -122,7 +122,7 @@ func walkDart(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 
 func recurseChildrenDart(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		walkDart(src, n.NamedChild(i), lang, enclosingClass, fs)
 	}
 }
@@ -137,7 +137,7 @@ func detectDartCalls(src []byte, n *gotreesitter.Node, lang *gotreesitter.Langua
 		return
 	}
 	lastIdent := ""
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
@@ -190,7 +190,7 @@ func extractDartClass(src []byte, n *gotreesitter.Node, lang *gotreesitter.Langu
 		return cls
 	}
 	bc := body.NamedChildCount()
-	for i := 0; i < bc; i++ {
+	for i := range bc {
 		c := body.NamedChild(i)
 		if c == nil {
 			continue
@@ -255,7 +255,7 @@ func extractDartConstructor(src []byte, n *gotreesitter.Node, lang *gotreesitter
 func extractDartParams(src []byte, params *gotreesitter.Node, lang *gotreesitter.Language) []string {
 	var out []string
 	pc := params.NamedChildCount()
-	for i := 0; i < pc; i++ {
+	for i := range pc {
 		c := params.NamedChild(i)
 		if c == nil {
 			continue
@@ -282,7 +282,7 @@ func dartParamLastIdent(src []byte, n *gotreesitter.Node, lang *gotreesitter.Lan
 	}
 	last := ""
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
@@ -328,7 +328,7 @@ func dartImportBoundName(src []byte, n *gotreesitter.Node, lang *gotreesitter.La
 			return
 		}
 		nc := node.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			dfs(node.NamedChild(i))
 		}
 	}
@@ -338,8 +338,8 @@ func dartImportBoundName(src []byte, n *gotreesitter.Node, lang *gotreesitter.La
 	}
 	raw := strings.Trim(nodeText(src, lit), "'\"")
 	// `dart:async` → "async"
-	if strings.HasPrefix(raw, "dart:") {
-		return strings.TrimPrefix(raw, "dart:")
+	if after, ok := strings.CutPrefix(raw, "dart:"); ok {
+		return after
 	}
 	// `package:foo/bar/baz.dart` → "baz"
 	// `bar/baz.dart` → "baz"

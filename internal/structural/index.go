@@ -39,6 +39,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -346,10 +347,8 @@ func Build(corpusDir string) (*Index, error) {
 	numWorkers := runtime.NumCPU()
 	jobs := make(chan job, numWorkers*2)
 	var wg sync.WaitGroup
-	for w := 0; w < numWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range numWorkers {
+		wg.Go(func() {
 			for j := range jobs {
 				ext := filepath.Ext(j.rel)
 				gram, ok := kenLangToTSLang[ext]
@@ -377,7 +376,7 @@ func Build(corpusDir string) (*Index, error) {
 				langExtractor[gram](src, root, lc.lang, fs)
 				results[j.idx] = &fileResult{rel: j.rel, fs: fs}
 			}
-		}()
+		})
 	}
 	for i, rel := range relPaths {
 		jobs <- job{idx: i, rel: rel}
@@ -514,10 +513,8 @@ func (ix *Index) Stats() Stats {
 // dedupAppend is a small helper used by the Python extractor and the
 // Enrich path to keep slice order stable while filtering duplicates.
 func dedupAppend(dst []string, s string) []string {
-	for _, t := range dst {
-		if t == s {
-			return dst
-		}
+	if slices.Contains(dst, s) {
+		return dst
 	}
 	return append(dst, s)
 }

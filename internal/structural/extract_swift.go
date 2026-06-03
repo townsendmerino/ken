@@ -1,5 +1,4 @@
 //go:build swift
-// +build swift
 
 // The extractor below is gated behind the `swift` build tag — it
 // compiles only when explicitly requested (`go build -tags=swift

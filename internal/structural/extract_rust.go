@@ -70,7 +70,7 @@ func walkRust(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		} else {
 			// fallback: walk all children
 			nc := n.NamedChildCount()
-			for i := 0; i < nc; i++ {
+			for i := range nc {
 				c := n.NamedChild(i)
 				if c == nil {
 					continue
@@ -99,7 +99,7 @@ func walkRust(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		// the trait surface.
 		if body := n.ChildByFieldName("body", lang); body != nil {
 			bc := body.NamedChildCount()
-			for i := 0; i < bc; i++ {
+			for i := range bc {
 				c := body.NamedChild(i)
 				if c == nil {
 					continue
@@ -142,7 +142,7 @@ func walkRust(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 
 func recurseChildrenRust(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		walkRust(src, n.NamedChild(i), lang, enclosingClass, fs)
 	}
 }
@@ -185,7 +185,7 @@ func extractRustFunc(src []byte, n *gotreesitter.Node, lang *gotreesitter.Langua
 // labels for this subtree.
 func rustFirstNamedIdentifier(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language) string {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c != nil && c.Type(lang) == "identifier" {
 			return nodeText(src, c)
@@ -199,7 +199,7 @@ func rustFirstNamedIdentifier(src []byte, n *gotreesitter.Node, lang *gotreesitt
 // rustFirstNamedIdentifier.
 func rustFirstNamedChildOfType(n *gotreesitter.Node, lang *gotreesitter.Language, typeName string) *gotreesitter.Node {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c != nil && c.Type(lang) == typeName {
 			return c
@@ -211,7 +211,7 @@ func rustFirstNamedChildOfType(n *gotreesitter.Node, lang *gotreesitter.Language
 func extractRustParams(src []byte, params *gotreesitter.Node, lang *gotreesitter.Language) []string {
 	var out []string
 	pc := params.NamedChildCount()
-	for i := 0; i < pc; i++ {
+	for i := range pc {
 		c := params.NamedChild(i)
 		if c == nil {
 			continue
@@ -310,7 +310,7 @@ func rustCalleeName(src []byte, fn *gotreesitter.Node, lang *gotreesitter.Langua
 func rustUseBoundNames(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language) []string {
 	var out []string
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
@@ -340,7 +340,7 @@ func rustUseTreeBoundNames(src []byte, n *gotreesitter.Node, lang *gotreesitter.
 	case "use_list", "scoped_use_list":
 		var out []string
 		nc := n.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			c := n.NamedChild(i)
 			if c == nil {
 				continue

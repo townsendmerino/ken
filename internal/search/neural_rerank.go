@@ -229,10 +229,7 @@ func l2NormalizeCopy(v []float32) []float32 {
 // in [-1, 1]). Differs in length silently returns 0 — only callable
 // from internal code where length equality is invariant.
 func dot64(a, b []float32) float64 {
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
+	n := min(len(b), len(a))
 	var s float64
 	for i := 0; i < n; i++ {
 		s += float64(a[i]) * float64(b[i])

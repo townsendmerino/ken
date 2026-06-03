@@ -114,7 +114,7 @@ func walkTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		// with an arrow_function as its value. Treat it as a
 		// FuncDef so the agent's `definition("Login")` finds it.
 		nc := n.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			c := n.NamedChild(i)
 			if c == nil || c.Type(lang) != "variable_declarator" {
 				continue
@@ -158,7 +158,7 @@ func walkTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 			// skipping `parameters`/`parameter`/`return_type`.
 			// This catches both shapes uniformly.
 			anc := value.NamedChildCount()
-			for j := 0; j < anc; j++ {
+			for j := range anc {
 				ac := value.NamedChild(j)
 				if ac == nil {
 					continue
@@ -188,7 +188,7 @@ func walkTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 
 func recurseChildrenTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		walkTS(src, n.NamedChild(i), lang, enclosingClass, fs)
 	}
 }
@@ -213,7 +213,7 @@ func extractTSFunc(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language
 func extractTSParams(src []byte, params *gotreesitter.Node, lang *gotreesitter.Language) []string {
 	var out []string
 	pc := params.NamedChildCount()
-	for i := 0; i < pc; i++ {
+	for i := range pc {
 		c := params.NamedChild(i)
 		if c == nil {
 			continue
@@ -253,7 +253,7 @@ func extractTSClass(src []byte, n *gotreesitter.Node, lang *gotreesitter.Languag
 		return cls
 	}
 	bc := body.NamedChildCount()
-	for i := 0; i < bc; i++ {
+	for i := range bc {
 		c := body.NamedChild(i)
 		if c == nil {
 			continue
@@ -320,7 +320,7 @@ func extractTSImports(src []byte, importNode *gotreesitter.Node, lang *gotreesit
 		return
 	}
 	cc := clause.NamedChildCount()
-	for i := 0; i < cc; i++ {
+	for i := range cc {
 		c := clause.NamedChild(i)
 		if c == nil {
 			continue
@@ -336,7 +336,7 @@ func extractTSImports(src []byte, importNode *gotreesitter.Node, lang *gotreesit
 			// has `name` and optional `alias` fields. Alias
 			// wins as the bound local name; else `name`.
 			sc := c.NamedChildCount()
-			for j := 0; j < sc; j++ {
+			for j := range sc {
 				spec := c.NamedChild(j)
 				if spec == nil || spec.Type(lang) != "import_specifier" {
 					continue
@@ -351,7 +351,7 @@ func extractTSImports(src []byte, importNode *gotreesitter.Node, lang *gotreesit
 			// `import * as bar from "..."` — the identifier
 			// child IS the bound name.
 			sc := c.NamedChildCount()
-			for j := 0; j < sc; j++ {
+			for j := range sc {
 				inner := c.NamedChild(j)
 				if inner != nil && inner.Type(lang) == "identifier" {
 					fs.Imports = dedupAppend(fs.Imports, nodeText(src, inner))
@@ -366,7 +366,7 @@ func extractTSImports(src []byte, importNode *gotreesitter.Node, lang *gotreesit
 // Tiny helper to avoid an explicit loop at call sites.
 func findChildByType(n *gotreesitter.Node, lang *gotreesitter.Language, typeName string) *gotreesitter.Node {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c != nil && c.Type(lang) == typeName {
 			return c
@@ -418,7 +418,7 @@ func jsExtractRequire(src []byte, callNode *gotreesitter.Node, lang *gotreesitte
 	// the shape varies.
 	var path string
 	cc := arg0.NamedChildCount()
-	for j := 0; j < cc; j++ {
+	for j := range cc {
 		inner := arg0.NamedChild(j)
 		if inner != nil && inner.Type(lang) == "string_fragment" {
 			path = nodeText(src, inner)

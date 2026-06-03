@@ -93,7 +93,7 @@ func walkKotlin(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, e
 
 func recurseChildrenKotlin(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		walkKotlin(src, n.NamedChild(i), lang, enclosingClass, fs)
 	}
 }
@@ -121,7 +121,7 @@ func extractKotlinFunc(src []byte, n *gotreesitter.Node, lang *gotreesitter.Lang
 func extractKotlinParams(src []byte, params *gotreesitter.Node, lang *gotreesitter.Language) []string {
 	var out []string
 	pc := params.NamedChildCount()
-	for i := 0; i < pc; i++ {
+	for i := range pc {
 		c := params.NamedChild(i)
 		if c == nil || c.Type(lang) != "parameter" {
 			continue
@@ -146,7 +146,7 @@ func extractKotlinClass(src []byte, n *gotreesitter.Node, lang *gotreesitter.Lan
 		return cls
 	}
 	bc := body.NamedChildCount()
-	for i := 0; i < bc; i++ {
+	for i := range bc {
 		c := body.NamedChild(i)
 		if c == nil {
 			continue
@@ -280,7 +280,7 @@ func firstNamedChildOfType(n *gotreesitter.Node, lang *gotreesitter.Language, wa
 		return nil
 	}
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c != nil && c.Type(lang) == want {
 			return c

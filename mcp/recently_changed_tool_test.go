@@ -115,7 +115,7 @@ func TestRecentlyChanged_HappyPath(t *testing.T) {
 func TestRecentlyChanged_NLimit(t *testing.T) {
 	dir, repo := makeTempRepo(t)
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		commitFile(t, dir, repo,
 			"f.txt",
 			"content "+string(rune('a'+i))+"\n",

@@ -17,7 +17,7 @@ package perf
 
 import (
 	"runtime"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -47,14 +47,11 @@ func LatencyOf(sample []time.Duration) LatencyStats {
 	if n == 0 {
 		return LatencyStats{}
 	}
-	sort.Slice(sample, func(i, j int) bool { return sample[i] < sample[j] })
+	slices.Sort(sample)
 	toMs := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000.0 }
 	idx := func(p float64) int {
 		// nearest-rank 1-indexed: ceil(p * n) - 1, clamped to [0, n-1].
-		i := int((p*float64(n))+0.999999) - 1
-		if i < 0 {
-			i = 0
-		}
+		i := max(int((p*float64(n))+0.999999)-1, 0)
 		if i >= n {
 			i = n - 1
 		}

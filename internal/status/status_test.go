@@ -108,7 +108,7 @@ func TestBuild_SavingsRoundTrip(t *testing.T) {
 	if rec == nil {
 		t.Fatal("NewRecorder returned nil for non-empty path")
 	}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rec.Record("search", 3 /* results */, 1000 /* snippetChars */, 5000 /* fileChars */)
 	}
 

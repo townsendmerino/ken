@@ -282,7 +282,7 @@ func cmdStatus(args []string) int {
 		jsonOut bool
 		verbose bool
 	)
-	for i := 0; i < len(args); i++ {
+	for i := range args {
 		switch args[i] {
 		case "--json":
 			jsonOut = true

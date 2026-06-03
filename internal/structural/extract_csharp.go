@@ -1,5 +1,4 @@
 //go:build csharp
-// +build csharp
 
 // The extractor below is gated behind the `csharp` build tag — it
 // compiles only when explicitly requested (`go build -tags=csharp

@@ -225,8 +225,8 @@ func filterByPrefix(paths []string, prefix string) []string {
 }
 
 func firstLine(msg string) string {
-	if i := strings.IndexByte(msg, '\n'); i >= 0 {
-		return strings.TrimSpace(msg[:i])
+	if before, _, ok := strings.Cut(msg, "\n"); ok {
+		return strings.TrimSpace(before)
 	}
 	return strings.TrimSpace(msg)
 }

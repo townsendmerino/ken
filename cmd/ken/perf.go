@@ -345,7 +345,7 @@ func cmdPerfSearch(args []string) int {
 	samples := make([]time.Duration, nTarget)
 	runtime.GC()
 	allocStart := perf.StartAlloc()
-	for i := 0; i < nTarget; i++ {
+	for i := range nTarget {
 		q := queries[i%len(queries)]
 		started := time.Now()
 		_ = ix.Search(q, k)
@@ -393,7 +393,7 @@ func loadQueryFile(path string) ([]string, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var out []string
-	for _, line := range strings.Split(string(b), "\n") {
+	for line := range strings.SplitSeq(string(b), "\n") {
 		q := strings.TrimSpace(line)
 		if q == "" || strings.HasPrefix(q, "#") {
 			continue
@@ -489,7 +489,7 @@ func cmdPerfWatch(args []string) int {
 
 	samples := make([]time.Duration, 0, edits)
 	const editTimeout = 30 * time.Second // generous; debounce is 2s, full reindex of a small corpus is sub-second
-	for i := 0; i < edits; i++ {
+	for i := range edits {
 		// Drain any leftover flush signal from before this iteration.
 		select {
 		case <-flushCh:

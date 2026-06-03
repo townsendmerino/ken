@@ -441,10 +441,7 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 	fetchK := topK
 	hasFilters := len(args.Languages) > 0 || args.PathContains != "" || args.ExcludePathContains != ""
 	if hasFilters {
-		fetchK = topK * 10
-		if fetchK > 200 {
-			fetchK = 200
-		}
+		fetchK = min(topK*10, 200)
 	}
 	collect := log != nil || includeInResponse
 	var (

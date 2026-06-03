@@ -125,7 +125,7 @@ func walkPhp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, encl
 
 func recurseChildrenPhp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		walkPhp(src, n.NamedChild(i), lang, enclosingClass, fs)
 	}
 }
@@ -150,7 +150,7 @@ func extractPhpFunc(src []byte, n *gotreesitter.Node, lang *gotreesitter.Languag
 func extractPhpParams(src []byte, params *gotreesitter.Node, lang *gotreesitter.Language) []string {
 	var out []string
 	pc := params.NamedChildCount()
-	for i := 0; i < pc; i++ {
+	for i := range pc {
 		c := params.NamedChild(i)
 		if c == nil {
 			continue
@@ -179,7 +179,7 @@ func phpVariableLeafName(src []byte, n *gotreesitter.Node, lang *gotreesitter.La
 	}
 	if n.Type(lang) == "variable_name" {
 		nc := n.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			c := n.NamedChild(i)
 			if c != nil && c.Type(lang) == "name" {
 				return nodeText(src, c)
@@ -202,7 +202,7 @@ func extractPhpClass(src []byte, n *gotreesitter.Node, lang *gotreesitter.Langua
 		return cls
 	}
 	bc := body.NamedChildCount()
-	for i := 0; i < bc; i++ {
+	for i := range bc {
 		c := body.NamedChild(i)
 		if c == nil {
 			continue
@@ -260,7 +260,7 @@ func phpObjectCreationClass(n *gotreesitter.Node, lang *gotreesitter.Language) *
 	}
 	// Fallback: first named child that's a name/qualified_name.
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
@@ -304,7 +304,7 @@ func phpThrowName(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language)
 func phpUseBoundNames(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language) []string {
 	var out []string
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
@@ -317,7 +317,7 @@ func phpUseBoundNames(src []byte, n *gotreesitter.Node, lang *gotreesitter.Langu
 			alias := ""
 			var qn *gotreesitter.Node
 			cc := c.NamedChildCount()
-			for j := 0; j < cc; j++ {
+			for j := range cc {
 				inner := c.NamedChild(j)
 				if inner == nil {
 					continue
@@ -348,7 +348,7 @@ func phpUseBoundNames(src []byte, n *gotreesitter.Node, lang *gotreesitter.Langu
 			// `use App\Models\{User, Admin};` — recurse into
 			// the group clauses.
 			gc := c.NamedChildCount()
-			for j := 0; j < gc; j++ {
+			for j := range gc {
 				inner := c.NamedChild(j)
 				if inner == nil {
 					continue
@@ -358,7 +358,7 @@ func phpUseBoundNames(src []byte, n *gotreesitter.Node, lang *gotreesitter.Langu
 					ac := inner.NamedChildCount()
 					var qn *gotreesitter.Node
 					alias := ""
-					for k := 0; k < ac; k++ {
+					for k := range ac {
 						gi := inner.NamedChild(k)
 						if gi == nil {
 							continue

@@ -22,10 +22,7 @@ func buildSyntheticTree(b *testing.B, numFiles int) string {
 	b.Helper()
 	root := b.TempDir()
 	const payload = "package x\n\nfunc Hi() string { return \"hi\" }\n"
-	dirsTotal := numFiles / 100
-	if dirsTotal < 1 {
-		dirsTotal = 1
-	}
+	dirsTotal := max(numFiles/100, 1)
 	// Pre-create every subdirectory so the WriteFile loop never races
 	// the directory existence check.
 	for d := 0; d < dirsTotal; d++ {
@@ -33,7 +30,7 @@ func buildSyntheticTree(b *testing.B, numFiles int) string {
 			b.Fatalf("mkdir: %v", err)
 		}
 	}
-	for i := 0; i < numFiles; i++ {
+	for i := range numFiles {
 		dir := filepath.Join(root, fmt.Sprintf("dir%04d", i%dirsTotal))
 		path := filepath.Join(dir, fmt.Sprintf("file%06d.go", i))
 		if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {

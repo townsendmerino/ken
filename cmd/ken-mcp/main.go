@@ -778,8 +778,8 @@ func redactDSN(dsn string) string {
 	// Native driver DSN (no scheme): strip everything up to and
 	// including the first '@'.
 	if !strings.Contains(dsn, "://") {
-		if idx := strings.Index(dsn, "@"); idx >= 0 {
-			return dsn[idx+1:]
+		if _, after, ok := strings.Cut(dsn, "@"); ok {
+			return after
 		}
 		return dsn // no userinfo to redact
 	}

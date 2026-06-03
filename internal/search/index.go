@@ -382,10 +382,8 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 	errCh := make(chan error, numWorkers)
 	var wg sync.WaitGroup
 
-	for w := 0; w < numWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range numWorkers {
+		wg.Go(func() {
 			for j := range jobs {
 				data, rerr := fs.ReadFile(fsys, j.rel)
 				if rerr != nil {
@@ -437,7 +435,7 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 				}
 				results[j.idx] = fileResult{chunks: cs, vecs: localVecs}
 			}
-		}()
+		})
 	}
 
 	for i, rel := range files {
@@ -811,10 +809,7 @@ func (ix *Index) SearchModeWithTelemetry(query string, k int, mode Mode) ([]Resu
 	}
 
 	// Stage 1: hybrid retrieval (instrumented).
-	fetch := ix.rerankCfg.rerankN
-	if fetch < k {
-		fetch = k
-	}
+	fetch := max(ix.rerankCfg.rerankN, k)
 	s1 := time.Now()
 	ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, fetch, -1, nil)
 	results := make([]Result, 0, len(ranked))
@@ -837,10 +832,9 @@ func (ix *Index) SearchModeWithTelemetry(query string, k int, mode Mode) ([]Resu
 	// BlendWall is the difference between the outer rerank wall and
 	// the reranker-internal compute time, if available.
 	if tel.RerankerQueryEncode > 0 || tel.RerankerCandidateEncode > 0 {
-		modelWall := tel.RerankerQueryEncode
-		if tel.RerankerCandidateEncode > modelWall {
-			modelWall = tel.RerankerCandidateEncode // pipelined max, not sum
-		}
+		modelWall := max(tel.RerankerCandidateEncode,
+			// pipelined max, not sum
+			tel.RerankerQueryEncode)
 		if tel.RerankWall > modelWall {
 			tel.BlendWall = tel.RerankWall - modelWall
 		}
@@ -928,10 +922,7 @@ func (ix *Index) SearchMode(query string, k int, mode Mode) ([]Result, Mode) {
 		// without losing the reranker's reordering effect on positions
 		// 1..k. The reranker pre-check above already downgraded if nil,
 		// so ix.reranker is guaranteed non-nil here.
-		fetch := ix.rerankCfg.rerankN
-		if fetch < k {
-			fetch = k
-		}
+		fetch := max(ix.rerankCfg.rerankN, k)
 		ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, fetch, -1, nil)
 		// Tombstone-filter BEFORE the neural pass so the rerank
 		// budget isn't spent encoding chunks that'll be dropped.
@@ -1042,10 +1033,7 @@ func (ix *Index) SearchWithQVecPredicted(query string, qVec []float32, predicted
 		}
 		return out, mode
 	case ModeHybridRerank:
-		fetch := ix.rerankCfg.rerankN
-		if fetch < k {
-			fetch = k
-		}
+		fetch := max(ix.rerankCfg.rerankN, k)
 		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, fetch, -1, predicted)
 		results := make([]Result, 0, len(ranked))
 		for _, r := range ranked {
@@ -1112,10 +1100,7 @@ func (ix *Index) SearchWithQVecPredictedTelemetry(query string, qVec []float32, 
 		return results, effMode, tel
 	}
 
-	fetch := ix.rerankCfg.rerankN
-	if fetch < k {
-		fetch = k
-	}
+	fetch := max(ix.rerankCfg.rerankN, k)
 	s1 := time.Now()
 	ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, fetch, -1, predicted)
 	results := make([]Result, 0, len(ranked))
@@ -1132,10 +1117,7 @@ func (ix *Index) SearchWithQVecPredictedTelemetry(query string, qVec []float32, 
 	results = applyRerankerWithTelemetry(ix.reranker, query, results, ix.rerankCfg, &tel)
 	tel.RerankWall = time.Since(s2)
 	if tel.RerankerQueryEncode > 0 || tel.RerankerCandidateEncode > 0 {
-		modelWall := tel.RerankerQueryEncode
-		if tel.RerankerCandidateEncode > modelWall {
-			modelWall = tel.RerankerCandidateEncode
-		}
+		modelWall := max(tel.RerankerCandidateEncode, tel.RerankerQueryEncode)
 		if tel.RerankWall > modelWall {
 			tel.BlendWall = tel.RerankWall - modelWall
 		}

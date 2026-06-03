@@ -2,6 +2,7 @@ package structural
 
 import (
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -87,17 +88,11 @@ func (ix *Index) References(name string) []Reference {
 	// raises are infrequent enough that a linear scan is fine for
 	// a 14k-file corpus (sub-ms in practice).
 	for path, fs := range ix.files {
-		for _, n := range fs.Imports {
-			if n == name {
-				out = append(out, Reference{File: path, Kind: ReferenceKindImport})
-				break
-			}
+		if slices.Contains(fs.Imports, name) {
+			out = append(out, Reference{File: path, Kind: ReferenceKindImport})
 		}
-		for _, n := range fs.Raises {
-			if n == name {
-				out = append(out, Reference{File: path, Kind: ReferenceKindRaise})
-				break
-			}
+		if slices.Contains(fs.Raises, name) {
+			out = append(out, Reference{File: path, Kind: ReferenceKindRaise})
 		}
 	}
 

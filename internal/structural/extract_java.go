@@ -119,7 +119,7 @@ func walkJava(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 
 func recurseChildrenJava(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		walkJava(src, n.NamedChild(i), lang, enclosingClass, fs)
 	}
 }
@@ -144,7 +144,7 @@ func extractJavaMethod(src []byte, n *gotreesitter.Node, lang *gotreesitter.Lang
 func extractJavaParams(src []byte, params *gotreesitter.Node, lang *gotreesitter.Language) []string {
 	var out []string
 	pc := params.NamedChildCount()
-	for i := 0; i < pc; i++ {
+	for i := range pc {
 		c := params.NamedChild(i)
 		if c == nil {
 			continue
@@ -171,7 +171,7 @@ func extractJavaClass(src []byte, n *gotreesitter.Node, lang *gotreesitter.Langu
 		return cls
 	}
 	bc := body.NamedChildCount()
-	for i := 0; i < bc; i++ {
+	for i := range bc {
 		c := body.NamedChild(i)
 		if c == nil {
 			continue
@@ -254,7 +254,7 @@ func javaImportBoundName(src []byte, n *gotreesitter.Node, lang *gotreesitter.La
 	// to the LAST identifier component — that's the bound type
 	// name in the local namespace.
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue

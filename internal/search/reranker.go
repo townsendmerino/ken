@@ -148,10 +148,7 @@ func applyRerankerWithTelemetry(r Reranker, query string, ranked []Result, cfg r
 	if r == nil || cfg.rerankN <= 0 || len(ranked) == 0 {
 		return ranked
 	}
-	n := cfg.rerankN
-	if n > len(ranked) {
-		n = len(ranked)
-	}
+	n := min(cfg.rerankN, len(ranked))
 	// M8c adaptive: when stage-1 is confident (top-1 ≫ top-2 by
 	// relative margin), shrink the rerank head to adaptiveMinN. Saves
 	// most of the rerank cost on "easy" queries without changing the

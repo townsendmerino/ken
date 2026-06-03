@@ -63,7 +63,7 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
 			nc := body.NamedChildCount()
-			for i := 0; i < nc; i++ {
+			for i := range nc {
 				walkGo(src, body.NamedChild(i), lang, enclosingType, fs)
 			}
 		}
@@ -83,7 +83,7 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
 			nc := body.NamedChildCount()
-			for i := 0; i < nc; i++ {
+			for i := range nc {
 				walkGo(src, body.NamedChild(i), lang, recvType, fs)
 			}
 		}
@@ -91,7 +91,7 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		// `type_declaration` may contain multiple `type_spec`
 		// children (parenthesized form: `type (A int; B string)`).
 		nc := n.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			c := n.NamedChild(i)
 			if c == nil {
 				continue
@@ -107,7 +107,7 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 			fs.Calls = dedupAppend(fs.Calls, name)
 		}
 		nc := n.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			walkGo(src, n.NamedChild(i), lang, enclosingType, fs)
 		}
 	case "import_declaration":
@@ -116,7 +116,7 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		// `path` (interpreted_string_literal) and optional
 		// `name` (alias).
 		nc := n.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			c := n.NamedChild(i)
 			if c == nil {
 				continue
@@ -131,7 +131,7 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 			// inner specs.
 			if c.Type(lang) == "import_spec_list" {
 				dc := c.NamedChildCount()
-				for j := 0; j < dc; j++ {
+				for j := range dc {
 					sp := c.NamedChild(j)
 					if sp != nil && sp.Type(lang) == "import_spec" {
 						if name := goImportBoundName(src, sp, lang); name != "" {
@@ -143,7 +143,7 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		}
 	default:
 		nc := n.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			walkGo(src, n.NamedChild(i), lang, enclosingType, fs)
 		}
 	}
@@ -162,7 +162,7 @@ func extractGoFunc(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language
 	}
 	if params := n.ChildByFieldName("parameters", lang); params != nil {
 		pc := params.NamedChildCount()
-		for i := 0; i < pc; i++ {
+		for i := range pc {
 			c := params.NamedChild(i)
 			if c == nil || c.Type(lang) != "parameter_declaration" {
 				continue
@@ -174,7 +174,7 @@ func extractGoFunc(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language
 			// Simplest path: any identifier child IS a name.
 			// type_identifier children are types, not names.
 			cc := c.NamedChildCount()
-			for j := 0; j < cc; j++ {
+			for j := range cc {
 				cn := c.NamedChild(j)
 				if cn != nil && cn.Type(lang) == "identifier" {
 					if pname := nodeText(src, cn); pname != "" && pname != "_" {
@@ -215,7 +215,7 @@ func goReceiverType(src []byte, methodNode *gotreesitter.Node, lang *gotreesitte
 	// receiver type — typically pointer_type(*T) or just type_
 	// identifier(T).
 	pc := recv.NamedChildCount()
-	for i := 0; i < pc; i++ {
+	for i := range pc {
 		decl := recv.NamedChild(i)
 		if decl == nil || decl.Type(lang) != "parameter_declaration" {
 			continue
@@ -230,7 +230,7 @@ func goReceiverType(src []byte, methodNode *gotreesitter.Node, lang *gotreesitte
 		case "pointer_type":
 			// pointer_type wraps the inner type_identifier.
 			ic := typ.NamedChildCount()
-			for j := 0; j < ic; j++ {
+			for j := range ic {
 				inner := typ.NamedChild(j)
 				if inner != nil && inner.Type(lang) == "type_identifier" {
 					return nodeText(src, inner)
@@ -240,7 +240,7 @@ func goReceiverType(src []byte, methodNode *gotreesitter.Node, lang *gotreesitte
 			// Generic receiver: `func (s *Stack[T]) Push(...)`
 			// inner is a type_identifier for the base type.
 			ic := typ.NamedChildCount()
-			for j := 0; j < ic; j++ {
+			for j := range ic {
 				inner := typ.NamedChild(j)
 				if inner != nil && inner.Type(lang) == "type_identifier" {
 					return nodeText(src, inner)

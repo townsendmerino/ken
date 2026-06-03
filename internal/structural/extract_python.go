@@ -51,7 +51,7 @@ func walkPy(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		// a method of any class it's lexically inside, only of
 		// the immediately-enclosing class_definition.
 		nc := n.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			walkPy(src, n.NamedChild(i), lang, enclosingClass, fs)
 		}
 	case "class_definition":
@@ -65,7 +65,7 @@ func walkPy(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
 			nc := body.NamedChildCount()
-			for i := 0; i < nc; i++ {
+			for i := range nc {
 				walkPy(src, body.NamedChild(i), lang, cls.Name, fs)
 			}
 		}
@@ -75,7 +75,7 @@ func walkPy(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		}
 		// Recurse — nested calls inside arguments also count.
 		nc := n.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			walkPy(src, n.NamedChild(i), lang, enclosingClass, fs)
 		}
 	case "raise_statement":
@@ -83,14 +83,14 @@ func walkPy(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 			fs.Raises = dedupAppend(fs.Raises, name)
 		}
 		nc := n.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			walkPy(src, n.NamedChild(i), lang, enclosingClass, fs)
 		}
 	case "import_statement":
 		// `import foo, bar.baz` — record each dotted_name's last
 		// component as the bound name.
 		nc := n.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			c := n.NamedChild(i)
 			if c == nil {
 				continue
@@ -123,7 +123,7 @@ func walkPy(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		// Generic recurse for everything else (module body,
 		// expression statements, if/try/with, etc.).
 		nc := n.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			walkPy(src, n.NamedChild(i), lang, enclosingClass, fs)
 		}
 	}
@@ -142,7 +142,7 @@ func extractPyFunc(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language
 	}
 	if params := n.ChildByFieldName("parameters", lang); params != nil {
 		pc := params.NamedChildCount()
-		for i := 0; i < pc; i++ {
+		for i := range pc {
 			pname := pyParamName(src, params.NamedChild(i), lang)
 			if pname != "" && pname != "self" && pname != "cls" {
 				fn.Params = append(fn.Params, pname)
@@ -168,7 +168,7 @@ func extractPyClass(src []byte, n *gotreesitter.Node, lang *gotreesitter.Languag
 		return cls
 	}
 	bc := body.NamedChildCount()
-	for i := 0; i < bc; i++ {
+	for i := range bc {
 		c := body.NamedChild(i)
 		if c == nil {
 			continue
@@ -180,7 +180,7 @@ func extractPyClass(src []byte, n *gotreesitter.Node, lang *gotreesitter.Languag
 			// `@decorator def f(...)` — descend one level to
 			// find the actual function_definition.
 			dc := c.NamedChildCount()
-			for j := 0; j < dc; j++ {
+			for j := range dc {
 				inner := c.NamedChild(j)
 				if inner != nil && inner.Type(lang) == "function_definition" {
 					cls.Methods = append(cls.Methods, extractPyFunc(src, inner, lang, cls.Name))
@@ -230,7 +230,7 @@ func pyRaiseName(src []byte, raiseNode *gotreesitter.Node, lang *gotreesitter.La
 	// the `raise` keyword; gotreesitter's tree exposes it as a
 	// children-list-search rather than a named field.
 	nc := raiseNode.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := raiseNode.NamedChild(i)
 		if c == nil {
 			continue

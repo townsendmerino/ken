@@ -299,7 +299,7 @@ func decodeRerankCache(data []byte, expectedScopeKey string, expectedEmbedDim in
 
 	keys := make([]uint64, 0, entryCount)
 	vecs := make([][]float32, 0, entryCount)
-	for i := uint32(0); i < entryCount; i++ {
+	for range entryCount {
 		k := binary.LittleEndian.Uint64(body[p:])
 		p += 8
 		_ = binary.LittleEndian.Uint64(body[p:]) // lastAccessUnix reserved

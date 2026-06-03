@@ -57,7 +57,7 @@ func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 			recurseChildrenRuby(src, body, lang, cls.Name, fs)
 		} else {
 			nc := n.NamedChildCount()
-			for i := 0; i < nc; i++ {
+			for i := range nc {
 				c := n.NamedChild(i)
 				if c == nil {
 					continue
@@ -78,7 +78,7 @@ func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		} else {
 			// Fallback: walk children skipping name/parameters.
 			nc := n.NamedChildCount()
-			for i := 0; i < nc; i++ {
+			for i := range nc {
 				c := n.NamedChild(i)
 				if c == nil {
 					continue
@@ -108,7 +108,7 @@ func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 			recurseChildrenRuby(src, body, lang, recv, fs)
 		} else {
 			nc := n.NamedChildCount()
-			for i := 0; i < nc; i++ {
+			for i := range nc {
 				c := n.NamedChild(i)
 				if c == nil {
 					continue
@@ -143,7 +143,7 @@ func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 
 func recurseChildrenRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		walkRuby(src, n.NamedChild(i), lang, enclosingClass, fs)
 	}
 }
@@ -168,7 +168,7 @@ func extractRubyMethod(src []byte, n *gotreesitter.Node, lang *gotreesitter.Lang
 func extractRubyParams(src []byte, params *gotreesitter.Node, lang *gotreesitter.Language) []string {
 	var out []string
 	pc := params.NamedChildCount()
-	for i := 0; i < pc; i++ {
+	for i := range pc {
 		c := params.NamedChild(i)
 		if c == nil {
 			continue
@@ -184,7 +184,7 @@ func extractRubyParams(src []byte, params *gotreesitter.Node, lang *gotreesitter
 			}
 			// Fallback: first identifier child.
 			cc := c.NamedChildCount()
-			for j := 0; j < cc; j++ {
+			for j := range cc {
 				inner := c.NamedChild(j)
 				if inner != nil && inner.Type(lang) == "identifier" {
 					out = append(out, nodeText(src, inner))

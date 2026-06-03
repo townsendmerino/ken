@@ -14,9 +14,9 @@ import (
 // code paths.
 func buildRerankCorpus(numFiles, chunksPerFile int) []chunk.Chunk {
 	out := make([]chunk.Chunk, 0, numFiles*chunksPerFile)
-	for f := 0; f < numFiles; f++ {
+	for f := range numFiles {
 		file := fmt.Sprintf("pkg/sub%d/file%d.go", f%5, f)
-		for c := 0; c < chunksPerFile; c++ {
+		for c := range chunksPerFile {
 			start := c*40 + 1
 			text := fmt.Sprintf(`package sub%d
 

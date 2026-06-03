@@ -3,6 +3,7 @@ package structural
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -219,12 +220,7 @@ func funcNames(fs []FuncDef) []string {
 }
 
 func contains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(haystack, needle)
 }
 
 func sliceEq(a, b []string) bool {

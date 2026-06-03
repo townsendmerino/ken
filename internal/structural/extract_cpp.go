@@ -135,7 +135,7 @@ func walkCpp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, encl
 
 func recurseChildrenCpp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		walkCpp(src, n.NamedChild(i), lang, enclosingClass, fs)
 	}
 }
@@ -208,7 +208,7 @@ func cppUnwrapDeclarator(n *gotreesitter.Node, lang *gotreesitter.Language) *got
 func extractCppParams(src []byte, params *gotreesitter.Node, lang *gotreesitter.Language) []string {
 	var out []string
 	pc := params.NamedChildCount()
-	for i := 0; i < pc; i++ {
+	for i := range pc {
 		c := params.NamedChild(i)
 		if c == nil {
 			continue
@@ -261,7 +261,7 @@ func extractCppClass(src []byte, n *gotreesitter.Node, lang *gotreesitter.Langua
 		return cls
 	}
 	bc := body.NamedChildCount()
-	for i := 0; i < bc; i++ {
+	for i := range bc {
 		c := body.NamedChild(i)
 		if c == nil {
 			continue
@@ -361,7 +361,7 @@ func cppScopeLeaf(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language)
 // `#include "redis/foo.h"` → "foo".
 func cppIncludeBoundName(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language) string {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
@@ -378,7 +378,7 @@ func cppIncludeBoundName(src []byte, n *gotreesitter.Node, lang *gotreesitter.La
 			// string_content for the bare path; fall back to
 			// stripping quotes from the raw text.
 			cc := c.NamedChildCount()
-			for j := 0; j < cc; j++ {
+			for j := range cc {
 				inner := c.NamedChild(j)
 				if inner != nil && inner.Type(lang) == "string_content" {
 					return includeBasename(nodeText(src, inner))

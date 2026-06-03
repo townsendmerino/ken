@@ -89,12 +89,10 @@ func TestLazyReranker_ConcurrentFirstCallers_LoaderRunsOnce(t *testing.T) {
 	const N = 50
 	var wg sync.WaitGroup
 	cands := []chunk.Chunk{{Text: "x"}}
-	for i := 0; i < N; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range N {
+		wg.Go(func() {
 			lr.Rerank("q", cands)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -129,7 +127,7 @@ func TestLazyReranker_LoaderErrorPassesThroughAsNil(t *testing.T) {
 
 	// Subsequent calls also pass through as nil — without retrying
 	// the failed loader.
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if got := lr.Rerank("q", []chunk.Chunk{{Text: "x"}}); got != nil {
 			t.Errorf("call #%d after error returned %v; want nil", i+2, got)
 		}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/odvcencio/gotreesitter"
@@ -66,24 +67,24 @@ func dumpAST(t *testing.T, src []byte, n *gotreesitter.Node, lang *gotreesitter.
 	if n == nil || depth > maxDepth {
 		return
 	}
-	indent := ""
-	for i := 0; i < depth; i++ {
-		indent += "  "
+	var indent strings.Builder
+	for range depth {
+		indent.WriteString("  ")
 	}
 	text := nodeText(src, n)
 	if len(text) > 70 {
 		text = text[:70] + "..."
 	}
-	t.Logf("%s%s = %q", indent, n.Type(lang), text)
+	t.Logf("%s%s = %q", indent.String(), n.Type(lang), text)
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
 		}
 		fieldName := n.FieldNameForChild(i, lang)
 		if fieldName != "" {
-			t.Logf("%s  [namedIdx=%d field=%s]", indent, i, fieldName)
+			t.Logf("%s  [namedIdx=%d field=%s]", indent.String(), i, fieldName)
 		}
 		dumpAST(t, src, c, lang, depth+1, maxDepth)
 	}
