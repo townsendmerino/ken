@@ -21,10 +21,12 @@
 // This is the same relevance-over-completeness trade ken makes for
 // retrieval; honest in both directions.
 //
-// Stage 8 v0 supports Python only. Adding other languages is a new
-// extract_<lang>.go file + a row in the kenLangToTSLang map; the
-// surface stays the same. Languages whose grammar fails (the
-// gotreesitter v0.18.0 C#/bash failure modes already documented in
+// Stage 8 supports ten languages via dedicated extractors: Python,
+// Go, TypeScript, JavaScript, Java, Rust, C, C++, PHP, Ruby. Adding
+// another language is a new extract_<lang>.go file plus a row in the
+// kenLangToTSLang and langExtractor maps; the surface stays the same.
+// Languages whose grammar fails (the gotreesitter v0.18.0 C#/bash
+// failure modes already documented in
 // aikit/chunk/treesitter/languages.go) silently fall through — the
 // structural index simply lacks entries for unsupported files, which
 // is the right thing.
@@ -46,9 +48,9 @@ import (
 )
 
 // FileStruct captures the structural facts a single corpus file
-// contains. One per file. For Stage 8 v0 each Python file in the bench
-// corpus IS one chunk (CSN convention); for multi-chunk-per-file
-// repos a future revision will split FileStruct per-chunk.
+// contains. One per file. For the CSN bench convention each Python
+// file IS one chunk; for multi-chunk-per-file repos a future
+// revision will split FileStruct per-chunk.
 type FileStruct struct {
 	// Path is the file path relative to the corpus root. The corpus
 	// root prefix is the caller's responsibility — Build() always

@@ -17,10 +17,12 @@ package mcp
 //
 // Lifecycle: each handler resolves the cached RepoBundle via
 // Cache.GetBundle (eager structural build per Stage 8 design).
-// Bundle.Structural may be nil for repos whose corpus the
-// extractor doesn't support (no Python files, or Stage 8 v0 only
-// indexes Python). Handlers degrade to a clear "no structural
-// index available" text response.
+// Bundle.Structural may be nil for repos whose corpus has no files
+// matching a registered extractor — the structural index covers
+// ten languages (Python, Go, TypeScript, JavaScript, Java, Rust, C,
+// C++, PHP, Ruby); files outside this set are silently skipped at
+// Build time. Handlers degrade to a clear "no structural index
+// available" text response.
 
 import (
 	"context"
@@ -120,7 +122,9 @@ func renderDefinitionMarkdown(r DefinitionResponse) string {
 
 // handleReferences implements the `references` tool: given a name,
 // return every file where it appears in a recognized syntactic
-// context (call site, import, or raise statement in Stage 8 v0).
+// context (call site, import statement, or raise statement; the
+// per-language extractors map their language-native equivalents
+// into these three kinds).
 //
 // Honest framing in the response header: this is "all places the
 // name appears in these specific contexts," not "all places that

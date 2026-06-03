@@ -96,8 +96,10 @@ type ReferencesResponse struct {
 }
 
 // ReferenceRowOut is one (file, kinds) entry. Kinds is the set of
-// reference categories observed in that file ("call" / "import" /
-// "raise" in Stage 8 v0; the renderer dedupes within a file).
+// reference categories observed in that file — currently "call" /
+// "import" / "raise" (per-language extractors normalize their
+// language-native references into these three; the renderer
+// dedupes within a file).
 type ReferenceRowOut struct {
 	File  string   `json:"file"`
 	Kinds []string `json:"kinds"`
