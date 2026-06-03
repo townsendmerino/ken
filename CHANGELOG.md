@@ -10,51 +10,93 @@ with pre-built binaries.
 
 ## [Unreleased]
 
-### Changed (extracted reusable packages into separate `aikit` module — ADR-034)
+(none — 1.0-RC content is captured under `[0.9.0]` below.)
 
-- **New module [`github.com/townsendmerino/aikit`](https://github.com/townsendmerino/aikit) at v0.1.0.** ken's reusable algorithm packages — `topk`, `ann`, `bm25`, `embed`, `coderank` (renamed `encoder`), and `chunk` (+ `regex` / `markdown` / `treesitter`) — moved out of `internal/` (and out of public `chunk/`) into a second module that any project can import. ken now consumes them via `require github.com/townsendmerino/aikit v0.1.0`. Closes the "reusable by another project" path that `internal/` foreclosed. See [ADR-034](docs/DECISIONS.md#adr-034-extract-reusable-algorithm-packages-into-a-separate-aikit-module).
-- **`coderank` renamed to `encoder` on the move.** The package is a transformer encoder, not a PageRank-style ranker; the old name misled. The rename ripples through error prefixes (`"coderank: ..."` → `"encoder: ..."`), the env var (`KEN_MCP_RERANK_QUANT` and friends are unchanged — those name the operator-facing knob), `testdata/coderank-model` → `testdata/encoder-model` symlink convention, `testdata/coderank_golden.json` → `testdata/encoder_golden.json`, scripts (`scripts/pin_coderank.py` → `scripts/pin_encoder.py`, `scripts/coderank_model.py` → `scripts/encoder_model.py`, `scripts/m0_ceiling.py` moved to aikit), and ken's `.gitignore`. The HuggingFace model name (`nomic-ai/CodeRankEmbed`) and the on-disk cache scope key (`"coderankembed/f32/dim=768"`) are unchanged — those identify the model itself, not ken's package.
-- **Breaking change for the public `chunk` path.** [ADR-032](docs/DECISIONS.md#adr-032-promote-the-chunk-package-to-public-chunk--chunkers-chunker-interface-is-the-10-boundary) promoted `chunk` to a public, 1.0-stable surface at `github.com/townsendmerino/ken/chunk` two days before this extraction. That path is now `github.com/townsendmerino/aikit/chunk`. ADR-032 was never in a tagged release (latest v0.8.8 still had `internal/chunk`) and GitHub code search returns zero downstream consumers — hard break, no shim. External `mcp.Run` authors update their imports.
-- **Drift guard relocated.** `chunk/treesitter`'s `TestSubsetTagsMatchKenToTreeSitter` (the ADR-033 `.goreleaser.yml` ↔ `kenToTreeSitter` parity check) moved to `ken/internal/buildchecks/subset_test.go` because it's a ken release-config guard, not a chunk concern. The map's identifier uppercased to `KenToTreeSitter` so the test can reach it from outside the package.
+## [0.9.0] — 2026-06-03 — 1.0 release candidate
 
-**Calibration:** numerically bit-identical. `aikit/encoder` golden cosine = 1.000000 preserved on all 18 fixtures (versus PyTorch+MPS). `TestForwardBatch_matchesSingle` exact. `TestMatmulBT_blockedMatchesNaive` exact on all 8 shapes. `mcp/binary_contract_test.go` v0.6.0 binary-size contract still satisfied. No behavior change; only import paths and the `coderank → encoder` rename.
+The feature-complete 1.0-RC: Stage 8 closes (structural-navigation tools shipped across 10 languages + Arm B enrichment wired into production); the seven-item 1.0 ship-list closes (every tool an agent needs + JSON output mode + status / recently_changed surfaces + first-class USERS / DEVELOPERS docs); the startup + query-latency perf campaign closes (cold-start budget down 55–79% across corpora). Detail below, grouped by theme.
 
-### Changed (slim release binaries via gotreesitter grammar_subset — ADR-033)
+### Added — Stage 8 Track 2 structural-navigation tools across 10 languages
 
-- **gotreesitter `v0.19.1` → `v0.20.0-rc2`**, and ken's release binaries (`ken`, `ken-mcp`) now build **slim** — embedding only the 17 tree-sitter grammars `chunk/treesitter` actually dispatches (per `kenToTreeSitter`) instead of all 206 — via the `grammar_subset` build tags in `.goreleaser.yml`. Measured: `ken-mcp` 52.3 → 38.3 MB, `ken` 36.0 → 22.0 MB (−14 MB each, M1 Pro / `CGO_ENABLED=0`). The C-only `ken-demo-postgres` similarly drops ~16 MB of download. Resolves the embed-layer limitation [ADR-023](docs/DECISIONS.md#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome) flagged in v0.8.2 and confirms the upstream API for [odvcencio/gotreesitter#88](https://github.com/odvcencio/gotreesitter/issues/88).
-- **Library `go build` / `mcp.Run` is unaffected** — build tags are set by whoever compiles, not by importers, so external embedded-corpus authors who don't pass the tags still get all 206 grammars. Slim is opt-in to ken's own release pipeline.
-- **Drift guard:** `chunk/treesitter`'s `TestSubsetTagsMatchKenToTreeSitter` asserts the `.goreleaser.yml` subset tag set equals `kenToTreeSitter` (both directions), and `TestKenToTreeSitterGrammarsResolve` asserts every mapped grammar still exists in the pinned dep. A CI compile-smoke builds the slim binaries on every PR. `.goreleaser.yml` is the single source of truth (`scripts/subset-tags.sh` derives local/CI builds from it).
+- **Five MCP tools** for tree-sitter-grade, name-resolved (NOT type-resolved) structural navigation:
+  - `definition(symbol)` — locate every site where a function / class / method is defined. Bare `symbol` returns top-level AND every method on any type; qualified `Type.method` pins one.
+  - `references(symbol)` — every file where a name appears in a recognized syntactic context (call site, import, raise).
+  - `callers(symbol)` — files containing a call to the named function. File-level granularity. **Stage 8 Gate 2 precision sample: 100% on 400 edges across 8 languages.**
+  - `outline(path)` — top-level functions, classes, methods (with parameter names) per file or directory.
+  - `symbols([path])` — every top-level symbol defined in the repo, optionally filtered by directory prefix.
+- **Ten languages** via dedicated gotreesitter-backed extractors: Python · Go · TypeScript · JavaScript · Java · Rust · C · C++ · PHP · Ruby. Per-language identifier-resolution rules + noise-filter calibrated against eight popular dogfood repos (excalidraw, express, spring-petclinic, ripgrep, leveldb, redis, laravel, jekyll).
+- **Two extractor refinements found via the dogfood pass**: `#include <foo.h>` surfaces as a C/C++ import (basename, sans dir + ext); Node CommonJS `require('mod')` calls are routed to `fs.Imports` instead of leaking `require` into `fs.Calls`.
 
-**Calibration:** no behavior change for the 17 dispatched languages — slim and fat produce byte-identical treesitter chunks (verified on a mixed corpus: `fallback=0` both). csharp/shell stay omitted (DESIGN.md §10). The `v0.20.0-rc2` pin bends ADR-010's "pin at major.minor" rule deliberately (the feature isn't in a stable tag yet); tracked to re-pin at stable `v0.20.0`. See [ADR-033](docs/DECISIONS.md#adr-033-adopt-gotreesitter-grammarsubset-slim-release-binaries-v0200-rc2).
+### Added — Arm B chunk-level enrichment (ADR-035)
 
-### Changed (public chunk package — ADR-032)
+- **Deterministic per-file label** (`# func: NAME | calls: A, B | raises: X\n`) prepended to every chunk's text before BM25 tokenization + embedding. Pure-Go, no extra model. Default-on; opt out via `KEN_ENRICH=off` or `FSOptions.DisableEnrichment=true`. **+0.0208 NDCG@10 hybrid on csn-python-nl-stripped (N=500); +0.0321 on CoSQA dev** — both within 0.002 of the validated Gate-1 numbers on the production code path.
+- **Single source of truth**: `structural.EnrichFromFileStruct` (per-file, index-free) and `(Index).Enrich` (with optional cross-file callers) both delegate to `enrichCore`. Future bench materializers route through the same function; the Python bench materializer remains as a drift cross-check reference.
+- **Closes Stage 8**, with the two validation gates published in `outputs/stage8-gate-1-cosqa-armb-results.md` and `outputs/stage8-gate-2-call-edge-precision.md`. Track 1 (callers-as-chunk-enrichment) closed negative under M0e; query-time graph expansion explored separately, closed negative (`outputs/stage8-qgraph-expansion-results.md`); ColBERT MaxSim probe explored, parked (`outputs/stage8-maxsim-probe-parked.md`).
 
-- **`internal/chunk` → `chunk` (public).** The chunker package — the `Chunker` interface, `Register`/`Get`/`Names`, `ChunkFile`, the `Chunk` struct — and the concrete chunkers (`chunk/regex`, `chunk/treesitter`, `chunk/markdown`) moved out of `internal/` to the top-level `chunk/` path. External `mcp.Run` authors can now blank-import `github.com/townsendmerino/ken/chunk/treesitter` (or implement + `chunk.Register` their own) before calling `mcp.Run` — previously impossible, since `internal/` packages can't be imported across module boundaries. Closes [#36](https://github.com/townsendmerino/ken/issues/36).
-- **Two documented stability tiers.** The `chunk.Chunker` interface (+ `Register`/`Get`/`Names` + the `Chunk` struct's `File`/`StartLine`/`EndLine`/`Text` fields) is the **hard, 1.0-committed** surface — small and dependency-free, the swap-out boundary from ADR-010. The concrete chunkers behind it — especially `chunk/treesitter`, backed by the pre-1.0 `gotreesitter` dep — are **best-effort**: valid contiguous byte-faithful chunks guaranteed, exact boundaries not (they wobble ~0.1% under load, [#35](https://github.com/townsendmerino/ken/issues/35)).
+### Added — 1.0 ship-list user-facing surfaces
 
-**Not a behavior change.** Pure package relocation + doc tiers; package names unchanged, only import paths moved. No API removed. `go build ./...` / `go vet` / `gofmt` clean; full `go test ./...` (with `-race` on chunk + search) green. See [ADR-032](docs/DECISIONS.md#adr-032-promote-the-chunk-package-to-public-chunk--chunkers-chunker-interface-is-the-10-boundary).
+- **`callers(name)` MCP tool** — Stage 8 Gate 2 recommendation; described above.
+- **Search filters on `search`**: `languages` / `path_contains` / `exclude_path_contains`. Over-fetch (10× top_k, capped at 200) + post-filter + ratio-in-header response. Honest empty-after-filter message names the cause rather than silently returning fewer than top_k.
+- **`ken status` CLI + MCP tool** — build identity, model availability, Arm B enrichment state, token-savings summary (today / 7d / all-time, with chars + ~tokens at chars/4), and (when `repo` is passed via the MCP variant) live index + structural + cache stats. Markdown default; `--json` / `output:"json"` for machine-readable.
+- **`recently_changed(n)` MCP tool** — git-aware (go-git PlainOpen on the working tree); returns the last N commits with the files each touched. Args: `n` (default 10, max 100), `repo` (local path), `path` prefix filter. Local repos only; URL repos get a friendly "clone first" error.
+- **JSON output mode** on `search` / `find_related` / `definition` / `references` / `callers` / `outline` / `symbols` / `status`. Each tool gains an `Output` arg; `output:"json"` returns a typed response struct (response shapes defined in `mcp/json_responses.go` — 1.0-stable surface). Unknown values return a friendly error rather than silent fallback.
+- **First-class user-facing docs**: [`docs/USERS.md`](docs/USERS.md) (install per agent, ken-vs-grep, the 9 tools, common config, troubleshooting) and [`docs/DEVELOPERS.md`](docs/DEVELOPERS.md) (mcp.Run library, prebuilt indices, public API stability table, custom chunkers, tuning rerank, performance expectations).
 
-### Added (ken-mcp pre-built-index cold-start)
+### Changed — perf-startup-query campaign (ADR-036)
 
-- **`ken-mcp` auto-loads a pre-built index at `<repo>/.ken/index.bin`.** The standalone `ken-mcp` binary now honors the same ADR-024 convention `mcp.Run` already did: when a corpus carries a pre-built index (from `ken build-index <repo> -o <repo>/.ken/index.bin`), the server loads it in ~1-2 s and serves it **frozen, with no file watcher** — instead of paying a full live walk+chunk+embed build on the first query. Repos without a baked index are unchanged (lazy live build + watcher, exactly as before).
-- **Eager startup validation for the default repo.** When `KEN_MCP_DEFAULT_REPO` points at a local path carrying `.ken/index.bin`, the index is loaded + validated at startup (warming the cache so the first query is instant). A **mode/chunker mismatch** between the pre-built index and the server's `KEN_MCP_MODE` / `KEN_MCP_CHUNKER` is a **hard startup failure** (exit 1) with a message naming both sides and the fix — we won't silently serve wrong-config results. Corrupt / incompatible-format / missing-model pre-built files **warn and fall back** to a live build (a slower-but-correct result beats an outage).
+- **M2 — Lazy rerank model load.** New `internal/search/LazyReranker` defers `encoder.Load` + persistent cache hydration until the first hybrid+rerank query. **−491 ms on ken-mcp startup when `KEN_MCP_RERANK=on`** — rerank-on startup is now indistinguishable from unset (~30 ms median). For users who don't immediately issue a rerank query, the load is never paid at startup.
+- **M4 — Parallel `structural.Build`.** Refactored Pass 1 of structural.Build to `runtime.NumCPU()` workers using the per-file pattern from ADR-030. Determinism preserved by writing per-file results into idx-aligned slots + merging in lexical order before Pass 2. **3.5× on jekyll (−1,127 ms), 4.5× on ken itself (−360 ms).**
+- **Cumulative cold-start budget reduction**: tiny 627 ms → 134 ms (−79%); medium (ken) 1,405 ms → 555 ms (−60%); large (jekyll) 2,927 ms → 1,309 ms (−55%). Warm-search p50 unchanged (already sub-millisecond at M0; H4 confirmed).
+- **M1, M3, M5 killed**: M2 superseded M1 (Q8 rerank default); H2 refuted M3 (warm-up Encode penalty <0.3 ms); H4 confirmed M5 (query-path already sub-ms).
+- **Campaign closure** in [ADR-036](docs/DECISIONS.md#adr-036-close-the-startup--query-latency-perf-campaign). Out-of-band trigger: real user latency report against a hot path none of M0's measurements touched.
 
-  Motivation: a postgres+treesitter `ken-mcp` server hung on its first query during demo capture — three consecutive MCP `search` calls timed out at ~4 min and the server went unresponsive. Measured root cause (not the initially-suspected single-flight or watch-mode overhead — both were ruled out by reproduction): the binary always **live-indexes** the default repo on first query, and a treesitter build of postgres is ~44 s on a quiet machine. Under capture-time contention (three ken-mcp servers + the app on a 16 GB box) that 44 s exceeded the MCP client's tool-call timeout. Loading a pre-built index removes the build from the request path: measured **first cold `search` 44.6 s → 46.6 ms** on postgres+treesitter (real binary, `sdk.CommandTransport`).
+### Changed — extracted reusable packages into separate `aikit` module (ADR-034)
 
-### Calibration discipline (cold-start)
+- **New module [`github.com/townsendmerino/aikit`](https://github.com/townsendmerino/aikit) at v0.1.0** (now pinned at `v0.1.1`). ken's reusable algorithm packages — `topk`, `ann`, `bm25`, `embed`, `coderank` (renamed `encoder`), and `chunk` (+ `regex` / `markdown` / `treesitter`) — moved out of `internal/` (and out of public `chunk/`) into a second module that any project can import. ken now consumes them via `require github.com/townsendmerino/aikit`. Closes the "reusable by another project" path that `internal/` foreclosed. See [ADR-034](docs/DECISIONS.md#adr-034-extract-reusable-algorithm-packages-into-a-separate-aikit-module).
+- **`coderank` renamed to `encoder`** on the move. The package is a transformer encoder, not a PageRank-style ranker; the old name misled. The rename ripples through error prefixes, the env var (`KEN_MCP_RERANK_QUANT` and friends unchanged — those name the operator-facing knob), `testdata/coderank-model` → `testdata/encoder-model`, scripts (`scripts/pin_coderank.py` → `scripts/pin_encoder.py`, etc.), and ken's `.gitignore`. HuggingFace model name (`nomic-ai/CodeRankEmbed`) and on-disk cache scope key are unchanged.
+- **Breaking change for the public `chunk` path**: was `github.com/townsendmerino/ken/chunk` (added in ADR-032 two days prior, never tagged in a release); now `github.com/townsendmerino/aikit/chunk`. GitHub code search returns zero downstream consumers — hard break, no shim.
 
-**Startup/transport only — NOT a retrieval-quality, recall, or ranking change, and NOT a change to what gets indexed.** A loaded pre-built index serves byte-identical chunks to what `ken build-index` produced for the same corpus + flags, so transcripts captured against a live index and against the pre-built index reflect the same retrieval. Single-flight (already present in `mcp/cache.go`) and watch-mode were both verified by reproduction to be working/irrelevant; no behavior changed there. Same framing as v0.8.3's "cold-start optimization, NOT search-quality change."
+**Calibration:** numerically bit-identical. `aikit/encoder` golden cosine = 1.000000 preserved on all 18 fixtures. `TestForwardBatch_matchesSingle` exact. `TestMatmulBT_blockedMatchesNaive` exact on all 8 shapes. v0.6.0 binary-size contract still satisfied.
 
-### Added (treesitter chunker fallback observability)
+### Changed — slim release binaries via gotreesitter `grammar_subset` (ADR-033)
 
-- **Per-reason fallback counters on the treesitter chunker.** `internal/chunk/treesitter.Chunker` now tracks four atomic counters — one per silent-fallback site in `Chunk` (unsupported language, `pool.Parse` error, nil root node, invalid spans) — plus a total-files-attempted counter. Exposed via `Chunker.Stats() Stats`. Thread-safe (`sync/atomic`); negligible hot-path cost (one atomic add per chunked file).
-- **`treesitter` field on `ken perf index` JSON output (omitempty).** When `--chunker=treesitter`, the perf record includes a `treesitter` object with `total`, `fallback`, and per-reason counts. Lets callers — primarily the OSS-demo build-time validation per `outputs/oss-demo-playbook.md` — quantify how many files in a corpus actually got AST-chunked vs silently degraded to the line chunker.
+- **gotreesitter `v0.19.1` → `v0.20.0-rc2`**, and ken's release binaries (`ken`, `ken-mcp`) now build **slim** — embedding only the 17 tree-sitter grammars `chunk/treesitter` actually dispatches (per `kenToTreeSitter`) instead of all 206 — via the `grammar_subset` build tags in `.goreleaser.yml`. **Measured: `ken-mcp` 52.3 → 38.3 MB, `ken` 36.0 → 22.0 MB** (M1 Pro / `CGO_ENABLED=0`). The C-only `ken-demo-postgres` similarly drops ~16 MB of download. Resolves the embed-layer limitation [ADR-023](docs/DECISIONS.md#adr-023) flagged in v0.8.2.
+- **Library `go build` / `mcp.Run` is unaffected** — build tags are set by whoever compiles, not by importers; external embedded-corpus authors who don't pass the tags still get all 206 grammars. Slim is opt-in to ken's own release pipeline.
+- **Drift guard**: `chunk/treesitter`'s `TestSubsetTagsMatchKenToTreeSitter` asserts the `.goreleaser.yml` subset tag set equals `kenToTreeSitter` (both directions); a CI compile-smoke builds the slim binaries on every PR.
 
-### Calibration discipline
+### Changed — public `chunk` package (ADR-032)
 
-This is **observability only**: a measurement gap closed. **NOT** a retrieval-quality change, **NOT** a recall change, **NOT** a search-ranking change, **NOT** a behavior change. The silent-fallback semantics ADR-010 chose are deliberately preserved — `ken index` / `ken-mcp` / library callers see byte-identical output and zero new stderr spam. The counters are introspection for callers who explicitly want them (`perf index`'s JSON consumer); every other caller is unaffected.
+- **`internal/chunk` → `chunk` (public)** — and then to `aikit/chunk` two days later under ADR-034. The `Chunker` interface is the **hard, 1.0-committed** seam; concrete chunkers (especially `treesitter`, backed by pre-1.0 `gotreesitter`) are **best-effort**: valid contiguous byte-faithful chunks guaranteed, exact boundaries not (~0.1% wobble under load, [#35](https://github.com/townsendmerino/ken/issues/35)).
 
-Same calibration framing as v0.8.3's "cold-start optimization, NOT search-quality change" and v0.8.1's "Tier-1 chunk fidelity, NOT recall" entries.
+### Added — ken-mcp prebuilt-index auto-load (#32, ADR-024 close)
+
+- **`ken-mcp` auto-loads `<repo>/.ken/index.bin`** when present, matching the convention `mcp.Run` already did. Cold start drops from full live walk+chunk+embed to ~1-2 s index hydration. Mode/chunker mismatch is a hard startup failure (exit 1); corrupt / format-version / missing-model fall back to a live build with a stderr warning.
+- **Eager startup validation for the default repo** (`KEN_MCP_DEFAULT_REPO`): index loaded + validated at startup so the first query is instant.
+
+### Added — treesitter per-reason fallback counters (#31)
+
+- `chunk/treesitter` reports per-reason fallback counts via `Stats()`; `ken perf index` JSON surface exposes them under `treesitter` when `--chunker=treesitter`. **Observability only**; ADR-010's silent-fallback semantics are preserved (no behavior change, no stderr noise).
+
+### Changed — public API discipline
+
+- **Un-deprecated `search.FromPath` and `repo.Walk`** for 1.0. Both are thin wrappers around the `fs.FS` variants and are useful at ~10 call sites in our test/bench/script code. The deprecation marker was dropped after the 1.0 audit confirmed both signatures stable. Doc-comments now describe them as "1.0-stable" with rationale (string path vs fs.FS choice).
+- **Best-effort markers added** to `CloneShallow`, `NormalizeKey`, `ValidateEnum` — useful for custom Cache `Builder` implementations but signature/semantics may evolve. Hard-1.0 surfaces enumerated in [DEVELOPERS.md → Public API surface](docs/DEVELOPERS.md#public-api-surface).
+- **Stale doc-comments fixed**: language coverage claims now accurately list ten languages (was "Stage 8 v0 supports Python only"); MCP tool descriptions audit confirmed consistent in voice and accurate against the implementation.
+
+### Other
+
+- **MaxSim probe parked** with a closing memo and reopen-trigger list (`outputs/stage8-maxsim-probe-parked.md`). Slim N=25 sample shows MaxSim consistently underperforms CLS-pool on CodeRankEmbed's token vectors; the cheap-reuse path for ColBERT is killed.
+- **Windows binary deferred until pressure** — pure-Go cross-compile is technically trivial but the support surface (CRLF, path separators, MCP quirks) isn't free; re-opens on real user reports.
+- **CI Docker-pulls-Postgres flake documented** with mitigation (`gh run rerun --failed`) and the permanent-fix path (mirror service images to ghcr.io). Deferred until load-bearing.
+- **Aikit alignment**: ken's CHANGELOG notes that ken 1.0 requires aikit at a tagged 1.0 (or clearly within a 1.0-RC window) for the stability promises to compose. Coordination point, not a blocker.
+
+## [0.8.8] — 2026-05-27
+
+**DB introspection sample-loop parallelism + treesitter fallback counters + ken-mcp prebuilt-index auto-load.** Not separately changelogged in detail at the time; covered in retrospect under [0.9.0] above (the #31 / #32 / ADR-031 entries). Tag exists at commit 7efdbde with corresponding GitHub release artifacts.
+
+## [0.8.7] — 2026-05-27
+
+**Parallel index build — per-file workers for chunk + embed.** [ADR-030](docs/DECISIONS.md#adr-030-indexing-pipeline-parallelism--phase-a-per-file-workers-for-chunk--embed-v087): hybrid INDEX wall 165.3 s → 45.4 s (3.64× speedup); GC share on hybrid 38% → 8%; bm25 1.15×. N=20 determinism stress confirmed bit-identical (one unique SHA per mode). NDCG@10 exact-match all three modes. Tag exists at commit b3ec110 with corresponding GitHub release artifacts. (Calibration retrospectively documented in `outputs/project-v087.md`-equivalent memory entry; not separately changelogged at the time.)
 
 ## [0.8.3] — 2026-05-26
 

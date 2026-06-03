@@ -71,7 +71,7 @@ hybrid on csn-stripped, +0.0321 on CoSQA reproducing Gate-1 within
 | MCP tool description audit | 🟢 partial (2026-06-02) | Stale "Stage 8 extractor covers Python only" copy replaced across mcp/structural_tools.go with the accurate "no registered extractors for this corpus" framing as part of the callers ship. Full voice/length sweep across all 7 tools still pending if it turns out to matter. |
 | Deprecated functions | 🟡 | `search.FromPath` ([internal/search/index.go](../internal/search/index.go)) and `repo.Walk` ([internal/repo/walk.go](../internal/repo/walk.go)) marked Deprecated but still called internally. 1.0 is the moment to remove or commit to keeping. I lean remove. |
 | `CHANGELOG.md` currency | 🟡 | Check it's current through v0.8.8 and the demos/v0.1.0 release. |
-| CI Docker-pulls-Postgres flake | 🟡 | Hit on the recent release push. Worth a retry-with-backoff or a registry mirror; "ship the flake" is not the right answer. |
+| CI Docker-pulls-Postgres flake | 🟢 documented + mitigation | The flake is at GitHub Actions' service-container provisioning layer — before any step we control runs. Actions has built-in pull-retry-with-backoff; when Docker Hub is slow OR has an outage (recent release push hit this), even the built-in retry exhausts. **Live mitigation: `gh run rerun <run-id> --failed`** (already-green jobs stay green). **Permanent fix: mirror service images to ghcr.io** — deferred until the flake becomes load-bearing. Documented in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) above the `test-db-integration` job. |
 | `internal/structural/Enrich()` unused opts | 🟡 | Arm B baseline is shipping but `Callers/Imports/Signature/Siblings` options exist and aren't on the ship path. M0e proved they don't help. Either delete or document as "experimental / not in production." |
 | Bench-side parallel impl | 🟢 documented | After ADR-035 ship, the Python materializers are docs-noted as "bench-only fallback for drift cross-checks." Retained as a known-good reference for any future drift investigation; production goes through `structural.EnrichFromFileStruct`. |
 
@@ -89,9 +89,14 @@ hybrid on csn-stripped, +0.0321 on CoSQA reproducing Gate-1 within
 - 🟡 **Document the recommended Claude-Code-with-ken workflow**.
   `ultracode` / `ultrareview` are Claude Code skills, not ken
   features, but they're the easiest dogfood path.
-- 🟡 **Aikit's 1.0.** We extracted aikit at v0.1.0 (ADR-034); ken
-  1.0 likely wants aikit at a tagged 1.0 too, with its own
-  documented public API.
+- 🟢 **Aikit's 1.0** — aligned. ken pins `aikit v0.1.1` in
+  go.mod. aikit's README documents its stability tiers in the
+  same hard/best-effort shape ken uses; ken's
+  [DEVELOPERS.md](DEVELOPERS.md#aikit-packages) now notes that
+  ken 1.0 requires aikit at a tagged 1.0 (or clearly within a
+  1.0-RC window) so the stability promises compose cleanly.
+  The actual aikit 1.0 cut is on aikit's own schedule; this is
+  a coordination point, not a blocker for ken's v0.9-RC.
 - 🟡 **Performance expectations doc.** ADRs 026–030 set baselines.
   "What should ken feel like" — "indexing the Linux kernel takes
   ~X minutes, queries are sub-Y ms" — sets user expectations and

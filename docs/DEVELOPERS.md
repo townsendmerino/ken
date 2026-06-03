@@ -191,7 +191,17 @@ external code — they may break without ADR.
 
 ken consumes aikit (
 [github.com/townsendmerino/aikit](https://github.com/townsendmerino/aikit))
-as a separate module. Its public surface is documented in
+as a separate module — `require github.com/townsendmerino/aikit
+v0.1.1` in [go.mod](../go.mod) at the time of this writing. aikit
+is `0.x` (pre-1.0); its "hard, 1.0-committed" surfaces are
+expected to stay stable through aikit's own path to 1.0, but
+breaking changes between `0.x` minors are technically still
+permitted by semver. ken's CHANGELOG records every aikit bump.
+When ken cuts 1.0, the aikit dep should be at a tagged 1.0 or
+clearly within a 1.0-RC window so the stability promise composes
+cleanly.
+
+The full aikit stability table is in
 [aikit/README.md](https://github.com/townsendmerino/aikit#stability).
 The summary:
 

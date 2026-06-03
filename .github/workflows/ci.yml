@@ -118,6 +118,19 @@ jobs:
   # macos-latest. The default `go test ./...` job above doesn't depend
   # on this — it always runs on both OSes and the dbintegration tests
   # are gated by the build tag, so non-DB runs skip them silently.
+  #
+  # Known transient flake (2026-06-02): when Docker Hub is slow or
+  # rate-limiting, the service-container init step ("Initialize
+  # containers") fails before any step we control runs — Actions'
+  # built-in pull-retry-with-backoff exhausts its window and the
+  # entire job goes red. There's no in-workflow mitigation because
+  # the failure is in the runner's service provisioning, not in our
+  # steps. Live mitigation: `gh run rerun <run-id> --failed` (the
+  # already-green jobs stay green; only this one re-runs). Permanent
+  # fix: mirror `postgres:16-alpine` + `mysql:8` + `mariadb:10` to
+  # ghcr.io to escape Docker Hub rate limits and (mostly) escape
+  # Docker Hub outages. Deferred until the flake becomes load-bearing
+  # for a release — tracked in road-to-1.0.md.
   test-db-integration:
     name: ubuntu / DB integration (Postgres + SQLite + MySQL + MariaDB + Listen)
     runs-on: ubuntu-latest
