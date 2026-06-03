@@ -2515,3 +2515,52 @@ If we ever swap the embedding model for an order-sensitive one (e.g. a real tran
 - **Indexing wall-time cost: ~25ms per file on this corpus** (regex + treesitter mix; absolute number scales with file count). Cheap enough to default-on without an indexing-perf regression note in CLAUDE.md.
 - **Single source of truth for Arm B label**: any future bench / materializer that wants the same prefix MUST call `structural.EnrichFromFileStruct` or `(Index).Enrich`. Other paths are forbidden by convention; the diff script catches drift if anyone tries.
 - **Closes Stage 8.** Together with the already-shipped Track 2 tools and 10-language extractors, the Stage 8 plan is now production. road-to-1.0.md tracker retrieval section can be marked closed.
+
+
+## ADR-036: Close the startup + query-latency perf campaign
+
+### Context
+
+[`docs/perf-campaign-startup-query.md`](perf-campaign-startup-query.md) kicked off a focused perf campaign targeting two surfaces the v0.8.x indexing campaign (project-perf-phase0, ADRs 026-029) didn't touch: ken-mcp cold-start time and per-query latency. Profile-driven; no Mn optimization until M0 data ranked it.
+
+### Decision
+
+**Close the campaign.** Both confirmed-hypothesis milestones shipped; both refuted-hypothesis milestones killed without code change. The campaign's closure criteria (every confirmed-H milestone shipped + residual hypotheses documented) are met.
+
+**Shipped milestones:**
+
+- **M2 — Lazy rerank model load** (commit fa5dc5e, [outputs/perf-startup-m2-results.md](../outputs/perf-startup-m2-results.md)). New `internal/search/LazyReranker` defers `encoder.Load` + `LoadCacheFromFile` until the first `Rerank` call; sync.Once for single-shot under concurrent callers; thread-safe by construction. cmd/ken-mcp builds a closure that performs the 3-step block lazily. **−491 ms on ken-mcp startup when `KEN_MCP_RERANK=on`** — rerank-on startup is now indistinguishable from unset (~30 ms median, perf_startup_m2.sh).
+- **M4 — Parallel `structural.Build`** (commit 34a52ae, [outputs/perf-startup-m4-results.md](../outputs/perf-startup-m4-results.md)). Pass 1 of `internal/structural/Build` refactored to `runtime.NumCPU()` workers using the same per-file work pattern v0.8.7's chunk+embed parallelism shipped under ADR-030. Determinism preserved by writing per-file results into idx-aligned slice + merging in lexical order before Pass 2 builds lookup maps. **3.5× on jekyll (−1,127 ms), 4.5× on ken itself (−360 ms).**
+
+**Killed milestones:**
+
+- **M1 — Default Q8 rerank when present.** Closed without code change ([outputs/perf-startup-m1-results.md](../outputs/perf-startup-m1-results.md)). Two reasons: (1) M2 already removed the rerank-load cost from the cold-start critical path, so M1's premise dissolved; (2) on Apple Silicon (the campaign's host platform), f32+NEON dominates int8 in both speed AND accuracy — the existing in-tree commentary in cmd/ken/main.go was right. Q8 remains available via `KEN_MCP_RERANK_QUANT=int8` for memory-constrained amd64/Linux deployments.
+- **M3 — Warm-up `Encode("")` after index build.** Killed in M0 by H2 refutation. First-query semantic embed pays a ~25% cold penalty in relative terms, but the absolute difference is < 0.3 ms — well below the worthwhile-optimization bar.
+- **M5 — Query-path micro-optimizations.** Killed in M0 by H4 confirmation. Warm-search p50 is already sub-millisecond on all three test corpora; no work needed.
+
+### Cumulative cold-start reduction
+
+vs M0 baseline, after M2 + M4:
+
+| Corpus | M0 baseline | After M2 + M4 | Total reduction |
+|---|---:|---:|---:|
+| tiny (6 files) | 627 ms | 134 ms | **−493 ms (79%)** |
+| medium (ken, 250 files) | 1,405 ms | 555 ms | **−850 ms (60%)** |
+| large (jekyll, 766 files) | 2,927 ms | 1,309 ms | **−1,618 ms (55%)** |
+
+Warm-search p50 unchanged (already sub-ms; H4 confirmed in M0).
+
+### Alternatives considered
+
+- **Keep M1 open as a 1.0 nice-to-have.** Rejected — without amd64/Linux benchmark data, "default to Q8 because it's smaller" is a vibes-based optimization that would regress arm64. The platform-aware version requires a fetch-and-build path (`ken download-model --quant int8`) that isn't on the campaign scope. Re-open trigger documented in the M1 memo for future sprints.
+- **Add per-query rerank-side optimization milestones** beyond M5. Refused — M5 itself was killed by H4; warm-search is already sub-ms. The remaining rerank-side cost is the 491 ms first-load wall, which M2 covers, and the per-rerank-call cost, which M9/M10/M11 already campaigned under project-rerank.
+- **Cross-platform x86_64 reproduction.** Documented as nice-to-have in the campaign plan; not gated. arm64 numbers stand as the authoritative campaign baseline.
+
+### Consequences
+
+- **Cold-start budget halved on real corpora**, with the largest reduction (1.6 s) on the multi-language large-corpus case agents care about most.
+- **Single source of truth for the rerank load** is now the LazyReranker closure in cmd/ken-mcp. Any future change to model load semantics goes there, not in five scattered call sites.
+- **Determinism contract preserved.** Parallel structural.Build produces the same Index.files iteration order as the single-threaded build — every existing test pinning the structural surface (16 across the 10 extractors, plus the dogfood-driven Stage 8 Gate 2 precision check) continues to pass.
+- **Campaign re-opens** only on a real user latency report that hits a hot path none of M0's measurements touched (matches the out-of-band trigger in the campaign plan).
+
+This is the second "perf-campaign close" ADR in ken's history; ADR-029 closed project-perf-phase0. Both follow the same pattern: profile → ship the confirmed wins → kill the refuted ones with evidence → close.
