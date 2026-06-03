@@ -2,7 +2,8 @@
 
 Living document tracking what stands between ken's current state and a
 v1.0 release. Updated as items ship or change. Last updated:
-2026-06-02 (Arm B shipped, MaxSim parked).
+2026-06-02 (Arm B + MaxSim parking + Windows deferred + callers tool +
+search filters shipped).
 
 Status legend: 🟢 done · 🟡 open · 🔴 blocked · ⚪ deferred / killed
 
@@ -44,9 +45,9 @@ hybrid on csn-stripped, +0.0321 on CoSQA reproducing Gate-1 within
 
 | Rank | Feature | Status | Effort | Why |
 |---|---|---|---:|---|
-| 1 | `callers(name)` MCP tool | 🟡 | ~1 day | Stage 8 Gate 2 recommendation. File-level granularity is honest; immediate agent value. |
-| 2 | Search filters: `--language` / `--path-glob` / `--exclude-path` | 🟡 | ~1 day | Agents constantly want "find auth code in `src/api/` only" — currently they post-filter. Implement at chunk-iteration. **High-value, low-risk.** |
-| 3 | Windows binary in the release matrix | 🟡 | ~half day | [`.goreleaser.yml`](../.goreleaser.yml) builds 4 platforms (darwin/linux × amd64/arm64); no Windows. Pure-Go ⇒ cross-compiles cleanly. Adoption blocker for Windows-first developers. |
+| 1 | `callers(name)` MCP tool | 🟢 shipped | done | 2026-06-02. handleCallers + AddTool registration in mcp/server.go + types.CallersArgs. File-level granularity; honest framing in tool description + response header. |
+| 2 | Search filters: `languages` / `path_contains` / `exclude_path_contains` | 🟢 shipped | done | 2026-06-02. SearchArgs extended; runSearchWithTelemetry over-fetches 10× when filters are set, post-filters, reports candidate-vs-filter ratio in the header. Substring match (not glob); covers the canonical "find auth code in src/api/" + "exclude test files" cases. |
+| — | ~~Windows binary~~ | ⚪ deferred-until-pressure | — | Owner preference (2026-06-02): defer until extreme user pressure. Pure-Go cross-compile is technically trivial but the support surface (CRLF, path separators, Windows-specific MCP quirks, npm/PowerShell install paths) is not free. Re-open ONLY if a real user reports being blocked. |
 | 4 | `ken status` (CLI + MCP tool) | 🟡 | ~half day | Indexed file count, last-rebuild time, watch status, model availability, structural-extractor coverage by language. Reassurance signal. |
 | 5 | `recently_changed(N)` MCP tool (git-aware) | 🟡 | ~half day | Common agent question; currently they shell out. Reuses the `go-git` dep we already have. |
 | 6 | JSON output mode for `search` and structural tools | 🟡 | ~half day | Markdown-only locks out programmatic consumers. Add `args.output = "json" \| "markdown"`. |
@@ -64,7 +65,7 @@ hybrid on csn-stripped, +0.0321 on CoSQA reproducing Gate-1 within
 | Nit | Status | Notes |
 |---|---|---|
 | 2 untracked docs in `docs/` | 🟡 | [`colbert-late-interaction-for-ken.md`](colbert-late-interaction-for-ken.md), [`ken-context.md`](ken-context.md). Either track or `.gitignore`; they've been in every `git status` for weeks. |
-| MCP tool description audit | 🟡 | 7 tool description strings in [`mcp/server.go`](../mcp/server.go). Check consistency in voice / length and agreement with tested behavior. `references` returns text not structured callsites; `outline` is file-scoped; etc. |
+| MCP tool description audit | 🟢 partial (2026-06-02) | Stale "Stage 8 extractor covers Python only" copy replaced across mcp/structural_tools.go with the accurate "no registered extractors for this corpus" framing as part of the callers ship. Full voice/length sweep across all 7 tools still pending if it turns out to matter. |
 | Deprecated functions | 🟡 | `search.FromPath` ([internal/search/index.go](../internal/search/index.go)) and `repo.Walk` ([internal/repo/walk.go](../internal/repo/walk.go)) marked Deprecated but still called internally. 1.0 is the moment to remove or commit to keeping. I lean remove. |
 | `CHANGELOG.md` currency | 🟡 | Check it's current through v0.8.8 and the demos/v0.1.0 release. |
 | CI Docker-pulls-Postgres flake | 🟡 | Hit on the recent release push. Worth a retry-with-backoff or a registry mirror; "ship the flake" is not the right answer. |

@@ -370,3 +370,128 @@ func TestRun_ListsBothTools(t *testing.T) {
 		}
 	}
 }
+
+// TestRun_SearchFilters_Language pins the 1.0 language-filter behavior:
+// search returns candidates from the index, then post-filters by
+// file extension. The embedded corpus has main.go (Go) and auth.py
+// (Python); a query that hits both narrowed to languages=["go"]
+// must return only main.go.
+func TestRun_SearchFilters_Language(t *testing.T) {
+	ctx, sess, logBuf, cleanup := runRunOnInMemoryTransport(t, Options{
+		Mode:        "bm25",
+		ChunkerName: "regex",
+	})
+	defer cleanup()
+
+	// "validate user" hits both Go's ValidateUser (camelCase split)
+	// and Python's validate_user. Without a filter we'd see both.
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query":     "validate user",
+			"top_k":     10,
+			"languages": []string{"go"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search): %v\n--log--\n%s", err, logBuf.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(txt, "main.go") {
+		t.Errorf("languages=[go] filter dropped the expected .go result:\n%s", txt)
+	}
+	if strings.Contains(txt, "auth.py") {
+		t.Errorf("languages=[go] should have filtered out auth.py:\n%s", txt)
+	}
+	// Header should report the candidate-vs-filter ratio.
+	if !strings.Contains(txt, "passed filter") {
+		t.Errorf("expected filter ratio in header, got:\n%s", txt)
+	}
+}
+
+// TestRun_SearchFilters_PathContains pins the substring-path filter.
+// "auth" matches auth.py; main.go has no "auth" in its path.
+func TestRun_SearchFilters_PathContains(t *testing.T) {
+	ctx, sess, logBuf, cleanup := runRunOnInMemoryTransport(t, Options{
+		Mode:        "bm25",
+		ChunkerName: "regex",
+	})
+	defer cleanup()
+
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query":         "validate user",
+			"top_k":         10,
+			"path_contains": "auth",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search): %v\n--log--\n%s", err, logBuf.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(txt, "auth.py") {
+		t.Errorf("path_contains=auth dropped the expected match:\n%s", txt)
+	}
+	if strings.Contains(txt, "main.go") {
+		t.Errorf("path_contains=auth should have filtered out main.go:\n%s", txt)
+	}
+}
+
+// TestRun_SearchFilters_ExcludePath pins exclude_path_contains.
+// Excluding ".py" should drop auth.py and keep main.go.
+func TestRun_SearchFilters_ExcludePath(t *testing.T) {
+	ctx, sess, logBuf, cleanup := runRunOnInMemoryTransport(t, Options{
+		Mode:        "bm25",
+		ChunkerName: "regex",
+	})
+	defer cleanup()
+
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query":                 "validate user",
+			"top_k":                 10,
+			"exclude_path_contains": ".py",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search): %v\n--log--\n%s", err, logBuf.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if strings.Contains(txt, "auth.py") {
+		t.Errorf("exclude_path_contains=.py should have dropped auth.py:\n%s", txt)
+	}
+	if !strings.Contains(txt, "main.go") {
+		t.Errorf("exclude_path_contains=.py dropped main.go too:\n%s", txt)
+	}
+}
+
+// TestRun_SearchFilters_NoMatch confirms the honest empty-after-filter
+// response: when the filter rules out every candidate, the response
+// names the issue rather than silently returning "No results found"
+// (which would be confusing — the search DID find candidates; the
+// filter dropped them).
+func TestRun_SearchFilters_NoMatch(t *testing.T) {
+	ctx, sess, logBuf, cleanup := runRunOnInMemoryTransport(t, Options{
+		Mode:        "bm25",
+		ChunkerName: "regex",
+	})
+	defer cleanup()
+
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query":     "validate user",
+			"top_k":     5,
+			"languages": []string{"rs"}, // no .rs files in fixture
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search): %v\n--log--\n%s", err, logBuf.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if !strings.Contains(txt, "match the filters") {
+		t.Errorf("expected post-filter-empty message, got:\n%s", txt)
+	}
+}

@@ -524,11 +524,11 @@ func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 		have[tl.Name] = true
 		t.Logf("tool: %s — %s", tl.Name, tl.Description)
 	}
-	// Stage 8 Track 2: all six tools must be registered (search +
-	// find_related from v0.6; definition, references, outline,
-	// symbols from Stage 8). reindex_db remains hidden when DB is
-	// unset (separate ADR-020 invariant).
-	for _, name := range []string{"search", "find_related", "definition", "references", "outline", "symbols"} {
+	// Stage 8 Track 2: all seven tools must be registered (search +
+	// find_related from v0.6; definition, references, callers,
+	// outline, symbols from Stage 8). reindex_db remains hidden when
+	// DB is unset (separate ADR-020 invariant).
+	for _, name := range []string{"search", "find_related", "definition", "references", "callers", "outline", "symbols"} {
 		if !have[name] {
 			t.Errorf("missing tool %q (have %v)", name, have)
 		}
@@ -576,6 +576,11 @@ func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 		// for..." text. Both shapes contain the symbol name; check
 		// for that as the catch-all.
 		{"references", map[string]any{"symbol": "validate_user"}, "validate_user"},
+		// `callers`: same situation as references — validate_user is
+		// defined but not called in the fixture, so the response is
+		// the "No callers found for..." text. Both shapes contain
+		// the symbol name.
+		{"callers", map[string]any{"symbol": "validate_user"}, "validate_user"},
 		// `outline`: auth.py defines class User and func
 		// validate_user, so the outline is non-empty.
 		{"outline", map[string]any{"path": "auth.py"}, "Outline"},

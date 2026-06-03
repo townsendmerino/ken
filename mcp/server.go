@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -251,6 +252,19 @@ func NewServer(cfg Config) *sdk.Server {
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
+		Name: "callers",
+		Description: "Find the files that contain a call to a given function name. " +
+			"Returns file-level callers (\"this file has a call to X\"), not function-level " +
+			"call hierarchy. Tree-sitter-grade: name-resolved, not type-resolved — same-spelled " +
+			"functions across types collapse into one list. Stage 8 Gate 2 precision sample: " +
+			"100% on a 400-edge sample across 8 languages. For function-level call hierarchy " +
+			"(which specific function calls X), fall back to an LSP — ken doesn't track caller-" +
+			"function scopes.",
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, args CallersArgs) (*sdk.CallToolResult, any, error) {
+		return handleCallers(ctx, &cfg, args)
+	})
+
+	sdk.AddTool(srv, &sdk.Tool{
 		Name: "outline",
 		Description: "Show the structural outline of a file or directory. " +
 			"For a file path: returns every top-level function, class, and method " +
@@ -388,6 +402,21 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 	if topK <= 0 {
 		topK = DefaultTopK
 	}
+	// 1.0 filters: when any of Languages / PathContains /
+	// ExcludePathContains is set, over-fetch by a factor so the
+	// post-filter top-K still has plausible candidates. The factor
+	// is generous (10× topK, capped at 200) because filter
+	// selectivity is unpredictable — "Go only" might keep 30% of
+	// hits while "src/api only" might keep 1%. Over-fetching past
+	// the cap caps wall-time at known-bounded levels.
+	fetchK := topK
+	hasFilters := len(args.Languages) > 0 || args.PathContains != "" || args.ExcludePathContains != ""
+	if hasFilters {
+		fetchK = topK * 10
+		if fetchK > 200 {
+			fetchK = 200
+		}
+	}
 	collect := log != nil || includeInResponse
 	var (
 		results       []search.Result
@@ -395,24 +424,87 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 		tel           search.Telemetry
 	)
 	if collect {
-		results, effectiveMode, tel = ix.SearchModeWithTelemetry(args.Query, topK, requestedMode)
+		results, effectiveMode, tel = ix.SearchModeWithTelemetry(args.Query, fetchK, requestedMode)
 	} else {
-		results, effectiveMode = ix.SearchMode(args.Query, topK, requestedMode)
+		results, effectiveMode = ix.SearchMode(args.Query, fetchK, requestedMode)
 	}
 	if log != nil {
 		log(args.Query, tel)
 	}
+	// Apply filters and truncate. recall@filter is reported in the
+	// header (`X of Y results matched filters`) so callers can see
+	// when the filter was the limiting factor.
+	rawCount := len(results)
+	if hasFilters {
+		results = applySearchFilters(results, args)
+	}
+	if len(results) > topK {
+		results = results[:topK]
+	}
 	if len(results) == 0 {
+		if hasFilters && rawCount > 0 {
+			return textResult(fmt.Sprintf(
+				"No results match the filters (search returned %d candidate%s before filtering). "+
+					"Try removing or loosening languages / path_contains / exclude_path_contains.",
+				rawCount, pluralS(rawCount))), nil, nil
+		}
 		return textResult("No results found."), nil, nil
 	}
 	recordSearchUsage(recorder, "search", results, sourceRoot)
 	header := fmt.Sprintf("Search results for: %q (mode=%s)",
 		args.Query, search.ModeNames()[int(effectiveMode)])
+	if hasFilters {
+		header += fmt.Sprintf(" — %d of %d candidate%s passed filter",
+			len(results), rawCount, pluralS(rawCount))
+	}
 	body := FormatResults(header, results)
 	if includeInResponse {
 		body += "\n\n" + formatTelemetryLine(tel)
 	}
 	return textResult(body), nil, nil
+}
+
+// applySearchFilters drops results whose file path doesn't satisfy
+// the args' Languages / PathContains / ExcludePathContains
+// constraints. Filters are AND-ed; a result must pass every set
+// constraint to survive. Languages normalize a leading dot (so
+// both "py" and ".py" work); path filters are case-sensitive
+// substring matches.
+func applySearchFilters(results []search.Result, args SearchArgs) []search.Result {
+	// Build a quick-lookup extension set; tolerate either "py" or
+	// ".py" inputs.
+	var allowExt map[string]bool
+	if len(args.Languages) > 0 {
+		allowExt = make(map[string]bool, len(args.Languages))
+		for _, lang := range args.Languages {
+			lang = strings.TrimSpace(lang)
+			if lang == "" {
+				continue
+			}
+			if !strings.HasPrefix(lang, ".") {
+				lang = "." + lang
+			}
+			allowExt[strings.ToLower(lang)] = true
+		}
+	}
+	out := results[:0]
+	for _, r := range results {
+		path := r.Chunk.File
+		if allowExt != nil {
+			ext := strings.ToLower(filepath.Ext(path))
+			if !allowExt[ext] {
+				continue
+			}
+		}
+		if args.PathContains != "" && !strings.Contains(path, args.PathContains) {
+			continue
+		}
+		if args.ExcludePathContains != "" && strings.Contains(path, args.ExcludePathContains) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // recordSearchUsage computes snippet_chars + file_chars (the unique-

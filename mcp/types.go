@@ -37,6 +37,18 @@ type SearchArgs struct {
 	Repo  string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL (e.g. https://github.com/org/repo) or local directory path to index and search. Required when no default index was configured at startup. The index is cached after the first call, so repeat queries are fast."`
 	Mode  string `json:"mode,omitempty" jsonschema:"Optional per-call mode override: hybrid|semantic|bm25. If omitted, uses the mode the server was started with. Requesting semantic or hybrid against a bm25-only index transparently downgrades to bm25 (the response header reports the effective mode)."`
 	TopK  int    `json:"top_k,omitempty" jsonschema:"Number of results to return."`
+
+	// === 1.0 filters (over-fetch + post-filter; no ranking-quality change) ===
+	//
+	// All three filters are AND-ed: a result must pass every set
+	// constraint to be returned. Filters apply AFTER the hybrid
+	// retriever runs; we over-fetch by a generous multiplier so the
+	// post-filter top-K still has good candidates. If the filter set
+	// removes every candidate, the response says so honestly rather
+	// than silently returning fewer than top_k.
+	Languages           []string `json:"languages,omitempty" jsonschema:"Optional list of file extensions to include (e.g. ['py','go','ts']). Leading dot optional ('py' and '.py' both work). When set, only results from files with these extensions are returned. Use this to narrow a polyglot repo to one language."`
+	PathContains        string   `json:"path_contains,omitempty" jsonschema:"Optional substring that must appear in the result's file path (case-sensitive). E.g. 'src/api' returns only results under directories whose path contains src/api. Substring match, not glob — for glob patterns use a more specific path_contains value."`
+	ExcludePathContains string   `json:"exclude_path_contains,omitempty" jsonschema:"Optional substring that must NOT appear in the file path. E.g. '_test.go' excludes Go test files; 'node_modules' excludes vendored JS. Substring match."`
 }
 
 // FindRelatedArgs is the argument schema for `find_related`.
@@ -111,6 +123,18 @@ type OutlineArgs struct {
 type SymbolsArgs struct {
 	Path string `json:"path,omitempty" jsonschema:"Optional path prefix (relative to repo root) to filter the symbol list. Empty/omitted returns every top-level symbol in the repo."`
 	Repo string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+}
+
+// CallersArgs is the argument schema for the `callers` tool. Returns
+// the list of FILES that contain a call to the named function.
+// File-level granularity is what the structural index actually keys
+// on (Stage 8 Gate 2 sampled 400 edges across 8 languages and
+// confirmed 100% precision — every reported edge resolves to a real
+// call in the file). Function-level granularity ("function A calls
+// function B") would need a richer index; deferred.
+type CallersArgs struct {
+	Symbol string `json:"symbol" jsonschema:"The function name whose callers you want (exact match, no qualification — pass 'Login' not 'User.Login'). Returns files that contain a call to this name."`
+	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
 }
 
 // FormatResults mirrors semble utils._format_results: a header, then each
