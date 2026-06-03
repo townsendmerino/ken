@@ -235,10 +235,16 @@ func FromFSWithOptions(fsys fs.FS, mode Mode, chunkerName, modelDir string, opts
 	return BuildIndex(chunks, vecs, mode, model), nil
 }
 
-// FromPath is the real-filesystem entry point retained for backward
-// compatibility with pre-v0.5.0 callers.
+// FromPath is the real-filesystem entry point — a thin wrapper
+// around FromFS that resolves `root` to an `os.DirFS`. Use this
+// when you have a directory path on disk; use FromFS directly when
+// you have an `fs.FS` (e.g. an embedded `//go:embed` corpus for the
+// mcp.Run library pattern).
 //
-// Deprecated: use FromFS(os.DirFS(root), mode, chunkerName, modelDir) instead.
+// 1.0-stable. The deprecation marker was dropped after the 1.0
+// audit confirmed both entry points are useful and stable. Keeping
+// both is cheap (FromPath is 1 line) and saves callers a
+// `os.DirFS(...)` wrap at every invocation.
 func FromPath(root string, mode Mode, chunkerName, modelDir string) (*Index, error) {
 	return FromFS(os.DirFS(root), mode, chunkerName, modelDir)
 }

@@ -115,10 +115,15 @@ func WalkFS(fsys fs.FS, opts Options) ([]string, error) {
 	return files, nil
 }
 
-// Walk is the real-filesystem entry point retained for backward
-// compatibility with pre-v0.5.0 callers.
+// Walk is the real-filesystem entry point — a thin wrapper around
+// WalkFS that resolves `opts.Root` to an `os.DirFS`. Use this when
+// you already have a string path; use WalkFS directly when you have
+// an `fs.FS` (e.g. an embedded `//go:embed` filesystem).
 //
-// Deprecated: use WalkFS(os.DirFS(opts.Root), opts) instead.
+// 1.0-stable. The deprecation marker was dropped after the 1.0 audit
+// confirmed both entry points are useful and stable. Keeping both
+// is cheap (Walk is 1 line) and saves callers a `os.DirFS(...)`
+// wrap at every invocation.
 func Walk(opts Options) ([]string, error) {
 	return WalkFS(os.DirFS(opts.Root), opts)
 }
