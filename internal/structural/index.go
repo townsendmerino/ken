@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -294,38 +295,75 @@ func Build(corpusDir string) (*Index, error) {
 		return nil, fmt.Errorf("structural.Build: walk %s: %w", corpusDir, err)
 	}
 
-	// Pass 1: parse + extract per-file structure. The walker
-	// already filtered to repo-tracked files; here we further
-	// gate by file extension against the supported grammars.
-	for _, rel := range relPaths {
-		ext := filepath.Ext(rel)
-		gram, ok := kenLangToTSLang[ext]
-		if !ok {
+	// Pass 1: parse + extract per-file structure. Parallelized in
+	// M4 (docs/perf-campaign-startup-query.md) — single-threaded
+	// build was the dominant cold-start cost on large multi-language
+	// corpora (M0: 1577 ms for 167 Ruby files on jekyll). Per-file
+	// work is independent: each goroutine reads its file, borrows
+	// from gotreesitter's per-grammar parser pool (thread-safe by
+	// design), and extracts into a fresh FileStruct. Results are
+	// written into an indexed slice and merged into ix.files in
+	// lexical order after the fan-in, preserving the deterministic
+	// iteration order that pass 2's lookup maps rely on.
+	type fileResult struct {
+		rel string
+		fs  *FileStruct
+	}
+	results := make([]*fileResult, len(relPaths))
+	type job struct {
+		idx int
+		rel string
+	}
+	numWorkers := runtime.NumCPU()
+	jobs := make(chan job, numWorkers*2)
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				ext := filepath.Ext(j.rel)
+				gram, ok := kenLangToTSLang[ext]
+				if !ok {
+					continue
+				}
+				lc := langCacheFor(gram)
+				if lc == nil {
+					continue
+				}
+				abs := filepath.Join(corpusDir, j.rel)
+				src, err := os.ReadFile(abs)
+				if err != nil {
+					continue
+				}
+				tree, err := lc.pool.Parse(src)
+				if err != nil || tree == nil {
+					continue
+				}
+				root := tree.RootNode()
+				if root == nil {
+					continue
+				}
+				fs := &FileStruct{Path: j.rel}
+				langExtractor[gram](src, root, lc.lang, fs)
+				results[j.idx] = &fileResult{rel: j.rel, fs: fs}
+			}
+		}()
+	}
+	for i, rel := range relPaths {
+		jobs <- job{idx: i, rel: rel}
+	}
+	close(jobs)
+	wg.Wait()
+	// Merge results in lexical order (results[i] aligned with
+	// relPaths[i] which itself came from repo.WalkFS sorted output).
+	// Deterministic merge ⇒ deterministic pass 2 iteration ⇒ the
+	// methods/defs maps' append ordering is reproducible across runs.
+	for _, r := range results {
+		if r == nil {
 			continue
 		}
-		lc := langCacheFor(gram)
-		if lc == nil {
-			continue // grammar unavailable; skip silently
-		}
-		abs := filepath.Join(corpusDir, rel)
-		src, err := os.ReadFile(abs)
-		if err != nil {
-			continue
-		}
-		tree, err := lc.pool.Parse(src)
-		if err != nil {
-			continue // parse timed out or errored
-		}
-		if tree == nil {
-			continue
-		}
-		root := tree.RootNode()
-		if root == nil {
-			continue
-		}
-		fs := &FileStruct{Path: rel}
-		langExtractor[gram](src, root, lc.lang, fs)
-		ix.files[rel] = fs
+		ix.files[r.rel] = r.fs
 	}
 
 	// Pass 2: build the lookup maps.
