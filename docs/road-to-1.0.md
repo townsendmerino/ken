@@ -2,10 +2,10 @@
 
 Living document tracking what stands between ken's current state and a
 v1.0 release. Updated as items ship or change. Last updated:
-2026-06-02 (Arm B + MaxSim parking + Windows deferred + callers tool +
-search filters + `ken status` + `recently_changed` + JSON output mode
-shipped; perf-startup-query campaign CLOSED via ADR-036 — 55-79%
-cold-start reduction).
+2026-06-02 — **all seven 1.0 ship-list items now closed** (Arm B +
+MaxSim parking + Windows deferred + callers tool + search filters +
+`ken status` + `recently_changed` + JSON output mode + perf-startup-
+query campaign + user docs). ken is feature-complete for 1.0.
 
 Status legend: 🟢 done · 🟡 open · 🔴 blocked · ⚪ deferred / killed
 
@@ -53,7 +53,7 @@ hybrid on csn-stripped, +0.0321 on CoSQA reproducing Gate-1 within
 | 4 | `ken status` CLI + MCP tool | 🟢 shipped | done | 2026-06-02. New `internal/status` package builds a Status snapshot (versions, models, Arm B env, savings, optional live index + structural + cache). `ken status` CLI + `status` MCP tool registered on both NewServer and Run paths. Output modes: text (default), `--json` / `output:"json"`, markdown for MCP. Token savings surfaced as today / 7d / all-time with chars + ~tokens estimate. |
 | 5 | `recently_changed(N)` MCP tool (git-aware) | 🟢 shipped | done | 2026-06-02. mcp/recently_changed_tool.go — go-git PlainOpen, walks HEAD N commits back, formats commit + changed-file list as markdown. Args: `n` (default 10, max 100), `repo`, `path` prefix filter. Local repos only in Pass 1; URL repos return a friendly "clone first" error rather than coupling to the cache's temp clone dir. |
 | 6 | JSON output mode for `search` and structural tools | 🟢 shipped | done | 2026-06-02. Each of search / find_related / definition / references / callers / outline / symbols got an `Output` arg. `mcp/json_responses.go` defines a typed response struct per tool (1.0-stable surface) + a shared `dispatchOutput` helper. Markdown stays the default; `output: "json"` returns the typed struct as indented JSON. Unknown values like `"yaml"` get a friendly error rather than silent fallback. Tests: 13 sub-tests across `TestRun_JSONOutput` (Run-path: search + find_related + dispatch corners) and `TestJSONOutput_StructuralTools` (NewServer fixture upgraded to also build a structural index). |
-| 7 | First-class user docs | 🟡 | ~2 days | "How to think about ken vs grep" decision doc, "tuning your config" doc, MCP-tool-by-tool reference. |
+| 7 | First-class user docs | 🟢 shipped | done | 2026-06-02. Two-tier user-facing docs: [`docs/USERS.md`](USERS.md) (install per agent, ken-vs-grep decision, the 9 tools at-a-glance, common env vars, troubleshooting) + [`docs/DEVELOPERS.md`](DEVELOPERS.md) (mcp.Run library, prebuilt indices, public API stability table, JSON output mode, custom chunkers, tuning rerank, performance expectations). README + GitHub Pages index both link both docs. Audience cut (Option A): agent users vs SDK authors. |
 | — | Perf campaign: startup + query latency | 🟢 closed (ADR-036) | done | 2026-06-02. **M0 baselines** ([memo](../outputs/perf-startup-m0-baselines.md)) → **M2 lazy rerank load** ([memo](../outputs/perf-startup-m2-results.md)): −491 ms when `KEN_MCP_RERANK=on`. → **M4 parallel `structural.Build`** ([memo](../outputs/perf-startup-m4-results.md)): 3.5× on jekyll (−1,127 ms). → **M1 killed without code change** ([memo](../outputs/perf-startup-m1-results.md)): M2 superseded it. M3 + M5 killed by M0 data. **Cumulative cold-start reduction: 55-79% across corpora**; warm-search p50 already sub-ms. Closed via [ADR-036](DECISIONS.md#adr-036). |
 
 ### Lower-priority but real

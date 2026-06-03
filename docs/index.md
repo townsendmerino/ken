@@ -7,6 +7,11 @@ title: ken
 
 Hybrid (BM25 + Model2Vec) code search via MCP. Pure Go. [Source on GitHub](https://github.com/townsendmerino/ken).
 
+## Get started
+
+- [**Users guide**](https://github.com/townsendmerino/ken/blob/main/docs/USERS.md) — install ken-mcp into Claude Code / Cursor / Codex, the nine tools, common config, troubleshooting.
+- [**Developers guide**](https://github.com/townsendmerino/ken/blob/main/docs/DEVELOPERS.md) — mcp.Run library, public API stability, custom chunkers, tuning rerank.
+
 ## Demos
 
 - [**ken-demo-kubernetes / ken-demo-postgres** (downloadable binaries)](https://github.com/townsendmerino/ken/releases/tag/demos/v0.1.0)

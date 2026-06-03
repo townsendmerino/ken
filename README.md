@@ -11,6 +11,12 @@
 
 ken is a Go port of semble. The retrieval algorithm is ported verbatim from semble's `search.py` + `ranking/*.py`; ken adds two things on top: **runtime properties** (single-binary distribution, no Python interpreter import on cold start, no GIL on the indexing pipeline) and **measured agent-input efficiency** (~44× fewer tokens than grep+Read at recall@10 on semble's diverse-query benchmark; at corpus scale — CoIR-CSN-Python's 280K files — corpus-wide grep is functionally impossible and ken's 1,296-token result is the only workable path). The honest tradeoff: ken's recall caps at 82–91% vs grep's ~99%, so exhaustive enumeration (refactors, pre-rename audits) still belongs to grep — but for "find the chunk that answers this," ken wins by 1–2 orders of magnitude on tokens. Full table in [`docs/BENCH.md`](docs/BENCH.md#token-budget-recall--agent-side-efficiency). If you already use semble in your agent, you can swap to ken-mcp without re-prompting; the wire format is the same string semble emits.
 
+## Where to start
+
+- **[docs/USERS.md](docs/USERS.md)** — agent users. Install ken-mcp, point your agent at it, use the nine tools. 5-minute on-ramp.
+- **[docs/DEVELOPERS.md](docs/DEVELOPERS.md)** — SDK authors and serious tuners. mcp.Run library, public API stability, custom chunkers, tuning rerank, performance expectations.
+- **[docs/DESIGN.md](docs/DESIGN.md)** + **[docs/DECISIONS.md](docs/DECISIONS.md)** — internals + every ADR.
+
 ## Embedded-corpus build pattern (v0.6.0)
 
 The library form of ken-mcp lets SDK authors ship docs as a **single static MCP server binary**. Write ~20 lines of `main.go`, `//go:embed` your `docs/` and the Model2Vec model, `go build` — push a binary to a GitHub release. Users `brew install`, add one line to their agent config, and their coding agent has high-quality local retrieval over your SDK's docs. No backend, no vector DB to operate, no network egress per query, no "is the cache stale" question — the binary IS the corpus, version-pinned by build artifact.
