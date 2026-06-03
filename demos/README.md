@@ -1,11 +1,14 @@
 # ken demos
 
-Downloadable, self-contained `ken-mcp` servers for popular OSS codebases. Each is a single static binary with a **pre-built search index + the Model2Vec model baked in** via `//go:embed` (ADR-024 / `mcp.Run`), so it starts in ~4 s with no corpus checkout, no model download, and no live indexing.
+Downloadable, self-contained `ken-mcp` servers for popular OSS codebases. Each is a single static binary with a **pre-built search index + the Model2Vec model baked in** via `//go:embed` (ADR-024 / `mcp.Run`), so it starts in ~2-4 s with no corpus checkout, no model download, and no live indexing.
 
-| demo | corpus | chunker | mode | chunks |
-|---|---|---|---|---|
-| [`kubernetes`](kubernetes/) | kubernetes source (vendor + generated excluded) | regex | hybrid | 59,795 |
-| [`postgres`](postgres/) | postgres source (doc + test fixtures excluded) | treesitter | hybrid | 64,506 |
+| demo | corpus | chunker | mode | chunks | role |
+|---|---|---|---|---|---|
+| [`go-stdlib`](go-stdlib/) ⭐ | Go 1.26.3 stdlib (`$GOROOT/src` minus `cmd/`, `*/testdata/*`) | regex | hybrid | 35,708 | **flagship** — every Go dev knows the corpus by heart; verify answers instantly; reproduce against your own `$GOROOT/src` in 30 s |
+| [`kubernetes`](kubernetes/) | kubernetes source (vendor + generated excluded) | regex | hybrid | 59,795 | proof of scale (large polyglot-ish Go monorepo) |
+| [`postgres`](postgres/) | postgres source (doc + test fixtures excluded) | treesitter | hybrid | 64,506 | proof of polyglot reach (treesitter chunker on C) |
+
+The **go-stdlib** demo is the flagship: instant audience recognition, instant verifiability (every Go dev knows the stdlib), instant reproducibility against the audience's own `$GOROOT/src`. The two supporting demos exercise different ken capabilities — kubernetes for scale, postgres for the treesitter C-chunker path. See [`go-stdlib/QUERIES.md`](go-stdlib/QUERIES.md) for the 14 vetted Phase 1 queries with their canonical answers + three explicit grep-vs-ken head-to-head comparisons.
 
 ## Demo transcripts
 
@@ -22,18 +25,27 @@ The demo `main.go` files carry `//go:build kendemo` so they're **excluded from `
 ## Build steps
 
 ```sh
-# 1. Generate the pre-built index for each demo (excludes come from the
-#    corpus's own .gitignore, which the walker honors).
-ken build-index <kubernetes-src> -o demos/kubernetes/index.bin --mode=hybrid --chunker=regex      --model ~/.ken/model
-ken build-index <postgres-src>   -o demos/postgres/index.bin   --mode=hybrid --chunker=treesitter --model ~/.ken/model
+# 1. Assemble the go-stdlib curated corpus (cmd/ + testdata excluded —
+#    see go-stdlib/README.md for the scope rationale).
+mkdir -p /tmp/go-stdlib-curated
+rsync -a --delete \
+  --exclude='cmd/' --exclude='testdata/' --exclude='*/testdata/' --exclude='vendor/' \
+  "$(go env GOROOT)/src/" /tmp/go-stdlib-curated/
 
-# 2. Copy the Model2Vec model (model.safetensors + tokenizer.json + config.json) into each demo's model/ dir.
-for d in kubernetes postgres; do
+# 2. Generate the pre-built index for each demo (kubernetes + postgres
+#    excludes come from the corpus's own .gitignore, which the walker honors).
+ken build-index /tmp/go-stdlib-curated -o demos/go-stdlib/index.bin   --mode=hybrid --chunker=regex      --model ~/.ken/model
+ken build-index <kubernetes-src>       -o demos/kubernetes/index.bin  --mode=hybrid --chunker=regex      --model ~/.ken/model
+ken build-index <postgres-src>         -o demos/postgres/index.bin    --mode=hybrid --chunker=treesitter --model ~/.ken/model
+
+# 3. Copy the Model2Vec model (model.safetensors + tokenizer.json + config.json) into each demo's model/ dir.
+for d in go-stdlib kubernetes postgres; do
   mkdir -p demos/$d/model
   cp ~/.ken/model/model.safetensors ~/.ken/model/tokenizer.json ~/.ken/model/config.json demos/$d/model/
 done
 
-# 3. Build (per platform). CGO_ENABLED=0 → static, portable. The kendemo tag activates the embeds.
+# 4. Build (per platform). CGO_ENABLED=0 → static, portable. The kendemo tag activates the embeds.
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags=kendemo -o ken-demo-go-stdlib  ./demos/go-stdlib
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags=kendemo -o ken-demo-kubernetes ./demos/kubernetes
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags=kendemo -o ken-demo-postgres   ./demos/postgres
 # ... repeat for darwin/arm64, darwin/amd64, linux/arm64.

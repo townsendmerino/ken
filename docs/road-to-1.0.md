@@ -111,10 +111,26 @@ invocations).
   `FormatResults`, `Logger`). Best-effort symbols (`CloneShallow`,
   `NormalizeKey`, `ValidateEnum`) keep their existing
   "best-effort" stability notes.
-- 🟡 **Flagship demo with broad recognition** in addition to or
-  replacing the current kubernetes + postgres demos. E.g. "ken
-  indexes the Go standard library, ask it questions" — instantly
-  understandable to anyone who's written Go.
+- 🟢 **Flagship demo with broad recognition** — shipped 2026-06-03 at
+  [`demos/go-stdlib/`](../demos/go-stdlib/). "ken indexes the Go
+  standard library, ask it questions." Same single-static-binary
+  pattern as the kubernetes + postgres demos (regex chunker, hybrid
+  mode, 35,708 chunks on the Go 1.26.3 stdlib at `$GOROOT/src` minus
+  `cmd/` and `*/testdata/*`). 191 MB binary, ~2 s startup.
+  Phase 1 vetted **14 demo artifacts** — 7 semantic-bridging
+  queries, 4 structural-tool lookups, 3 grep-vs-ken head-to-head
+  comparisons (one shows grep returning 1,103 hits across 131 files
+  vs ken returning 1 chunk). Two reproducible harnesses in tree:
+  [`scripts/stdlib_demo_vet.go`](../scripts/stdlib_demo_vet.go) for
+  the semantic-bridging side, [`scripts/stdlib_phase1_close.go`](../scripts/stdlib_phase1_close.go)
+  for structural + head-to-head. Audience can reproduce the entire
+  demo against their own `$GOROOT/src` in 30 s (rsync recipe in the
+  demo README). Per the kickoff doc's recommendation: flagship +
+  supporting positioning — kubernetes/postgres stay as proof-of-
+  scale and proof-of-polyglot-reach. **What's left for Phase 3:**
+  agent-session capture (transcripts) + blog post + GitHub Pages
+  landing update; tracked separately on the demo plan, not gating
+  the binary itself.
 - 🟢 **Document the recommended Claude-Code-with-ken workflow** —
   shipped 2026-06-03 at [`docs/claude-code-workflow.md`](claude-code-workflow.md).
   Four-layer framing: routine (just ken) → local `/review` →
