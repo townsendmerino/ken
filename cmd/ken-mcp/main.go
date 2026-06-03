@@ -232,11 +232,18 @@ func main() {
 	//                                                  silently downgrade to hybrid
 	rerankEnabled := envBool("KEN_MCP_RERANK", false, logger)
 	var (
-		neuralReranker  *search.NeuralReranker
+		// lazyReranker wraps the model load + cache hydration so the
+		// 491 ms encoder.Load cost (M0 baseline) doesn't land on the
+		// cold-start critical path. The actual NeuralReranker is
+		// constructed when the FIRST hybrid+rerank query lands — for
+		// the common case where ken-mcp boots with KEN_MCP_RERANK=on
+		// but the user issues hybrid-only queries, the cost is never
+		// paid. See docs/perf-campaign-startup-query.md M2.
+		lazyReranker    *search.LazyReranker
 		rerankerOptions []search.RerankerOption
-		// M9 persistent doc cache: populated after the reranker loads
-		// successfully; the shutdown goroutine writes the LRU back to
-		// this path. Empty path = persistence disabled.
+		// M9 persistent doc cache: shutdown path saves the LRU here
+		// IFF the lazy reranker has actually loaded (gate on
+		// lazyReranker.Loaded()). Empty path = persistence disabled.
 		rerankCachePath  string
 		rerankCacheScope string
 		rerankCacheDim   int
@@ -281,49 +288,58 @@ func main() {
 				"no CodeRankEmbed model at KEN_MCP_RERANK_MODEL_DIR=%q — "+
 					"hybrid-rerank queries will downgrade to hybrid", rerankModelDir)
 		} else {
-			var (
-				enc     encoder.Encoder
-				loadErr error
-			)
-			switch rerankQuant {
-			case "int8":
-				enc, loadErr = encoder.LoadQ8(rerankModelDir)
-			default:
-				enc, loadErr = encoder.Load(rerankModelDir)
+			rerankerOptions = []search.RerankerOption{
+				search.WithRerankN(rerankTopN),
+				search.WithRerankBlendBeta(rerankBeta),
 			}
-			if loadErr != nil {
-				logger.Logf(kenmcp.LogWarn,
-					"failed to load rerank model from %q (quant=%s): %v — "+
-						"hybrid-rerank queries will downgrade to hybrid", rerankModelDir, rerankQuant, loadErr)
-			} else {
-				neuralReranker = search.NewNeuralReranker(enc, search.WithCacheSize(rerankCacheSize))
-				rerankerOptions = []search.RerankerOption{
-					search.WithRerankN(rerankTopN),
-					search.WithRerankBlendBeta(rerankBeta),
-				}
-				if adaptiveThreshold > 0 && adaptiveMinN > 0 {
-					rerankerOptions = append(rerankerOptions,
-						search.WithAdaptiveRerankN(adaptiveThreshold, adaptiveMinN))
-				}
+			if adaptiveThreshold > 0 && adaptiveMinN > 0 {
+				rerankerOptions = append(rerankerOptions,
+					search.WithAdaptiveRerankN(adaptiveThreshold, adaptiveMinN))
+			}
 
-				// M9 persistent doc cache. Default ~/.ken/rerank-cache-<quant>.bin
-				// — the per-quant filename keeps an f32 cache and an int8
-				// cache side-by-side (otherwise swapping KEN_MCP_RERANK_QUANT
-				// across boots logs ErrCacheScopeMismatch on every restart).
-				// Override path via KEN_MCP_RERANK_CACHE; KEN_MCP_RERANK_CACHE=""
-				// (explicit empty) disables persistence entirely.
+			// Cache path resolution stays eager — it's cheap (env
+			// lookup + home-dir join) and the shutdown save path
+			// needs the path even when no rerank query landed.
+			// `KEN_MCP_RERANK_CACHE=""` (explicit empty) disables
+			// persistence. Per-quant filename keeps an f32 and an
+			// int8 cache side-by-side.
+			if raw, set := os.LookupEnv("KEN_MCP_RERANK_CACHE"); set {
+				rerankCachePath = strings.TrimSpace(raw)
+			} else {
+				home, _ := os.UserHomeDir()
+				if home != "" {
+					rerankCachePath = filepath.Join(home, ".ken", fmt.Sprintf("rerank-cache-%s.bin", rerankQuant))
+				}
+			}
+
+			// LAZY LOADER. Runs on the first hybrid+rerank query.
+			// Performs the three expensive steps that used to be
+			// startup work: encoder.Load (~491 ms f32), NeuralReranker
+			// construction, persistent cache hydration. Errors here
+			// surface as a pass-through (LazyReranker.Rerank returns
+			// nil → orchestrator skips rerank).
+			loader := func() (search.Reranker, error) {
+				var (
+					enc     encoder.Encoder
+					loadErr error
+				)
+				switch rerankQuant {
+				case "int8":
+					enc, loadErr = encoder.LoadQ8(rerankModelDir)
+				default:
+					enc, loadErr = encoder.Load(rerankModelDir)
+				}
+				if loadErr != nil {
+					logger.Logf(kenmcp.LogWarn,
+						"lazy rerank load: failed to load model from %q (quant=%s): %v — "+
+							"hybrid-rerank queries will downgrade to hybrid", rerankModelDir, rerankQuant, loadErr)
+					return nil, loadErr
+				}
+				nr := search.NewNeuralReranker(enc, search.WithCacheSize(rerankCacheSize))
 				rerankCacheDim = enc.HiddenDim()
 				rerankCacheScope = search.CacheScopeKey(filepath.Base(rerankModelDir), rerankQuant, rerankCacheDim)
-				if raw, set := os.LookupEnv("KEN_MCP_RERANK_CACHE"); set {
-					rerankCachePath = strings.TrimSpace(raw)
-				} else {
-					home, _ := os.UserHomeDir()
-					if home != "" {
-						rerankCachePath = filepath.Join(home, ".ken", fmt.Sprintf("rerank-cache-%s.bin", rerankQuant))
-					}
-				}
 				if rerankCachePath != "" {
-					loaded, lerr := search.LoadCacheFromFile(neuralReranker, rerankCachePath, rerankCacheScope, rerankCacheDim)
+					loaded, lerr := search.LoadCacheFromFile(nr, rerankCachePath, rerankCacheScope, rerankCacheDim)
 					switch {
 					case lerr == nil:
 						logger.Logf(kenmcp.LogInfo, "rerank cache: loaded %d entries from %s", loaded, rerankCachePath)
@@ -337,12 +353,16 @@ func main() {
 						logger.Logf(kenmcp.LogWarn, "rerank cache: load failed (%v); starting cold", lerr)
 					}
 				}
-
 				logger.Logf(kenmcp.LogInfo,
-					"rerank: loaded %s (quant=%s top_n=%d cache_size=%d beta=%v adaptive=%v:%d cache_path=%q)",
+					"rerank: loaded %s on first query (quant=%s top_n=%d cache_size=%d beta=%v adaptive=%v:%d cache_path=%q)",
 					rerankModelDir, rerankQuant, rerankTopN, rerankCacheSize, rerankBeta,
 					adaptiveThreshold, adaptiveMinN, rerankCachePath)
+				return nr, nil
 			}
+			lazyReranker = search.NewLazyReranker(loader)
+			logger.Logf(kenmcp.LogInfo,
+				"rerank: lazy-load configured (quant=%s top_n=%d beta=%v adaptive=%v:%d); model will load on first hybrid+rerank query",
+				rerankQuant, rerankTopN, rerankBeta, adaptiveThreshold, adaptiveMinN)
 		}
 	}
 
@@ -366,8 +386,8 @@ func main() {
 		modelDir = ""
 	}
 	rerankStatus := "off"
-	if neuralReranker != nil {
-		rerankStatus = "on"
+	if lazyReranker != nil {
+		rerankStatus = "on (lazy)"
 	} else if rerankEnabled {
 		rerankStatus = "on-but-unavailable"
 	}
@@ -414,8 +434,8 @@ func main() {
 		// WatchedIndex AND survives the watcher's snapshot republishes,
 		// so the content-hash LRU stays warm regardless of file churn or
 		// switching between repos.
-		if neuralReranker != nil {
-			ix.SetReranker(neuralReranker, rerankerOptions...)
+		if lazyReranker != nil {
+			ix.SetReranker(lazyReranker, rerankerOptions...)
 		}
 		// Log reindex activity at info-level so warn-default runs stay
 		// quiet but `KEN_MCP_LOG_LEVEL=info` shows agents the file
@@ -498,7 +518,7 @@ func main() {
 	// means the zero-config path (no time.Now bookkeeping).
 	telemetryInResponse := envBool("KEN_MCP_RERANK_TELEMETRY", false, logger)
 	var telemetryLog func(query string, t search.Telemetry)
-	if neuralReranker != nil && logger.Level <= kenmcp.LogInfo {
+	if lazyReranker != nil && logger.Level <= kenmcp.LogInfo {
 		telemetryLog = func(query string, t search.Telemetry) {
 			logger.Logf(kenmcp.LogInfo,
 				"search %q total=%s stage1=%s rerank=%s blend=%s n=%d cache=%d/%d q_enc=%s cand_enc=%s",
@@ -554,12 +574,19 @@ func main() {
 	// already terminating).
 	go func() {
 		<-ctx.Done()
-		if neuralReranker != nil && rerankCachePath != "" {
-			if _, _, sz := neuralReranker.CacheStats(); sz > 0 {
-				if serr := search.SaveCacheToFile(neuralReranker, rerankCachePath, rerankCacheScope, rerankCacheDim); serr != nil {
-					logger.Logf(kenmcp.LogWarn, "rerank cache: save to %s failed: %v", rerankCachePath, serr)
-				} else {
-					logger.Logf(kenmcp.LogInfo, "rerank cache: saved %d entries to %s", sz, rerankCachePath)
+		// M9 persistent cache save — only when the lazy reranker
+		// actually loaded (otherwise there's nothing in its LRU to
+		// save). Guards against the M2 happy path where ken-mcp
+		// boots with KEN_MCP_RERANK=on but no rerank query ever
+		// landed: skip the save, the disk file stays untouched.
+		if lazyReranker != nil && lazyReranker.Loaded() && rerankCachePath != "" {
+			if nr, ok := lazyReranker.Inner().(*search.NeuralReranker); ok && nr != nil {
+				if _, _, sz := nr.CacheStats(); sz > 0 {
+					if serr := search.SaveCacheToFile(nr, rerankCachePath, rerankCacheScope, rerankCacheDim); serr != nil {
+						logger.Logf(kenmcp.LogWarn, "rerank cache: save to %s failed: %v", rerankCachePath, serr)
+					} else {
+						logger.Logf(kenmcp.LogInfo, "rerank cache: saved %d entries to %s", sz, rerankCachePath)
+					}
 				}
 			}
 		}
