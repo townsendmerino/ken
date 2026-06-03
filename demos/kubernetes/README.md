@@ -6,8 +6,8 @@ The search index and the embedding model are **baked into the binary** — no so
 
 ## What it indexes
 
-- **Corpus:** `github.com/kubernetes/kubernetes` source (vendored dependencies and generated code excluded — `vendor/`, `zz_generated*.go`, `*.pb.go`, `*_test.go`, `applyconfigurations/`, OpenAPI specs).
-- **Chunks:** 59,795 (chunker: `regex`, mode: `hybrid`).
+- **Corpus:** `github.com/kubernetes/kubernetes` at **tag `v1.36.0`** (vendored dependencies and generated code excluded — `vendor/`, `zz_generated*.go`, `*.pb.go`, `*_test.go`, `applyconfigurations/`, OpenAPI specs).
+- **Chunks:** 90,063 (chunker: `regex`, mode: `hybrid`).
 - The index is a point-in-time snapshot of the source it shipped with; it does not update. A new release ships a refreshed index.
 
 ## Install
@@ -38,10 +38,10 @@ No environment variables and no `repo` argument — the corpus is fixed inside t
 
 | | |
 |---|---|
-| download size | ~215 MB per platform |
-| startup (one-time, loads the embedded index) | ~4 s |
+| download size | ~220 MB per platform |
+| startup (one-time, loads the embedded index) | ~3 s |
 | query latency after startup | ~60 ms |
-| resident memory while running | ~1.4 GB |
+| resident memory while running | ~1.5 GB |
 
 Allow ~2 GB free RAM.
 

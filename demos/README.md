@@ -5,8 +5,8 @@ Downloadable, self-contained `ken-mcp` servers for popular OSS codebases. Each i
 | demo | corpus | chunker | mode | chunks | role |
 |---|---|---|---|---|---|
 | [`go-stdlib`](go-stdlib/) ⭐ | Go 1.26.3 stdlib (`$GOROOT/src` minus `cmd/`, `*/testdata/*`) | regex | hybrid | 35,708 | **flagship** — every Go dev knows the corpus by heart; verify answers instantly; reproduce against your own `$GOROOT/src` in 30 s |
-| [`kubernetes`](kubernetes/) | kubernetes source (vendor + generated excluded) | regex | hybrid | 59,795 | proof of scale (large polyglot-ish Go monorepo) |
-| [`postgres`](postgres/) | postgres source (doc + test fixtures excluded) | treesitter | hybrid | 64,506 | proof of polyglot reach (treesitter chunker on C) |
+| [`kubernetes`](kubernetes/) | kubernetes `v1.36.0` (vendor + generated excluded) | regex | hybrid | 90,063 | proof of scale (large polyglot-ish Go monorepo) |
+| [`postgres`](postgres/) | postgres `REL_18_0` (doc + test fixtures excluded) | treesitter | hybrid | 69,601 | proof of polyglot reach (treesitter chunker on C) |
 
 The **go-stdlib** demo is the flagship: instant audience recognition, instant verifiability (every Go dev knows the stdlib), instant reproducibility against the audience's own `$GOROOT/src`. The two supporting demos exercise different ken capabilities — kubernetes for scale, postgres for the treesitter C-chunker path. See [`go-stdlib/QUERIES.md`](go-stdlib/QUERIES.md) for the 14 vetted Phase 1 queries with their canonical answers + three explicit grep-vs-ken head-to-head comparisons.
 

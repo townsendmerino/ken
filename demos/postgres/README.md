@@ -6,9 +6,9 @@ The search index and the embedding model are **baked into the binary** — no so
 
 ## What it indexes
 
-- **Corpus:** `github.com/postgres/postgres` source (documentation and regression-test fixtures excluded — `doc/`, `src/test/`, `*.out`).
-- **Chunks:** 64,506 (chunker: `treesitter`, mode: `hybrid`).
-- `treesitter` gives real C AST boundaries — ken's `regex` chunker has no C ruleset, so it would degrade `.c`/`.h` files to line windows. 0% of files fell back to line-chunking in this build.
+- **Corpus:** `github.com/postgres/postgres` at **tag `REL_18_0`** (documentation and regression-test fixtures excluded — `doc/`, `src/test/`, `*.out`).
+- **Chunks:** 69,601 (chunker: `treesitter`, mode: `hybrid`).
+- `treesitter` gives real C AST boundaries — ken's `regex` chunker has no C ruleset, so it would degrade `.c`/`.h` files to line windows.
 - The index is a point-in-time snapshot of the source it shipped with; it does not update. A new release ships a refreshed index.
 
 ## Install
@@ -39,10 +39,10 @@ No environment variables and no `repo` argument — the corpus is fixed inside t
 
 | | |
 |---|---|
-| download size | ~265 MB per platform |
-| startup (one-time, loads the embedded index) | ~4 s |
+| download size | ~240 MB per platform |
+| startup (one-time, loads the embedded index) | ~3 s |
 | query latency after startup | ~35 ms |
-| resident memory while running | ~1.4 GB |
+| resident memory while running | ~1.5 GB |
 
 Allow ~2 GB free RAM.
 
