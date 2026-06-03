@@ -91,6 +91,15 @@ func (c *Cache) Len() int {
 	return len(c.items)
 }
 
+// Capacity returns the LRU bound. Used by the `status` MCP tool to
+// surface the cache's configured size; pairs with Len for the
+// in-use / capacity display.
+func (c *Cache) Capacity() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.max
+}
+
 // scpishURL catches `user@host:path` SCP-form git URLs (semble's MCP
 // rejects these; only http(s) is allowed via the MCP boundary).
 var scpishURL = regexp.MustCompile(`^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:.+`)

@@ -495,3 +495,44 @@ func TestRun_SearchFilters_NoMatch(t *testing.T) {
 		t.Errorf("expected post-filter-empty message, got:\n%s", txt)
 	}
 }
+
+// TestRun_StatusTool exercises the `status` MCP tool end-to-end:
+// markdown by default, includes the headline fields agents would
+// read, and accepts output=json for the machine-readable form.
+func TestRun_StatusTool(t *testing.T) {
+	ctx, sess, logBuf, cleanup := runRunOnInMemoryTransport(t, Options{
+		Mode:        "bm25",
+		ChunkerName: "regex",
+	})
+	defer cleanup()
+
+	// Default: markdown.
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name:      "status",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(status): %v\n--log--\n%s", err, logBuf.String())
+	}
+	txt := res.Content[0].(*sdk.TextContent).Text
+	for _, want := range []string{"ken status", "Build", "Models", "Arm B enrichment", "go:"} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("status markdown missing %q\n---\n%s", want, txt)
+		}
+	}
+
+	// output=json should return JSON.
+	resJSON, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name:      "status",
+		Arguments: map[string]any{"output": "json"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(status json): %v\n--log--\n%s", err, logBuf.String())
+	}
+	jtxt := resJSON.Content[0].(*sdk.TextContent).Text
+	for _, want := range []string{`"Versions":`, `"GoVersion":`, `"EmbedModel":`, `"Enrichment":`} {
+		if !strings.Contains(jtxt, want) {
+			t.Errorf("status JSON missing %q\n---\n%s", want, jtxt)
+		}
+	}
+}

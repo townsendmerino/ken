@@ -524,11 +524,12 @@ func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 		have[tl.Name] = true
 		t.Logf("tool: %s — %s", tl.Name, tl.Description)
 	}
-	// Stage 8 Track 2: all seven tools must be registered (search +
-	// find_related from v0.6; definition, references, callers,
-	// outline, symbols from Stage 8). reindex_db remains hidden when
-	// DB is unset (separate ADR-020 invariant).
-	for _, name := range []string{"search", "find_related", "definition", "references", "callers", "outline", "symbols"} {
+	// Stage 8 Track 2 + 1.0 status: all eight tools must be
+	// registered (search + find_related from v0.6; definition,
+	// references, callers, outline, symbols from Stage 8; status
+	// from the 1.0 ship-list). reindex_db remains hidden when DB is
+	// unset (separate ADR-020 invariant).
+	for _, name := range []string{"search", "find_related", "definition", "references", "callers", "outline", "symbols", "status"} {
 		if !have[name] {
 			t.Errorf("missing tool %q (have %v)", name, have)
 		}

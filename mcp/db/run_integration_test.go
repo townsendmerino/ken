@@ -162,12 +162,14 @@ func TestRun_WithoutMCPDB_ToolListExcludesReindexDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v\n--stderr--\n%s", err, stderr.String())
 	}
-	if len(tl.Tools) != 2 {
+	// search + find_related from v0.6, plus status from the 1.0
+	// ship-list. reindex_db remains hidden when MY_DB_DSN is empty.
+	if len(tl.Tools) != 3 {
 		names := []string{}
 		for _, tool := range tl.Tools {
 			names = append(names, tool.Name)
 		}
-		t.Errorf("got %d tools, want 2 (no DSN configured → reindex_db not registered); got %v", len(tl.Tools), names)
+		t.Errorf("got %d tools, want 3 (no DSN configured → reindex_db not registered); got %v", len(tl.Tools), names)
 	}
 	for _, tool := range tl.Tools {
 		if tool.Name == "reindex_db" {

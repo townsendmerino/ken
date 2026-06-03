@@ -125,6 +125,18 @@ type SymbolsArgs struct {
 	Repo string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
 }
 
+// StatusArgs is the argument schema for the `status` tool. All
+// fields optional; without a repo it reports machine-level state
+// (models, enrichment env, savings) plus the server's cache state.
+// With repo set, it ALSO populates live index + structural fields
+// for that repo (resolving via the same cache path the search
+// tools use).
+type StatusArgs struct {
+	Repo    string `json:"repo,omitempty" jsonschema:"Optional repo to also report live index state for. If set, the response includes file count, chunk count, mode, chunker, and structural-index symbol counts for that repo (resolved via the same cache the search tools use). If omitted, machine-level state only."`
+	Verbose bool   `json:"verbose,omitempty" jsonschema:"Include per-language extractor coverage + per-call-type counts in the response."`
+	Output  string `json:"output,omitempty" jsonschema:"Optional output format: 'markdown' (default; human-readable) or 'json' (machine-parsable). Agents that want to programmatically inspect status should pass 'json'."`
+}
+
 // CallersArgs is the argument schema for the `callers` tool. Returns
 // the list of FILES that contain a call to the named function.
 // File-level granularity is what the structural index actually keys

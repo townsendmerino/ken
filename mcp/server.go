@@ -286,6 +286,21 @@ func NewServer(cfg Config) *sdk.Server {
 		return handleSymbols(ctx, &cfg, args)
 	})
 
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: "status",
+		Description: "Report ken's current state. Without args, returns build identity " +
+			"(commit, aikit / gotreesitter / go versions), model availability " +
+			"(embedding + rerank dirs and size on disk), Arm B enrichment state, " +
+			"the persistent token-savings summary (today / 7d / all-time), and the " +
+			"server's cache state. With `repo` set, ALSO includes live index state " +
+			"(file count, chunks, mode, chunker) and structural-index counts for that " +
+			"repo. Use this to verify the right binary / model / index is loaded, or " +
+			"to surface how many tokens ken has saved across sessions. " +
+			"Pass `output: 'json'` for a machine-parsable response; default is markdown.",
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, args StatusArgs) (*sdk.CallToolResult, any, error) {
+		return handleStatus(ctx, &cfg, args)
+	})
+
 	return srv
 }
 

@@ -25,6 +25,7 @@ import (
 	"github.com/townsendmerino/aikit/encoder"
 	"github.com/townsendmerino/ken/internal/modelfetch"
 	"github.com/townsendmerino/ken/internal/search"
+	"github.com/townsendmerino/ken/internal/status"
 	usagepkg "github.com/townsendmerino/ken/internal/usage"
 )
 
@@ -134,6 +135,7 @@ usage:
   ken build-index     <corpus>         -o <path> [--chunker ...] [--mode ...] [--model DIR]
   ken download-model                     [--rerank] [--model ORG/NAME] [--to DIR] [--force]
   ken savings                            [--verbose] [--path FILE]    # render token-savings summary
+  ken status                             [--json] [--verbose]         # build identity, models, enrichment, savings
 
 ken index --watch (default in v0.3+) keeps the process alive and re-indexes
 files on change; --no-watch is the v0.2 behavior (build once, print, exit).
@@ -254,10 +256,62 @@ func main() {
 		os.Exit(cmdDownloadModel(os.Args[2:]))
 	case "savings":
 		os.Exit(cmdSavings(os.Args[2:]))
+	case "status":
+		os.Exit(cmdStatus(os.Args[2:]))
 	default:
 		usage()
 		os.Exit(2)
 	}
+}
+
+// cmdStatus renders the ken status overview: build identity, model
+// availability, Arm B enrichment state, and the persistent token-
+// savings summary. Read-only — never opens any file for writing.
+//
+// CLI is the machine-level view (no live index data); the MCP
+// `status` tool is the server-level view that adds live index +
+// cache + structural fields.
+//
+// Flags:
+//
+//	--json          emit machine-readable JSON instead of text
+//	--verbose       include per-language extractor coverage,
+//	                per-call-type counts, and the process block
+func cmdStatus(args []string) int {
+	var (
+		jsonOut bool
+		verbose bool
+	)
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--json":
+			jsonOut = true
+		case "--verbose", "-v":
+			verbose = true
+		case "-h", "--help":
+			fmt.Println("Usage: ken status [--json] [--verbose]")
+			fmt.Println("  Build identity, model availability, Arm B enrichment state,")
+			fmt.Println("  and the persistent token-savings summary.")
+			fmt.Println("  --json     machine-readable JSON instead of text")
+			fmt.Println("  --verbose  include per-call-type counts + process block")
+			return 0
+		default:
+			fmt.Fprintf(os.Stderr, "ken status: unknown flag %q\n", args[i])
+			return 2
+		}
+	}
+	s := status.Build(status.BuildOptions{})
+	if jsonOut {
+		out, err := status.RenderJSON(s)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ken status: %v\n", err)
+			return 1
+		}
+		fmt.Println(string(out))
+		return 0
+	}
+	fmt.Print(status.RenderText(s, verbose))
+	return 0
 }
 
 // cmdSavings renders the persistent usage log (~/.ken/savings.jsonl

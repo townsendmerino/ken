@@ -399,6 +399,16 @@ func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db D
 		return runFindRelated(ixPtr.Load(), args)
 	})
 
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: "status",
+		Description: "Report ken's current state: build identity, model availability, " +
+			"Arm B enrichment state, persistent token-savings summary, and the live " +
+			"embedded-corpus index (chunk count, mode, chunker). Pass `output: 'json'` " +
+			"for a machine-parsable response.",
+	}, func(_ context.Context, _ *sdk.CallToolRequest, args StatusArgs) (*sdk.CallToolResult, any, error) {
+		return handleStatusRun(ixPtr.Load(), args)
+	})
+
 	// v0.8.0 Part 2 + Part 3 (ADR-020): reindex_db tool. Same
 	// conditional-registration pattern as NewServer — registered ONLY
 	// when db is non-nil so tools/list stays honest for plain docs-only

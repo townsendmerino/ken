@@ -59,9 +59,9 @@ func TestServer_ListsRegisteredTools(t *testing.T) {
 	// Default fixture wires DB=nil → reindex_db is NOT registered,
 	// so the agent sees the two v0.6.0 retrieval tools plus the
 	// five Stage 8 structural tools (definition / references /
-	// callers / outline / symbols — always registered).
-	// v0.8.0 Part 2 keeps tools/list honest by hiding tools that
-	// would return "no DB" 100% of the time.
+	// callers / outline / symbols) plus `status` (always
+	// registered). v0.8.0 Part 2 keeps tools/list honest by hiding
+	// tools that would return "no DB" 100% of the time.
 	wantNames := map[string]bool{
 		"search":       true,
 		"find_related": true,
@@ -70,6 +70,7 @@ func TestServer_ListsRegisteredTools(t *testing.T) {
 		"callers":      true,
 		"outline":      true,
 		"symbols":      true,
+		"status":       true,
 	}
 	if len(res.Tools) != len(wantNames) {
 		t.Fatalf("got %d tools, want %d (DB unset → reindex_db not registered)",
