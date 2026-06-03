@@ -83,23 +83,39 @@ func handleDefinition(ctx context.Context, cfg *Config, args DefinitionArgs) (*s
 
 	sites := bundle.Structural.Definition(sym)
 	if len(sites) == 0 {
-		return textResult(fmt.Sprintf("No definition found for %q.", sym)), nil, nil
+		resp := DefinitionResponse{Symbol: sym, Definitions: []DefinitionRowOut{}}
+		return dispatchOutput(args.Output, resp, fmt.Sprintf("No definition found for %q.", sym))
 	}
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "# Definition: `%s`\n\n", sym)
-	if len(sites) > 1 {
-		fmt.Fprintf(&b, "_%d sites — name resolved by identifier, not type. Ambiguous; results ordered alphabetically by file path. Method sites carry their qualified `Type.method` form in parentheses._\n\n", len(sites))
+	resp := DefinitionResponse{Symbol: sym, Definitions: make([]DefinitionRowOut, 0, len(sites))}
+	for _, s := range sites {
+		qname := ""
+		if s.Kind == structural.DefinitionKindMethod && s.QName != "" && s.QName != sym {
+			qname = s.QName
+		}
+		resp.Definitions = append(resp.Definitions, DefinitionRowOut{
+			File:  s.File,
+			Kind:  kindLabel(s.Kind),
+			QName: qname,
+		})
 	}
-	for i, s := range sites {
-		switch {
-		case s.Kind == structural.DefinitionKindMethod && s.QName != "" && s.QName != sym:
-			fmt.Fprintf(&b, "%d. **%s** — method (%s)\n", i+1, s.File, s.QName)
-		default:
-			fmt.Fprintf(&b, "%d. **%s** — %s\n", i+1, s.File, kindLabel(s.Kind))
+	return dispatchOutput(args.Output, resp, renderDefinitionMarkdown(resp))
+}
+
+func renderDefinitionMarkdown(r DefinitionResponse) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Definition: `%s`\n\n", r.Symbol)
+	if len(r.Definitions) > 1 {
+		fmt.Fprintf(&b, "_%d sites — name resolved by identifier, not type. Ambiguous; results ordered alphabetically by file path. Method sites carry their qualified `Type.method` form in parentheses._\n\n", len(r.Definitions))
+	}
+	for i, d := range r.Definitions {
+		if d.Kind == "method" && d.QName != "" {
+			fmt.Fprintf(&b, "%d. **%s** — method (%s)\n", i+1, d.File, d.QName)
+		} else {
+			fmt.Fprintf(&b, "%d. **%s** — %s\n", i+1, d.File, d.Kind)
 		}
 	}
-	return textResult(strings.TrimRight(b.String(), "\n")), nil, nil
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // handleReferences implements the `references` tool: given a name,
@@ -130,7 +146,12 @@ func handleReferences(ctx context.Context, cfg *Config, args ReferencesArgs) (*s
 
 	refs := bundle.Structural.References(sym)
 	if len(refs) == 0 {
-		return textResult(fmt.Sprintf("No references found for %q.", sym)), nil, nil
+		resp := ReferencesResponse{
+			Symbol:     sym,
+			References: []ReferenceRowOut{},
+			Totals:     ReferencesRowTotal{},
+		}
+		return dispatchOutput(args.Output, resp, fmt.Sprintf("No references found for %q.", sym))
 	}
 
 	// Group by file so the agent reads "this file uses it in these
@@ -145,15 +166,30 @@ func handleReferences(ctx context.Context, cfg *Config, args ReferencesArgs) (*s
 	}
 	sort.Strings(order)
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "# References: `%s`\n\n", sym)
-	fmt.Fprintf(&b, "_%d reference%s across %d file%s. Name-resolved, not type-resolved — same-spelled identifiers in different contexts collapse into one list._\n\n",
-		len(refs), pluralS(len(refs)), len(order), pluralS(len(order)))
-	for i, f := range order {
-		kinds := dedupRefKinds(byFile[f])
-		fmt.Fprintf(&b, "%d. **%s** — %s\n", i+1, f, strings.Join(kinds, ", "))
+	resp := ReferencesResponse{
+		Symbol:     sym,
+		References: make([]ReferenceRowOut, 0, len(order)),
+		Totals:     ReferencesRowTotal{References: len(refs), Files: len(order)},
 	}
-	return textResult(strings.TrimRight(b.String(), "\n")), nil, nil
+	for _, f := range order {
+		resp.References = append(resp.References, ReferenceRowOut{
+			File:  f,
+			Kinds: dedupRefKinds(byFile[f]),
+		})
+	}
+	return dispatchOutput(args.Output, resp, renderReferencesMarkdown(resp))
+}
+
+func renderReferencesMarkdown(r ReferencesResponse) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# References: `%s`\n\n", r.Symbol)
+	fmt.Fprintf(&b, "_%d reference%s across %d file%s. Name-resolved, not type-resolved — same-spelled identifiers in different contexts collapse into one list._\n\n",
+		r.Totals.References, pluralS(r.Totals.References),
+		r.Totals.Files, pluralS(r.Totals.Files))
+	for i, row := range r.References {
+		fmt.Fprintf(&b, "%d. **%s** — %s\n", i+1, row.File, strings.Join(row.Kinds, ", "))
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // handleCallers implements the `callers` tool: given a function
@@ -187,11 +223,16 @@ func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.Cal
 
 	sites := bundle.Structural.Callers(sym)
 	if len(sites) == 0 {
-		return textResult(fmt.Sprintf(
+		// Empty: same shape in JSON (files: []) so agents don't
+		// have to special-case missing data; markdown gets the
+		// human-readable hint.
+		resp := CallersResponse{Symbol: sym, Files: []string{}}
+		md := fmt.Sprintf(
 			"No callers found for %q. "+
 				"This means no indexed file contains a call to that exact name "+
 				"(name-resolved, NOT type-resolved — try the bare method name without a class qualifier).",
-			sym)), nil, nil
+			sym)
+		return dispatchOutput(args.Output, resp, md)
 	}
 
 	// Dedupe + sort by file path. Callers may report a file once
@@ -208,15 +249,20 @@ func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.Cal
 	}
 	sort.Strings(files)
 
+	resp := CallersResponse{Symbol: sym, Files: files}
+	return dispatchOutput(args.Output, resp, renderCallersMarkdown(resp))
+}
+
+func renderCallersMarkdown(r CallersResponse) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Callers: `%s`\n\n", sym)
+	fmt.Fprintf(&b, "# Callers: `%s`\n\n", r.Symbol)
 	fmt.Fprintf(&b, "_%d file%s contain%s a call to this name. File-level granularity; "+
 		"tree-sitter-grade, name-resolved, NOT type-resolved._\n\n",
-		len(files), pluralS(len(files)), didOrDoes(len(files) == 1, "s", ""))
-	for i, f := range files {
+		len(r.Files), pluralS(len(r.Files)), didOrDoes(len(r.Files) == 1, "s", ""))
+	for i, f := range r.Files {
 		fmt.Fprintf(&b, "%d. **%s**\n", i+1, f)
 	}
-	return textResult(strings.TrimRight(b.String(), "\n")), nil, nil
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // didOrDoes returns a or b depending on cond — tiny helper to keep
@@ -253,7 +299,12 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	// First, try as a single file: if the index has an entry for
 	// this exact path, render its outline directly.
 	if fs := bundle.Structural.File(path); fs != nil {
-		return textResult(formatOutline(path, bundle.Structural.Outline(path))), nil, nil
+		entries := bundle.Structural.Outline(path)
+		resp := OutlineResponse{
+			Path:    path,
+			Entries: convertOutlineEntries(path, entries),
+		}
+		return dispatchOutput(args.Output, resp, formatOutline(path, entries))
 	}
 
 	// Otherwise treat as a directory prefix and walk every
@@ -261,26 +312,55 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	// nothing.
 	files := bundle.Structural.FilesUnderPath(path)
 	if len(files) == 0 {
-		return textResult(fmt.Sprintf("No indexed files found at or under %q. "+
+		resp := OutlineResponse{Path: path, Entries: []OutlineEntryOut{}}
+		md := fmt.Sprintf("No indexed files found at or under %q. "+
 			"Possible reasons: the path doesn't exist, the files aren't a supported "+
-			"language (no registered extractor for that file extension), or the corpus excluded them.", path)), nil, nil
+			"language (no registered extractor for that file extension), or the corpus excluded them.", path)
+		return dispatchOutput(args.Output, resp, md)
 	}
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "# Outline: `%s` (%d file%s)\n\n",
-		path, len(files), pluralS(len(files)))
+	resp := OutlineResponse{Path: path}
 	for _, f := range files {
 		entries := bundle.Structural.Outline(f)
 		if len(entries) == 0 {
 			continue
 		}
+		converted := convertOutlineEntries(f, entries)
+		resp.Entries = append(resp.Entries, converted...)
+		resp.ByFile = append(resp.ByFile, OutlineFileEntry{File: f, Entries: converted})
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Outline: `%s` (%d file%s)\n\n",
+		path, len(files), pluralS(len(files)))
+	for _, fe := range resp.ByFile {
 		b.WriteString("## ")
-		b.WriteString(f)
+		b.WriteString(fe.File)
 		b.WriteString("\n\n")
-		b.WriteString(formatOutlineEntries(entries))
+		// Re-render from the raw entries so the markdown layer
+		// stays identical to today (params on funcs, container.
+		// prefix on methods, class label on classes).
+		b.WriteString(formatOutlineEntries(bundle.Structural.Outline(fe.File)))
 		b.WriteString("\n")
 	}
-	return textResult(strings.TrimRight(b.String(), "\n")), nil, nil
+	return dispatchOutput(args.Output, resp, strings.TrimRight(b.String(), "\n"))
+}
+
+// convertOutlineEntries adapts structural.OutlineEntry rows into the
+// JSON-stable shape. File is the path being outlined (added so a
+// flat Entries slice across multiple files is self-describing).
+func convertOutlineEntries(file string, entries []structural.OutlineEntry) []OutlineEntryOut {
+	out := make([]OutlineEntryOut, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, OutlineEntryOut{
+			File:      file,
+			Name:      e.Name,
+			Kind:      kindLabel(e.Kind),
+			Container: e.Container,
+			Params:    e.Params,
+		})
+	}
+	return out
 }
 
 // handleSymbols implements the `symbols` tool: given an optional
@@ -305,25 +385,34 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 	} else {
 		names = bundle.Structural.SymbolsInPath(structural.NormalizePath(path))
 	}
+	if names == nil {
+		names = []string{}
+	}
+	resp := SymbolsResponse{PathPrefix: path, Symbols: names}
 	if len(names) == 0 {
+		md := ""
 		if path == "" {
-			return textResult("No symbols indexed. " +
-				"The structural index has no extractors for this corpus. " +
-				"repos with no .py files produce an empty symbol list."), nil, nil
+			md = "No symbols indexed. " +
+				"The structural index has no extractors for this corpus."
+		} else {
+			md = fmt.Sprintf("No symbols found at or under %q.", path)
 		}
-		return textResult(fmt.Sprintf("No symbols found at or under %q.", path)), nil, nil
+		return dispatchOutput(args.Output, resp, md)
 	}
+	return dispatchOutput(args.Output, resp, renderSymbolsMarkdown(resp))
+}
 
+func renderSymbolsMarkdown(r SymbolsResponse) string {
 	var b strings.Builder
-	if path == "" {
-		fmt.Fprintf(&b, "# Symbols (%d total)\n\n", len(names))
+	if r.PathPrefix == "" {
+		fmt.Fprintf(&b, "# Symbols (%d total)\n\n", len(r.Symbols))
 	} else {
-		fmt.Fprintf(&b, "# Symbols under `%s` (%d total)\n\n", path, len(names))
+		fmt.Fprintf(&b, "# Symbols under `%s` (%d total)\n\n", r.PathPrefix, len(r.Symbols))
 	}
-	for _, n := range names {
+	for _, n := range r.Symbols {
 		fmt.Fprintf(&b, "- `%s`\n", n)
 	}
-	return textResult(strings.TrimRight(b.String(), "\n")), nil, nil
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // === formatting helpers ===

@@ -49,6 +49,9 @@ type SearchArgs struct {
 	Languages           []string `json:"languages,omitempty" jsonschema:"Optional list of file extensions to include (e.g. ['py','go','ts']). Leading dot optional ('py' and '.py' both work). When set, only results from files with these extensions are returned. Use this to narrow a polyglot repo to one language."`
 	PathContains        string   `json:"path_contains,omitempty" jsonschema:"Optional substring that must appear in the result's file path (case-sensitive). E.g. 'src/api' returns only results under directories whose path contains src/api. Substring match, not glob — for glob patterns use a more specific path_contains value."`
 	ExcludePathContains string   `json:"exclude_path_contains,omitempty" jsonschema:"Optional substring that must NOT appear in the file path. E.g. '_test.go' excludes Go test files; 'node_modules' excludes vendored JS. Substring match."`
+
+	// === 1.0 output format (markdown default, json opt-in) ===
+	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default; same string format semble uses) or 'json' (structured response with query/mode/results/filter fields — see SearchResponse)."`
 }
 
 // FindRelatedArgs is the argument schema for `find_related`.
@@ -57,6 +60,7 @@ type FindRelatedArgs struct {
 	Line     int    `json:"line" jsonschema:"Line number (1-indexed)."`
 	Repo     string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
 	TopK     int    `json:"top_k,omitempty" jsonschema:"Number of similar chunks to return."`
+	Output   string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with anchor/results — see FindRelatedResponse)."`
 }
 
 // ReindexDBArgs is the argument schema for the v0.8.0 reindex_db tool.
@@ -96,6 +100,7 @@ type ReindexDBArgs struct{}
 type DefinitionArgs struct {
 	Symbol string `json:"symbol" jsonschema:"The symbol name to locate (function or class name as written in source — exact match; no fuzzy matching, no qualification)."`
 	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with symbol/definitions — see DefinitionResponse)."`
 }
 
 // ReferencesArgs is the argument schema for the `references` tool.
@@ -106,6 +111,7 @@ type DefinitionArgs struct {
 type ReferencesArgs struct {
 	Symbol string `json:"symbol" jsonschema:"The name to find references for (function, class, or any identifier — exact match)."`
 	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with symbol/references/totals — see ReferencesResponse)."`
 }
 
 // OutlineArgs is the argument schema for the `outline` tool.
@@ -113,16 +119,18 @@ type ReferencesArgs struct {
 // classes, and their methods). For directory paths, returns the
 // outline for every indexed file under the directory.
 type OutlineArgs struct {
-	Path string `json:"path" jsonschema:"File path (relative to repo root) or directory path. A file returns just that file's outline; a directory returns outlines for every indexed file under it."`
-	Repo string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+	Path   string `json:"path" jsonschema:"File path (relative to repo root) or directory path. A file returns just that file's outline; a directory returns outlines for every indexed file under it."`
+	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with path/entries — see OutlineResponse)."`
 }
 
 // SymbolsArgs is the argument schema for the `symbols` tool.
 // Returns every top-level symbol (function or class) defined in
 // the repo, optionally filtered to a subdirectory prefix.
 type SymbolsArgs struct {
-	Path string `json:"path,omitempty" jsonschema:"Optional path prefix (relative to repo root) to filter the symbol list. Empty/omitted returns every top-level symbol in the repo."`
-	Repo string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+	Path   string `json:"path,omitempty" jsonschema:"Optional path prefix (relative to repo root) to filter the symbol list. Empty/omitted returns every top-level symbol in the repo."`
+	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with path_prefix/symbols — see SymbolsResponse)."`
 }
 
 // RecentlyChangedArgs is the argument schema for the
@@ -163,6 +171,7 @@ type StatusArgs struct {
 type CallersArgs struct {
 	Symbol string `json:"symbol" jsonschema:"The function name whose callers you want (exact match, no qualification — pass 'Login' not 'User.Login'). Returns files that contain a call to this name."`
 	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with symbol/files — see CallersResponse)."`
 }
 
 // FormatResults mirrors semble utils._format_results: a header, then each

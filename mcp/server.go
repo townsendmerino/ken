@@ -470,16 +470,42 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 	if len(results) > topK {
 		results = results[:topK]
 	}
+	resp := SearchResponse{
+		Query: args.Query,
+		Mode:  search.ModeNames()[int(effectiveMode)],
+	}
+	if hasFilters {
+		resp.Filter = &SearchFilterMeta{
+			Languages:              args.Languages,
+			PathContains:           args.PathContains,
+			ExcludePathContains:    args.ExcludePathContains,
+			CandidatesBeforeFilter: rawCount,
+			ResultsAfterFilter:     len(results),
+		}
+	}
 	if len(results) == 0 {
 		if hasFilters && rawCount > 0 {
-			return textResult(fmt.Sprintf(
+			md := fmt.Sprintf(
 				"No results match the filters (search returned %d candidate%s before filtering). "+
 					"Try removing or loosening languages / path_contains / exclude_path_contains.",
-				rawCount, pluralS(rawCount))), nil, nil
+				rawCount, pluralS(rawCount))
+			resp.Results = []SearchResultRow{}
+			return dispatchOutput(args.Output, resp, md)
 		}
-		return textResult("No results found."), nil, nil
+		resp.Results = []SearchResultRow{}
+		return dispatchOutput(args.Output, resp, "No results found.")
 	}
 	recordSearchUsage(recorder, "search", results, sourceRoot)
+	for i, r := range results {
+		resp.Results = append(resp.Results, SearchResultRow{
+			Rank:      i + 1,
+			File:      r.Chunk.File,
+			StartLine: r.Chunk.StartLine,
+			EndLine:   r.Chunk.EndLine,
+			Score:     r.Score,
+			Text:      r.Chunk.Text,
+		})
+	}
 	header := fmt.Sprintf("Search results for: %q (mode=%s)",
 		args.Query, search.ModeNames()[int(effectiveMode)])
 	if hasFilters {
@@ -490,7 +516,7 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 	if includeInResponse {
 		body += "\n\n" + formatTelemetryLine(tel)
 	}
-	return textResult(body), nil, nil
+	return dispatchOutput(args.Output, resp, body)
 }
 
 // applySearchFilters drops results whose file path doesn't satisfy
@@ -591,19 +617,38 @@ func runFindRelatedWithUsage(ix *search.Index, args FindRelatedArgs, recorder Us
 	if topK <= 0 {
 		topK = DefaultTopK
 	}
+	resp := FindRelatedResponse{
+		Anchor: FindRelatedAnchor{File: args.FilePath, Line: args.Line},
+	}
 	results, err := ix.FindRelated(args.FilePath, args.Line, topK)
 	if err != nil {
 		// e.g. BM25-only index: semantic similarity is unavailable. Surface
 		// as text so the agent can adapt rather than fail.
-		return textResult(err.Error()), nil, nil
+		resp.Results = []SearchResultRow{}
+		return dispatchOutput(args.Output, resp, err.Error())
 	}
 	if results == nil {
-		return textResult(fmt.Sprintf("No chunk found at %s:%d. Make sure the file is indexed and the line number is within a known chunk.", args.FilePath, args.Line)), nil, nil
+		resp.Results = []SearchResultRow{}
+		return dispatchOutput(args.Output, resp, fmt.Sprintf(
+			"No chunk found at %s:%d. Make sure the file is indexed and the line number is within a known chunk.",
+			args.FilePath, args.Line))
 	}
 	if len(results) == 0 {
-		return textResult(fmt.Sprintf("No related chunks found for %s:%d.", args.FilePath, args.Line)), nil, nil
+		resp.Results = []SearchResultRow{}
+		return dispatchOutput(args.Output, resp, fmt.Sprintf(
+			"No related chunks found for %s:%d.", args.FilePath, args.Line))
 	}
 	recordSearchUsage(recorder, "find_related", results, sourceRoot)
+	for i, r := range results {
+		resp.Results = append(resp.Results, SearchResultRow{
+			Rank:      i + 1,
+			File:      r.Chunk.File,
+			StartLine: r.Chunk.StartLine,
+			EndLine:   r.Chunk.EndLine,
+			Score:     r.Score,
+			Text:      r.Chunk.Text,
+		})
+	}
 	header := fmt.Sprintf("Chunks related to %s:%d", args.FilePath, args.Line)
-	return textResult(FormatResults(header, results)), nil, nil
+	return dispatchOutput(args.Output, resp, FormatResults(header, results))
 }

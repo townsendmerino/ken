@@ -10,6 +10,7 @@ import (
 
 	"github.com/townsendmerino/aikit/chunk"
 	"github.com/townsendmerino/ken/internal/search"
+	"github.com/townsendmerino/ken/internal/structural"
 )
 
 // newInMemoryServerClient wires our ken-mcp server to a test client over
@@ -22,8 +23,17 @@ func newInMemoryServerClient(t *testing.T) (context.Context, *sdk.ClientSession,
 	if err != nil {
 		t.Fatalf("NewWatchedIndex: %v", err)
 	}
+	// Build the structural index too so JSON / markdown tests of
+	// the Stage 8 tools (definition / references / callers /
+	// outline / symbols) hit the populated path rather than the
+	// "no structural index" branch. testdata/repo has one .py
+	// file (auth.py) the extractors recognize.
+	sx, err := structural.Build("../testdata/repo")
+	if err != nil {
+		t.Fatalf("structural.Build: %v", err)
+	}
 	cache := NewCache(4, func(context.Context, string) (*RepoBundle, func(), error) {
-		return &RepoBundle{Index: ix}, nil, nil
+		return &RepoBundle{Index: ix, Structural: sx}, nil, nil
 	})
 	srv := NewServer(Config{Cache: cache, DefaultRepo: "../testdata/repo"})
 

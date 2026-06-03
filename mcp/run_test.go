@@ -3,6 +3,7 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -535,4 +536,137 @@ func TestRun_StatusTool(t *testing.T) {
 			t.Errorf("status JSON missing %q\n---\n%s", want, jtxt)
 		}
 	}
+}
+
+// TestRun_JSONOutput exercises the Pass 1 output:"json" mode across
+// the seven 1.0-stable tools. Each sub-test calls the tool with
+// output:"json" and confirms the response decodes into the expected
+// struct (no markdown smuggled into the wire format) and carries
+// the right headline fields.
+func TestRun_JSONOutput(t *testing.T) {
+	ctx, sess, _, cleanup := runRunOnInMemoryTransport(t, Options{
+		Mode:        "bm25",
+		ChunkerName: "regex",
+	})
+	defer cleanup()
+
+	// search → SearchResponse
+	t.Run("search", func(t *testing.T) {
+		res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+			Name: "search",
+			Arguments: map[string]any{
+				"query":  "validate user",
+				"output": "json",
+			},
+		})
+		if err != nil {
+			t.Fatalf("CallTool(search): %v", err)
+		}
+		var resp SearchResponse
+		if err := json.Unmarshal([]byte(res.Content[0].(*sdk.TextContent).Text), &resp); err != nil {
+			t.Fatalf("unmarshal SearchResponse: %v\ntext=%s", err, res.Content[0].(*sdk.TextContent).Text)
+		}
+		if resp.Query != "validate user" {
+			t.Errorf("Query echo = %q, want %q", resp.Query, "validate user")
+		}
+		if resp.Mode == "" {
+			t.Errorf("Mode should be set")
+		}
+		if len(resp.Results) == 0 {
+			t.Errorf("expected ≥1 result, got %+v", resp)
+		} else if resp.Results[0].File == "" || resp.Results[0].Text == "" {
+			t.Errorf("first result missing File/Text: %+v", resp.Results[0])
+		}
+	})
+
+	// search with filter → SearchResponse.Filter populated
+	t.Run("search_with_filter", func(t *testing.T) {
+		res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+			Name: "search",
+			Arguments: map[string]any{
+				"query":     "validate user",
+				"languages": []string{"go"},
+				"output":    "json",
+			},
+		})
+		if err != nil {
+			t.Fatalf("CallTool(search): %v", err)
+		}
+		var resp SearchResponse
+		if err := json.Unmarshal([]byte(res.Content[0].(*sdk.TextContent).Text), &resp); err != nil {
+			t.Fatalf("unmarshal SearchResponse: %v", err)
+		}
+		if resp.Filter == nil {
+			t.Fatal("expected Filter to be populated when filter args present")
+		}
+		if resp.Filter.CandidatesBeforeFilter <= 0 {
+			t.Errorf("CandidatesBeforeFilter = %d, want > 0", resp.Filter.CandidatesBeforeFilter)
+		}
+	})
+
+	// Structural tools aren't registered in the Run path (embedded-
+	// corpus mode has no Bundle); their JSON tests live in
+	// server_test.go where newInMemoryServerClient builds a real
+	// RepoBundle with a structural index. The Run-path JSON coverage
+	// here exercises search / find_related and the dispatch corners.
+
+	// find_related → FindRelatedResponse
+	t.Run("find_related", func(t *testing.T) {
+		res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+			Name: "find_related",
+			Arguments: map[string]any{
+				"file_path": "auth.py",
+				"line":      1,
+				"output":    "json",
+			},
+		})
+		if err != nil {
+			t.Fatalf("CallTool(find_related): %v", err)
+		}
+		var resp FindRelatedResponse
+		txt := res.Content[0].(*sdk.TextContent).Text
+		if err := json.Unmarshal([]byte(txt), &resp); err != nil {
+			t.Fatalf("unmarshal FindRelatedResponse: %v\ntext=%s", err, txt)
+		}
+		if resp.Anchor.File != "auth.py" || resp.Anchor.Line != 1 {
+			t.Errorf("Anchor echo = %+v, want {auth.py, 1}", resp.Anchor)
+		}
+	})
+
+	// Default (no output arg) returns markdown — sanity check that
+	// adding the JSON path didn't accidentally switch defaults.
+	t.Run("default_still_markdown", func(t *testing.T) {
+		res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+			Name: "search",
+			Arguments: map[string]any{
+				"query": "validate user",
+			},
+		})
+		if err != nil {
+			t.Fatalf("CallTool(search): %v", err)
+		}
+		txt := res.Content[0].(*sdk.TextContent).Text
+		if len(txt) > 0 && txt[0] == '{' {
+			t.Errorf("default should be markdown, got JSON-looking text:\n%s", txt)
+		}
+	})
+
+	// Unknown output mode → friendly error rather than silent
+	// markdown fallback.
+	t.Run("unknown_output_errors", func(t *testing.T) {
+		res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+			Name: "search",
+			Arguments: map[string]any{
+				"query":  "validate user",
+				"output": "jsom",
+			},
+		})
+		if err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+		txt := res.Content[0].(*sdk.TextContent).Text
+		if !strings.Contains(txt, "unknown output mode") {
+			t.Errorf("expected 'unknown output mode' error, got:\n%s", txt)
+		}
+	})
 }
