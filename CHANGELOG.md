@@ -10,7 +10,52 @@ with pre-built binaries.
 
 ## [Unreleased]
 
-(none — 1.0-RC content is captured under `[0.9.0]` below.)
+(none — most recent shipped state is captured under `[0.9.1]` below.)
+
+## [0.9.1] — 2026-06-03 — language coverage + upstream-bug diagnostics
+
+Two new structural-extractor languages ship (Kotlin · Dart, taking total coverage to twelve); two languages that were in scope (C# · Swift) get parked behind diagnostic memos ready to file upstream at `gotreesitter`. A new `docs/add-a-language.md` walkthrough captures the end-to-end process for future contributors. Same Stage 8 architecture as v0.9.0 — no API changes, no behavior changes for existing languages.
+
+### Added — Kotlin structural extractor
+
+- **`extract_kotlin.go`** lights up the structural index on `.kt` and `.kts` files. Tree-sitter-kotlin doesn't expose useful field names (`FieldNameForChild` returns `""` on most nodes), so the walker uses positional + `Type()` access — the same fallback pattern documented in [`docs/add-a-language.md`](docs/add-a-language.md) and used by `extract_rust.go`. The grammar lumps `class` / `interface` / `data class` under one `class_declaration` node; `object_declaration` handles singletons. `jump_expression` covers BOTH `return` and `throw`, discriminated via the node's source-text prefix.
+- **Dogfood validation against [square/okhttp](https://github.com/square/okhttp):** 537 files indexed in ~1.0 s; 5,017 functions (4,816 methods) + 716 classes. Top calls are real okhttp-builder vocabulary (`build` / `Builder` / `newCall` / `execute` / `url` / `assertThat`); imports correctly bound to rightmost-segment names (`IOException` / `OkHttpClient` / `Request`); raises are real exception types — no noise leakage.
+
+### Added — Dart structural extractor
+
+- **`extract_dart.go`** lights up the structural index on `.dart` files. Notable shape difference from every other language ken covers: there is **no `call_expression` node**. Calls are flat sibling sequences at the parent level — `identifier + selector + selector(argument_part)` — so the extractor's `detectDartCalls` walks each container's children left-to-right, tracks the most-recent identifier candidate, and records a call when an `argument_part` selector follows. Handles bare and dotted calls uniformly. `mixin_declaration` is a top-level class-like declaration treated as a class for outline purposes. Nameless `function_signature` (closures, anonymous functions) is filtered to keep the symbol map clean.
+- **Three coupling points wired** (drift guard stays green): `aikit/chunk/treesitter` adds `.dart → dart` to `KenToTreeSitter`; `.goreleaser.yml` adds `grammar_subset_dart` so release binaries embed the Dart grammar; `internal/structural/index.go` registers `.dart → dart` and `dart → extractDart`. The `TestSubsetTagsMatchKenToTreeSitter` drift guard catches any future drift.
+- **Cross-corpus parse-health survey** (`scripts/dart_survey.go`) before shipping: 74% / 94% / 72% clean root on [dart-lang/web](https://github.com/dart-lang/web) / [dart-lang/dart_style](https://github.com/dart-lang/dart_style) / [flutter/samples](https://github.com/flutter/samples) — usable across both vanilla Dart and Flutter.
+- **Dogfood validation:**
+  - **dart_style** (80 files): 1,565 functions (823 methods), 143 classes, build time 2.7 s. Top calls are domain vocabulary (`format` / `pushIndent` / `popIndent` / `space` / `State`); imports correctly bound (`piece` / `code_writer` / `profile`); raises are real exception types (`ArgumentError` / `FormatException` / `StateError`).
+  - **flutter/samples** (483 files): top calls are real Flutter widget vocabulary — `Text` / `Center` / `Scaffold` / `AppBar` / `Padding` / `Column` / `MaterialApp` / `pumpWidget` / `runApp`. Imports resolve correctly to package names (`material` / `cupertino` / `flutter_test` / `go_router` / `provider`).
+
+### Documented — C# OOM root cause (upstream-ready memo)
+
+- **`docs/csharp-oom-root-cause.md`** — full diagnostic of the gotreesitter C# grammar's unbounded recursion in its post-parse namespace recovery pass. The 65-byte minimal reproducer (`namespace N { class C { void M(string n) { F(n, E.A | E.B); } } }`) allocates 9M+ objects / 3 GB Go heap in ~3 s before OOM. Root cause: `parser_result_csharp.go`'s `normalizeCSharpRecoveredNamespaces` triggers `parseWithSnippetParser` on a sub-range, which re-enters the same recovery pass with a fresh `recoveryCount = 0`. The `csharpMaxNamespaceRecoveries = 32` cap bounds breadth within one frame, but not depth across frames. Memo includes the captured goroutine stack showing 5 nested recursions on the same 65-byte source range, an `alloc_objects` pprof profile dominated by `NewParser → buildSmallLookup` (>94%), three suggested fix directions (depth counter via `parseWithSnippetParser` opts; range-progress guard; pool-acquisition depth cap), and a test that would have caught it.
+- **Three reproducer scripts** in tree under public gotreesitter APIs so upstream can re-run them: [`scripts/csharp_oom_diag.go`](scripts/csharp_oom_diag.go) (`--mode=leak / --mode=per-file / --mode=single`), [`scripts/csharp_bisect.go`](scripts/csharp_bisect.go) (fork-and-budget bisection), [`scripts/csharp_pprof.go`](scripts/csharp_pprof.go) (in-process pprof dump when heap crosses 1.5 GB; HTTP pprof can't be used because the parse goroutine starves the scheduler).
+- **`extract_csharp.go`** stays in tree behind a `csharp` build tag (compiles only with `go build -tags=csharp`), so re-enabling C# is a two-line registration change once the upstream fix lands. `kenLangToTSLang` and `langExtractor` map entries are commented out with the rationale inline.
+
+### Documented — Swift parse misbehavior (upstream-ready memo)
+
+- **`docs/swift-parse-root-cause.md`** — diagnostic of the gotreesitter Swift grammar's lexer misbehavior on real-world Swift. The line-comment lexer fails to recognize `//` followed by common English words like "and" / "software" / "associated" / "Permission" — a 35-byte file `//\n//  software\n\nclass Foo {}` already parses to `root=ERROR`. Cross-corpus survey (`scripts/swift_survey.go`) measured **0% / 2% / 8% / 35% clean-parse rates** on Alamofire / swift-nio / swift-collections / Defaults respectively — universally broken on shipping code because every MIT-license-headered file fails. Different failure mode from C# (this one finishes promptly but produces garbage trees), same downstream effect (extractor returns zero useful data).
+- **`extract_swift.go`** parked behind a `swift` build tag (the chunker layer keeps the Swift grammar via the slim subset — it still produces some boundaries even from ERROR roots — but the structural extractor needs a clean AST). Memo includes the minimal reproducer, the per-trigger-word list, the cross-corpus failure rates, and a test that would have caught it. Re-enabling is a two-line registration change once upstream fixes the lexer.
+- **DESIGN.md §10 risk register** updated with the Swift entry alongside the existing C# and bash entries. The chunker still embeds the Swift grammar in slim binaries (it produces *some* chunks from ERROR roots, which is better than the line-chunker fallback for retrieval); only the structural extractor is gated off.
+
+### Added — `docs/add-a-language.md` walkthrough
+
+- Step-by-step guide for adding a new language to ken's structural index: AST probing via `KEN_DEBUG_AST=1 KEN_DEBUG_LANG=<grammar> go test -run TestDebug_ASTShape` (with `KEN_DEBUG_AST_DEPTH` knob added in this release), writing the extractor, registering in `kenLangToTSLang` + `langExtractor`, fixture tests, dogfood validation, precision-sample check, lint / commit. Documents the field-name-dropping quirk (Rust / Kotlin / Dart fallback pattern), common patterns (method receivers, generic-type instantiation, import binding), and what to do when the dogfood pass kills the language (the C# and Swift parks are the worked examples).
+- **DEVELOPERS.md "Adding a structural extractor"** entry now links to the walkthrough instead of carrying the inline summary.
+
+### Changed — gotreesitter v0.20.0-rc2 → v0.20.0-rc3
+
+- Cross-checked the C# OOM against rc3 (which targeted GLR fork-reduction on the C grammar, not C#); rc3 still OOMs the same way. The bump is captured in ken's `go.mod` and aikit's `go.mod` (the sister aikit commit also bumps aikit from v0.19.1 to align). `KEN_DEBUG_LANG=csharp` aliasing added to `debug_ast_test.go::debugLangGrammar` so the alias resolves to gotreesitter's `c_sharp` grammar name.
+
+### Notes — backwards compatibility
+
+- **No behavior change for any existing language.** The Kotlin + Dart additions are pure adds; no other extractor was touched. C# and Swift never shipped in v0.9.0's `kenLangToTSLang` to begin with (C# was already in `chunk/treesitter` only); the build-tag parks in this release codify the existing OFF state with clear re-enable paths.
+- **No API additions or removals.** No new tools, no new MCP surface, no new library functions. The structural extractor surface for new languages is the same (`extract_<lang>.go` + two map rows) as documented since v0.9.0.
+- **Drift guard stays green.** `internal/buildchecks/subset_test.go::TestSubsetTagsMatchKenToTreeSitter` passes — the three Dart wirepoints (`KenToTreeSitter` / `.goreleaser.yml` slim tag / structural extractor) are in sync.
 
 ## [0.9.0] — 2026-06-03 — 1.0 release candidate
 
