@@ -125,6 +125,22 @@ type SymbolsArgs struct {
 	Repo string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
 }
 
+// RecentlyChangedArgs is the argument schema for the
+// `recently_changed` tool. Returns the last N commits with the
+// files they touched, sourced from the repo's git history (go-git
+// PlainOpen on the local working tree).
+//
+// Pass 1 supports LOCAL REPO PATHS ONLY. URL repos (https://...)
+// are cloned into the cache's temp dir but ken doesn't expose that
+// path; calling recently_changed with a URL returns a helpful
+// error. Pass 2 can plumb the local clone path through when there's
+// demand.
+type RecentlyChangedArgs struct {
+	N    int    `json:"n,omitempty" jsonschema:"Number of recent commits to include (default 10, max 100)."`
+	Repo string `json:"repo,omitempty" jsonschema:"Local directory path containing a git working tree. Required when no default index was configured at startup. Pass 1 of this tool does NOT support https:// URLs — for those, clone manually first."`
+	Path string `json:"path,omitempty" jsonschema:"Optional path prefix to filter the file list. Commits with no matching file changes are skipped from the output. E.g. 'src/api' returns only commits that touched something under src/api/."`
+}
+
 // StatusArgs is the argument schema for the `status` tool. All
 // fields optional; without a repo it reports machine-level state
 // (models, enrichment env, savings) plus the server's cache state.

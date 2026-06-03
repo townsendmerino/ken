@@ -3,7 +3,7 @@
 Living document tracking what stands between ken's current state and a
 v1.0 release. Updated as items ship or change. Last updated:
 2026-06-02 (Arm B + MaxSim parking + Windows deferred + callers tool +
-search filters + `ken status` CLI/MCP shipped).
+search filters + `ken status` CLI/MCP + `recently_changed` MCP shipped).
 
 Status legend: 🟢 done · 🟡 open · 🔴 blocked · ⚪ deferred / killed
 
@@ -49,7 +49,7 @@ hybrid on csn-stripped, +0.0321 on CoSQA reproducing Gate-1 within
 | 2 | Search filters: `languages` / `path_contains` / `exclude_path_contains` | 🟢 shipped | done | 2026-06-02. SearchArgs extended; runSearchWithTelemetry over-fetches 10× when filters are set, post-filters, reports candidate-vs-filter ratio in the header. Substring match (not glob); covers the canonical "find auth code in src/api/" + "exclude test files" cases. |
 | — | ~~Windows binary~~ | ⚪ deferred-until-pressure | — | Owner preference (2026-06-02): defer until extreme user pressure. Pure-Go cross-compile is technically trivial but the support surface (CRLF, path separators, Windows-specific MCP quirks, npm/PowerShell install paths) is not free. Re-open ONLY if a real user reports being blocked. |
 | 4 | `ken status` CLI + MCP tool | 🟢 shipped | done | 2026-06-02. New `internal/status` package builds a Status snapshot (versions, models, Arm B env, savings, optional live index + structural + cache). `ken status` CLI + `status` MCP tool registered on both NewServer and Run paths. Output modes: text (default), `--json` / `output:"json"`, markdown for MCP. Token savings surfaced as today / 7d / all-time with chars + ~tokens estimate. |
-| 5 | `recently_changed(N)` MCP tool (git-aware) | 🟡 | ~half day | Common agent question; currently they shell out. Reuses the `go-git` dep we already have. |
+| 5 | `recently_changed(N)` MCP tool (git-aware) | 🟢 shipped | done | 2026-06-02. mcp/recently_changed_tool.go — go-git PlainOpen, walks HEAD N commits back, formats commit + changed-file list as markdown. Args: `n` (default 10, max 100), `repo`, `path` prefix filter. Local repos only in Pass 1; URL repos return a friendly "clone first" error rather than coupling to the cache's temp clone dir. |
 | 6 | JSON output mode for `search` and structural tools | 🟡 | ~half day | Markdown-only locks out programmatic consumers. Add `args.output = "json" \| "markdown"`. |
 | 7 | First-class user docs | 🟡 | ~2 days | "How to think about ken vs grep" decision doc, "tuning your config" doc, MCP-tool-by-tool reference. |
 

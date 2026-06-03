@@ -287,6 +287,20 @@ func NewServer(cfg Config) *sdk.Server {
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
+		Name: "recently_changed",
+		Description: "List the last N commits that touched the repo, with the files each commit changed. " +
+			"Sourced from git history via go-git PlainOpen on the working tree. " +
+			"Pass `n` (default 10, max 100) for how far back to look; pass `path` to filter to " +
+			"commits that touched a path prefix (e.g. 'src/api'). " +
+			"LOCAL REPO PATHS ONLY in this version — https:// URLs return a helpful error; " +
+			"clone manually first if you need git history for a remote repo. " +
+			"Use this to understand `what's been worked on recently` or `who is touching this area` " +
+			"without shelling out to git log.",
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, args RecentlyChangedArgs) (*sdk.CallToolResult, any, error) {
+		return handleRecentlyChanged(ctx, &cfg, args)
+	})
+
+	sdk.AddTool(srv, &sdk.Tool{
 		Name: "status",
 		Description: "Report ken's current state. Without args, returns build identity " +
 			"(commit, aikit / gotreesitter / go versions), model availability " +
