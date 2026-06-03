@@ -89,6 +89,7 @@ func dumpAST(t *testing.T, src []byte, n *gotreesitter.Node, lang *gotreesitter.
 var debugLangGrammar = map[string]string{
 	"ts_arrow": "typescript",
 	"cpp_min":  "cpp",
+	"csharp":   "c_sharp",
 }
 
 // fixtureForLang returns a small representative source string per
@@ -96,6 +97,38 @@ var debugLangGrammar = map[string]string{
 // every shape extract_<lang>.go needs to handle.
 func fixtureForLang(name string) string {
 	switch name {
+	case "csharp":
+		return `using System;
+using System.Collections.Generic;
+
+namespace App.Auth
+{
+    public class SessionManager
+    {
+        private List<User> active = new List<User>();
+
+        public bool Login(User u, string password)
+        {
+            if (!VerifyToken(u.Id, password))
+            {
+                throw new AuthException("denied");
+            }
+            active.Add(u);
+            return true;
+        }
+
+        public void Logout(User u)
+        {
+            active.Remove(u);
+        }
+    }
+
+    public interface IAuthenticator
+    {
+        bool Authenticate(User u, string pwd);
+    }
+}
+`
 	case "ts_arrow":
 		return `const handler = (user) => verifyToken(user);
 const noop = () => doNothing();

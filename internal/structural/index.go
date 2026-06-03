@@ -191,6 +191,13 @@ var kenLangToTSLang = map[string]string{
 	".h":    "c",
 	".php":  "php",
 	".rb":   "ruby",
+	// .cs (C#) intentionally OMITTED — the gotreesitter v0.20.0-rc3
+	// C# grammar still OOMs on real-world C# (dapper-corpus
+	// retest 2026-06-03: 93+ GB resident before SIGKILL, even
+	// single-threaded). The extractor at extract_csharp.go is
+	// kept in tree so re-enabling is a one-line change once
+	// either the grammar fixes the memory regression or ken
+	// adds a per-parse memory cap. See DESIGN.md §10.
 }
 
 // langExtractor maps a gotreesitter grammar name to its AST-walking
@@ -213,6 +220,8 @@ var langExtractor = map[string]func([]byte, *gotreesitter.Node, *gotreesitter.La
 	"c":          extractCpp,
 	"php":        extractPhp,
 	"ruby":       extractRuby,
+	// "c_sharp": extractCsharp — registered but parked; see the
+	// kenLangToTSLang block above. Uncomment when the OOM clears.
 }
 
 // langCache holds the pool + language handle per grammar. Both are
