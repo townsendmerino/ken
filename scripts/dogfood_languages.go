@@ -50,6 +50,8 @@ var targets = []target{
 	{"redis", "https://github.com/redis/redis.git", "C", "src"},
 	{"laravel", "https://github.com/laravel/framework.git", "PHP", "src/Illuminate"},
 	{"jekyll", "https://github.com/jekyll/jekyll.git", "Ruby", "lib"},
+	{"okhttp", "https://github.com/square/okhttp.git", "Kotlin", ""},
+	{"alamofire", "https://github.com/Alamofire/Alamofire.git", "Swift", "Source"},
 }
 
 func main() {

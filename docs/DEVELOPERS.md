@@ -448,7 +448,7 @@ golangci-lint run ./...` — all three should be clean before pushing.
   probing via `debug_ast_test.go`, writing the extractor,
   registering in `kenLangToTSLang` + `langExtractor` maps,
   fixture tests, dogfood validation against a real repo,
-  precision-sample check. The existing ten extractors are the
+  precision-sample check. The existing eleven extractors are the
   canonical templates.
 - **MCP tool**: define `*Args` + `*Response` in
   `mcp/types.go` + `mcp/json_responses.go`. Add handler in

@@ -3,6 +3,7 @@ package structural
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/odvcencio/gotreesitter"
@@ -52,7 +53,13 @@ func TestDebug_ASTShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dumpAST(t, []byte(src), tree.RootNode(), lang, 0, 6)
+	maxDepth := 6
+	if md := os.Getenv("KEN_DEBUG_AST_DEPTH"); md != "" {
+		if v, err := strconv.Atoi(md); err == nil && v > 0 {
+			maxDepth = v
+		}
+	}
+	dumpAST(t, []byte(src), tree.RootNode(), lang, 0, maxDepth)
 }
 
 func dumpAST(t *testing.T, src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, depth, maxDepth int) {
@@ -183,6 +190,82 @@ class SessionManager {
 		this.active.push(u);
 	}
 }
+`
+	case "kotlin":
+		return `
+package com.example.auth
+
+import kotlin.collections.List
+import java.util.ArrayList
+
+class SessionManager(private val store: TokenStore) {
+    private val active: MutableList<User> = ArrayList()
+
+    fun login(u: User, password: String): Boolean {
+        if (!verifyToken(u.id, password)) {
+            throw AuthException("denied")
+        }
+        active.add(u)
+        return true
+    }
+
+    fun logout(u: User) {
+        active.remove(u)
+    }
+}
+
+interface Authenticator {
+    fun authenticate(u: User, pwd: String): Boolean
+}
+
+fun verifyToken(id: String, pwd: String): Boolean = true
+
+object Constants {
+    const val MAX_TRIES = 3
+}
+`
+	case "swift":
+		return `
+import Foundation
+
+protocol Authenticator {
+    func authenticate(user: User, password: String) -> Bool
+}
+
+class SessionManager {
+    private var active: [User] = []
+
+    init() {}
+
+    func login(_ u: User, password: String) throws -> Bool {
+        guard verifyToken(u.id, password) else {
+            throw AuthError.denied
+        }
+        active.append(u)
+        return true
+    }
+
+    func logout(_ u: User) {
+        active.removeAll { $0.id == u.id }
+    }
+}
+
+extension SessionManager: Authenticator {
+    func authenticate(user: User, password: String) -> Bool {
+        return verifyToken(user.id, password)
+    }
+}
+
+struct User {
+    let id: String
+    let name: String
+}
+
+enum AuthError: Error {
+    case denied
+}
+
+func verifyToken(_ id: String, _ pwd: String) -> Bool { return true }
 `
 	case "java":
 		return `

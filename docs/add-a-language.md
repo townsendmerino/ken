@@ -301,9 +301,9 @@ golangci-lint run ./...
 ```
 
 Update [`CLAUDE.md`](../CLAUDE.md)'s structural-extractor
-language list if your contribution adds the eleventh language
-(the current list is "ten languages: Python · Go · TypeScript
-· JavaScript · Java · Rust · C · C++ · PHP · Ruby").
+language list if your contribution adds another language
+(the current list is "eleven languages: Python · Go · TypeScript
+· JavaScript · Java · Rust · C · C++ · PHP · Ruby · Kotlin").
 
 Commit per the project conventions
 (see [DEVELOPERS.md → Pull requests](DEVELOPERS.md#pull-requests)).

@@ -21,15 +21,17 @@
 // This is the same relevance-over-completeness trade ken makes for
 // retrieval; honest in both directions.
 //
-// Stage 8 supports ten languages via dedicated extractors: Python,
-// Go, TypeScript, JavaScript, Java, Rust, C, C++, PHP, Ruby. Adding
-// another language is a new extract_<lang>.go file plus a row in the
-// kenLangToTSLang and langExtractor maps; the surface stays the same.
-// Languages whose grammar fails (the gotreesitter v0.18.0 C#/bash
-// failure modes already documented in
-// aikit/chunk/treesitter/languages.go) silently fall through — the
-// structural index simply lacks entries for unsupported files, which
-// is the right thing.
+// Stage 8 supports eleven languages via dedicated extractors:
+// Python, Go, TypeScript, JavaScript, Java, Rust, C, C++, PHP, Ruby,
+// Kotlin. Adding another language is a new extract_<lang>.go file
+// plus a row in the kenLangToTSLang and langExtractor maps; the
+// surface stays the same. Languages whose grammar fails — C#
+// (unbounded recursion in the post-parse namespace recovery pass),
+// Swift (lexer misparses real-world header comments), bash
+// (pathologically slow) — silently fall through to the chunker's
+// line fallback. Extractors for those exist in tree under
+// build-tag gates so re-enabling is a flag flip once upstream
+// grammar fixes land; see DESIGN.md §10.
 package structural
 
 import (
@@ -191,6 +193,16 @@ var kenLangToTSLang = map[string]string{
 	".h":    "c",
 	".php":  "php",
 	".rb":   "ruby",
+	".kt":   "kotlin",
+	".kts":  "kotlin",
+	// .swift intentionally OMITTED — the gotreesitter v0.20.0-rc3
+	// tree-sitter-swift grammar misparses real-world Swift (header
+	// comments containing common words like "and" / "software" /
+	// "Permission" produce a root=ERROR parse; 0–35% clean-parse
+	// rate across Alamofire / swift-nio / swift-collections /
+	// Defaults). The extractor at extract_swift.go is parked behind
+	// the `swift` build tag; re-enable once the grammar improves.
+	// See DESIGN.md §10.
 	// .cs (C#) intentionally OMITTED — the gotreesitter v0.20.0-rc3
 	// C# grammar still OOMs on real-world C# (dapper-corpus
 	// retest 2026-06-03: 93+ GB resident before SIGKILL, even
@@ -220,6 +232,10 @@ var langExtractor = map[string]func([]byte, *gotreesitter.Node, *gotreesitter.La
 	"c":          extractCpp,
 	"php":        extractPhp,
 	"ruby":       extractRuby,
+	"kotlin":     extractKotlin,
+	// "swift": extractSwift — registered but parked; see the
+	// kenLangToTSLang block above. Uncomment when the grammar
+	// is fixed upstream.
 	// "c_sharp": extractCsharp — registered but parked; see the
 	// kenLangToTSLang block above. Uncomment when the OOM clears.
 }
