@@ -58,82 +58,88 @@ import (
 //     of the qualified_name (the type that's
 //     in scope).
 func extractCsharp(src []byte, root *gotreesitter.Node, lang *gotreesitter.Language, fs *FileStruct) {
-	walkCsharp(src, root, lang, "", fs)
+	walkCsharp(src, root, lang, "", "", fs)
 }
 
-func walkCsharp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func walkCsharp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	if n == nil {
 		return
 	}
 	switch n.Type(lang) {
 	case "method_declaration":
 		fn := extractCsharpMethod(src, n, lang, enclosingClass)
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol(enclosingClass, fn.Name)
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenCsharp(src, body, lang, enclosingClass, fs)
+			recurseChildrenCsharp(src, body, lang, enclosingClass, sym, fs)
 		}
 	case "constructor_declaration":
 		fn := extractCsharpMethod(src, n, lang, enclosingClass)
 		if fn.Name == "" && enclosingClass != "" {
 			fn.Name = enclosingClass
 		}
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol(enclosingClass, fn.Name)
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenCsharp(src, body, lang, enclosingClass, fs)
+			recurseChildrenCsharp(src, body, lang, enclosingClass, sym, fs)
 		}
 	case "class_declaration", "struct_declaration", "record_declaration", "enum_declaration":
 		cls := extractCsharpClass(src, n, lang)
+		cls.fillSpan(n)
 		fs.Classes = append(fs.Classes, cls)
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
-			recurseChildrenCsharp(src, body, lang, cls.Name, fs)
+			recurseChildrenCsharp(src, body, lang, cls.Name, enclosingSymbol, fs)
 		}
 	case "interface_declaration":
 		cls := extractCsharpClass(src, n, lang)
+		cls.fillSpan(n)
 		fs.Classes = append(fs.Classes, cls)
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
-			recurseChildrenCsharp(src, body, lang, cls.Name, fs)
+			recurseChildrenCsharp(src, body, lang, cls.Name, enclosingSymbol, fs)
 		}
 	case "namespace_declaration", "file_scoped_namespace_declaration":
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
-			recurseChildrenCsharp(src, body, lang, enclosingClass, fs)
+			recurseChildrenCsharp(src, body, lang, enclosingClass, enclosingSymbol, fs)
 		} else {
-			recurseChildrenCsharp(src, n, lang, enclosingClass, fs)
+			recurseChildrenCsharp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 		}
 	case "invocation_expression":
 		if fn := n.ChildByFieldName("function", lang); fn != nil {
 			if name := csharpCalleeName(src, fn, lang); name != "" && !csharpIsBuiltinOrNoise(name) {
-				fs.Calls = dedupAppend(fs.Calls, name)
+				fs.appendCall(name, "", n, enclosingSymbol)
 			}
 		}
-		recurseChildrenCsharp(src, n, lang, enclosingClass, fs)
+		recurseChildrenCsharp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "object_creation_expression":
 		if tnode := n.ChildByFieldName("type", lang); tnode != nil {
 			if s := csharpTypeLeafName(src, tnode, lang); s != "" && !csharpIsBuiltinOrNoise(s) {
-				fs.Calls = dedupAppend(fs.Calls, s)
+				fs.appendCall(s, "", n, enclosingSymbol)
 			}
 		}
-		recurseChildrenCsharp(src, n, lang, enclosingClass, fs)
+		recurseChildrenCsharp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "throw_statement", "throw_expression":
 		if name := csharpThrowName(src, n, lang); name != "" {
 			fs.Raises = dedupAppend(fs.Raises, name)
 		}
-		recurseChildrenCsharp(src, n, lang, enclosingClass, fs)
+		recurseChildrenCsharp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "using_directive":
 		if name := csharpUsingBoundName(src, n, lang); name != "" {
 			fs.Imports = dedupAppend(fs.Imports, name)
 		}
 	default:
-		recurseChildrenCsharp(src, n, lang, enclosingClass, fs)
+		recurseChildrenCsharp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 
-func recurseChildrenCsharp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func recurseChildrenCsharp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	nc := n.NamedChildCount()
 	for i := 0; i < nc; i++ {
-		walkCsharp(src, n.NamedChild(i), lang, enclosingClass, fs)
+		walkCsharp(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 

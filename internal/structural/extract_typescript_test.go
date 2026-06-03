@@ -129,13 +129,13 @@ class SessionManager {
 	// applies the same identifier-noise discipline as the Go
 	// extractor.
 	for _, want := range []string{"verifyToken"} {
-		if !contains(fs.Calls, want) {
-			t.Errorf("Calls missing %q; have %v", want, fs.Calls)
+		if !contains(fs.CalleeNames(), want) {
+			t.Errorf("Calls missing %q; have %v", want, fs.CalleeNames())
 		}
 	}
 	for _, noise := range []string{"push", "filter"} {
-		if contains(fs.Calls, noise) {
-			t.Errorf("Calls should NOT contain %q (filtered by tsIsBuiltinOrNoise); have %v", noise, fs.Calls)
+		if contains(fs.CalleeNames(), noise) {
+			t.Errorf("Calls should NOT contain %q (filtered by tsIsBuiltinOrNoise); have %v", noise, fs.CalleeNames())
 		}
 	}
 
@@ -232,8 +232,8 @@ const noop = () => doNothing();
 
 	// Calls inside arrow bodies are captured.
 	for _, want := range []string{"verifyToken", "doNothing"} {
-		if !contains(fs.Calls, want) {
-			t.Errorf("Calls missing %q; have %v", want, fs.Calls)
+		if !contains(fs.CalleeNames(), want) {
+			t.Errorf("Calls missing %q; have %v", want, fs.CalleeNames())
 		}
 	}
 }

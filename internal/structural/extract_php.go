@@ -38,41 +38,46 @@ import (
 // `identifier` like other grammars). This affects everywhere we read
 // a node value as a name.
 func extractPhp(src []byte, root *gotreesitter.Node, lang *gotreesitter.Language, fs *FileStruct) {
-	walkPhp(src, root, lang, "", fs)
+	walkPhp(src, root, lang, "", "", fs)
 }
 
-func walkPhp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func walkPhp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	if n == nil {
 		return
 	}
 	switch n.Type(lang) {
 	case "function_definition":
 		fn := extractPhpFunc(src, n, lang, "")
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol("", fn.Name)
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenPhp(src, body, lang, enclosingClass, fs)
+			recurseChildrenPhp(src, body, lang, enclosingClass, sym, fs)
 		}
 	case "method_declaration":
 		fn := extractPhpFunc(src, n, lang, enclosingClass)
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol(enclosingClass, fn.Name)
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenPhp(src, body, lang, enclosingClass, fs)
+			recurseChildrenPhp(src, body, lang, enclosingClass, sym, fs)
 		}
 	case "class_declaration", "interface_declaration", "trait_declaration":
 		cls := extractPhpClass(src, n, lang)
+		cls.fillSpan(n)
 		fs.Classes = append(fs.Classes, cls)
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
-			recurseChildrenPhp(src, body, lang, cls.Name, fs)
+			recurseChildrenPhp(src, body, lang, cls.Name, enclosingSymbol, fs)
 		}
 	case "function_call_expression":
 		// `foo($args)` — function field is a `name` node.
 		if fn := n.ChildByFieldName("function", lang); fn != nil {
 			if name := phpCalleeName(src, fn, lang); name != "" && !phpIsBuiltinOrNoise(name) {
-				fs.Calls = dedupAppend(fs.Calls, name)
+				fs.appendCall(name, "", n, enclosingSymbol)
 			}
 		}
-		recurseChildrenPhp(src, n, lang, enclosingClass, fs)
+		recurseChildrenPhp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "member_call_expression":
 		// `$obj->method(...)` — `name` field is the method.
 		// Dynamic dispatch (`$obj->$method()` / `$obj->{$expr}()`)
@@ -81,34 +86,34 @@ func walkPhp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, encl
 		// `$method` isn't a real method identifier.
 		if name := n.ChildByFieldName("name", lang); name != nil && phpIsStaticName(name, lang) {
 			if s := nodeText(src, name); s != "" && !phpIsBuiltinOrNoise(s) {
-				fs.Calls = dedupAppend(fs.Calls, s)
+				fs.appendCall(s, "", n, enclosingSymbol)
 			}
 		}
-		recurseChildrenPhp(src, n, lang, enclosingClass, fs)
+		recurseChildrenPhp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "scoped_call_expression":
 		// `Foo::bar(...)` — `name` field is the method. Same
 		// dynamic-dispatch carve-out (`Foo::$method()`).
 		if name := n.ChildByFieldName("name", lang); name != nil && phpIsStaticName(name, lang) {
 			if s := nodeText(src, name); s != "" && !phpIsBuiltinOrNoise(s) {
-				fs.Calls = dedupAppend(fs.Calls, s)
+				fs.appendCall(s, "", n, enclosingSymbol)
 			}
 		}
-		recurseChildrenPhp(src, n, lang, enclosingClass, fs)
+		recurseChildrenPhp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "object_creation_expression":
 		// `new Foo(...)` — the type is the constructor target.
 		// In tree-sitter-php this is the first named child OR a
 		// field-named child depending on grammar version.
 		if class := phpObjectCreationClass(n, lang); class != nil {
 			if s := phpQualifiedNameLeaf(src, class, lang); s != "" && !phpIsBuiltinOrNoise(s) {
-				fs.Calls = dedupAppend(fs.Calls, s)
+				fs.appendCall(s, "", n, enclosingSymbol)
 			}
 		}
-		recurseChildrenPhp(src, n, lang, enclosingClass, fs)
+		recurseChildrenPhp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "throw_expression", "throw_statement":
 		if name := phpThrowName(src, n, lang); name != "" {
 			fs.Raises = dedupAppend(fs.Raises, name)
 		}
-		recurseChildrenPhp(src, n, lang, enclosingClass, fs)
+		recurseChildrenPhp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "namespace_use_declaration":
 		for _, bound := range phpUseBoundNames(src, n, lang) {
 			fs.Imports = dedupAppend(fs.Imports, bound)
@@ -117,16 +122,16 @@ func walkPhp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, encl
 		// File-scope namespace — recurse without changing
 		// enclosingClass. Methods still bind to their class
 		// inside; the namespace just shapes import resolution.
-		recurseChildrenPhp(src, n, lang, enclosingClass, fs)
+		recurseChildrenPhp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	default:
-		recurseChildrenPhp(src, n, lang, enclosingClass, fs)
+		recurseChildrenPhp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 
-func recurseChildrenPhp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func recurseChildrenPhp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	nc := n.NamedChildCount()
 	for i := range nc {
-		walkPhp(src, n.NamedChild(i), lang, enclosingClass, fs)
+		walkPhp(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 

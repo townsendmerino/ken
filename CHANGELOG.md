@@ -10,7 +10,67 @@ with pre-built binaries.
 
 ## [Unreleased]
 
-(none — most recent shipped state is captured under `[0.9.1]` below.)
+### Added — Phase 0 of the structural call-graph plan (substrate for function-level edges)
+
+- **`FuncDef.StartLine` / `FuncDef.EndLine` + `ClassDef.StartLine` /
+  `ClassDef.EndLine`** — 1-based line spans on every function / method /
+  class / interface / mixin / record / enum across all 10 shipping
+  languages. Zero values mean "not recorded" (no extractor produces
+  them as of this commit). Free at parse time — `nodeText` was already
+  reading the bytes; we just record the spans. The immediate
+  user-visible effect lives in [`docs/structural-call-graph-plan.md`](docs/structural-call-graph-plan.md)'s
+  Phase 0 entry: future `references` / `definition` output gains line
+  numbers without further extractor work.
+- **`structural.CallRef` + `FileStruct.CallRefs`** — replaces the
+  pre-Phase-0 file-scoped `FileStruct.Calls []string` with per-call-site
+  records carrying `Callee` (leaf name), `Receiver` (the `obj` text from
+  `obj.bar()`; empty for bare calls; retained for Phase 3 type
+  resolution), `Line` (1-based source line), and `EnclosingSymbol` (the
+  qualified `Type.method` or `func` the call lives inside; empty at file
+  top level). NOT deduped — the Phase 0 substrate captures every call
+  site in AST order. This is the seam Phase 1+ resolution writes
+  against; nothing in v0.9.x consumes it as a typed structure yet.
+- **`(*FileStruct).CalleeNames()` accessor** — returns the
+  deduped first-appearance-order leaf-name list the pre-Phase-0
+  `FileStruct.Calls []string` field used to expose. Arm B enrichment
+  (ADR-035) and the corpus-wide `callers` map both call through this
+  accessor; `TestEnrich_ArmBBaseline_FormatStability` confirms the
+  enrichment output is byte-identical to v0.9.1. This is a hard
+  invariant: Phase 0 is a strict *superset* of pre-Phase-0 facts, not
+  a reshape of the enrichment input.
+- **`enclosingSymbol` threading through every `walk*`** —
+  `extract_python.go` / `extract_go.go` / etc. now compute
+  `qualifySymbol(enclosingClass, fn.Name)` on each function/method
+  entry and thread it through nested recursion so child `CallRef`
+  records attribute correctly. Centralized in
+  `internal/structural/index.go` as `qualifySymbol` + the `fillSpan`
+  receiver methods + the `nodeStartLine` / `nodeEndLine` /
+  `appendCall` helpers, so the 10 extractors stay symmetric.
+- **Memory budget gate cleared.** Measured on three real corpora:
+  jekyll (167 Ruby files, 9350 CallRefs, +29 MiB HeapAlloc), express
+  (141 JS files, 10855 CallRefs, +25 MiB), ripgrep (101 Rust files,
+  4484 CallRefs, +309 MiB — dominated by gotreesitter parser arenas,
+  not Phase 0 data). The CallRef substrate itself adds ~500 KiB on
+  each corpus — well inside the plan's ≤2× envelope.
+- **Plan doc updated** with Phase 0 SHIPPED status and the Plan-agent
+  independent review feedback: Phases 1+4 should ship BUNDLED behind
+  one `KEN_STRUCTURAL_GRAPH=on` flag (so the headline `impact` tool
+  rides the same flag as function-level `callers`); validation-
+  harness scope is now called out as a separately-budgeted
+  deliverable on the order of Stage 8 Gate 2 itself; silent
+  wrong-answer risk from missed watch-mode invalidation moved to the
+  top of the risk register. Trigger to start Phases 1+4: MCP log
+  evidence that the agent's current 2-step `callers` → `outline` →
+  re-query pattern is in practice 3+ steps in a measurable fraction
+  of invocations.
+
+This is a substrate-only ship: no API additions to the MCP tool
+surface, no new MCP tools, no behavior change for `callers` /
+`references` / `outline` / `symbols` callers (they still return
+file-level shapes). The new `CallRef` field is public on `FileStruct`
+but unused by any consumer; same for the new `StartLine` / `EndLine`
+fields on `FuncDef` / `ClassDef`. Phase 1's tool upgrades will
+consume them.
 
 ## [0.9.1] — 2026-06-03 — language coverage + upstream-bug diagnostics
 

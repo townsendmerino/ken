@@ -40,19 +40,21 @@ import (
 //     the rightmost identifier
 //     introduced into local scope.
 func extractRust(src []byte, root *gotreesitter.Node, lang *gotreesitter.Language, fs *FileStruct) {
-	walkRust(src, root, lang, "", fs)
+	walkRust(src, root, lang, "", "", fs)
 }
 
-func walkRust(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func walkRust(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	if n == nil {
 		return
 	}
 	switch n.Type(lang) {
 	case "function_item", "function_signature_item":
 		fn := extractRustFunc(src, n, lang, enclosingClass)
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol(enclosingClass, fn.Name)
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenRust(src, body, lang, enclosingClass, fs)
+			recurseChildrenRust(src, body, lang, enclosingClass, sym, fs)
 		}
 	case "impl_item":
 		// `impl Foo` or `impl Trait for Foo`. The `type` field
@@ -66,7 +68,7 @@ func walkRust(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		// `type` carries Foo. We already grabbed `type`; that's
 		// correct for method-receiver scoping.
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenRust(src, body, lang, recvName, fs)
+			recurseChildrenRust(src, body, lang, recvName, enclosingSymbol, fs)
 		} else {
 			// fallback: walk all children
 			nc := n.NamedChildCount()
@@ -76,7 +78,7 @@ func walkRust(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 					continue
 				}
 				if c.Type(lang) == "declaration_list" {
-					recurseChildrenRust(src, c, lang, recvName, fs)
+					recurseChildrenRust(src, c, lang, recvName, enclosingSymbol, fs)
 				}
 			}
 		}
@@ -85,6 +87,7 @@ func walkRust(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		if name := n.ChildByFieldName("name", lang); name != nil {
 			cls.Name = nodeText(src, name)
 		}
+		cls.fillSpan(n)
 		// Methods on a struct/enum live in a separate impl_item,
 		// not inside the struct/enum body. So cls.Methods is
 		// empty here — methods land via impl_item recursion above.
@@ -94,6 +97,7 @@ func walkRust(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		if name := n.ChildByFieldName("name", lang); name != nil {
 			cls.Name = nodeText(src, name)
 		}
+		cls.fillSpan(n)
 		// Trait method signatures (function_signature_item):
 		// collected as methods of the trait so Outline shows
 		// the trait surface.
@@ -113,37 +117,37 @@ func walkRust(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		// Also recurse so the trait body's signatures land in
 		// fs.Functions as defs.
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenRust(src, body, lang, cls.Name, fs)
+			recurseChildrenRust(src, body, lang, cls.Name, enclosingSymbol, fs)
 		}
 	case "call_expression":
 		if fn := n.ChildByFieldName("function", lang); fn != nil {
 			if name := rustCalleeName(src, fn, lang); name != "" && !rustIsBuiltinOrNoise(name) {
-				fs.Calls = dedupAppend(fs.Calls, name)
+				fs.appendCall(name, "", n, enclosingSymbol)
 			}
 		}
-		recurseChildrenRust(src, n, lang, enclosingClass, fs)
+		recurseChildrenRust(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "macro_invocation":
 		// `println!(...)`, `vec![...]`. The macro is named via
 		// the `macro` field (identifier or scoped_identifier).
 		if macroNode := n.ChildByFieldName("macro", lang); macroNode != nil {
 			if name := rustCalleeName(src, macroNode, lang); name != "" && !rustIsBuiltinOrNoise(name) {
-				fs.Calls = dedupAppend(fs.Calls, name)
+				fs.appendCall(name, "", n, enclosingSymbol)
 			}
 		}
-		recurseChildrenRust(src, n, lang, enclosingClass, fs)
+		recurseChildrenRust(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "use_declaration":
 		for _, bound := range rustUseBoundNames(src, n, lang) {
 			fs.Imports = dedupAppend(fs.Imports, bound)
 		}
 	default:
-		recurseChildrenRust(src, n, lang, enclosingClass, fs)
+		recurseChildrenRust(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 
-func recurseChildrenRust(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func recurseChildrenRust(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	nc := n.NamedChildCount()
 	for i := range nc {
-		walkRust(src, n.NamedChild(i), lang, enclosingClass, fs)
+		walkRust(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 

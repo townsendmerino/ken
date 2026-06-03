@@ -120,12 +120,12 @@ fun verifyToken(id: String, pwd: String): Boolean = true
 	// constructor-shaped call). `add`/`remove` are filtered as
 	// stdlib noise.
 	for _, want := range []string{"verifyToken", "AuthException"} {
-		if !contains(fs.Calls, want) {
-			t.Errorf("Calls missing %q; have %v", want, fs.Calls)
+		if !contains(fs.CalleeNames(), want) {
+			t.Errorf("Calls missing %q; have %v", want, fs.CalleeNames())
 		}
 	}
-	if contains(fs.Calls, "add") {
-		t.Errorf("Calls should NOT contain 'add' (filtered by kotlinIsBuiltinOrNoise); have %v", fs.Calls)
+	if contains(fs.CalleeNames(), "add") {
+		t.Errorf("Calls should NOT contain 'add' (filtered by kotlinIsBuiltinOrNoise); have %v", fs.CalleeNames())
 	}
 
 	// Imports: bound names are rightmost segments.

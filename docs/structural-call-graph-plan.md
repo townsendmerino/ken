@@ -2,16 +2,29 @@
 
 ## Status
 
-**Proposed / planning.** Not yet implemented. This document is the design
-work for closing ken's one remaining structural-model gap relative to
-graph-native code-intelligence tools (e.g. GitNexus): moving the Track 2
-structural layer from *name-resolved, file-level* facts to a *resolved,
-node-level call and dependency graph* with transitive traversal.
+- **Phase 0 — node-level data model:** **SHIPPED** (2026-06-03, this commit).
+  Span fields on `FuncDef` / `ClassDef`, per-call-site `CallRef` records
+  with `Callee` / `Receiver` / `Line` / `EnclosingSymbol`, `CalleeNames()`
+  accessor preserving Arm B byte-identity, all 10 shipping languages
+  (plus the parked C# / Swift extractors behind their build tags).
+  Memory measured well within the ≤2× budget on three corpora — jekyll
+  (Ruby, 167 files, 9350 CallRefs, +29 MiB HeapAlloc), express
+  (JavaScript, 141 files, 10855 CallRefs, +25 MiB), ripgrep (Rust, 101
+  files, 4484 CallRefs, +309 MiB — gotreesitter parser arenas dominate
+  here, not our data model). The CallRef substrate itself adds ~500 KiB
+  on the structural index of each corpus.
+- **Phases 1, 2, 4 — bundled behind a trigger:** **Deferred until MCP
+  log evidence shows demand** (see Sequencing & triggers below).
+- **Phase 3 — type / receiver resolution:** **Hard-deferred** until
+  Phase 2 visibility hits a measured precision ceiling on OO-heavy
+  corpora.
 
-When the phases below are accepted they become ADR-037+ in
-[`DECISIONS.md`](DECISIONS.md) (latest landed ADR is ADR-036). This doc is
-the umbrella plan; each phase gets its own ADR with the rejected-alternatives
-audit trail the repo convention requires.
+Each accepted phase becomes ADR-037+ in [`DECISIONS.md`](DECISIONS.md)
+(latest landed ADR is ADR-036). This doc is the umbrella plan; Phase 0
+ships under it without its own ADR (mechanical superset, no
+architectural alternatives to weigh); Phases 1+ will each get their own
+ADR with the rejected-alternatives audit trail the repo convention
+requires.
 
 **Performance is a first-class acceptance criterion here, not an
 afterthought.** Every phase below has an explicit *Performance impact*
@@ -387,36 +400,90 @@ query latency unchanged (atomic-snapshot invariant from ADR-012 preserved);
 
 ## Sequencing & triggers
 
-1. **Phase 0** — unblocks everything; ship across all 10 languages. Trigger: now.
-2. **Phase 1** — the capability that makes `callers` function-level; all 10
-   languages. Trigger: Phase 0 merged + memory budget confirmed.
-3. **Phase 4** — `impact` tool. Trigger: Phase 1 merged (cheap, high user value;
-   can precede Phase 2/3 since traversal works on name-resolved edges, just
-   with Phase-1 confidence).
-4. **Phase 2** — dependency edges + collision sharpening; all languages.
-   Trigger: demand for the dependency surface, or Phase 1 edge precision capped
-   by collisions.
-5. **Phase 3** — type resolution; Python-first, opt-in. Trigger: measured
-   edge-precision ceiling on OO-heavy corpora that Phase 2 visibility can't
-   lift.
+**Revised after Plan-agent independent review (2026-06-03):**
+
+1. **Phase 0** — unblocks everything; ship across all 10 languages.
+   Trigger: now. **Status: SHIPPED.**
+2. **Phases 1 + 4 BUNDLED behind `KEN_STRUCTURAL_GRAPH=on`** — function-level
+   call resolution + transitive impact traversal, shipped as one opt-in
+   unit so users get the headline capability (`impact(symbol)` blast-radius)
+   on the same flag flip that upgrades `callers` to function-level. Phase 1
+   alone would give a marginally-better `callers` with no headline
+   capability and would invite scope-creep pressure to immediately do
+   Phase 2 or 3; bundling 1+4 keeps the "expensive is opt-in" boundary
+   crisp. **Trigger:** MCP log evidence that the agent's current 2-step
+   pattern (`callers` → `outline` of returned files → re-query) is in
+   practice 3+ steps in a measurable fraction of `callers` invocations
+   (rough rule of thumb: >30% of `callers` calls followed by `outline`
+   followed by another `callers` / `search`). One week of `ken-mcp` logs
+   settles the question.
+3. **Phase 2** — dependency edges + collision sharpening; all languages.
+   Trigger: 1+4 ship + demand for the dependency surface, or Phase 1 edge
+   precision capped by collisions in the first month of real usage.
+4. **Phase 3** — type resolution; Python-first, opt-in. Trigger:
+   measured edge-precision ceiling on OO-heavy corpora that Phase 2
+   visibility can't lift.
+
+### Why the Phase 1 + 4 bundling matters
+
+The Plan-agent review flagged two things this doc originally
+under-budgeted:
+
+- **The validation harness is bigger than Phases 1 and 3's "part of
+  the phase" framing suggests.** A multi-language hand-labeled
+  call-graph ground-truth corpus with confidence-tier precision /
+  recall reporting is on the same order as Stage 8 Gate 2 itself
+  (~2-3 weeks of dedicated work), AND has no upstream reference to
+  diff against (unlike everything ken has done to date, which diffed
+  against semble's Python). The 6-10 week Phase 1+4 estimate should
+  therefore be read as **6-10 weeks of implementation + a
+  separately-budgeted eval-infrastructure project**. The implementation
+  total is genuinely "6-10 weeks plus an eval surface ken has never
+  built before"; don't take the implementation estimate as the
+  shipping estimate.
+- **Silent wrong answers from missed watch-mode invalidation.** Today's
+  file-level `callers` degrades gracefully — a missed cross-file
+  invalidation gives the agent a stale file in a list, agent re-reads,
+  no harm. With resolved function-level edges, a missed cross-file
+  invalidation hands the agent **a confidently-typed edge to the
+  wrong function** — strictly worse than today's status quo. The
+  Phase 1 recommendation in the original plan (recompute-affected
+  invalidation strategy) is correct in principle but is the kind of
+  correctness work that takes longer to harden than to write, and
+  belongs in the risk register at higher weight than "memory blowup."
 
 ## Risk register
 
-- **Memory blowup from per-call-site records.** Highest-probability regression.
-  Mitigated by string interning + flat slices + a measured ≤2× gate at Phase 0.
-  If the gate fails, fall back to storing spans only for resolved edges and
-  dropping unresolved-call retention to the existing deduped names.
-- **Watch-mode edge invalidation correctness.** A resolved graph has non-local
-  invalidation; a missed invalidation yields a stale edge (silent wrong
-  answer). Mitigated by the reverse `symbol → referencing-files` index and a
-  watch-mode integration test that asserts edge consistency after a cross-file
-  edit, extending `watch_test.go`.
+- **Silent wrong answers from missed watch-mode invalidation** (re-weighted
+  highest as of the Plan-agent review). A resolved function-level graph has
+  non-local invalidation; a missed invalidation yields a confidently-typed
+  edge to the wrong function — strictly worse than today's file-level status
+  quo, where a stale entry just costs a re-read. Mitigated by the reverse
+  `symbol → referencing-files` index, a watch-mode integration test that
+  asserts edge consistency after every cross-file edit shape (rename, move,
+  delete, add) extending `watch_test.go`, and a CI gate that re-runs the
+  shape suite under fuzzing. **Do not ship Phase 1 without those tests
+  shipping in the same commit.**
+- **Validation-harness scope creep.** The hand-labeled ground-truth corpus
+  per language with confidence-tier precision/recall reporting is **not** a
+  ~2-week side-task — it is on the same order as Stage 8 Gate 2 itself
+  (~2-3 weeks of dedicated work) and has no upstream reference to diff
+  against. Mitigated by budgeting it as a separate explicit deliverable
+  before Phase 1+4 starts, NOT folded into the implementation estimate.
+- **Memory blowup from per-call-site records.** Originally listed first; now
+  judged lower than the two risks above based on Phase 0's measurements
+  (~500 KiB CallRef substrate on a ~28 MiB structural index across jekyll /
+  express / ripgrep). The ≤2× envelope held with room to spare; if Phase 1's
+  adjacency lists threaten the envelope, string interning + flat slices land
+  as the documented mitigation.
 - **Type resolution over-promising.** The danger is presenting heuristic edges
   as authoritative. Mitigated by mandatory confidence on every edge, the
   labeled-ground-truth precision reporting, and keeping Phase 3 opt-in.
 - **Enrichment regression.** Arm B (ADR-035) reads `FileStruct`; any reshape
-  that changes the enrichment label changes retrieval NDCG. Mitigated by the
-  Phase 0 byte-identical-enrichment invariant + the existing enrichment tests.
+  that changes the enrichment label changes retrieval NDCG. **Phase 0
+  preserved this byte-identically via the `CalleeNames()` accessor** —
+  `TestEnrich_ArmBBaseline_FormatStability` confirms. Same invariant
+  applies to Phase 1+.
 - **Per-language drift in Phase 3.** Type rules are bespoke per language and
   easy to get subtly wrong. Mitigated by Python-first + per-language gates +
   graceful degrade to Phase 1 edges.

@@ -47,39 +47,43 @@ import (
 //     "simple_identifier" is the bound name.
 //   - package_header         — skipped (not a binding).
 func extractKotlin(src []byte, root *gotreesitter.Node, lang *gotreesitter.Language, fs *FileStruct) {
-	walkKotlin(src, root, lang, "", fs)
+	walkKotlin(src, root, lang, "", "", fs)
 }
 
-func walkKotlin(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func walkKotlin(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	if n == nil {
 		return
 	}
 	switch n.Type(lang) {
 	case "function_declaration":
 		fn := extractKotlinFunc(src, n, lang, enclosingClass)
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
-		// Recurse into body for nested calls/throws.
+		// Recurse into body for nested calls/throws with this
+		// function as the enclosing symbol.
+		sym := qualifySymbol(enclosingClass, fn.Name)
 		if body := firstNamedChildOfType(n, lang, "function_body"); body != nil {
-			recurseChildrenKotlin(src, body, lang, enclosingClass, fs)
+			recurseChildrenKotlin(src, body, lang, enclosingClass, sym, fs)
 		}
 	case "class_declaration", "object_declaration":
 		cls := extractKotlinClass(src, n, lang)
+		cls.fillSpan(n)
 		fs.Classes = append(fs.Classes, cls)
 		if body := firstNamedChildOfType(n, lang, "class_body"); body != nil {
-			recurseChildrenKotlin(src, body, lang, cls.Name, fs)
+			recurseChildrenKotlin(src, body, lang, cls.Name, enclosingSymbol, fs)
 		}
 	case "call_expression":
 		if name := kotlinCalleeName(src, n, lang); name != "" && !kotlinIsBuiltinOrNoise(name) {
-			fs.Calls = dedupAppend(fs.Calls, name)
+			fs.appendCall(name, "", n, enclosingSymbol)
 		}
-		recurseChildrenKotlin(src, n, lang, enclosingClass, fs)
+		recurseChildrenKotlin(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "jump_expression":
 		if strings.HasPrefix(strings.TrimSpace(nodeText(src, n)), "throw") {
 			if name := kotlinThrowName(src, n, lang); name != "" {
 				fs.Raises = dedupAppend(fs.Raises, name)
 			}
 		}
-		recurseChildrenKotlin(src, n, lang, enclosingClass, fs)
+		recurseChildrenKotlin(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "import_header":
 		if name := kotlinImportBoundName(src, n, lang); name != "" {
 			fs.Imports = dedupAppend(fs.Imports, name)
@@ -87,14 +91,14 @@ func walkKotlin(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, e
 	case "package_header":
 		return
 	default:
-		recurseChildrenKotlin(src, n, lang, enclosingClass, fs)
+		recurseChildrenKotlin(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 
-func recurseChildrenKotlin(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func recurseChildrenKotlin(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	nc := n.NamedChildCount()
 	for i := range nc {
-		walkKotlin(src, n.NamedChild(i), lang, enclosingClass, fs)
+		walkKotlin(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 

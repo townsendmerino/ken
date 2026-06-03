@@ -43,19 +43,21 @@ import (
 //     imported member; we capture that too.
 //   - package_declaration      — skipped (not a definition).
 func extractJava(src []byte, root *gotreesitter.Node, lang *gotreesitter.Language, fs *FileStruct) {
-	walkJava(src, root, lang, "", fs)
+	walkJava(src, root, lang, "", "", fs)
 }
 
-func walkJava(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func walkJava(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	if n == nil {
 		return
 	}
 	switch n.Type(lang) {
 	case "method_declaration":
 		fn := extractJavaMethod(src, n, lang, enclosingClass)
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol(enclosingClass, fn.Name)
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenJava(src, body, lang, enclosingClass, fs)
+			recurseChildrenJava(src, body, lang, enclosingClass, sym, fs)
 		}
 	case "constructor_declaration":
 		// Constructor name == enclosing class name. Treat it as
@@ -65,46 +67,50 @@ func walkJava(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		if fn.Name == "" && enclosingClass != "" {
 			fn.Name = enclosingClass
 		}
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol(enclosingClass, fn.Name)
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenJava(src, body, lang, enclosingClass, fs)
+			recurseChildrenJava(src, body, lang, enclosingClass, sym, fs)
 		}
 	case "class_declaration", "record_declaration", "enum_declaration":
 		cls := extractJavaClass(src, n, lang)
+		cls.fillSpan(n)
 		fs.Classes = append(fs.Classes, cls)
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
-			recurseChildrenJava(src, body, lang, cls.Name, fs)
+			recurseChildrenJava(src, body, lang, cls.Name, enclosingSymbol, fs)
 		}
 	case "interface_declaration":
 		cls := extractJavaClass(src, n, lang)
+		cls.fillSpan(n)
 		fs.Classes = append(fs.Classes, cls)
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
-			recurseChildrenJava(src, body, lang, cls.Name, fs)
+			recurseChildrenJava(src, body, lang, cls.Name, enclosingSymbol, fs)
 		}
 	case "method_invocation":
 		if name := n.ChildByFieldName("name", lang); name != nil {
 			if s := nodeText(src, name); s != "" && !javaIsBuiltinOrNoise(s) {
-				fs.Calls = dedupAppend(fs.Calls, s)
+				fs.appendCall(s, "", n, enclosingSymbol)
 			}
 		}
-		recurseChildrenJava(src, n, lang, enclosingClass, fs)
+		recurseChildrenJava(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "object_creation_expression":
 		// `new Foo(...)` — the type is the constructor target.
 		// Resolve scoped types (e.g. `new pkg.Foo(...)`) to the
 		// rightmost identifier.
 		if tnode := n.ChildByFieldName("type", lang); tnode != nil {
 			if s := javaTypeLeafName(src, tnode, lang); s != "" && !javaIsBuiltinOrNoise(s) {
-				fs.Calls = dedupAppend(fs.Calls, s)
+				fs.appendCall(s, "", n, enclosingSymbol)
 			}
 		}
-		recurseChildrenJava(src, n, lang, enclosingClass, fs)
+		recurseChildrenJava(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "throw_statement":
 		if name := javaThrowName(src, n, lang); name != "" {
 			fs.Raises = dedupAppend(fs.Raises, name)
 		}
-		recurseChildrenJava(src, n, lang, enclosingClass, fs)
+		recurseChildrenJava(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "import_declaration":
 		if name := javaImportBoundName(src, n, lang); name != "" {
 			fs.Imports = dedupAppend(fs.Imports, name)
@@ -113,14 +119,14 @@ func walkJava(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		// Skip — not a binding.
 		return
 	default:
-		recurseChildrenJava(src, n, lang, enclosingClass, fs)
+		recurseChildrenJava(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 
-func recurseChildrenJava(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func recurseChildrenJava(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	nc := n.NamedChildCount()
 	for i := range nc {
-		walkJava(src, n.NamedChild(i), lang, enclosingClass, fs)
+		walkJava(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 

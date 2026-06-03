@@ -58,19 +58,20 @@ import (
 //     direct named child (followed by an optional argument selector
 //     when it's a constructor-style `throw Foo(...)`).
 func extractDart(src []byte, root *gotreesitter.Node, lang *gotreesitter.Language, fs *FileStruct) {
-	walkDart(src, root, lang, "", fs)
+	walkDart(src, root, lang, "", "", fs)
 }
 
-func walkDart(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func walkDart(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	if n == nil {
 		return
 	}
 	switch n.Type(lang) {
 	case "class_definition", "mixin_declaration", "extension_declaration":
 		cls := extractDartClass(src, n, lang)
+		cls.fillSpan(n)
 		fs.Classes = append(fs.Classes, cls)
 		if body := firstNamedChildOfType(n, lang, "class_body"); body != nil {
-			recurseChildrenDart(src, body, lang, cls.Name, fs)
+			recurseChildrenDart(src, body, lang, cls.Name, enclosingSymbol, fs)
 		}
 	case "function_signature":
 		// Top-level function signature OR method signature inside
@@ -86,16 +87,19 @@ func walkDart(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		// a leading identifier. Indexing them with empty names
 		// pollutes the symbol map.
 		if fn.Name != "" {
+			fn.fillSpan(n)
 			fs.Functions = append(fs.Functions, fn)
 		}
 	case "method_signature":
 		fn := extractDartMethodSignature(src, n, lang, enclosingClass)
 		if fn.Name != "" {
+			fn.fillSpan(n)
 			fs.Functions = append(fs.Functions, fn)
 		}
 	case "constructor_signature":
 		fn := extractDartConstructor(src, n, lang, enclosingClass)
 		if fn.Name != "" {
+			fn.fillSpan(n)
 			fs.Functions = append(fs.Functions, fn)
 		}
 	case "throw_expression":
@@ -103,7 +107,7 @@ func walkDart(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 			fs.Raises = dedupAppend(fs.Raises, name)
 		}
 		// Throw can still contain nested calls (e.g. throw Foo(bar())).
-		recurseChildrenDart(src, n, lang, enclosingClass, fs)
+		recurseChildrenDart(src, n, lang, enclosingClass, enclosingSymbol, fs)
 		return
 	case "library_import", "import_specification":
 		if name := dartImportBoundName(src, n, lang); name != "" {
@@ -116,14 +120,14 @@ func walkDart(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 	// its named children scanned for the `identifier ... selector(argument_part)`
 	// pattern so we catch calls in any context (statement, expression,
 	// argument list, etc.).
-	detectDartCalls(src, n, lang, fs)
-	recurseChildrenDart(src, n, lang, enclosingClass, fs)
+	detectDartCalls(src, n, lang, enclosingSymbol, fs)
+	recurseChildrenDart(src, n, lang, enclosingClass, enclosingSymbol, fs)
 }
 
-func recurseChildrenDart(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func recurseChildrenDart(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	nc := n.NamedChildCount()
 	for i := range nc {
-		walkDart(src, n.NamedChild(i), lang, enclosingClass, fs)
+		walkDart(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 
@@ -131,7 +135,7 @@ func recurseChildrenDart(src []byte, n *gotreesitter.Node, lang *gotreesitter.La
 // tracking the most-recent "would-be-callee" identifier, and records
 // a call when an argument_part selector follows. Handles both bare
 // calls (`f(x)`) and dotted calls (`a.b.f(x)`) uniformly.
-func detectDartCalls(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, fs *FileStruct) {
+func detectDartCalls(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingSymbol string, fs *FileStruct) {
 	nc := n.NamedChildCount()
 	if nc < 2 {
 		return
@@ -168,7 +172,7 @@ func detectDartCalls(src []byte, n *gotreesitter.Node, lang *gotreesitter.Langua
 			case "argument_part":
 				// `(...)`-style — preceding identifier is a call.
 				if lastIdent != "" && !dartIsBuiltinOrNoise(lastIdent) {
-					fs.Calls = dedupAppend(fs.Calls, lastIdent)
+					fs.appendCall(lastIdent, "", c, enclosingSymbol)
 				}
 				lastIdent = ""
 			}

@@ -105,12 +105,12 @@ end
 
 	// Calls: verify_token (free in singleton). add / delete /
 	// require / new are all in the noise filter.
-	if !contains(fs.Calls, "verify_token") {
-		t.Errorf("Calls missing 'verify_token'; have %v", fs.Calls)
+	if !contains(fs.CalleeNames(), "verify_token") {
+		t.Errorf("Calls missing 'verify_token'; have %v", fs.CalleeNames())
 	}
 	for _, noise := range []string{"add", "delete", "require", "new"} {
-		if contains(fs.Calls, noise) {
-			t.Errorf("Calls should NOT contain %q (Ruby kernel/common noise); have %v", noise, fs.Calls)
+		if contains(fs.CalleeNames(), noise) {
+			t.Errorf("Calls should NOT contain %q (Ruby kernel/common noise); have %v", noise, fs.CalleeNames())
 		}
 	}
 

@@ -140,12 +140,12 @@ type Authenticator interface {
 	// (Sum256, Authenticate, LogAccess). fmt.Errorf is in the
 	// goIsBuiltinOrNoise filter, so explicitly NOT captured.
 	for _, want := range []string{"Sum256", "Authenticate", "LogAccess"} {
-		if !contains(fs.Calls, want) {
-			t.Errorf("Calls missing %q; have %v", want, fs.Calls)
+		if !contains(fs.CalleeNames(), want) {
+			t.Errorf("Calls missing %q; have %v", want, fs.CalleeNames())
 		}
 	}
-	if contains(fs.Calls, "Errorf") {
-		t.Errorf("Calls should NOT contain Errorf (filtered by goIsBuiltinOrNoise); have %v", fs.Calls)
+	if contains(fs.CalleeNames(), "Errorf") {
+		t.Errorf("Calls should NOT contain Errorf (filtered by goIsBuiltinOrNoise); have %v", fs.CalleeNames())
 	}
 
 	// Imports: "sha256" (from crypto/sha256 path tail), "fmt",

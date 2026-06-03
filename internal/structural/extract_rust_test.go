@@ -104,13 +104,13 @@ fn log_event(msg: &str) {
 	// filter (constructor / iterator / mutator / macro idioms that
 	// dominated the dogfood top-calls list).
 	for _, want := range []string{"verify_token"} {
-		if !contains(fs.Calls, want) {
-			t.Errorf("Calls missing %q; have %v", want, fs.Calls)
+		if !contains(fs.CalleeNames(), want) {
+			t.Errorf("Calls missing %q; have %v", want, fs.CalleeNames())
 		}
 	}
 	for _, noise := range []string{"new", "insert", "clone", "println"} {
-		if contains(fs.Calls, noise) {
-			t.Errorf("Calls should NOT contain %q (filtered by rustIsBuiltinOrNoise); have %v", noise, fs.Calls)
+		if contains(fs.CalleeNames(), noise) {
+			t.Errorf("Calls should NOT contain %q (filtered by rustIsBuiltinOrNoise); have %v", noise, fs.CalleeNames())
 		}
 	}
 

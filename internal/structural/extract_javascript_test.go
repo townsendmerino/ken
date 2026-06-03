@@ -96,8 +96,8 @@ class SessionManager {
 	// Calls: verifyToken + authenticate (Login's body calls it).
 	// push is in the noise filter.
 	for _, want := range []string{"verifyToken", "authenticate"} {
-		if !contains(fs.Calls, want) {
-			t.Errorf("Calls missing %q; have %v", want, fs.Calls)
+		if !contains(fs.CalleeNames(), want) {
+			t.Errorf("Calls missing %q; have %v", want, fs.CalleeNames())
 		}
 	}
 
@@ -154,7 +154,7 @@ func TestBuild_JavaScriptExtVariants(t *testing.T) {
 // TestBuild_JavaScriptRequire confirms the CommonJS-require carve-out
 // in the call_expression handler: `require('mod')` lands in
 // fs.Imports (bound name = path basename, scope/extension stripped),
-// NOT in fs.Calls.
+// NOT in fs.CalleeNames().
 func TestBuild_JavaScriptRequire(t *testing.T) {
 	dir := t.TempDir()
 	src := `const express = require('express');
@@ -188,15 +188,15 @@ function setup() {
 		}
 	}
 
-	// fs.Calls MUST NOT contain "require" — the CommonJS carve-out
+	// fs.CalleeNames() MUST NOT contain "require" — the CommonJS carve-out
 	// routes require() calls to Imports instead. (If this fails it
 	// means a require() leaked through to tsCalleeName.)
-	if contains(fs.Calls, "require") {
-		t.Errorf("Calls should NOT contain 'require' (CommonJS imports are routed to fs.Imports); have %v", fs.Calls)
+	if contains(fs.CalleeNames(), "require") {
+		t.Errorf("Calls should NOT contain 'require' (CommonJS imports are routed to fs.Imports); have %v", fs.CalleeNames())
 	}
 
 	// Non-require calls still fire — express() and run() above.
-	if !contains(fs.Calls, "run") {
-		t.Errorf("Calls missing 'run'; have %v", fs.Calls)
+	if !contains(fs.CalleeNames(), "run") {
+		t.Errorf("Calls missing 'run'; have %v", fs.CalleeNames())
 	}
 }

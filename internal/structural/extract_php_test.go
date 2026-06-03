@@ -105,11 +105,11 @@ interface Authenticator {
 	}
 
 	// Calls: verifyToken (free call). unset is in the noise filter.
-	if !contains(fs.Calls, "verifyToken") {
-		t.Errorf("Calls missing 'verifyToken'; have %v", fs.Calls)
+	if !contains(fs.CalleeNames(), "verifyToken") {
+		t.Errorf("Calls missing 'verifyToken'; have %v", fs.CalleeNames())
 	}
-	if contains(fs.Calls, "unset") {
-		t.Errorf("Calls should NOT contain 'unset' (filtered); have %v", fs.Calls)
+	if contains(fs.CalleeNames(), "unset") {
+		t.Errorf("Calls should NOT contain 'unset' (filtered); have %v", fs.CalleeNames())
 	}
 
 	// Imports: bound names are rightmost segments (User,

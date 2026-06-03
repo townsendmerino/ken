@@ -67,19 +67,21 @@ import (
 //     the rightmost identifier is the bound
 //     name in scope.
 func extractSwift(src []byte, root *gotreesitter.Node, lang *gotreesitter.Language, fs *FileStruct) {
-	walkSwift(src, root, lang, "", fs)
+	walkSwift(src, root, lang, "", "", fs)
 }
 
-func walkSwift(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func walkSwift(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	if n == nil {
 		return
 	}
 	switch n.Type(lang) {
 	case "function_declaration", "protocol_function_declaration":
 		fn := extractSwiftFunc(src, n, lang, enclosingClass)
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol(enclosingClass, fn.Name)
 		if body := firstNamedChildOfType(n, lang, "function_body"); body != nil {
-			recurseChildrenSwift(src, body, lang, enclosingClass, fs)
+			recurseChildrenSwift(src, body, lang, enclosingClass, sym, fs)
 		}
 	case "init_declaration":
 		// Swift constructor — bind to enclosing type.
@@ -88,14 +90,17 @@ func walkSwift(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, en
 			IsMethod:       enclosingClass != "",
 			EnclosingClass: enclosingClass,
 		}
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol(enclosingClass, fn.Name)
 		if body := firstNamedChildOfType(n, lang, "function_body"); body != nil {
-			recurseChildrenSwift(src, body, lang, enclosingClass, fs)
+			recurseChildrenSwift(src, body, lang, enclosingClass, sym, fs)
 		}
 	case "class_declaration", "protocol_declaration":
 		name, isExtension := swiftClassDeclTarget(src, n, lang)
 		if !isExtension {
 			cls := extractSwiftClass(src, n, lang, name)
+			cls.fillSpan(n)
 			fs.Classes = append(fs.Classes, cls)
 		}
 		// Walk body regardless — for extensions this binds new
@@ -109,33 +114,33 @@ func walkSwift(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, en
 			body = firstNamedChildOfType(n, lang, "protocol_body")
 		}
 		if body != nil {
-			recurseChildrenSwift(src, body, lang, name, fs)
+			recurseChildrenSwift(src, body, lang, name, enclosingSymbol, fs)
 		}
 	case "call_expression":
 		if name := swiftCalleeName(src, n, lang); name != "" && !swiftIsBuiltinOrNoise(name) {
-			fs.Calls = dedupAppend(fs.Calls, name)
+			fs.appendCall(name, "", n, enclosingSymbol)
 		}
-		recurseChildrenSwift(src, n, lang, enclosingClass, fs)
+		recurseChildrenSwift(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "control_transfer_statement":
 		if swiftIsThrow(n, lang) {
 			if name := swiftThrowName(src, n, lang); name != "" {
 				fs.Raises = dedupAppend(fs.Raises, name)
 			}
 		}
-		recurseChildrenSwift(src, n, lang, enclosingClass, fs)
+		recurseChildrenSwift(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "import_declaration":
 		if name := swiftImportBoundName(src, n, lang); name != "" {
 			fs.Imports = dedupAppend(fs.Imports, name)
 		}
 	default:
-		recurseChildrenSwift(src, n, lang, enclosingClass, fs)
+		recurseChildrenSwift(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 
-func recurseChildrenSwift(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func recurseChildrenSwift(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	nc := n.NamedChildCount()
 	for i := 0; i < nc; i++ {
-		walkSwift(src, n.NamedChild(i), lang, enclosingClass, fs)
+		walkSwift(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 

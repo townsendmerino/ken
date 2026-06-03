@@ -98,8 +98,11 @@ func enrichCore(fs *FileStruct, opts EnrichOptions, callersResolver func(name st
 	if primaryFunc != "" {
 		parts = append(parts, "func: "+primaryFunc)
 	}
-	if len(fs.Calls) > 0 {
-		parts = append(parts, "calls: "+trimAndJoin(fs.Calls, maxCallsInLabel))
+	// Use CalleeNames() rather than ranging CallRefs directly: the
+	// label must be byte-identical to the pre-Phase-0 output (deduped,
+	// first-appearance order) so Arm B retrieval doesn't move.
+	if names := fs.CalleeNames(); len(names) > 0 {
+		parts = append(parts, "calls: "+trimAndJoin(names, maxCallsInLabel))
 	}
 	if len(fs.Raises) > 0 {
 		parts = append(parts, "raises: "+trimAndJoin(fs.Raises, maxRaisesInLabel))

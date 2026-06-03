@@ -88,11 +88,11 @@ void log_event(const char* msg) {
 
 	// Calls: verify_token. printf is in the noise filter (extended
 	// from the cppIsBuiltinOrNoise list).
-	if !contains(fs.Calls, "verify_token") {
-		t.Errorf("Calls missing 'verify_token'; have %v", fs.Calls)
+	if !contains(fs.CalleeNames(), "verify_token") {
+		t.Errorf("Calls missing 'verify_token'; have %v", fs.CalleeNames())
 	}
-	if contains(fs.Calls, "printf") {
-		t.Errorf("Calls should NOT contain 'printf' (filtered as C stdlib); have %v", fs.Calls)
+	if contains(fs.CalleeNames(), "printf") {
+		t.Errorf("Calls should NOT contain 'printf' (filtered as C stdlib); have %v", fs.CalleeNames())
 	}
 
 	// Imports: #include surfaces as bound names — `<stdlib.h>` →

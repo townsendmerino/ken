@@ -122,12 +122,12 @@ bool verifyToken(String id, String pwd) => true;
 
 	// Calls: verifyToken (bare call, inside if condition + unary
 	// expression). `add`/`remove` are filtered as stdlib noise.
-	if !contains(fs.Calls, "verifyToken") {
-		t.Errorf("Calls missing %q; have %v", "verifyToken", fs.Calls)
+	if !contains(fs.CalleeNames(), "verifyToken") {
+		t.Errorf("Calls missing %q; have %v", "verifyToken", fs.CalleeNames())
 	}
 	for _, noisy := range []string{"add", "remove"} {
-		if contains(fs.Calls, noisy) {
-			t.Errorf("Calls should NOT contain %q (filtered by dartIsBuiltinOrNoise); have %v", noisy, fs.Calls)
+		if contains(fs.CalleeNames(), noisy) {
+			t.Errorf("Calls should NOT contain %q (filtered by dartIsBuiltinOrNoise); have %v", noisy, fs.CalleeNames())
 		}
 	}
 

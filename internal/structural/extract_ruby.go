@@ -34,10 +34,10 @@ import (
 //     special-case `raise X` (and `fail X`) to populate fs.Raises
 //     with the raised class name.
 func extractRuby(src []byte, root *gotreesitter.Node, lang *gotreesitter.Language, fs *FileStruct) {
-	walkRuby(src, root, lang, "", fs)
+	walkRuby(src, root, lang, "", "", fs)
 }
 
-func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	if n == nil {
 		return
 	}
@@ -47,6 +47,7 @@ func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		if name := n.ChildByFieldName("name", lang); name != nil {
 			cls.Name = nodeText(src, name)
 		}
+		cls.fillSpan(n)
 		fs.Classes = append(fs.Classes, cls)
 		// Recurse into body_statement (which is the second
 		// named child in most cases) with enclosingClass set.
@@ -54,7 +55,7 @@ func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		// versions; fall back to walking children.
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
-			recurseChildrenRuby(src, body, lang, cls.Name, fs)
+			recurseChildrenRuby(src, body, lang, cls.Name, enclosingSymbol, fs)
 		} else {
 			nc := n.NamedChildCount()
 			for i := range nc {
@@ -63,7 +64,7 @@ func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 					continue
 				}
 				if c.Type(lang) == "body_statement" {
-					recurseChildrenRuby(src, c, lang, cls.Name, fs)
+					recurseChildrenRuby(src, c, lang, cls.Name, enclosingSymbol, fs)
 				}
 			}
 		}
@@ -72,9 +73,11 @@ func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		// body_statement wrapper.
 	case "method":
 		fn := extractRubyMethod(src, n, lang, enclosingClass, false)
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol(enclosingClass, fn.Name)
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenRuby(src, body, lang, enclosingClass, fs)
+			recurseChildrenRuby(src, body, lang, enclosingClass, sym, fs)
 		} else {
 			// Fallback: walk children skipping name/parameters.
 			nc := n.NamedChildCount()
@@ -84,7 +87,7 @@ func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 					continue
 				}
 				if c.Type(lang) == "body_statement" {
-					recurseChildrenRuby(src, c, lang, enclosingClass, fs)
+					recurseChildrenRuby(src, c, lang, enclosingClass, sym, fs)
 				}
 			}
 		}
@@ -103,9 +106,11 @@ func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 			// `self` keeps recv = enclosingClass.
 		}
 		fn := extractRubyMethod(src, n, lang, recv, true)
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol(recv, fn.Name)
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenRuby(src, body, lang, recv, fs)
+			recurseChildrenRuby(src, body, lang, recv, sym, fs)
 		} else {
 			nc := n.NamedChildCount()
 			for i := range nc {
@@ -114,7 +119,7 @@ func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 					continue
 				}
 				if c.Type(lang) == "body_statement" {
-					recurseChildrenRuby(src, c, lang, recv, fs)
+					recurseChildrenRuby(src, c, lang, recv, sym, fs)
 				}
 			}
 		}
@@ -126,25 +131,25 @@ func walkRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enc
 		if methodName != "" {
 			// `raise Foo` / `fail Foo` populate fs.Raises with
 			// the first argument's class name (when it's a
-			// constant). Other calls go to fs.Calls.
+			// constant). Other calls go to fs.CallRefs.
 			if methodName == "raise" || methodName == "fail" {
 				if name := rubyRaiseArgName(src, n, lang); name != "" {
 					fs.Raises = dedupAppend(fs.Raises, name)
 				}
 			} else if !rubyIsBuiltinOrNoise(methodName) {
-				fs.Calls = dedupAppend(fs.Calls, methodName)
+				fs.appendCall(methodName, "", n, enclosingSymbol)
 			}
 		}
-		recurseChildrenRuby(src, n, lang, enclosingClass, fs)
+		recurseChildrenRuby(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	default:
-		recurseChildrenRuby(src, n, lang, enclosingClass, fs)
+		recurseChildrenRuby(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 
-func recurseChildrenRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func recurseChildrenRuby(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	nc := n.NamedChildCount()
 	for i := range nc {
-		walkRuby(src, n.NamedChild(i), lang, enclosingClass, fs)
+		walkRuby(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 

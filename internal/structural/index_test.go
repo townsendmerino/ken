@@ -84,8 +84,8 @@ class Session:
 	// (built-ins like 'not' or attribute accesses like user.pwd
 	// don't count — call nodes only).
 	for _, want := range []string{"lookup_user", "check_hash", "verify_token", "revoke_token"} {
-		if !contains(fs.Calls, want) {
-			t.Errorf("Calls missing %q; have %v", want, fs.Calls)
+		if !contains(fs.CalleeNames(), want) {
+			t.Errorf("Calls missing %q; have %v", want, fs.CalleeNames())
 		}
 	}
 

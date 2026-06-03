@@ -46,10 +46,10 @@ import (
 // scope is the class name. The walker pulls that out so the function
 // is recorded as a method of Foo even though it's at file scope.
 func extractCpp(src []byte, root *gotreesitter.Node, lang *gotreesitter.Language, fs *FileStruct) {
-	walkCpp(src, root, lang, "", fs)
+	walkCpp(src, root, lang, "", "", fs)
 }
 
-func walkCpp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func walkCpp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	if n == nil {
 		return
 	}
@@ -65,12 +65,12 @@ func walkCpp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, encl
 			// Not a function-decl shape — could be a member
 			// variable or top-level variable declaration. Just
 			// keep walking children for nested calls etc.
-			recurseChildrenCpp(src, n, lang, enclosingClass, fs)
+			recurseChildrenCpp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 			return
 		}
 		fn, recvFromDeclarator := extractCppFunc(src, n, lang, enclosingClass)
 		if fn.Name == "" {
-			recurseChildrenCpp(src, n, lang, enclosingClass, fs)
+			recurseChildrenCpp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 			return
 		}
 		// Out-of-line method definition: declarator carried a
@@ -79,18 +79,21 @@ func walkCpp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, encl
 			fn.IsMethod = true
 			fn.EnclosingClass = recvFromDeclarator
 		}
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol(fn.EnclosingClass, fn.Name)
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenCpp(src, body, lang, fn.EnclosingClass, fs)
+			recurseChildrenCpp(src, body, lang, fn.EnclosingClass, sym, fs)
 		}
 	case "class_specifier", "struct_specifier", "union_specifier":
 		cls := extractCppClass(src, n, lang)
 		if cls.Name != "" {
+			cls.fillSpan(n)
 			fs.Classes = append(fs.Classes, cls)
 		}
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
-			recurseChildrenCpp(src, body, lang, cls.Name, fs)
+			recurseChildrenCpp(src, body, lang, cls.Name, enclosingSymbol, fs)
 		}
 	case "namespace_definition":
 		// Recurse without changing enclosingClass.
@@ -98,17 +101,17 @@ func walkCpp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, encl
 		if body == nil {
 			// Some versions use a different field name; fall
 			// back to walking all named children.
-			recurseChildrenCpp(src, n, lang, enclosingClass, fs)
+			recurseChildrenCpp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 			return
 		}
-		recurseChildrenCpp(src, body, lang, enclosingClass, fs)
+		recurseChildrenCpp(src, body, lang, enclosingClass, enclosingSymbol, fs)
 	case "call_expression":
 		if fn := n.ChildByFieldName("function", lang); fn != nil {
 			if name := cppCalleeName(src, fn, lang); name != "" && !cppIsBuiltinOrNoise(name) {
-				fs.Calls = dedupAppend(fs.Calls, name)
+				fs.appendCall(name, "", n, enclosingSymbol)
 			}
 		}
-		recurseChildrenCpp(src, n, lang, enclosingClass, fs)
+		recurseChildrenCpp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "throw_statement", "throw_expression":
 		// throw_statement: `throw <expr>;` (statement-position).
 		// throw_expression: `throw <expr>` inside an expression.
@@ -117,7 +120,7 @@ func walkCpp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, encl
 		if name := cppThrowName(src, n, lang); name != "" {
 			fs.Raises = dedupAppend(fs.Raises, name)
 		}
-		recurseChildrenCpp(src, n, lang, enclosingClass, fs)
+		recurseChildrenCpp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "preproc_include":
 		// `#include <foo.h>` / `#include "bar.h"` — surface the
 		// header's basename (sans extension) as an import. C/C++
@@ -129,14 +132,14 @@ func walkCpp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, encl
 		}
 		return
 	default:
-		recurseChildrenCpp(src, n, lang, enclosingClass, fs)
+		recurseChildrenCpp(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 
-func recurseChildrenCpp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func recurseChildrenCpp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	nc := n.NamedChildCount()
 	for i := range nc {
-		walkCpp(src, n.NamedChild(i), lang, enclosingClass, fs)
+		walkCpp(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 

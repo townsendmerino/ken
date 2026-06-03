@@ -30,32 +30,40 @@ import (
 // we don't recognize is skipped silently — the FileStruct just lacks
 // that fact.
 func extractPython(src []byte, root *gotreesitter.Node, lang *gotreesitter.Language, fs *FileStruct) {
-	walkPy(src, root, lang, "", fs)
+	walkPy(src, root, lang, "", "", fs)
 }
 
 // walkPy is the recursive driver. enclosingClass is the name of the
-// nearest class_definition ancestor (empty string at file scope), so
-// nested function_definitions can record IsMethod + EnclosingClass.
-func walkPy(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+// nearest class_definition ancestor (empty string at file scope);
+// enclosingSymbol is the qualified name of the nearest enclosing
+// function/method ("Type.method" if a method, "func" if top-level),
+// empty at file scope. Both are threaded so FuncDef gets the right
+// IsMethod + EnclosingClass and CallRef gets the right EnclosingSymbol.
+func walkPy(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	if n == nil {
 		return
 	}
 	switch n.Type(lang) {
 	case "function_definition":
 		fn := extractPyFunc(src, n, lang, enclosingClass)
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
 		// Recurse into the body so nested calls/raises are
 		// captured at file scope (matches the Python stdlib
 		// `ast.walk` behavior the M0d Python materializer used).
 		// Don't change enclosingClass — a nested function is not
 		// a method of any class it's lexically inside, only of
-		// the immediately-enclosing class_definition.
+		// the immediately-enclosing class_definition. DO update
+		// enclosingSymbol so child call sites attribute to this
+		// function.
+		sym := qualifySymbol(enclosingClass, fn.Name)
 		nc := n.NamedChildCount()
 		for i := range nc {
-			walkPy(src, n.NamedChild(i), lang, enclosingClass, fs)
+			walkPy(src, n.NamedChild(i), lang, enclosingClass, sym, fs)
 		}
 	case "class_definition":
 		cls := extractPyClass(src, n, lang)
+		cls.fillSpan(n)
 		fs.Classes = append(fs.Classes, cls)
 		// DON'T append cls.Methods to fs.Functions directly: the
 		// body recursion below propagates enclosingClass=cls.Name
@@ -66,17 +74,17 @@ func walkPy(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		if body != nil {
 			nc := body.NamedChildCount()
 			for i := range nc {
-				walkPy(src, body.NamedChild(i), lang, cls.Name, fs)
+				walkPy(src, body.NamedChild(i), lang, cls.Name, enclosingSymbol, fs)
 			}
 		}
 	case "call":
 		if name := pyCalleeName(src, n, lang); name != "" && !pyIsBuiltin(name) {
-			fs.Calls = dedupAppend(fs.Calls, name)
+			fs.appendCall(name, pyCallReceiver(src, n, lang), n, enclosingSymbol)
 		}
 		// Recurse — nested calls inside arguments also count.
 		nc := n.NamedChildCount()
 		for i := range nc {
-			walkPy(src, n.NamedChild(i), lang, enclosingClass, fs)
+			walkPy(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 		}
 	case "raise_statement":
 		if name := pyRaiseName(src, n, lang); name != "" {
@@ -84,7 +92,7 @@ func walkPy(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		}
 		nc := n.NamedChildCount()
 		for i := range nc {
-			walkPy(src, n.NamedChild(i), lang, enclosingClass, fs)
+			walkPy(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 		}
 	case "import_statement":
 		// `import foo, bar.baz` — record each dotted_name's last
@@ -124,7 +132,7 @@ func walkPy(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		// expression statements, if/try/with, etc.).
 		nc := n.NamedChildCount()
 		for i := range nc {
-			walkPy(src, n.NamedChild(i), lang, enclosingClass, fs)
+			walkPy(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 		}
 	}
 }
@@ -215,6 +223,22 @@ func pyCalleeName(src []byte, callNode *gotreesitter.Node, lang *gotreesitter.La
 		if name := fn.ChildByFieldName("attribute", lang); name != nil {
 			return nodeText(src, name)
 		}
+	}
+	return ""
+}
+
+// pyCallReceiver returns the text of the receiver expression in a
+// call. For `obj.bar(...)` it returns "obj"; for bare calls
+// (`foo(...)`) and unresolvable shapes it returns "". Phase 0
+// retains this for Phase 3 (type/heritage resolution); the
+// pre-Phase-0 extractor discarded it.
+func pyCallReceiver(src []byte, callNode *gotreesitter.Node, lang *gotreesitter.Language) string {
+	fn := callNode.ChildByFieldName("function", lang)
+	if fn == nil || fn.Type(lang) != "attribute" {
+		return ""
+	}
+	if obj := fn.ChildByFieldName("object", lang); obj != nil {
+		return nodeText(src, obj)
 	}
 	return ""
 }

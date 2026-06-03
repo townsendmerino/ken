@@ -78,16 +78,48 @@ type FileStruct struct {
 	// former).
 	Imports []string
 
-	// Calls: every distinct callee name invoked anywhere in this
-	// file. Captures both `foo(...)` (ast.Call with Name func) and
-	// `obj.bar(...)` (ast.Call with Attribute func: stored as "bar",
-	// not "obj.bar", because the bare attribute matches the BM25
-	// tokenizer's split). Dedup'd; order matches first occurrence.
-	Calls []string
+	// CallRefs is every call site invoked anywhere in this file, in
+	// AST order, NOT deduped. Each record carries the callee leaf
+	// name, the receiver expression (empty for bare calls), the
+	// 1-based line the call sits on, and the enclosing function /
+	// method qualified name (empty if at file top level).
+	//
+	// This is the Phase 0 substrate (see docs/structural-call-graph-plan.md):
+	// later phases will resolve Callee against the corpus-wide
+	// `defs` / `methods` maps to produce function-level edges. For
+	// the existing Arm B enrichment (ADR-035) and the pass-2
+	// callers-by-file index, use the CalleeNames() accessor — it
+	// returns the same deduped leaf-name list FileStruct.Calls used
+	// to expose, byte-identical to the pre-Phase-0 behaviour.
+	CallRefs []CallRef
 
 	// Raises: every exception type the file's `raise X(...)`
 	// statements name. Dedup'd; order matches first occurrence.
 	Raises []string
+}
+
+// CalleeNames returns the deduped list of callee leaf names invoked
+// anywhere in this file, in first-appearance order. This is the
+// drop-in replacement for the pre-Phase-0 `FileStruct.Calls []string`
+// field: Arm B enrichment and the pass-2 callers-by-file index both
+// consume this surface and must keep producing identical output.
+func (fs *FileStruct) CalleeNames() []string {
+	if fs == nil || len(fs.CallRefs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(fs.CallRefs))
+	seen := make(map[string]struct{}, len(fs.CallRefs))
+	for _, r := range fs.CallRefs {
+		if r.Callee == "" {
+			continue
+		}
+		if _, dup := seen[r.Callee]; dup {
+			continue
+		}
+		seen[r.Callee] = struct{}{}
+		out = append(out, r.Callee)
+	}
+	return out
 }
 
 // FuncDef is one function or method definition.
@@ -97,12 +129,47 @@ type FuncDef struct {
 	ReturnType     string   // text of the return-type annotation, "" if none
 	IsMethod       bool     // true if defined inside a class body
 	EnclosingClass string   // name of the enclosing class, "" if top-level
+
+	// StartLine, EndLine are 1-based line numbers spanning the
+	// definition (inclusive). Zero values for either field mean
+	// "not recorded" — the extractor that produced this FuncDef
+	// didn't capture spans. Captured by every extractor as of
+	// Phase 0 (docs/structural-call-graph-plan.md).
+	StartLine int
+	EndLine   int
 }
 
 // ClassDef is one class definition.
 type ClassDef struct {
 	Name    string
 	Methods []FuncDef
+
+	// StartLine, EndLine are 1-based line numbers spanning the
+	// class definition (inclusive). Same semantics as FuncDef:
+	// zero values mean "not recorded." Captured as of Phase 0.
+	StartLine int
+	EndLine   int
+}
+
+// CallRef is one call site recorded by the extractor. Phase 0
+// substrate: per-call-site facts that later phases will resolve into
+// function-level call-graph edges.
+//
+// Callee is the leaf name of the call target (`obj.bar(...)` records
+// "bar", not "obj.bar" — that matches the BM25 tokenizer's split and
+// the pre-Phase-0 file-scoped behaviour). Receiver is the text of
+// the receiver expression ("obj" in the example above), empty for
+// bare calls; retained because Phase 3 type resolution will use it.
+// Line is the 1-based line number the call sits on. EnclosingSymbol
+// is the qualified name of the function or method this call lives
+// inside (e.g. "SessionManager.Login" or "verifyToken"); empty for
+// file-top-level calls (rare; exists for some scripting-language
+// files).
+type CallRef struct {
+	Callee          string
+	Receiver        string
+	Line            int
+	EnclosingSymbol string
 }
 
 // CallSite represents one file calling a particular name. Used by the
@@ -430,12 +497,7 @@ func Build(corpusDir string) (*Index, error) {
 		for _, cls := range fs.Classes {
 			ix.defs[cls.Name] = append(ix.defs[cls.Name], path)
 		}
-		seen := make(map[string]struct{}, len(fs.Calls))
-		for _, callee := range fs.Calls {
-			if _, dup := seen[callee]; dup {
-				continue
-			}
-			seen[callee] = struct{}{}
+		for _, callee := range fs.CalleeNames() {
 			ix.callers[callee] = append(ix.callers[callee], CallSite{File: path})
 		}
 	}
@@ -527,4 +589,68 @@ func trimAndJoin(items []string, n int) string {
 		items = items[:n]
 	}
 	return strings.Join(items, ", ")
+}
+
+// nodeStartLine returns the 1-based line number a node starts on, or 0
+// if the node is nil. gotreesitter's StartPoint().Row is 0-based; the
+// +1 produces the conventional human-readable line number.
+func nodeStartLine(n *gotreesitter.Node) int {
+	if n == nil {
+		return 0
+	}
+	return int(n.StartPoint().Row) + 1
+}
+
+// nodeEndLine returns the 1-based line number a node ends on, or 0 if
+// the node is nil.
+func nodeEndLine(n *gotreesitter.Node) int {
+	if n == nil {
+		return 0
+	}
+	return int(n.EndPoint().Row) + 1
+}
+
+// fillSpan sets StartLine/EndLine on a FuncDef from a tree-sitter node.
+// Zero-line FuncDef fields mean "the extractor that produced this didn't
+// capture a span" — every shipping extractor sets both as of Phase 0.
+func (fn *FuncDef) fillSpan(n *gotreesitter.Node) {
+	fn.StartLine = nodeStartLine(n)
+	fn.EndLine = nodeEndLine(n)
+}
+
+// fillSpan sets StartLine/EndLine on a ClassDef from a tree-sitter node.
+func (cls *ClassDef) fillSpan(n *gotreesitter.Node) {
+	cls.StartLine = nodeStartLine(n)
+	cls.EndLine = nodeEndLine(n)
+}
+
+// appendCall records one call site. callee is the leaf name (empty
+// callees are dropped — they happen on unresolvable call shapes like
+// `(f or g)()` or `arr[i]()`). receiver is the text of the receiver
+// expression in `obj.bar()` ("obj"), empty for bare calls. callNode
+// is the call expression itself, used to compute the 1-based line.
+// enclosingSymbol is the qualified name of the enclosing function /
+// method ("Type.method" if a method, "func" if top-level), empty at
+// file scope.
+func (fs *FileStruct) appendCall(callee, receiver string, callNode *gotreesitter.Node, enclosingSymbol string) {
+	if callee == "" {
+		return
+	}
+	fs.CallRefs = append(fs.CallRefs, CallRef{
+		Callee:          callee,
+		Receiver:        receiver,
+		Line:            nodeStartLine(callNode),
+		EnclosingSymbol: enclosingSymbol,
+	})
+}
+
+// qualifySymbol composes "Type.method" if enclosingClass is non-empty,
+// "method" otherwise. Used by every extractor to compute the
+// enclosingSymbol string threaded into its walk function so call sites
+// can record which function they live inside.
+func qualifySymbol(enclosingClass, name string) string {
+	if enclosingClass != "" {
+		return enclosingClass + "." + name
+	}
+	return name
 }

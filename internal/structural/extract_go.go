@@ -48,28 +48,32 @@ import (
 // The walker is graceful on ERROR-recovered nodes — anything we
 // don't recognize is skipped; the FileStruct just lacks that fact.
 func extractGo(src []byte, root *gotreesitter.Node, lang *gotreesitter.Language, fs *FileStruct) {
-	walkGo(src, root, lang, "", fs)
+	walkGo(src, root, lang, "", "", fs)
 }
 
-func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingType string, fs *FileStruct) {
+func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingType, enclosingSymbol string, fs *FileStruct) {
 	if n == nil {
 		return
 	}
 	switch n.Type(lang) {
 	case "function_declaration":
 		fn := extractGoFunc(src, n, lang, "")
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
-		// Recurse into the body so nested calls land in fs.Calls.
+		// Recurse into the body so nested calls land in fs.CallRefs
+		// attributed to this function.
+		sym := qualifySymbol("", fn.Name)
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
 			nc := body.NamedChildCount()
 			for i := range nc {
-				walkGo(src, body.NamedChild(i), lang, enclosingType, fs)
+				walkGo(src, body.NamedChild(i), lang, enclosingType, sym, fs)
 			}
 		}
 	case "method_declaration":
 		recvType := goReceiverType(src, n, lang)
 		fn := extractGoFunc(src, n, lang, recvType)
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
 		// Methods are also recorded under their receiver type in
 		// Classes — same shape Python uses for class methods.
@@ -80,11 +84,12 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		if recvType != "" {
 			linkMethodToClass(fs, recvType, fn)
 		}
+		sym := qualifySymbol(recvType, fn.Name)
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
 			nc := body.NamedChildCount()
 			for i := range nc {
-				walkGo(src, body.NamedChild(i), lang, recvType, fs)
+				walkGo(src, body.NamedChild(i), lang, recvType, sym, fs)
 			}
 		}
 	case "type_declaration":
@@ -98,17 +103,18 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 			}
 			if c.Type(lang) == "type_spec" {
 				if cls := extractGoType(src, c, lang); cls.Name != "" {
+					cls.fillSpan(c)
 					ensureClass(fs, cls)
 				}
 			}
 		}
 	case "call_expression":
 		if name := goCalleeName(src, n, lang); name != "" && !goIsBuiltinOrNoise(name) {
-			fs.Calls = dedupAppend(fs.Calls, name)
+			fs.appendCall(name, "", n, enclosingSymbol)
 		}
 		nc := n.NamedChildCount()
 		for i := range nc {
-			walkGo(src, n.NamedChild(i), lang, enclosingType, fs)
+			walkGo(src, n.NamedChild(i), lang, enclosingType, enclosingSymbol, fs)
 		}
 	case "import_declaration":
 		// `import_declaration` → one or more `import_spec`
@@ -144,7 +150,7 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 	default:
 		nc := n.NamedChildCount()
 		for i := range nc {
-			walkGo(src, n.NamedChild(i), lang, enclosingType, fs)
+			walkGo(src, n.NamedChild(i), lang, enclosingType, enclosingSymbol, fs)
 		}
 	}
 }

@@ -97,11 +97,11 @@ void fail() {
 
 	// Calls: verifyToken (free call inside authenticate).
 	// push_back is filtered as STL noise.
-	if !contains(fs.Calls, "verifyToken") {
-		t.Errorf("Calls missing 'verifyToken'; have %v", fs.Calls)
+	if !contains(fs.CalleeNames(), "verifyToken") {
+		t.Errorf("Calls missing 'verifyToken'; have %v", fs.CalleeNames())
 	}
-	if contains(fs.Calls, "push_back") {
-		t.Errorf("Calls should NOT contain 'push_back' (STL noise filter); have %v", fs.Calls)
+	if contains(fs.CalleeNames(), "push_back") {
+		t.Errorf("Calls should NOT contain 'push_back' (STL noise filter); have %v", fs.CalleeNames())
 	}
 
 	// Raises: throw AuthError(...) → "AuthError"

@@ -46,19 +46,21 @@ import (
 //     pair-with-arrow shorthand instead.
 //   - Decorators / class field declarations beyond methods.
 func extractTypeScript(src []byte, root *gotreesitter.Node, lang *gotreesitter.Language, fs *FileStruct) {
-	walkTS(src, root, lang, "", fs)
+	walkTS(src, root, lang, "", "", fs)
 }
 
-func walkTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func walkTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	if n == nil {
 		return
 	}
 	switch n.Type(lang) {
 	case "function_declaration":
 		fn := extractTSFunc(src, n, lang, "")
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol("", fn.Name)
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenTS(src, body, lang, enclosingClass, fs)
+			recurseChildrenTS(src, body, lang, enclosingClass, sym, fs)
 		}
 	case "method_definition":
 		// Methods live inside a class_body. The walkTS
@@ -67,16 +69,19 @@ func walkTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		// method_definition the enclosingClass var carries the
 		// type name.
 		fn := extractTSFunc(src, n, lang, enclosingClass)
+		fn.fillSpan(n)
 		fs.Functions = append(fs.Functions, fn)
+		sym := qualifySymbol(enclosingClass, fn.Name)
 		if body := n.ChildByFieldName("body", lang); body != nil {
-			recurseChildrenTS(src, body, lang, enclosingClass, fs)
+			recurseChildrenTS(src, body, lang, enclosingClass, sym, fs)
 		}
 	case "class_declaration":
 		cls := extractTSClass(src, n, lang)
+		cls.fillSpan(n)
 		fs.Classes = append(fs.Classes, cls)
 		body := n.ChildByFieldName("body", lang)
 		if body != nil {
-			recurseChildrenTS(src, body, lang, cls.Name, fs)
+			recurseChildrenTS(src, body, lang, cls.Name, enclosingSymbol, fs)
 		}
 	case "interface_declaration":
 		// TS interfaces are class-like for outline purposes —
@@ -85,20 +90,22 @@ func walkTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		// (methods on an interface are signatures, not
 		// definitions). The Name surfaces in defs and Outline.
 		if name := n.ChildByFieldName("name", lang); name != nil {
-			fs.Classes = append(fs.Classes, ClassDef{Name: nodeText(src, name)})
+			cls := ClassDef{Name: nodeText(src, name)}
+			cls.fillSpan(n)
+			fs.Classes = append(fs.Classes, cls)
 		}
 	case "call_expression":
 		// Node CommonJS `require('module')` doesn't use the
 		// import_statement node — it's a normal call_expression
 		// whose function is the bare identifier `require`. Bind
 		// it on the import side instead of letting "require"
-		// pollute fs.Calls.
+		// pollute fs.CallRefs.
 		if mod := jsExtractRequire(src, n, lang); mod != "" {
 			fs.Imports = dedupAppend(fs.Imports, mod)
 		} else if name := tsCalleeName(src, n, lang); name != "" && !tsIsBuiltinOrNoise(name) {
-			fs.Calls = dedupAppend(fs.Calls, name)
+			fs.appendCall(name, "", n, enclosingSymbol)
 		}
-		recurseChildrenTS(src, n, lang, enclosingClass, fs)
+		recurseChildrenTS(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "throw_statement":
 		// TS doesn't have a "raise" — but `throw new X(...)` /
 		// `throw X` is the analog. Capture the constructor/
@@ -106,7 +113,7 @@ func walkTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		if name := tsThrowName(src, n, lang); name != "" {
 			fs.Raises = dedupAppend(fs.Raises, name)
 		}
-		recurseChildrenTS(src, n, lang, enclosingClass, fs)
+		recurseChildrenTS(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "import_statement":
 		extractTSImports(src, n, lang, fs)
 	case "lexical_declaration", "variable_declaration":
@@ -128,7 +135,7 @@ func walkTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 			if value.Type(lang) != "arrow_function" && value.Type(lang) != "function_expression" {
 				// Not a function-shaped declaration — keep
 				// recursing in case the rhs has calls.
-				recurseChildrenTS(src, c, lang, enclosingClass, fs)
+				recurseChildrenTS(src, c, lang, enclosingClass, enclosingSymbol, fs)
 				continue
 			}
 			fn := FuncDef{
@@ -147,7 +154,9 @@ func walkTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 			if ret := value.ChildByFieldName("return_type", lang); ret != nil {
 				fn.ReturnType = nodeText(src, ret)
 			}
+			fn.fillSpan(c)
 			fs.Functions = append(fs.Functions, fn)
+			sym := qualifySymbol("", fn.Name)
 			// Arrow functions have two body shapes:
 			//   - block body: `(x) => { ... }` — under `body`
 			//     field (statement_block).
@@ -167,14 +176,14 @@ func walkTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 				if fname == "parameters" || fname == "parameter" || fname == "return_type" {
 					continue
 				}
-				walkTS(src, ac, lang, enclosingClass, fs)
+				walkTS(src, ac, lang, enclosingClass, sym, fs)
 			}
 		}
 	case "export_statement", "ambient_declaration":
 		// `export function ...` / `declare function ...` wrap
 		// an inner declaration. Recurse into children at the
 		// same enclosingClass scope.
-		recurseChildrenTS(src, n, lang, enclosingClass, fs)
+		recurseChildrenTS(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	case "type_alias_declaration":
 		// `type Foo = ...` is a type-only construct, not a
 		// runtime definition. Skip — agents asking
@@ -182,14 +191,14 @@ func walkTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		// use structural.
 		return
 	default:
-		recurseChildrenTS(src, n, lang, enclosingClass, fs)
+		recurseChildrenTS(src, n, lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 
-func recurseChildrenTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass string, fs *FileStruct) {
+func recurseChildrenTS(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	nc := n.NamedChildCount()
 	for i := range nc {
-		walkTS(src, n.NamedChild(i), lang, enclosingClass, fs)
+		walkTS(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
 

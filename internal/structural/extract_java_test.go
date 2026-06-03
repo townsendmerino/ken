@@ -104,12 +104,12 @@ interface Authenticator {
 	// Calls: verifyToken (method_invocation) + ArrayList (the
 	// object_creation_expression's type). add is in the noise filter.
 	for _, want := range []string{"verifyToken", "ArrayList"} {
-		if !contains(fs.Calls, want) {
-			t.Errorf("Calls missing %q; have %v", want, fs.Calls)
+		if !contains(fs.CalleeNames(), want) {
+			t.Errorf("Calls missing %q; have %v", want, fs.CalleeNames())
 		}
 	}
-	if contains(fs.Calls, "add") {
-		t.Errorf("Calls should NOT contain 'add' (filtered by javaIsBuiltinOrNoise); have %v", fs.Calls)
+	if contains(fs.CalleeNames(), "add") {
+		t.Errorf("Calls should NOT contain 'add' (filtered by javaIsBuiltinOrNoise); have %v", fs.CalleeNames())
 	}
 
 	// Imports: bound names are the LAST segments of the scoped
