@@ -443,13 +443,13 @@ golangci-lint run ./...` — all three should be clean before pushing.
 - **Chunker**: implement aikit's `chunk.Chunker` interface,
   register in `init()`. Per ADR-032 the interface is the 1.0
   surface; the concrete struct is best-effort.
-- **Structural extractor** (new language): add
-  `internal/structural/extract_<lang>.go`, register in
-  `kenLangToTSLang` + `langExtractor` maps in
-  `internal/structural/index.go`. See the existing extractors
-  for the per-language pattern. Includes a fixture-based test
-  + run through `scripts/dogfood_languages.go` to spot-check on
-  a real repo.
+- **Structural extractor** (new language): full step-by-step
+  walkthrough in [add-a-language.md](add-a-language.md) — AST
+  probing via `debug_ast_test.go`, writing the extractor,
+  registering in `kenLangToTSLang` + `langExtractor` maps,
+  fixture tests, dogfood validation against a real repo,
+  precision-sample check. The existing ten extractors are the
+  canonical templates.
 - **MCP tool**: define `*Args` + `*Response` in
   `mcp/types.go` + `mcp/json_responses.go`. Add handler in
   `mcp/*.go`. Register via `sdk.AddTool` in `mcp/server.go`
