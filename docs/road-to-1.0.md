@@ -4,7 +4,7 @@ Living document tracking what stands between ken's current state and a
 v1.0 release. Updated as items ship or change. Last updated:
 2026-06-02 (Arm B + MaxSim parking + Windows deferred + callers tool +
 search filters + `ken status` + `recently_changed` + JSON output mode
-shipped).
+shipped; perf-startup-query campaign M0 baselines published).
 
 Status legend: 🟢 done · 🟡 open · 🔴 blocked · ⚪ deferred / killed
 
@@ -53,6 +53,7 @@ hybrid on csn-stripped, +0.0321 on CoSQA reproducing Gate-1 within
 | 5 | `recently_changed(N)` MCP tool (git-aware) | 🟢 shipped | done | 2026-06-02. mcp/recently_changed_tool.go — go-git PlainOpen, walks HEAD N commits back, formats commit + changed-file list as markdown. Args: `n` (default 10, max 100), `repo`, `path` prefix filter. Local repos only in Pass 1; URL repos return a friendly "clone first" error rather than coupling to the cache's temp clone dir. |
 | 6 | JSON output mode for `search` and structural tools | 🟢 shipped | done | 2026-06-02. Each of search / find_related / definition / references / callers / outline / symbols got an `Output` arg. `mcp/json_responses.go` defines a typed response struct per tool (1.0-stable surface) + a shared `dispatchOutput` helper. Markdown stays the default; `output: "json"` returns the typed struct as indented JSON. Unknown values like `"yaml"` get a friendly error rather than silent fallback. Tests: 13 sub-tests across `TestRun_JSONOutput` (Run-path: search + find_related + dispatch corners) and `TestJSONOutput_StructuralTools` (NewServer fixture upgraded to also build a structural index). |
 | 7 | First-class user docs | 🟡 | ~2 days | "How to think about ken vs grep" decision doc, "tuning your config" doc, MCP-tool-by-tool reference. |
+| — | Perf campaign: startup + query latency | 🟡 in progress | — | Tracked in [`docs/perf-campaign-startup-query.md`](perf-campaign-startup-query.md). **M0 baselines published** (2026-06-02, [outputs/perf-startup-m0-baselines.md](../outputs/perf-startup-m0-baselines.md)). Cold-start budget: tiny 627 ms (78% rerank load), medium 1.4 s, large 2.9 s (54% structural.Build). Recommended M1-M2-M3 order: M2 lazy rerank load → M4 parallel structural.Build → M1 Q8 rerank default. M3 (warm-up encode) + M5 (query-path micro-ops) killed by M0 data. |
 
 ### Lower-priority but real
 
