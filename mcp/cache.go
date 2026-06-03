@@ -77,6 +77,10 @@ type Cache struct {
 }
 
 // NewCache creates a cache bound to max entries (≤0 ⇒ DefaultCacheSize).
+//
+// Stability: 1.0-stable. The signature + [Cache]'s public method set
+// (Get / GetBundle / Len / Capacity / Close) are committed across
+// 1.0+ minors. The [Builder] callback shape is also stable.
 func NewCache(max int, build Builder) *Cache {
 	if max <= 0 {
 		max = DefaultCacheSize

@@ -84,13 +84,13 @@ type ReindexResult struct {
 // Config is the wiring for a ken-mcp server. Defaults applied by
 // NewServer for any zero value.
 type Config struct {
-	Cache         *Cache      // repo→Index cache (required)
-	DefaultRepo   string      // optional pre-configured source; if set, tools may be called without a `repo` arg
-	Mode          search.Mode // default ModeHybrid
-	Chunker       string      // default "regex"
-	Instructions  string      // server-instructions string; default mirrors semble's
-	ServerName    string      // default "ken"
-	ServerVersion string      // default "0"
+	Cache         *Cache // repo→Index cache (required)
+	DefaultRepo   string // optional pre-configured source; if set, tools may be called without a `repo` arg
+	Mode          Mode   // default ModeHybrid (see api_aliases.go for the constants)
+	Chunker       string // default "regex"
+	Instructions  string // server-instructions string; default mirrors semble's
+	ServerName    string // default "ken"
+	ServerVersion string // default "0"
 
 	// DB, when non-nil, registers the v0.8.0 reindex_db MCP tool
 	// (ADR-020 Part 2) and wires Tier-2 chunk integration via the
@@ -116,7 +116,7 @@ type Config struct {
 	// Setting this knob also enables telemetry collection in the
 	// search code path — leave nil to opt out of the (small) per-
 	// query timing overhead.
-	TelemetryLog func(query string, t search.Telemetry)
+	TelemetryLog func(query string, t Telemetry)
 
 	// TelemetryInResponse, when true, appends a "[telemetry]" line
 	// to the search tool response body so the agent can see timing
@@ -148,6 +148,11 @@ type UsageRecorder interface {
 // NewServer returns an MCP server with `search` and `find_related`
 // registered. The server speaks JSON-RPC over whatever Transport the
 // caller passes to server.Run — ken-mcp uses sdk.StdioTransport.
+//
+// Stability: 1.0-stable. The signature stays committed across 1.0+
+// minors. cmd/ken-mcp is the canonical consumer; SDK authors building
+// embedded-corpus servers usually want [Run] instead. New optional
+// fields on [Config] land additively.
 func NewServer(cfg Config) *sdk.Server {
 	if cfg.ServerName == "" {
 		cfg.ServerName = "ken"

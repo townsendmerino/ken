@@ -126,20 +126,38 @@ ship.
 
 ## Public API surface
 
-ken's exported packages and their 1.0 stability commitment.
+ken's exported packages and their 1.0 stability commitment. **Audit
+closed 2026-06-03** (see [road-to-1.0 §4](road-to-1.0.md#4-strategic--positioning-items)):
+every public symbol crossing a package boundary has a tier here, plus
+a `Stability:` doc-comment on the function/type itself. Three
+internal-type leaks through the mcp package surface
+(`Config.Mode` → `search.Mode`, `Config.TelemetryLog` →
+`search.Telemetry`, `FormatResults([]search.Result)`) were resolved
+by adding [`mcp/api_aliases.go`](../mcp/api_aliases.go) — 1.0-stable
+`mcp.Mode` / `mcp.Telemetry` / `mcp.Result` type aliases so SDK
+authors never need to import `internal/search`.
 
 ### ken's own packages
 
 **`github.com/townsendmerino/ken/mcp`** — Hard, 1.0-committed:
 
-- `Run(ctx, Options) error` — the embedded-corpus server entry.
+- `Run(ctx, fsys, Options) error` — the embedded-corpus server entry.
 - `Options{Corpus, ModelFS, ModelDir, Mode, ChunkerName,
   CacheSize, LogLevel, LogWriter, DB}` — the configuration
   struct.
 - `NewServer(Config) *sdk.Server` — the on-demand server entry
   (cmd/ken-mcp uses this).
-- `Config{Cache, DB, DefaultRepo, TelemetryLog,
+- `Config{Cache, DefaultRepo, Mode, Chunker, Instructions,
+  ServerName, ServerVersion, DB, TelemetryLog,
   TelemetryInResponse, UsageRecorder}` — server configuration.
+- `Mode`, `ModeBM25`, `ModeSemantic`, `ModeHybrid`,
+  `ModeHybridRerank` — search-pipeline mode + enum values
+  (1.0-stable type aliases in [`api_aliases.go`](../mcp/api_aliases.go)
+  for `internal/search`'s `Mode`).
+- `Telemetry` — per-query timing struct surfaced by
+  `Config.TelemetryLog` (alias for `search.Telemetry`).
+- `Result` — single search hit returned by ken's hybrid pipeline
+  (alias for `search.Result`); consumed by `FormatResults`.
 - `Cache`, `NewCache(max, builder)`, `RepoBundle{Index,
   Structural}`, `Builder` — repo cache used by tools.
 - `Cache.{Get, GetBundle, Len, Capacity, Close}` — cache
@@ -149,8 +167,9 @@ ken's exported packages and their 1.0 stability commitment.
 - All `*Args` types (`SearchArgs`, `DefinitionArgs`, etc.).
 - All `*Response` JSON types
   ([mcp/json_responses.go](../mcp/json_responses.go)).
-- `FormatResults(header, results) string` — semble-compatible
-  markdown shape.
+- `FormatResults(header, []Result) string` — semble-compatible
+  markdown shape. (Signature accepts the `mcp.Result` alias as of
+  the v0.9.x API audit; runtime behaviour unchanged.)
 - `Logger`, `LogLevel`, `NewLogger`, `ParseLogLevel`,
   `LogLevelNames` — logging seam used by `Options.LogWriter`
   consumers.
@@ -192,13 +211,15 @@ external code — they may break without ADR.
 ken consumes aikit (
 [github.com/townsendmerino/aikit](https://github.com/townsendmerino/aikit))
 as a separate module — `require github.com/townsendmerino/aikit
-v0.1.1` in [go.mod](../go.mod) at the time of this writing. aikit
-is `0.x` (pre-1.0); its "hard, 1.0-committed" surfaces are
-expected to stay stable through aikit's own path to 1.0, but
-breaking changes between `0.x` minors are technically still
-permitted by semver. ken's CHANGELOG records every aikit bump.
-When ken cuts 1.0, the aikit dep should be at a tagged 1.0 or
-clearly within a 1.0-RC window so the stability promise composes
+v0.2.0` in [go.mod](../go.mod) at the time of this writing
+(bumped from v0.1.1 on 2026-06-03; v0.2.0 added the generative
+half — `decoder` + `tokenizer` + GGUF — without disturbing the
+v0.1 hard tier). aikit is `0.x` (pre-1.0); its "hard, 1.0-committed"
+surfaces are expected to stay stable through aikit's own path to
+1.0, but breaking changes between `0.x` minors are technically
+still permitted by semver. ken's CHANGELOG records every aikit
+bump. When ken cuts 1.0, the aikit dep should be at a tagged 1.0
+or clearly within a 1.0-RC window so the stability promise composes
 cleanly.
 
 The full aikit stability table is in
@@ -206,11 +227,14 @@ The full aikit stability table is in
 The summary:
 
 - **Hard, 1.0-committed**: `topk` · `ann.New/Flat/Hit` · `bm25` ·
-  `embed` · `encoder.Load/Encoder` · `chunk.Chunker/Chunk/...`.
+  `embed` · `encoder.Load/Encoder` · `chunk.Chunker/Chunk/...` ·
+  `fuse.RRFWeighted` (consolidated onto from `internal/search`'s
+  hand-rolled RRF in v0.9.x).
 - **Best-effort**: concrete chunker structs (use
   `chunk.Get("regex")` instead), `chunk/treesitter` (depends on
   pre-1.0 gotreesitter), `encoder.LoadQ8`, HNSW internals,
-  `fuse.RRF*`.
+  `decoder` + `tokenizer` (v0.2.0 generative-half packages — explicitly
+  best-effort under aikit's own README stability section).
 
 ken pins aikit via `require`; bumping the minor follows ken's
 own release rhythm.

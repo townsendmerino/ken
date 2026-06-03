@@ -143,6 +143,10 @@ const prebuiltIndexPath = ".ken/index.bin"
 //
 // For multi-repo / per-request URL clone / file-watching use cases, use
 // cmd/ken-mcp directly — Run intentionally doesn't carry that machinery.
+//
+// Stability: 1.0-stable. The signature is the SDK-author entry point
+// and stays committed across 1.0+ minors. New optional fields can
+// land on [Options] without breaking existing callers.
 func Run(ctx context.Context, fsys fs.FS, opts Options) error {
 	return runOnTransport(ctx, fsys, opts, &sdk.StdioTransport{})
 }

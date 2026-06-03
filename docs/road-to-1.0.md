@@ -94,11 +94,23 @@ invocations).
 
 ## (4) Strategic / positioning items
 
-- 🟡 **Versioning / public API discipline.** v1.0 = a stability
-  promise for `mcp.Run`, the `chunk.Chunker` interface (ADR-032), and
-  the public `search` / `structural` surfaces. Worth a 1-day audit
-  identifying every public symbol crossing a package boundary and
-  either pinning it as 1.0-stable or marking it `// Internal:`.
+- 🟢 **Versioning / public API discipline** — closed 2026-06-03.
+  Audit walked every public symbol crossing a package boundary
+  (`go doc -short ./mcp` + `./mcp/db`); each is now pinned by tier in
+  [DEVELOPERS.md → Public API surface](DEVELOPERS.md#public-api-surface).
+  Three internal-type leaks through the mcp package surface
+  (`Config.Mode` was `search.Mode`, `Config.TelemetryLog` carried
+  `search.Telemetry`, `FormatResults` took `[]search.Result`) were
+  resolved by adding [`mcp/api_aliases.go`](../mcp/api_aliases.go) —
+  1.0-stable `mcp.Mode` / `mcp.Telemetry` / `mcp.Result` type aliases
+  so SDK authors never need to import `internal/search`. cmd/ken-mcp
+  + the mcp package itself keep their existing `search.*` imports;
+  runtime behaviour is unchanged because Go type aliases name the
+  same type. Code-level `Stability:` doc-comments added to the
+  load-bearing entry points (`Run`, `NewServer`, `NewCache`,
+  `FormatResults`, `Logger`). Best-effort symbols (`CloneShallow`,
+  `NormalizeKey`, `ValidateEnum`) keep their existing
+  "best-effort" stability notes.
 - 🟡 **Flagship demo with broad recognition** in addition to or
   replacing the current kubernetes + postgres demos. E.g. "ken
   indexes the Go standard library, ask it questions" — instantly

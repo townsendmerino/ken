@@ -49,6 +49,11 @@ func LogLevelNames() []string { return []string{"debug", "info", "warn", "error"
 // Logger is the level-aware logger used by mcp.Run and shared with
 // cmd/ken-mcp. Writes to its underlying io.Writer (stderr by default);
 // must never be wired to os.Stdout.
+//
+// Stability: 1.0-stable for the type + its Logf method. The
+// [ParseLogLevel] / [LogLevelNames] helpers + [LogLevel] constants
+// are also 1.0-stable. SDK authors who wire [Options.LogWriter] or
+// the Telemetry callback consume this surface.
 type Logger struct {
 	Level LogLevel
 	l     *log.Logger

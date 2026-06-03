@@ -17,8 +17,6 @@ package mcp
 import (
 	"fmt"
 	"strings"
-
-	"github.com/townsendmerino/ken/internal/search"
 )
 
 // DefaultTopK is the default value for top_k across both tools
@@ -182,7 +180,12 @@ type CallersArgs struct {
 // Exported because bench/tokens/ measures token budgets against this
 // exact wire format (not the in-memory chunk text), so it has to call
 // the same formatter ken-mcp emits over the JSON-RPC channel.
-func FormatResults(header string, results []search.Result) string {
+//
+// Stability: 1.0-stable. The output wire format is the agent-facing
+// contract — changing it is a behavior change that needs an ADR.
+// The signature accepts the [Result] alias defined in api_aliases.go;
+// SDK authors don't need to import internal/search to call this.
+func FormatResults(header string, results []Result) string {
 	var b strings.Builder
 	b.WriteString(header)
 	b.WriteString("\n\n")
