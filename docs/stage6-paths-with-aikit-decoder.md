@@ -50,6 +50,59 @@ expansion was considered during Stage-7a M0 as a way to lower
 cold-rerank-cache cost. That's the cheapest place to put a small
 generative model to work, and it's the natural Stage 6 entry point.
 
+## Update: aikit v0.3.0 (2026-06-03)
+
+v0.3.0 doesn't change which paths are feasible — it specifically
+strengthens **Path A**'s model menu and resolves **Path B**'s biggest
+open question. The framing above (the "Three concrete paths" menu,
+the trigger logic, the §10 deferred-item gate) is unchanged.
+
+What v0.3.0 added that matters here:
+
+- **Mellum2 end-to-end from a bare GGUF** — JetBrains'
+  code-pretrained model, validated argmax + cosine vs its f32 oracle.
+  Path A's open question #1 ("which model do we ship with?") cited
+  generic Qwen2.5-0.5B / Gemma-2B class as the candidate set under
+  the "small generators tolerate it" assumption. Mellum2 is a
+  *code-trained* generator, which is materially better matched to a
+  job whose entire purpose is "surface plausible identifier
+  vocabulary in the project's domain." Same binary-size budget, much
+  higher quality ceiling for the cheap-probe NDCG read.
+- **Full quant ladder** (Q2_K / Q3_K / Q4_K_M / Q5_K / Q6_K + IQ2_S /
+  IQ3_S / IQ4_NL / IQ4_XS, plus GPTQ + AWQ safetensors-resident
+  int4). Path A's open question #2 ("Q8_0 / Q4_0 / Q4_K_M") had three
+  options; the answer-space is now a continuum. Same Path A bench
+  becomes a quant-sweep instead of a binary pick.
+- **Parallel per-layer load** (Mellum2-12B Q4_K_M: ~2 min → ~20 s)
+  plus the mmap'd GGUF reader. Open question #4 ("acceptable cold
+  latency") gets meaningfully looser — the M2 LazyDecoder pattern
+  now amortizes a 20 s cold cost rather than a 2 min one.
+- **`constrain` package — structured / constrained decoding.** Path
+  B's NEW work list named "JSON output shape decision (mirror the
+  v0.9.0 JSON output mode)" as a real lift; that was code to parse
+  free-form output and gracefully fail on malformed JSON. v0.3.0
+  guarantees the model *cannot* emit malformed JSON. The cost of
+  Path B's MCP-tool surface drops accordingly.
+
+What v0.3.0 did NOT change:
+
+- The §10 Stage-6 trigger ("Stage 5 reranker creates a need for
+  higher-level query understanding") has not fired. Stage 6 stays
+  parked post-1.0 per [road-to-1.0.md](road-to-1.0.md).
+- The Path A cheap-probe recommendation is unchanged. If the probe
+  is run, Mellum2 + Q4_K_M is now the obvious starting model — but
+  the doc-level recommendation remains "only build production wiring
+  if the bench moves," exactly as written below.
+- The HyDE-on-rerank-on **kill verdict** from M0a
+  ([outputs/m0-hyde-results.md](../outputs/m0-hyde-results.md))
+  predates the v0.3.0 model menu. A code-trained generator could in
+  principle re-open that probe; that's a *separate* probe with a
+  *separate* trigger, not a 1.0 item.
+
+The rest of this doc reads as-was — open questions #3 (binary-size
+budget) and #5 (telemetry shape) are independent of the v0.3.0 delta
+and still apply if Path A is taken up.
+
 ## Three concrete paths, ordered
 
 Each path below names: what it would do, what aikit's new bits

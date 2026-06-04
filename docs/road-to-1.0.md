@@ -138,18 +138,30 @@ invocations).
   sideways for genuinely parallel work. Honest about cost / time on
   the cloud-side skills and consistent with USERS.md's existing
   ken-vs-grep decision matrix.
-- 🟢 **Aikit's 1.0** — coordination ongoing. ken pins `aikit v0.2.0`
-  in go.mod (bumped from v0.1.1 on 2026-06-03 in commit `b3ea116`).
+- 🟢 **Aikit's 1.0** — coordination ongoing. ken pins `aikit v0.3.0`
+  in go.mod (bumped from v0.1.1 → v0.2.0 on 2026-06-03 in commit
+  `b3ea116`; v0.2.0 → v0.3.0 on 2026-06-03 in commit `a1104a7`).
   v0.2.0 added the generative half — pure-Go `decoder` + `tokenizer`
   + GGUF support — without disturbing the v0.1 hard tier; both new
-  packages are best-effort. aikit's README documents its stability
-  tiers in the same hard/best-effort shape ken uses;
+  packages are best-effort. **v0.3.0 is decoder/quant maturation:**
+  full K-quant + IQ2/3/4 ladder, Mellum2 (code-pretrained) +
+  qwen2/qwen3/gemma3/Qwen-MoE end-to-end from bare GGUF, GPTQ + AWQ
+  safetensors-resident int4, parallel per-layer load (Mellum2-12B
+  Q4_K_M ~2 min → ~20 s), SDOT/NEON int8 kernels, and the
+  `constrain` package (structured decoding that cannot emit
+  malformed JSON). Zero API churn in the ken-imported surface
+  (`ann`, `bm25`, `topk`, `encoder`, `chunk` + 3 sub, `fuse`,
+  `embed`) — `embed/model.go` / `tokenize.go` / `pool.go`
+  byte-identical; the only edit in the import surface was a 15-line
+  additive `embed/safetensors.go` change for GPTQ checkpoint
+  sniffing. aikit's README documents its stability tiers in the
+  same hard/best-effort shape ken uses;
   [DEVELOPERS.md](DEVELOPERS.md#aikit-packages) notes that ken 1.0
   requires aikit at a tagged 1.0 (or clearly within a 1.0-RC
-  window) so the stability promises compose cleanly. v0.2.0's
-  generative-half packages would currently be best-effort under
-  that requirement — a coordination point, not a blocker for ken's
-  1.0 release.
+  window) so the stability promises compose cleanly. v0.3.0's
+  generative-half packages would still be best-effort under that
+  requirement — a coordination point, not a blocker for ken's 1.0
+  release.
 - 🟢 **Performance expectations doc** — shipped 2026-06-03 at
   [`docs/PERF-expectations.md`](PERF-expectations.md). User-facing
   "what should ken feel like" layer above PERF.md's measurement
