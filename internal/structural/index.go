@@ -327,13 +327,31 @@ var (
 	parserPools sync.Map // map[string]*langCache
 )
 
-// parseTimeoutMicros caps any single file's parse time. Matches the
-// treesitter chunker's value; pathological grammars (C#, some bash)
-// can hang forever otherwise. Set on the pool via
-// WithParserPoolTimeoutMicros; a timeout makes pool.Parse return an
-// error, which we treat as "skip this file" — same graceful-degrade
-// pattern as the chunker.
-const parseTimeoutMicros uint64 = 1_000_000
+// parseTimeoutMicros caps any single file's parse time. 0 disables.
+//
+// Originally set to 1s as a defensive bound against pathological
+// grammars (C# / some bash) that could hang forever in a single parse.
+// That budget broke the Arm B enrichment label's determinism contract:
+// under contention (CI -race + low GOMAXPROCS) a healthy parse could
+// brush the 1s budget, gotreesitter would *silently* return the
+// partial tree (pool.Parse returns (tree, nil) regardless of timeout —
+// stop reason is on the Tree), and the extractor would walk it as if
+// complete, producing a label missing a function or call. Two runs of
+// the same corpus then produce different bytes, and
+// TestBuildDeterminism_CrossRun/contention-bm25 flakes.
+//
+// Disabled because (a) the cited pathological grammars (C# / Swift)
+// are parked and not in the dispatch table, (b) the supported set
+// (Python, Go, TS/JS, Java, Rust, C/C++, PHP, Ruby, Kotlin, Dart) has
+// no known hang-forever inputs at file scale, and (c) ExtractFile is
+// per-file work — one slow parse blocks one worker, not the whole
+// build. If a real hang ever surfaces, prefer adding a watchdog-style
+// cancellation flag (deterministic skip on cancel) over a time budget.
+//
+// Defense in depth: ExtractFile also checks tree.ParseStopReason() and
+// returns nil for any non-accepted parse — so even if a future tweak
+// re-enables a timeout, the silent partial-tree path is closed.
+const parseTimeoutMicros uint64 = 0
 
 // langCacheFor returns the cached pool + language handle for a
 // grammar, or nil if the grammar isn't registered. Lazy-initialized.

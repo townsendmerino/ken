@@ -2,6 +2,8 @@ package structural
 
 import (
 	"path/filepath"
+
+	"github.com/odvcencio/gotreesitter"
 )
 
 // ExtractFile parses a single file's bytes via the gotreesitter
@@ -33,6 +35,15 @@ func ExtractFile(rel string, data []byte) *FileStruct {
 	}
 	tree, err := lc.pool.Parse(data)
 	if err != nil || tree == nil {
+		return nil
+	}
+	// Defense in depth (matches the parseTimeoutMicros=0 rationale in
+	// index.go): gotreesitter returns the partially-built tree on every
+	// non-accept stop reason — timeout, cancellation, iteration cap,
+	// node cap, etc. — with err=nil. Walking that partial tree as if
+	// complete is what flakes the determinism contract; reject any
+	// tree whose parse didn't run to clean acceptance.
+	if r := tree.ParseStopReason(); r != gotreesitter.ParseStopAccepted {
 		return nil
 	}
 	root := tree.RootNode()
