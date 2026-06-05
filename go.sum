@@ -113,8 +113,8 @@ github.com/stretchr/testify v1.4.0/go.mod h1:j7eGeouHqKxXV5pUuKE4zz7dFj8WfuZ+81P
 github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/townsendmerino/aikit v0.4.0 h1:fDHtlY+sFNHuuT1vlvaKDOtUgueniHEMxEh+/BbaIeA=
-github.com/townsendmerino/aikit v0.4.0/go.mod h1:UhgMEx0ow8/i5NAK9TUcJMtIQxrhHmGv4Xjg7DmsDDU=
+github.com/townsendmerino/aikit v0.4.1 h1:d61lffMxJ9nLtWR8xASeOXEImQHApIwpo4Y6b8KGBEM=
+github.com/townsendmerino/aikit v0.4.1/go.mod h1:UhgMEx0ow8/i5NAK9TUcJMtIQxrhHmGv4Xjg7DmsDDU=
 github.com/townsendmerino/aikit/chunk/treesitter v0.4.0 h1:pztXN8HXqUYnYv+CYG88Vru8/38QKr4ShQu8VzUuaJ4=
 github.com/townsendmerino/aikit/chunk/treesitter v0.4.0/go.mod h1:7IW3tFAzZQO0HGSlYwdx+71qlUeWzfq4E3mEwWB9VUU=
 github.com/xanzy/ssh-agent v0.3.3 h1:+/15pJfg/RsTxqYcX6fHqOXZwwMP+2VyYWJeWM2qQFM=

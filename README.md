@@ -419,7 +419,7 @@ The default `regex` chunker handles most cases well. If you index a lot of Kotli
 
 ## Features
 
-- **Pure Go, no cgo.** Single static binary; `GOOS`/`GOARCH` cross-compiles for free; no `libtokenizers.a` to vendor per platform.
+- **Pure Go, no cgo.** Single static binary that cross-compiles to **Linux, macOS, and Windows** (amd64/arm64) for free — no `libtokenizers.a` or per-platform assets to vendor (the tree-sitter grammars run on a pure-Go WASM runtime). SIGHUP-based reload is a no-op on Windows; everything else is identical.
 - **Drop-in MCP-compatible with semble.** Same `search` / `find_related` tool schemas, same markdown-string output format, install snippets adapted from semble's README.
 - **Algorithm verbatim from semble.** BM25 + Model2Vec semantic + α-weighted RRF fusion + code-aware rerank (definition / embedded-symbol / file-coherence / stem-match boosts) + path penalties + file-saturation decay. See [docs/DESIGN.md §7](docs/DESIGN.md#7-hybrid-retrieval--rerank).
 - **Measured agent-input efficiency.** ~44× fewer tokens than grep+Read at recall@10 on semble NL queries (4,269 vs 189,591 tok); ~16× on symbol queries; at 280K-file corpus scale, grep+Read is functionally impossible and ken is the only workable path. Full breakdown + caveats in [`docs/BENCH.md`](docs/BENCH.md#token-budget-recall--agent-side-efficiency).
