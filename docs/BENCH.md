@@ -246,7 +246,7 @@ This is the exact M0 cobra-β=1 pattern: pure replacement destroys file-level ar
 
 ```bash
 # 1) One-time setup: fetch both models (pure-Go; no Python tooling).
-ken download-model            # potion-code-16M  → ~/.ken/model           (~64 MB)
+ken download-model            # potion-code-16M  → ~/.ken/model           (~60 MB)
 ken download-model --rerank   # CodeRankEmbed    → ~/.ken/rerank-model    (~547 MB)
 
 # CoIR with hybrid-rerank (opt-in via KEN_RERANK=1).
@@ -355,16 +355,27 @@ Important nuance: **grep wins on recall completeness**. If an agent's task absol
 ### Default-mode (hybrid) recall — the number that matters
 
 The recall columns in the tables above are BM25-only, because the
-token-budget harness builds `ModeBM25`. ken's shipped default — for both
-`ken search` and `ken-mcp` — is **hybrid**, and on the same semble corpus
-(1251 tasks; reproduced by `internal/search/recall_decomp_test.go`,
-build-tag `bench`) the semantic arm lifts recall@10 by **+0.13**:
+token-budget harness builds `ModeBM25` by default (pass
+`KEN_TOKENS_MODE=hybrid` for the hybrid run below). ken's shipped
+default — for both `ken search` and `ken-mcp` — is **hybrid**, and on the
+same semble corpus (1251 tasks; reproduced by
+`internal/search/recall_decomp_test.go`, build-tag `bench`) the semantic
+arm lifts recall@10 by **+0.13**:
 
 | recall@10 | bm25-only (token-bench tables) | **hybrid (default)** |
 |---|---:|---:|
 | NL      | 0.832 | **0.967** |
 | symbol  | 0.892 | **0.995** |
 | overall | 0.841 | **0.971** |
+
+**Token cost in hybrid mode.** Running the same token-budget harness in
+hybrid (`KEN_TOKENS_MODE=hybrid go test -tags=bench ./bench/tokens/ -run
+TestTokens_Semble`) confirms the cost story holds at the higher recall:
+at K=10, NL queries cost a median **4,120 tokens at 0.967 recall** (vs
+tokenized grep+Read's 189,773 — **~46× cheaper**); symbol queries **3,647
+tokens at 0.994 recall** (vs 57,291 — ~16×). Formatted output is K fenced
+chunks regardless of mode, so the medians track the BM25-only table
+closely; the recall is what rises.
 
 Decomposing the residual NL miss (1 − 0.967 = 0.033) localizes where any
 further recall would have to come from — and which lever fixes it:

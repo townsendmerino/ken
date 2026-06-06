@@ -23,7 +23,7 @@ users already know. So "hybrid-by-default onboarding" = **close the
 ken-mcp silent-downgrade gap + make the model trivial to obtain.**
 
 Nothing is missing technically — `internal/modelfetch.Fetch` is pure-Go,
-fetches potion-code-16M (~64 MB) to `~/.ken/model`, atomic, no Python, and
+fetches potion-code-16M (~60 MB) to `~/.ken/model`, atomic, no Python, and
 already exposes `BaseURL`/`Client`/`Progress` injection points for
 offline tests. This is a behavior + distribution change, not new infra.
 

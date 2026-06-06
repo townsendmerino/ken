@@ -67,12 +67,32 @@ func TestTokens_Semble(t *testing.T) {
 		t.Skipf("missing corpus root %s — run `python %s/benchmarks/sync_repos.py` first", corpusRoot, semblePath)
 	}
 
+	// KEN_TOKENS_MODE selects the retrieval mode the token bench measures.
+	// Default bm25 (no model needed — the historical token-budget table).
+	// hybrid/semantic resolve a model dir (KEN_MODEL_DIR → ~/.ken/model)
+	// so the median-token + recall numbers reflect the default product mode.
+	tokMode, tokModelDir := search.ModeBM25, ""
+	switch os.Getenv("KEN_TOKENS_MODE") {
+	case "hybrid":
+		tokMode = search.ModeHybrid
+	case "semantic":
+		tokMode = search.ModeSemantic
+	}
+	if tokMode != search.ModeBM25 {
+		if tokModelDir = os.Getenv("KEN_MODEL_DIR"); tokModelDir == "" {
+			tokModelDir = filepath.Join(os.Getenv("HOME"), ".ken", "model")
+		}
+		if _, serr := os.Stat(filepath.Join(tokModelDir, "model.safetensors")); serr != nil {
+			t.Skipf("KEN_TOKENS_MODE=%s needs a model; none at %s", os.Getenv("KEN_TOKENS_MODE"), tokModelDir)
+		}
+	}
+
 	// Load repos.json.
 	repos, err := loadSembleRepos(reposPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("loaded %d repos", len(repos))
+	t.Logf("loaded %d repos (token mode=%v)", len(repos), tokMode)
 
 	// Optional subsample: KEN_SEMBLE_REPO_LIMIT=N runs the first N
 	// repos (alphabetic by name). Default is all.
@@ -110,7 +130,7 @@ func TestTokens_Semble(t *testing.T) {
 			continue
 		}
 
-		ix, err := search.FromPath(benchDir, search.ModeBM25, "regex", "")
+		ix, err := search.FromPath(benchDir, tokMode, "regex", tokModelDir)
 		if err != nil {
 			t.Logf("[%s] skipped — index build: %v", repo.Name, err)
 			continue

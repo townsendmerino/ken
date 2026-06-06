@@ -642,7 +642,7 @@ http(s) URLs shallow-clone via `go-git` to `$TMPDIR/ken-mcp/<sha256-prefix>/`. N
 ### Env vars
 
 - `KEN_MCP_DEFAULT_REPO` — optional pre-indexed source; tools may then be called without `repo`.
-- `KEN_MCP_MODE` — `bm25`/`semantic`/`hybrid` (default `hybrid`). Auto-downgrades to `bm25` with a stderr warning if the model dir is unreachable.
+- `KEN_MCP_MODE` — `bm25`/`semantic`/`hybrid` (default `hybrid`). Serves `bm25` while the model is missing; auto-fetched on first run by default (`KEN_MCP_AUTO_FETCH`, ADR-037), downgrade-and-warn when that's off.
 - `KEN_MCP_MODEL_DIR` — Model2Vec snapshot dir (must contain `model.safetensors`). Empty ⇒ `bm25`-only.
 - `KEN_MCP_CHUNKER` — `regex`/`treesitter`/`line` (default `regex`).
 - `KEN_MCP_CACHE_SIZE` — LRU bound (default 16).

@@ -11,7 +11,7 @@ ken is a Go port of [semble](https://github.com/MinishLab/semble): BM25 lexical 
 
 ## Why ken
 
-- **~97% recall@10 in the default (hybrid) mode** — **0.967 NL / 0.995 symbol** on semble's 1,251-query benchmark, vs grep's ~99.9% — while costing an agent **~44× fewer tokens** than `grep + Read` (4,269 vs 189,591 median tokens on NL queries — token medians measured in the BM25-only harness, but formatted-output size is essentially mode-independent). For "find the chunk that answers this," that's a 1–2 order-of-magnitude token win at near-parity recall. (Reproduce: [`docs/BENCH.md`](docs/BENCH.md#default-mode-hybrid-recall--the-number-that-matters).)
+- **~97% recall@10 in the default (hybrid) mode** — **0.967 NL / 0.995 symbol** on semble's 1,251-query benchmark, vs grep's ~99.9% — while costing an agent **~46× fewer tokens** than `grep + Read` (4,120 vs 189,773 median tokens on NL queries — measured in the same default hybrid mode). For "find the chunk that answers this," that's a 1–2 order-of-magnitude token win at near-parity recall. (Reproduce: [`docs/BENCH.md`](docs/BENCH.md#default-mode-hybrid-recall--the-number-that-matters).)
 - **Single static binary.** Pure Go, no cgo, no Python interpreter on cold start, no GIL on indexing. Cross-compiles to Linux / macOS / Windows (amd64/arm64) for free.
 - **Drop-in for semble.** Same `search` / `find_related` MCP tool schemas and the same markdown-string wire format — swap the `command:` path and existing agents work unchanged.
 - **Local, CPU-only.** Embedding inference, BM25, and fusion all run on the CPU. No API keys, no GPU, no vector DB, air-gapped friendly.
@@ -81,7 +81,7 @@ command = "/absolute/path/to/ken-mcp"
 | Variable | Default | Purpose |
 |---|---|---|
 | `KEN_MCP_DEFAULT_REPO` | (unset) | Pre-indexed source; lets tools omit the `repo` arg. |
-| `KEN_MCP_MODE` | `hybrid` | `bm25` / `semantic` / `hybrid`. Auto-downgrades to `bm25` (with a stderr warning) if the model dir is unreachable. |
+| `KEN_MCP_MODE` | `hybrid` | `bm25` / `semantic` / `hybrid`. Serves `bm25` while the model is missing — fetched on first run by default (see `KEN_MCP_AUTO_FETCH`). |
 | `KEN_MCP_MODEL_DIR` | `~/.ken/model` | Path to a Model2Vec snapshot containing `model.safetensors`. Falls back to `~/.ken/model` (where `ken download-model` writes) when unset. |
 | `KEN_MCP_AUTO_FETCH` | `1` | On first run with a model-needing mode and no model present, fetch `potion-code-16M` (~60 MB) in the background, serving `bm25` until it lands then upgrading to hybrid. `0` disables (serve bm25, warn). |
 | `KEN_MCP_CHUNKER` | `regex` | `regex` / `treesitter` / `line` / `markdown`. See [Choosing a chunker](#choosing-a-chunker). |
@@ -144,7 +144,7 @@ The retrieval algorithm is a verbatim port of semble's `search.py` + `ranking/*.
 | Retrieval algorithm | reference implementation | verbatim port (constants + pipeline order from `search.py` + `ranking/*.py`) |
 | NDCG@10 on semble's benchmark | 0.854 | **0.842 hybrid** (gap 0.012, full 63 repos × 1,251 queries) |
 | Recall@10 on agent queries | (not measured) | **~0.97 hybrid** (0.967 NL / 0.995 symbol); BM25-only fallback ~0.84 |
-| Tokens to recall@10 | (not measured) | **~44× fewer than grep+Read** on NL queries |
+| Tokens to recall@10 | (not measured) | **~46× fewer than grep+Read** on NL queries (4,120 vs 189,773 median, hybrid) |
 | MCP server | yes | yes — drop-in (same schemas + wire format) |
 | Binary size | n/a | release (slim) `ken` ~22 MB · `ken-mcp` ~38 MB |
 | Requires `huggingface-cli` | yes | **no** — `ken download-model` fetches direct from HF |

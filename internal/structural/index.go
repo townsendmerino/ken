@@ -21,17 +21,17 @@
 // This is the same relevance-over-completeness trade ken makes for
 // retrieval; honest in both directions.
 //
-// Stage 8 supports twelve languages via dedicated extractors:
+// Stage 8 supports thirteen languages via dedicated extractors:
 // Python, Go, TypeScript, JavaScript, Java, Rust, C, C++, PHP, Ruby,
-// Kotlin, Dart. Adding another language is a new extract_<lang>.go
-// file plus a row in the kenLangToTSLang and langExtractor maps; the
-// surface stays the same. Languages whose grammar fails — C#
-// (unbounded recursion in the post-parse namespace recovery pass),
-// Swift (lexer misparses real-world header comments), bash
-// (pathologically slow) — silently fall through to the chunker's
-// line fallback. Extractors for those exist in tree under
-// build-tag gates so re-enabling is a flag flip once upstream
-// grammar fixes land; see DESIGN.md §10.
+// Kotlin, Dart, C# (the last un-parked on gotreesitter v0.20.2, which
+// bounded the namespace-recovery recursion that had OOM'd it). Adding
+// another language is a new extract_<lang>.go file plus a row in the
+// kenLangToTSLang and langExtractor maps; the surface stays the same.
+// Languages whose grammar still fails — Swift (lexer misparses
+// real-world header comments) and bash (pathologically slow) —
+// silently fall through to the chunker's line fallback. Their
+// extractors exist in tree under build-tag gates so re-enabling is a
+// flag flip once upstream grammar fixes land; see DESIGN.md §10.
 package structural
 
 import (
@@ -336,10 +336,10 @@ var (
 // the same corpus then produce different bytes, and
 // TestBuildDeterminism_CrossRun/contention-bm25 flakes.
 //
-// Disabled because (a) the cited pathological grammars (C# / Swift)
-// are parked and not in the dispatch table, (b) the supported set
-// (Python, Go, TS/JS, Java, Rust, C/C++, PHP, Ruby, Kotlin, Dart) has
-// no known hang-forever inputs at file scale, and (c) ExtractFile is
+// Disabled because (a) the cited pathological grammar (Swift) is
+// parked and not in the dispatch table, (b) the supported set
+// (Python, Go, TS/JS, Java, Rust, C/C++, PHP, Ruby, Kotlin, Dart, C#)
+// has no known hang-forever inputs at file scale, and (c) ExtractFile is
 // per-file work — one slow parse blocks one worker, not the whole
 // build. If a real hang ever surfaces, prefer adding a watchdog-style
 // cancellation flag (deterministic skip on cancel) over a time budget.

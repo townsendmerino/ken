@@ -234,7 +234,7 @@ The env vars you'll actually touch:
 | Variable | Default | What it controls |
 |---|---|---|
 | `KEN_MCP_DEFAULT_REPO` | empty | Pre-indexed source. Tools work without `repo` arg when set. |
-| `KEN_MCP_MODE` | `hybrid` | Retrieval mode: `bm25`/`semantic`/`hybrid`. Auto-downgrades to `bm25` if the model is missing. |
+| `KEN_MCP_MODE` | `hybrid` | Retrieval mode: `bm25`/`semantic`/`hybrid`. Serves `bm25` while the model is missing — fetched on first run by default (`KEN_MCP_AUTO_FETCH`). |
 | `KEN_MCP_MODEL_DIR` | `~/.ken/model` | Model2Vec snapshot dir. Empty ⇒ bm25-only. |
 | `KEN_MCP_CHUNKER` | `regex` | Chunker: `regex`/`treesitter`/`line`. |
 | `KEN_MCP_CACHE_SIZE` | `16` | Repo LRU bound. `0` disables caching. |

@@ -5,7 +5,7 @@ title: ken
 
 # ken
 
-Hybrid (BM25 + Model2Vec) code search + structural navigation via MCP. Pure Go. **~97% recall@10** in default mode at **~44× fewer agent tokens** than grep+Read. [Source on GitHub](https://github.com/townsendmerino/ken).
+Hybrid (BM25 + Model2Vec) code search + structural navigation via MCP. Pure Go. **~97% recall@10** in default mode at **~46× fewer agent tokens** than grep+Read. [Source on GitHub](https://github.com/townsendmerino/ken).
 
 ## Get started
 
