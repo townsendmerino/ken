@@ -11,7 +11,7 @@ ken is a Go port of [semble](https://github.com/MinishLab/semble): BM25 lexical 
 
 ## Why ken
 
-- **~97% recall@10 in the default (hybrid) mode** — **0.967 NL / 0.995 symbol** on semble's 1,251-query benchmark, vs grep's ~99.9% — while costing an agent **~44× fewer tokens** than `grep + Read` (4,269 vs 189,591 median tokens on NL queries). For "find the chunk that answers this," that's a 1–2 order-of-magnitude token win at near-parity recall. (Reproduce: [`docs/BENCH.md`](docs/BENCH.md#default-mode-hybrid-recall--the-number-that-matters).)
+- **~97% recall@10 in the default (hybrid) mode** — **0.967 NL / 0.995 symbol** on semble's 1,251-query benchmark, vs grep's ~99.9% — while costing an agent **~44× fewer tokens** than `grep + Read` (4,269 vs 189,591 median tokens on NL queries — token medians measured in the BM25-only harness, but formatted-output size is essentially mode-independent). For "find the chunk that answers this," that's a 1–2 order-of-magnitude token win at near-parity recall. (Reproduce: [`docs/BENCH.md`](docs/BENCH.md#default-mode-hybrid-recall--the-number-that-matters).)
 - **Single static binary.** Pure Go, no cgo, no Python interpreter on cold start, no GIL on indexing. Cross-compiles to Linux / macOS / Windows (amd64/arm64) for free.
 - **Drop-in for semble.** Same `search` / `find_related` MCP tool schemas and the same markdown-string wire format — swap the `command:` path and existing agents work unchanged.
 - **Local, CPU-only.** Embedding inference, BM25, and fusion all run on the CPU. No API keys, no GPU, no vector DB, air-gapped friendly.

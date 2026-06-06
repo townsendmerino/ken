@@ -266,6 +266,34 @@ python bench/semble/run_ken.py --mode hybrid-rerank \
 
 CodeRankEmbed in pure Go costs **~30 s/query** on cobra (NL queries, rerankN=50, M-series Mac) and **~70 s/query** on CoIR (full Python function-source queries up to 512 tokens). M3 (matmul backend) + M4 (parallel `EncodeBatch`) reduced this by ~40× over the M2 naive baseline; M7 (batched single-GEMM-per-layer) + M8 (int8 quant) remain available levers if a future use case needs sub-5s rerank-N=50. See [outputs/m3-results.md](../outputs/m3-results.md) for the M3 verdict ("opt-in / batch tolerable; not yet interactive without M7/M8").
 
+## Structural enrichment (Arm B) — default-on, ADR-035
+
+ken's indexer prepends a deterministic per-file label line
+(`# func: NAME | calls: A, B | raises: X`) to every chunk from a file whose
+extension has a registered gotreesitter extractor, before BM25 tokenization
+and embedding. It surfaces structurally-related identifiers into the indexed
+text. This is **default-on** (ADR-035, Stage 8 close), so it's part of the
+numbers above — recorded here because BENCH.md is the canonical numbers doc.
+
+In-process bench (the production `structural.EnrichFromFileStruct` path):
+
+| Benchmark | Δ NDCG@10 (hybrid) |
+|---|---:|
+| csn-python-nl-stripped (N=500) | **+0.0208** |
+| CoSQA dev | **+0.0321** |
+
+(Reproduces the validated Gate-1 numbers within 0.002 on the production code
+path.) Files with no registered extractor pass through unchanged.
+
+- **Ablation switch:** `KEN_ENRICH=off` (or `FSOptions.DisableEnrichment=true`)
+  disables it for an A/B.
+- **Oversized-file skip:** files above 64 KiB skip enrichment
+  (`maxEnrichBytes` in `internal/structural/extract_file.go`) — a guard
+  against a gotreesitter GLR stack overflow on huge table-driven files; they
+  pass through unenriched, the same graceful no-op as an unregistered
+  extension. BM25 recall@10 is unchanged with/without it on the semble corpus.
+- **Full design + rationale:** [ADR-035](internal/DECISIONS.md#adr-035-ship-arm-b-structural-enrichment-in-the-production-indexer-stage-8-close).
+
 ## Token-budget recall — agent-side efficiency
 
 ### Why this exists
