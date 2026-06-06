@@ -26,7 +26,7 @@ builds:
     main: ./cmd/ken
     env:
       - CGO_ENABLED=0
-    goos: [darwin, linux]
+    goos: [darwin, linux, windows]
     goarch: [amd64, arm64]
     flags:
       - -trimpath
@@ -59,7 +59,7 @@ builds:
     main: ./cmd/ken-mcp
     env:
       - CGO_ENABLED=0
-    goos: [darwin, linux]
+    goos: [darwin, linux, windows]
     goarch: [amd64, arm64]
     flags:
       - -trimpath
@@ -72,6 +72,10 @@ archives:
     ids: [ken, ken-mcp]
     name_template: "ken_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
+    # Windows convention is .zip (tar.gz is awkward without bundled tools).
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     files:
       - LICENSE
       - NOTICE
