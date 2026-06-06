@@ -84,6 +84,52 @@ jobs:
       - name: go test ./...
         run: go test ./...
 
+  # Windows smoke. The `test` matrix above is ubuntu+macos (its gofmt /
+  # slim-build steps are bash-specific); this dedicated job guards the
+  # Windows surface — cross-compile, the sighup_windows.go no-op path, the
+  # MCP stdio contract, and binary-actually-runs — so a Windows regression
+  # is caught at PR time, not at release time (Windows binaries ship as of
+  # v0.10.0). bash is available on windows runners for the slim/grammar
+  # steps; everything else uses the default shell.
+  smoke-windows:
+    name: windows / build · slim · run · core tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: go build ./...
+        run: go build ./...
+
+      # Compile the exact slim release binaries (the grammar_subset tags
+      # from .goreleaser.yml) on Windows, so a windows-only slim-build
+      # break surfaces here rather than mid-release.
+      - name: slim release build compile-smoke (grammar_subset)
+        shell: bash
+        run: |
+          tags="$(scripts/subset-tags.sh)"
+          echo "subset tags: $tags"
+          CGO_ENABLED=0 go build -tags "$tags" -o ken.exe ./cmd/ken
+          CGO_ENABLED=0 go build -tags "$tags" -o ken-mcp.exe ./cmd/ken-mcp
+
+      # The binary actually runs on Windows: a bm25 search (no model) over
+      # the polyglot fixture must return the expected hit.
+      - name: smoke — ken search runs (bm25, no model)
+        shell: bash
+        run: ./ken.exe search ./testdata/repo "validate" -k 3 --mode bm25 | grep -q "auth.py"
+
+      # Core unit tests on Windows: retrieval + structural (incl. C#) +
+      # repo walk + the MCP package + the cmd/ken-mcp binary stdout-contract
+      # tests (which validate the MCP-over-stdio path on Windows). DB
+      # integration is gated behind -tags=dbintegration, so it's skipped.
+      - name: core unit tests
+        run: go test ./internal/search/ ./internal/structural/ ./internal/repo/ ./mcp/ ./cmd/ken-mcp/
+
   # Race-detector pass on the full unit suite. Lives in a separate
   # job from `test` so the ~2-3x slowdown from `-race` runs in
   # parallel with fast-feedback CI rather than blocking it.
