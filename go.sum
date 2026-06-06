@@ -83,6 +83,8 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
 github.com/ncruces/go-strftime v1.0.0/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
 github.com/odvcencio/gotreesitter v0.20.1 h1:h6aiS5AvXhpfCdLzOSQui8IYkJBmH+tZuujInZzVxFw=
 github.com/odvcencio/gotreesitter v0.20.1/go.mod h1:hBVkghd0paaYAVwd2087vfwdeU984bQbMo9LvpE0moo=
+github.com/odvcencio/gotreesitter v0.20.2 h1:oWxGgy0WzLJKeiZB8EFzXDDlHYG/hqiZmWrW+81uwy4=
+github.com/odvcencio/gotreesitter v0.20.2/go.mod h1:hBVkghd0paaYAVwd2087vfwdeU984bQbMo9LvpE0moo=
 github.com/onsi/gomega v1.34.1 h1:EUMJIKUjM8sKjYbtxQI9A4z2o+rruxnzNvpknOXie6k=
 github.com/onsi/gomega v1.34.1/go.mod h1:kU1QgUvBDLXBJq618Xvm2LUX6rSAfRaFRTcdOeDLwwY=
 github.com/pjbgf/sha1cd v0.6.0 h1:3WJ8Wz8gvDz29quX1OcEmkAlUg9diU4GxJHqs0/XiwU=
@@ -117,6 +119,8 @@ github.com/townsendmerino/aikit v0.4.1 h1:d61lffMxJ9nLtWR8xASeOXEImQHApIwpo4Y6b8
 github.com/townsendmerino/aikit v0.4.1/go.mod h1:UhgMEx0ow8/i5NAK9TUcJMtIQxrhHmGv4Xjg7DmsDDU=
 github.com/townsendmerino/aikit/chunk/treesitter v0.4.0 h1:pztXN8HXqUYnYv+CYG88Vru8/38QKr4ShQu8VzUuaJ4=
 github.com/townsendmerino/aikit/chunk/treesitter v0.4.0/go.mod h1:7IW3tFAzZQO0HGSlYwdx+71qlUeWzfq4E3mEwWB9VUU=
+github.com/townsendmerino/aikit/chunk/treesitter v0.4.1 h1:5TuT+9LMgLYOXLNMonh/Kt38SLAHE35/6gotUS1UA+s=
+github.com/townsendmerino/aikit/chunk/treesitter v0.4.1/go.mod h1:Zscm2azVWB0obz979XjYU+Yja2lSqVY8wMJey2LWu5s=
 github.com/xanzy/ssh-agent v0.3.3 h1:+/15pJfg/RsTxqYcX6fHqOXZwwMP+2VyYWJeWM2qQFM=
 github.com/xanzy/ssh-agent v0.3.3/go.mod h1:6dzNDKs0J9rVPHPhaGCukekBHKqfl+L3KghI1Bc68Uw=
 github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=

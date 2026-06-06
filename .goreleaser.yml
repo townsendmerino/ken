@@ -50,6 +50,7 @@ builds:
       - grammar_subset_lua
       - grammar_subset_zig
       - grammar_subset_dart
+      - grammar_subset_c_sharp
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}}
 

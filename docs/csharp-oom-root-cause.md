@@ -1,5 +1,14 @@
 # gotreesitter C# OOM root cause (v0.20.0-rc3)
 
+> **RESOLVED 2026-06-06 in gotreesitter v0.20.2.** Upstream #98/#106
+> ("bound C# namespace recovery sub-parses") bounded the unbounded
+> recursion this memo diagnosed. Re-verified: the minimal reproducer
+> below parses in ~5ms (was 3GB/OOM), and Dapper's 156 `.cs` files parse
+> in ~3s at 89% clean root with no OOM. C# is now un-parked and shipped —
+> see [`DESIGN.md` §10](DESIGN.md#10-risk-register) and
+> [`road-to-1.0.md`](road-to-1.0.md). Retained as the diagnostic record
+> of the original defect.
+
 Written 2026-06-03 for filing upstream at
 [github.com/odvcencio/gotreesitter](https://github.com/odvcencio/gotreesitter).
 This is the diagnostic memo behind the ken-side C# park documented in

@@ -264,21 +264,18 @@ var kenLangToTSLang = map[string]string{
 	".kt":   "kotlin",
 	".kts":  "kotlin",
 	".dart": "dart",
-	// .swift intentionally OMITTED — the gotreesitter v0.20.0-rc3
-	// tree-sitter-swift grammar misparses real-world Swift (header
-	// comments containing common words like "and" / "software" /
-	// "Permission" produce a root=ERROR parse; 0–35% clean-parse
-	// rate across Alamofire / swift-nio / swift-collections /
-	// Defaults). The extractor at extract_swift.go is parked behind
-	// the `swift` build tag; re-enable once the grammar improves.
-	// See DESIGN.md §10.
-	// .cs (C#) intentionally OMITTED — the gotreesitter v0.20.0-rc3
-	// C# grammar still OOMs on real-world C# (dapper-corpus
-	// retest 2026-06-03: 93+ GB resident before SIGKILL, even
-	// single-threaded). The extractor at extract_csharp.go is
-	// kept in tree so re-enabling is a one-line change once
-	// either the grammar fixes the memory regression or ken
-	// adds a per-parse memory cap. See DESIGN.md §10.
+	".cs":   "c_sharp",
+	// .swift intentionally OMITTED — the gotreesitter v0.20.2
+	// tree-sitter-swift grammar still misparses real-world Swift
+	// (header-comment fix in v0.20.2 lifted Alamofire 0%→35% clean,
+	// but ~65% of files still fail and ~20% take 2–6s per parse —
+	// not production-viable). The extractor at extract_swift.go is
+	// parked behind the `swift` build tag; re-enable once the grammar
+	// improves further. See DESIGN.md §10.
+	// .cs (C#) un-parked 2026-06-06: gotreesitter v0.20.2 bounded the
+	// namespace-recovery sub-parses that OOM'd on v0.20.0-rc3 (Dapper
+	// retest: 89% clean, ~3s/156 files, no SIGKILL). extractCsharp is
+	// registered below; see DESIGN.md §10.
 }
 
 // langExtractor maps a gotreesitter grammar name to its AST-walking
@@ -303,11 +300,10 @@ var langExtractor = map[string]func([]byte, *gotreesitter.Node, *gotreesitter.La
 	"ruby":       extractRuby,
 	"kotlin":     extractKotlin,
 	"dart":       extractDart,
+	"c_sharp":    extractCsharp,
 	// "swift": extractSwift — registered but parked; see the
 	// kenLangToTSLang block above. Uncomment when the grammar
 	// is fixed upstream.
-	// "c_sharp": extractCsharp — registered but parked; see the
-	// kenLangToTSLang block above. Uncomment when the OOM clears.
 }
 
 // langCache holds the pool + language handle per grammar. Both are

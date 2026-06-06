@@ -1,16 +1,10 @@
-//go:build csharp
-
-// The extractor below is gated behind the `csharp` build tag — it
-// compiles only when explicitly requested (`go build -tags=csharp
-// ./...`) and is excluded from the default build. C# remains parked
-// at the kenLangToTSLang gate because the gotreesitter C# grammar
-// OOMs on real-world C# (last retested with v0.20.0-rc3 against the
-// DapperLib/Dapper repo, 2026-06-03: 93+ GB resident before SIGKILL,
-// even single-threaded). The file stays in-tree so the extractor
-// work isn't lost; re-enabling when the grammar improves is a
-// two-line change: register `.cs → c_sharp` in kenLangToTSLang and
-// `c_sharp → extractCsharp` in langExtractor, drop this build tag,
-// and revert the OOM note in DESIGN.md §10.
+// C# structural extractor. Un-parked 2026-06-06: gotreesitter v0.20.2
+// bounded the C# namespace-recovery sub-parses that previously OOM'd on
+// real-world C# (DapperLib/Dapper retest under v0.20.0-rc3: 93+ GB
+// resident before SIGKILL). Re-verified on v0.20.2: Dapper's 156 .cs
+// files parse in ~3s, 89% clean root, no OOM (the minimal reproducer
+// from docs/csharp-oom-root-cause.md now parses in ~5ms). See DESIGN.md
+// §10 and that memo for the resolution history.
 
 package structural
 
@@ -21,18 +15,16 @@ import (
 // extractCsharp walks a tree-sitter-c_sharp AST and fills FileStruct.
 // Same shape as the other extractors.
 //
-// Status as of 2026-06-03: the gotreesitter v0.20.0-rc3 C# grammar
-// still OOMs on real-world C# (dapper retest: 93+ GB resident before
-// SIGKILL, even single-threaded). Root cause is an unbounded
-// recursion in `parser_result_csharp.go`'s post-parse namespace
-// recovery pass — full diagnostic in [docs/csharp-oom-root-cause.md].
-// This file remains gated behind the `csharp` build tag and is
-// EXCLUDED from default builds; the `.cs` registration in
-// kenLangToTSLang is also commented out. Re-enable once an upstream
-// gotreesitter release ships the recursion-depth fix, OR ken adds
-// a per-parse memory cap at the chunker layer.
+// Status as of 2026-06-06: UN-PARKED. gotreesitter v0.20.2 bounded the
+// namespace-recovery sub-parses whose unbounded recursion previously
+// OOM'd on real-world C# (dapper retest under v0.20.0-rc3: 93+ GB
+// resident before SIGKILL). Re-verified on v0.20.2: Dapper's 156 .cs
+// files parse in ~3s, 89% clean root, no OOM; the minimal reproducer
+// from docs/csharp-oom-root-cause.md now parses in ~5ms. This file
+// compiles in the default build, `.cs → c_sharp` is registered in
+// kenLangToTSLang, and `c_sharp → extractCsharp` in langExtractor.
 //
-// C# node-type mapping (from gotreesitter v0.20.0-rc3):
+// C# node-type mapping (from gotreesitter v0.20.2):
 //
 //   - method_declaration       — name field is identifier; parameters,
 //     returns, body all field-named.

@@ -10,6 +10,25 @@ with pre-built binaries.
 
 ## [Unreleased]
 
+### Added — C# language support (13th language)
+
+- **C# (`.cs`) un-parked and shipped** now that gotreesitter **v0.20.2**
+  bounded the C# namespace-recovery sub-parses (#98/#106) whose unbounded
+  recursion previously OOM'd ken's indexer (1.7+ GB RSS → SIGKILL on real
+  C#; v0.20.0-rc3 retest hit 93+ GB). Re-verified: Dapper's 156 `.cs`
+  files parse in ~3s at 89% clean root with no OOM; the former minimal
+  OOM reproducer now parses in ~5ms. Coordinated the same three wirepoints
+  as the Dart add: aikit `chunk/treesitter` `KenToTreeSitter`
+  (`csharp → c_sharp`, bumped to `v0.4.1`), the `.goreleaser.yml`
+  `grammar_subset_c_sharp` slim-release tag (drift-guard green), and the
+  structural extractor (`extract_csharp.go`, build tag dropped; `.cs →
+  c_sharp` in `kenLangToTSLang`, `c_sharp → extractCsharp` in
+  `langExtractor`). New regression test exercises the former OOM trigger.
+  gotreesitter bumped `v0.20.1 → v0.20.2` (also carries Go/JS/TS/Python
+  grammar fixes #100–#103). **Swift stays parked** — v0.20.2's
+  license-header fix lifted Alamofire 0%→35% clean but ~65% of real Swift
+  still fails and ~20% takes 2–6s/parse.
+
 ### Added — Phase 0 of the structural call-graph plan (substrate for function-level edges)
 
 - **`FuncDef.StartLine` / `FuncDef.EndLine` + `ClassDef.StartLine` /
