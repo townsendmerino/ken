@@ -126,7 +126,38 @@ What we learned:
 - **chunkSize is in bytes, not tokens.** The cAST paper uses tokens; Chonkie uses tokens. ken uses bytes (consistent with the rest of ken's pipeline). Increasing chunkSize from 1500 → 3000 bytes (≈ Chonkie's token budget) *hurt* NDCG by 0.004 on non-bash languages — bigger chunks dilute BM25 IDF and average out Model2Vec embeddings without preserving more structural signal. ken's existing 1500-byte budget is the right value for both chunkers.
 - **Two grammars failed badly enough to disable entirely.** The gotreesitter v0.18.0 **C# grammar** OOMs (1.7+ GB RSS) on real C# files. The **bash grammar** is pathologically slow (~39% of files timeout at 1 s per parse). Both are absent from the treesitter chunker's supported-languages list and route through the line chunker — identical behavior to the regex chunker's fallback path for them.
 - **The wins are real but narrow.** Kotlin +0.011, Zig +0.013, TypeScript +0.009, Java +0.006, PHP +0.005. Users who index those languages heavily should prefer `--chunker=treesitter`. Everyone else should stay on the default `regex` — losses on Python (−0.009), C (−0.017), Rust (−0.013), Lua (−0.022), Scala (−0.022) outweigh the wins on the average corpus.
-- **Net decision: ship treesitter as opt-in.** See [`docs/internal/DECISIONS.md` ADR-011](internal/DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in) for the full rationale; the per-language recommendation table is in [README.md "Choosing a chunker"](../README.md#choosing-a-chunker).
+- **Net decision: ship treesitter as opt-in.** See [`docs/internal/DECISIONS.md` ADR-011](internal/DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in) for the full rationale; the full per-language recommendation table is just below.
+
+### Per-language chunker recommendation (full table)
+
+Moved here from the README. The NDCG@10 difference is small (overall hybrid: treesitter 0.838 vs regex 0.842 — Δ −0.004, within bench noise), but it's not uniform per-language. From the v0.2.0 measurement on semble's 63-repo benchmark:
+
+| Language | regex | treesitter | Recommendation |
+|---|---:|---:|---|
+| Kotlin | 0.806 | **0.817** | **`treesitter`** *(+0.011)* |
+| Zig | 0.867 | **0.880** | **`treesitter`** *(+0.013)* |
+| TypeScript | 0.676 | **0.685** | **`treesitter`** *(+0.009)* |
+| Java | 0.829 | **0.835** | **`treesitter`** *(+0.006)* |
+| PHP | 0.860 | **0.865** | **`treesitter`** *(+0.005)* |
+| Python | **0.870** | 0.861 | `regex` *(−0.009)* |
+| C | **0.748** | 0.731 | `regex` *(−0.017)* |
+| C++ | **0.896** | 0.884 | `regex` *(−0.012)* |
+| Rust | **0.806** | 0.793 | `regex` *(−0.013)* |
+| Lua | **0.838** | 0.816 | `regex` *(−0.022)* |
+| Scala | **0.905** | 0.883 | `regex` *(−0.022)* |
+| Go | **0.849** | 0.846 | either *(tied within ±0.005)* |
+| JavaScript | 0.917 | 0.912 | either |
+| Ruby | 0.903 | 0.903 | either |
+| Swift | 0.846 | 0.841 | either |
+| Elixir | 0.911 | 0.907 | either |
+| Haskell | 0.738 | 0.739 | either |
+| C# | 0.859 | 0.859 | either *(treesitter auto-falls-back to line)* |
+| Bash | 0.821 | 0.821 | either *(treesitter auto-falls-back to line)* |
+
+Notes on the auto-fallback rows:
+- **C#** — the gotreesitter v0.18.0 C# grammar OOMs on real-world C# files (1.7+ GB RSS during indexing). The treesitter chunker detects unsupported languages and routes them through the line chunker, so C# behaves identically under both selections.
+- **Bash** — the bash grammar is pathologically slow on real bash-it content (~39% of files timeout). Same auto-fallback behavior.
+
 
 ## External benchmark — CoIR-CSN-Python
 
