@@ -14,8 +14,8 @@ Hybrid (BM25 + Model2Vec) code search + structural navigation via MCP. Pure Go. 
 
 ## Demos
 
-- ⭐ **[go-stdlib](https://github.com/townsendmerino/ken/tree/main/demos/go-stdlib) (flagship)** — ken indexes the Go standard library (35,708 chunks). Every Go dev knows the corpus, so you can verify the answers instantly — and reproduce the whole thing against your own `$GOROOT/src` in ~30 s. See the [example queries](https://github.com/townsendmerino/ken/blob/main/demos/go-stdlib/QUERIES.md).
-- **Scale / polyglot proof:** [ken-demo-kubernetes / ken-demo-postgres downloadable binaries](https://github.com/townsendmerino/ken/releases/tag/demos/v0.1.0) — Kubernetes Go (59,795 chunks) and PostgreSQL C (64,506 chunks, real tree-sitter AST).
+- ⭐ **[go-stdlib](https://github.com/townsendmerino/ken/releases/tag/demos/v0.2.0) (flagship, downloadable)** — ken indexes the Go standard library (35,708 chunks). Every Go dev knows the corpus, so you can verify the answers instantly — and reproduce the whole thing against your own `$GOROOT/src` in ~30 s ([source + example queries](https://github.com/townsendmerino/ken/blob/main/demos/go-stdlib/QUERIES.md)).
+- **Scale / polyglot proof** (same [`demos/v0.2.0`](https://github.com/townsendmerino/ken/releases/tag/demos/v0.2.0) release) — Kubernetes Go (v1.36.0) and PostgreSQL C (REL_18_0, real tree-sitter AST), single static binaries.
 - [Audit transcripts under `demos/`](https://github.com/townsendmerino/ken/tree/main/demos)
 
 ## Writing
