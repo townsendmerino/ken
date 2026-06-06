@@ -552,7 +552,7 @@ func FromFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.Sta
 // BuildIndex assembles a snapshot *Index from a chunks slice and (for
 // semantic/hybrid) the parallel embedding vectors. It re-tokenizes every
 // chunk for BM25 — incremental BM25 postings updates are intentionally
-// not implemented (see docs/DECISIONS.md ADR-012; the rebuild is dwarfed
+// not implemented (see docs/internal/DECISIONS.md ADR-012; the rebuild is dwarfed
 // by embedding cost on real workloads).
 //
 // Tombstoned chunks are kept in the chunks slice so callers can rely on

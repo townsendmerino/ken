@@ -8,7 +8,7 @@ heavier-weight skills (`ultrareview`, `ultracode`) on top.
 
 For the agent-user reference of ken's nine MCP tools and the
 "when do I use ken vs grep" decision matrix, see
-[USERS.md](USERS.md). This doc assumes you've read that one and
+[USERS.md](../USERS.md). This doc assumes you've read that one and
 wants the *workflow* layer above it.
 
 ## Setup (one line)
@@ -20,14 +20,14 @@ claude mcp add ken -s user -- /absolute/path/to/ken-mcp
 That's the whole thing. Per-repo routing tweaks (the optional
 `CLAUDE.md` block telling the agent when to prefer grep over ken on
 this specific repo) are documented in
-[README.md → Tuning ken's routing for your repo](../README.md#tuning-kens-routing-for-your-repo);
+[README.md → Tuning ken's routing for your repo](../../README.md#tuning-kens-routing-for-your-repo);
 skip until a specific repo's results convince you it matters.
 
 ## Layer 0 — Just ken (the routine case)
 
 90% of Claude Code sessions need nothing past the install. The
 default agent instructions ken-mcp ships with
-([`mcp/server.go`](../mcp/server.go)) already tell the agent:
+([`mcp/server.go`](../../mcp/server.go)) already tell the agent:
 
 - Use ken for conceptual queries ("where do we handle X?"),
   locating definitions, and "show me the surface of this area"
@@ -148,7 +148,7 @@ You don't pick one. The natural progression on a real PR:
   ken's structural tools (`callers`, `references`, `outline`) are
   retrieval primitives, not review verdicts.
 - **The MCP install snippet stays the same across providers.** The
-  `claude mcp add ken …` line in [USERS.md](USERS.md) works for
+  `claude mcp add ken …` line in [USERS.md](../USERS.md) works for
   Pro / Max / Team / Enterprise on any provider Claude Code supports.
 
 ## When to reach past this loop
@@ -190,7 +190,7 @@ Claude Code to this fallback; you don't need to coach the agent.
 
 References:
 
-- ken's [USERS.md](USERS.md) — install + ken-vs-grep decision matrix + nine-tool reference
-- ken's [README.md → Tuning ken's routing](../README.md#tuning-kens-routing-for-your-repo) — optional per-repo `CLAUDE.md` guidance
+- ken's [USERS.md](../USERS.md) — install + ken-vs-grep decision matrix + nine-tool reference
+- ken's [README.md → Tuning ken's routing](../../README.md#tuning-kens-routing-for-your-repo) — optional per-repo `CLAUDE.md` guidance
 - Claude Code's [Ultrareview docs](https://code.claude.com/docs/en/ultrareview.md)
 - Claude Code's [Dynamic Workflows / ultracode docs](https://code.claude.com/docs/en/workflows)

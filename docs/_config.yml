@@ -2,3 +2,8 @@ title: ken
 description: Hybrid code search via MCP
 theme: jekyll-theme-cayman
 markdown: kramdown
+
+# Internal working docs (plans, ADRs, root-cause memos, trackers) live in
+# docs/internal/ and are NOT published to the Pages site.
+exclude:
+  - internal

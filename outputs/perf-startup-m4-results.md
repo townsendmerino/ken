@@ -73,7 +73,7 @@ The other side-effect: `search.FromFS` also dropped slightly
 across all three corpora (e.g. medium 398→328 ms). This isn't
 M4's doing — same warm-disk effect. Future bench passes should
 ideally drop OS caches between runs for the cleanest numbers;
-recording the methodology in `docs/PERF.md` is on the campaign
+recording the methodology in `docs/internal/PERF.md` is on the campaign
 plan's bench rules.
 
 ## Hypothesis verdict update

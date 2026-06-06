@@ -127,7 +127,7 @@ ship.
 ## Public API surface
 
 ken's exported packages and their 1.0 stability commitment. **Audit
-closed 2026-06-03** (see [road-to-1.0 §4](road-to-1.0.md#4-strategic--positioning-items)):
+closed 2026-06-03** (see [road-to-1.0 §4](internal/road-to-1.0.md#4-strategic--positioning-items)):
 every public symbol crossing a package boundary has a tier here, plus
 a `Stability:` doc-comment on the function/type itself. Three
 internal-type leaks through the mcp package surface
@@ -376,7 +376,7 @@ next compatible run saves over it.
 
 ### Lazy load (M2)
 
-As of [ADR-036](DECISIONS.md#adr-036), the rerank model loads on
+As of [ADR-036](internal/DECISIONS.md#adr-036), the rerank model loads on
 the **first hybrid+rerank query**, not at startup. ken-mcp
 startup with `KEN_MCP_RERANK=on` is now indistinguishable from
 unset (~30 ms median). The 491 ms encoder.Load wall moves to the
@@ -442,15 +442,15 @@ for methodology).
 
 - **[DESIGN.md](DESIGN.md)** — architecture spec: pipeline,
   fusion algorithm, embed implementation, license chain.
-- **[DECISIONS.md](DECISIONS.md)** — every ADR. Read these
+- **[DECISIONS.md](internal/DECISIONS.md)** — every ADR. Read these
   before proposing structural changes — most paths have already
   been explored.
 - **[BENCH.md](BENCH.md)** — NDCG@10 / token-budget bench
   methodology. Every quality claim ships with a reproducible
   command.
-- **[PERF.md](PERF.md)** — performance discipline. Same
+- **[PERF.md](internal/PERF.md)** — performance discipline. Same
   reproducibility rule for perf claims.
-- **[road-to-1.0.md](road-to-1.0.md)** — current state of every
+- **[road-to-1.0.md](internal/road-to-1.0.md)** — current state of every
   1.0 ship-list item, plus closed/killed/deferred reasons.
 - **[Issues](https://github.com/townsendmerino/ken/issues)** —
   bug tracker. The maintainer (and Claude Code) read these.
@@ -468,7 +468,7 @@ golangci-lint run ./...` — all three should be clean before pushing.
   register in `init()`. Per ADR-032 the interface is the 1.0
   surface; the concrete struct is best-effort.
 - **Structural extractor** (new language): full step-by-step
-  walkthrough in [add-a-language.md](add-a-language.md) — AST
+  walkthrough in [add-a-language.md](internal/add-a-language.md) — AST
   probing via `debug_ast_test.go`, writing the extractor,
   registering in `kenLangToTSLang` + `langExtractor` maps,
   fixture tests, dogfood validation against a real repo,
@@ -483,5 +483,5 @@ golangci-lint run ./...` — all three should be clean before pushing.
 ### License
 
 MIT. See [LICENSE](../LICENSE) and
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for upstream
+[THIRD_PARTY_LICENSES.md](../THIRD_PARTY_LICENSES.md) for upstream
 attributions.

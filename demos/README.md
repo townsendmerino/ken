@@ -16,7 +16,7 @@ Captured agent conversations against these binaries — the actual deliverable t
 
 ## Why in-tree
 
-Originally the postgres demo *had* to live in-tree: the **treesitter** chunker was at `internal/chunk/treesitter`, and Go forbids importing `internal/` packages across module boundaries. [ADR-032](../docs/DECISIONS.md) promoted the chunker package to a public path (`chunk/treesitter`), so that constraint is gone — the demos could now be separate modules. They stay in-tree for a single paired launch and shared build tooling, not out of necessity. (The k8s demo only needs `regex`, registered transitively via `internal/search`.)
+Originally the postgres demo *had* to live in-tree: the **treesitter** chunker was at `internal/chunk/treesitter`, and Go forbids importing `internal/` packages across module boundaries. [ADR-032](../docs/internal/DECISIONS.md) promoted the chunker package to a public path (`chunk/treesitter`), so that constraint is gone — the demos could now be separate modules. They stay in-tree for a single paired launch and shared build tooling, not out of necessity. (The k8s demo only needs `regex`, registered transitively via `internal/search`.)
 
 ## Build tag + gitignored assets
 

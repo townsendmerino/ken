@@ -1,7 +1,7 @@
 # M0 — Startup & Query Latency Baselines
 
 Profile-driven baselines for the perf campaign tracked in
-[`docs/perf-campaign-startup-query.md`](../docs/perf-campaign-startup-query.md).
+[`docs/internal/perf-campaign-startup-query.md`](../docs/internal/perf-campaign-startup-query.md).
 Single run on M-series Mac (darwin/arm64, Go 1.26.3, GOMAXPROCS=8).
 N=100 warm-search samples per corpus after a 10-sample warmup
 drop. No GOGC tweaks, no profile-time-ordering games.

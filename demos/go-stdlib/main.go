@@ -10,7 +10,7 @@
 // The corpus is the Go 1.26.3 stdlib at `$GOROOT/src` minus `cmd/`
 // minus `*/testdata/*` — what a Go developer thinks of as "the
 // stdlib" (runtime, net, encoding, sync, io, context, ...). See
-// docs/road-to-1.0.md and the Phase 1 vetting evidence in
+// docs/internal/road-to-1.0.md and the Phase 1 vetting evidence in
 // demos/go-stdlib/QUERIES.md for the scope rationale + the 14
 // vetted demo queries.
 //

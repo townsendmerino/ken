@@ -58,4 +58,4 @@ Then an overall: the publishable 3-per-codebase set, any ken bugs that block shi
 
 ## Calibration line
 
-Any number or claim that makes it from this audit into the blog/release notes follows `docs/PERF.md` discipline — machine-annotated, no unverified headline claims. If retrieval is genuinely mediocre on a question, we say so (the playbook's "honest learning if adoption is weak" applies to the demo's own warts too); we don't quietly drop the hard questions and ship only the flattering ones.
+Any number or claim that makes it from this audit into the blog/release notes follows `docs/internal/PERF.md` discipline — machine-annotated, no unverified headline claims. If retrieval is genuinely mediocre on a question, we say so (the playbook's "honest learning if adoption is weak" applies to the demo's own warts too); we don't quietly drop the hard questions and ship only the flattering ones.

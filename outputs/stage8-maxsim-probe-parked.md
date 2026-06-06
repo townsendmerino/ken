@@ -5,7 +5,7 @@ shortlist with MaxSim over CodeRankEmbed's per-token vectors instead
 of CLS-pool cosine) does not beat CLS-pool at the rerank stage. The
 "do CodeRankEmbed token vectors carry late-interaction signal at
 all" gate from the kickoff memo
-([`docs/colbert-late-interaction-for-ken.md`](../docs/colbert-late-interaction-for-ken.md))
+([`docs/internal/colbert-late-interaction-for-ken.md`](../docs/internal/colbert-late-interaction-for-ken.md))
 came back negative on a small slim sample; the kickoff's explicit
 decision logic mapped that to *park shape B*.
 

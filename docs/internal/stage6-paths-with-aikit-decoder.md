@@ -11,7 +11,7 @@ hasn't been run; the foundation just landed in tree).
 
 ## The one insight that frames everything
 
-Stage 6 was listed as deferred in [DESIGN.md §10](DESIGN.md#10-risk-register)
+Stage 6 was listed as deferred in [DESIGN.md §10](../DESIGN.md#10-risk-register)
 with three implementation options (wazero + llama.wasm, Hugot's ONNX
 backend, or a hand-rolled transformer forward pass) and a single
 hard constraint: **pure Go, no cgo, single static binary.** The
@@ -94,7 +94,7 @@ What v0.3.0 did NOT change:
   the doc-level recommendation remains "only build production wiring
   if the bench moves," exactly as written below.
 - The HyDE-on-rerank-on **kill verdict** from M0a
-  ([outputs/m0-hyde-results.md](../outputs/m0-hyde-results.md))
+  ([outputs/m0-hyde-results.md](../../outputs/m0-hyde-results.md))
   predates the v0.3.0 model menu. A code-trained generator could in
   principle re-open that probe; that's a *separate* probe with a
   *separate* trigger, not a 1.0 item.
@@ -160,7 +160,7 @@ exactly what `internal/search/hybrid.go`'s α-routing already wants.
 - **Per-query latency.** Even a 0.5B model at Q4_K_M takes
   meaningful wall-clock to generate ~80 tokens. The Stage-5 rerank
   warm cache buys back ~65× the cold-rerank wall time
-  ([baseline](../internal/search/neural_rerank_bench_test.go) on
+  ([baseline](../../internal/search/neural_rerank_bench_test.go) on
   M1 Pro: 7.16 s cold → 110 ms warm); a 200–500 ms LLM expansion on
   top is acceptable for the cold path but a noticeable regression
   for the warm path. The right framing is probably "HyDE only fires
@@ -283,7 +283,7 @@ past 1.0.
   artifacts — Paths A/B don't *require* this, but it's the obvious
   way to let operators who don't want generative features avoid
   paying the binary size.
-- **Lazy model load is mandatory.** The M2 [`LazyReranker`](../internal/search/lazy_reranker.go)
+- **Lazy model load is mandatory.** The M2 [`LazyReranker`](../../internal/search/lazy_reranker.go)
   pattern applies directly — generative model load is several
   hundred MB read off disk; we already deferred it once.
 - **No new external dependencies.** `aikit/decoder` and
@@ -354,7 +354,7 @@ demand for summarization, an agentic-refinement use case) provides
 the trigger.
 
 If you do nothing, Stage 6 remains correctly parked and
-[DESIGN.md §10's trigger](DESIGN.md#10-risk-register) keeps watch.
+[DESIGN.md §10's trigger](../DESIGN.md#10-risk-register) keeps watch.
 The only thing the v0.2.0 bump changed is that the right answer is
 no longer "we'd have to port a transformer first."
 
@@ -362,7 +362,7 @@ no longer "we'd have to port a transformer first."
 
 Sources & references:
 - aikit v0.2.0 CHANGELOG and release notes
-- [`docs/colbert-late-interaction-for-ken.md`](colbert-late-interaction-for-ken.md) (companion late-interaction analysis)
-- [`docs/DESIGN.md` §10](DESIGN.md#10-risk-register) (Stage 6 deferred-item entry)
+- [`docs/internal/colbert-late-interaction-for-ken.md`](colbert-late-interaction-for-ken.md) (companion late-interaction analysis)
+- [`docs/DESIGN.md` §10](../DESIGN.md#10-risk-register) (Stage 6 deferred-item entry)
 - `project-rerank-cold-start-mitigations` memory entry (HyDE as cold-cache mitigation)
 - Original HyDE paper: [Gao et al., "Precise Zero-Shot Dense Retrieval without Relevance Labels" (arXiv 2212.10496)](https://arxiv.org/abs/2212.10496)

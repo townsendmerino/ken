@@ -6,7 +6,7 @@ profile so "is ken slow?" has a checkable answer.
 
 For the measurement *methodology* — the harness, the workloads, the
 benchstat discipline that says when a number is publishable — see
-[PERF.md](PERF.md). This doc is the layer above: "if you run ken on
+[PERF.md](internal/PERF.md). This doc is the layer above: "if you run ken on
 a typical laptop, here's roughly what you should see, and here's
 what would be surprising."
 
@@ -73,7 +73,7 @@ remains the default; treesitter is opt-in
 
 **Caveat on the Linux-kernel extrapolation.** ken hasn't actually
 been measured against the Linux kernel yet — it's the "Large"
-workload TBD in [PERF.md](PERF.md). The "~10–30 min" estimate is
+workload TBD in [PERF.md](internal/PERF.md). The "~10–30 min" estimate is
 linear extrapolation from medium (378k chunks → 45 s hybrid) to
 the kernel's expected ~5 M chunks. Real numbers will land when the
 PERF.md "Large" pass runs; treat the extrapolation as a check
@@ -90,7 +90,7 @@ M-series):
 
 If your `structural.Build` is significantly outside that range
 for the language mix you're indexing, [ADR-036 M4 (parallel
-structural.Build)](DECISIONS.md#adr-036) may not be active —
+structural.Build)](internal/DECISIONS.md#adr-036) may not be active —
 check that ken-mcp is reporting `runtime.NumCPU()` workers, not 1.
 
 ## Query latency
@@ -132,7 +132,7 @@ queries):
 The structural-call-graph Phase 0 substrate (per-call-site
 `CallRef` records, the 2026-06-03 ship) adds ~500 KiB on each
 of those — well inside the plan's ≤2× memory envelope. See
-[structural-call-graph-plan.md](structural-call-graph-plan.md).
+[structural-call-graph-plan.md](internal/structural-call-graph-plan.md).
 
 **Binary size (slim release builds, ADR-033):**
 
@@ -191,7 +191,7 @@ on a known corpus and compare to the M0 baseline in
    are slow, suspect the on-disk file is corrupt or the encoder
    model changed (cache scope-keys on the quantization tier).
 6. **NDCG@10 moved by more than ±0.005 on the semble bench
-   corpus.** Per [PERF.md](PERF.md) and
+   corpus.** Per [PERF.md](internal/PERF.md) and
    [BENCH.md](BENCH.md): perf changes that regress retrieval
    quality don't ship without an explicit calibration-discipline
    ADR documenting the trade. Same threshold here for "user
@@ -199,7 +199,7 @@ on a known corpus and compare to the M0 baseline in
 
 If none of the red flags fire but ken still feels slow on your
 specific corpus, the next step is to run `scripts/perf_collect.sh
-medium` per [PERF.md](PERF.md) and benchstat against a stored
+medium` per [PERF.md](internal/PERF.md) and benchstat against a stored
 baseline. The PERF.md harness is the right tool for honest
 investigation; this doc is the rule-of-thumb layer above it.
 
@@ -218,7 +218,7 @@ That prints the same record format
 was built from. Compare embed-load + rerank-load + search.FromFS +
 structural.Build to the table at the top of this doc.
 
-**Full benchstat pass (see [PERF.md](PERF.md) for the methodology):**
+**Full benchstat pass (see [PERF.md](internal/PERF.md) for the methodology):**
 
 ```bash
 scripts/perf_collect.sh small      # ~30 s
@@ -251,10 +251,10 @@ right tool.
 
 References:
 
-- [PERF.md](PERF.md) — measurement methodology, harness, workloads
+- [PERF.md](internal/PERF.md) — measurement methodology, harness, workloads
 - [BENCH.md](BENCH.md) — NDCG / quality methodology (companion to PERF.md)
-- [DECISIONS.md ADR-026 → ADR-031](DECISIONS.md) — the v0.8.x perf campaign trail
-- [DECISIONS.md ADR-036](DECISIONS.md#adr-036) — startup + query latency campaign close (M2 + M4)
+- [DECISIONS.md ADR-026 → ADR-031](internal/DECISIONS.md) — the v0.8.x perf campaign trail
+- [DECISIONS.md ADR-036](internal/DECISIONS.md#adr-036) — startup + query latency campaign close (M2 + M4)
 - [`outputs/perf-startup-m0-baselines.md`](../outputs/perf-startup-m0-baselines.md) — M0 cold-start baselines
 - [`internal/search/neural_rerank_bench_test.go`](../internal/search/neural_rerank_bench_test.go) — neural rerank bench (cold vs warm-cache)
 - [`scripts/perf_startup_m0.go`](../scripts/perf_startup_m0.go) — quick health-check harness

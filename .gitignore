@@ -56,7 +56,7 @@ bench/tokens/results/
 # `ken perf` collection output (regenerated via scripts/perf_collect.sh
 # on the perf-investigation branch). Per-workload, per-date pprof
 # profiles + JSON records + the built ken binary; reproducible from
-# the methodology in docs/PERF.md (on the perf-investigation branch).
+# the methodology in docs/internal/PERF.md (on the perf-investigation branch).
 # Tens to hundreds of MB; never committed.
 bench_out/
 

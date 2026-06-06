@@ -3,7 +3,7 @@ package mcp
 import "github.com/townsendmerino/ken/internal/search"
 
 // This file resolves the v0.9.x public-API audit finding (see
-// docs/road-to-1.0.md → "Versioning / public API discipline" row,
+// docs/internal/road-to-1.0.md → "Versioning / public API discipline" row,
 // closed 2026-06-03): a handful of types from internal/search leaked
 // through mcp.Config, mcp.FormatResults, and the TelemetryLog
 // callback signature. SDK authors who imported mcp couldn't construct

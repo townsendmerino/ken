@@ -365,7 +365,7 @@ hand-labeled ground truth":
   the Stage 8 Gate-2 sample that already underpins the "file-level callers,
   100% precision" claim).
 - Report **precision/recall of resolved edges** at each confidence tier, per
-  language, in [`BENCH.md`](BENCH.md) — the analog of the NDCG tables.
+  language, in [`BENCH.md`](../BENCH.md) — the analog of the NDCG tables.
 - Gate each phase on not regressing the prior phase's edge precision.
 
 This harness is real work and is budgeted as part of Phases 1 and 3, not bolted

@@ -84,7 +84,7 @@ type FileStruct struct {
 	// 1-based line the call sits on, and the enclosing function /
 	// method qualified name (empty if at file top level).
 	//
-	// This is the Phase 0 substrate (see docs/structural-call-graph-plan.md):
+	// This is the Phase 0 substrate (see docs/internal/structural-call-graph-plan.md):
 	// later phases will resolve Callee against the corpus-wide
 	// `defs` / `methods` maps to produce function-level edges. For
 	// the existing Arm B enrichment (ADR-035) and the pass-2
@@ -134,7 +134,7 @@ type FuncDef struct {
 	// definition (inclusive). Zero values for either field mean
 	// "not recorded" — the extractor that produced this FuncDef
 	// didn't capture spans. Captured by every extractor as of
-	// Phase 0 (docs/structural-call-graph-plan.md).
+	// Phase 0 (docs/internal/structural-call-graph-plan.md).
 	StartLine int
 	EndLine   int
 }
@@ -407,7 +407,7 @@ func Build(corpusDir string) (*Index, error) {
 	}
 
 	// Pass 1: parse + extract per-file structure. Parallelized in
-	// M4 (docs/perf-campaign-startup-query.md) — single-threaded
+	// M4 (docs/internal/perf-campaign-startup-query.md) — single-threaded
 	// build was the dominant cold-start cost on large multi-language
 	// corpora (M0: 1577 ms for 167 Ruby files on jekyll). Per-file
 	// work is independent: each goroutine reads its file, borrows

@@ -12,11 +12,11 @@ C++, PHP, Ruby. Adding an eleventh is well-paved.
 ## The shape
 
 Each supported language has a single Go file
-[`internal/structural/extract_<lang>.go`](../internal/structural)
+[`internal/structural/extract_<lang>.go`](../../internal/structural)
 that walks a gotreesitter-produced parse tree and fills a
 `FileStruct{Path, Functions, Classes, Calls, Imports, Raises}`
 record. The file is registered in two maps in
-[`internal/structural/index.go`](../internal/structural/index.go):
+[`internal/structural/index.go`](../../internal/structural/index.go):
 
 ```go
 var kenLangToTSLang = map[string]string{
@@ -59,7 +59,7 @@ Your job is Pass 1's extractor for the new language.
 ## Step 1: probe the AST
 
 The repo carries a debug helper at
-[`internal/structural/debug_ast_test.go`](../internal/structural/debug_ast_test.go)
+[`internal/structural/debug_ast_test.go`](../../internal/structural/debug_ast_test.go)
 that dumps a parse tree for an inline fixture. Use this to
 discover the exact node types and field names your extractor
 needs to handle.
@@ -93,16 +93,16 @@ with empty field labels — `ChildByFieldName("name", lang)`
 returns nil even though the identifier child is right there.
 Rust's `extract_rust.go` documents this in detail and falls
 back to a positional first-named-identifier lookup
-([`rustFirstNamedIdentifier`](../internal/structural/extract_rust.go)).
+([`rustFirstNamedIdentifier`](../../internal/structural/extract_rust.go)).
 Be ready to add a similar fallback for your language.
 
 ## Step 2: write `extract_<lang>.go`
 
 Follow the existing extractors as templates. Read
-[`extract_typescript.go`](../internal/structural/extract_typescript.go)
+[`extract_typescript.go`](../../internal/structural/extract_typescript.go)
 for a grammar with rich AST (class declarations, interfaces,
 arrow functions, multiple call shapes). Read
-[`extract_ruby.go`](../internal/structural/extract_ruby.go)
+[`extract_ruby.go`](../../internal/structural/extract_ruby.go)
 for a grammar with idiomatic surprises (parenless calls,
 `raise X` as a method call, modules vs classes).
 
@@ -162,7 +162,7 @@ func myLangIsBuiltinOrNoise(name string) bool {
 
 ### Helpers shared across extractors
 
-[`internal/structural/index.go`](../internal/structural/index.go)
+[`internal/structural/index.go`](../../internal/structural/index.go)
 and the existing extractors provide:
 
 - `nodeText(src, node)` — slice the source bytes by the node's
@@ -177,7 +177,7 @@ and the existing extractors provide:
 ## Step 3: register the language
 
 Two map entries in
-[`internal/structural/index.go`](../internal/structural/index.go):
+[`internal/structural/index.go`](../../internal/structural/index.go):
 
 ```go
 var kenLangToTSLang = map[string]string{
@@ -198,8 +198,8 @@ the value is the gotreesitter grammar name from step 1.
 ## Step 4: write `extract_<lang>_test.go`
 
 Fixture-based unit tests. Look at
-[`extract_python_test.go`](../internal/structural/extract_python_test.go)
-or [`extract_ruby_test.go`](../internal/structural/extract_ruby_test.go)
+[`extract_python_test.go`](../../internal/structural/extract_python_test.go)
+or [`extract_ruby_test.go`](../../internal/structural/extract_ruby_test.go)
 for the standard shape: write a small inline source string with
 known function / class / call / import / raise content, run
 `structural.Build` on a `t.TempDir()` containing that source,
@@ -229,7 +229,7 @@ go test ./internal/structural/ -run 'TestBuild_MyLang' -v
 Unit tests cover what you remembered to test. The dogfood
 harness covers what you didn't.
 
-[`scripts/dogfood_languages.go`](../scripts/dogfood_languages.go)
+[`scripts/dogfood_languages.go`](../../scripts/dogfood_languages.go)
 clones eight popular repos, runs `structural.Build` against
 each, and reports per-corpus stats. Add a row for your
 language to its `targets` list — pick a popular ~1k-file repo
@@ -267,7 +267,7 @@ repos.
 
 ## Step 6: validate precision
 
-[`scripts/precision_sample_edges.go`](../scripts/precision_sample_edges.go)
+[`scripts/precision_sample_edges.go`](../../scripts/precision_sample_edges.go)
 samples 50 random `(caller_file, callee_name)` edges and
 verifies them with a regex-based oracle independent of the
 gotreesitter extractor. Run it against your dogfood corpus:
@@ -286,7 +286,7 @@ file), the extractor is producing spurious edges and needs
 fixing.
 
 This is the same gate Stage 8 Gate 2 ran across 8 languages
-([memo](../outputs/stage8-gate-2-call-edge-precision.md)).
+([memo](../../outputs/stage8-gate-2-call-edge-precision.md)).
 
 ## Step 7: integrate, lint, commit
 
@@ -300,14 +300,14 @@ gofmt -l cmd internal mcp bench
 golangci-lint run ./...
 ```
 
-Update [`CLAUDE.md`](../CLAUDE.md)'s structural-extractor
+Update [`CLAUDE.md`](../../CLAUDE.md)'s structural-extractor
 language list if your contribution adds another language
 (the current list is "twelve languages: Python · Go · TypeScript
 · JavaScript · Java · Rust · C · C++ · PHP · Ruby · Kotlin ·
 Dart").
 
 Commit per the project conventions
-(see [DEVELOPERS.md → Pull requests](DEVELOPERS.md#pull-requests)).
+(see [DEVELOPERS.md → Pull requests](../DEVELOPERS.md#pull-requests)).
 The commit message should mention the dogfood-validated repo
 and the precision-sample result.
 
@@ -326,9 +326,9 @@ and the precision-sample result.
 - **Generic-type instantiation** — `new Foo<>()`,
   `Foo::new()`, `Vec<T>` — usually a call shape that needs a
   type-name-leaf helper. See `javaTypeLeafName` in
-  [`extract_java.go`](../internal/structural/extract_java.go) or
+  [`extract_java.go`](../../internal/structural/extract_java.go) or
   `cppScopeLeaf` in
-  [`extract_cpp.go`](../internal/structural/extract_cpp.go).
+  [`extract_cpp.go`](../../internal/structural/extract_cpp.go).
 - **Import binding** — the bound LOCAL name is what an agent
   searches for. `from foo import bar` binds "bar", not "foo".
   `use crate::foo::Bar as Quux` binds "Quux". The Python and
@@ -361,7 +361,7 @@ issue tagged with the gotreesitter dependency.
 - **The ten existing extractors** — each documents the AST node
   types it handles + the gotreesitter quirks it works around.
   Read 2-3 close to your target language.
-- **[BENCH.md](BENCH.md)** — quality methodology; if you want to
+- **[BENCH.md](../BENCH.md)** — quality methodology; if you want to
   prove your extractor doesn't regress retrieval, this is the
   harness.
 - **[GitHub issues](https://github.com/townsendmerino/ken/issues)**

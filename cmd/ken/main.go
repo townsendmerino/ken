@@ -145,7 +145,7 @@ the process exits after the result.
 ken build-index pre-builds a search index from a corpus directory and writes
 the serialized bytes to <path>. SDK authors using mcp.Run typically point
 -o at <corpus>/.ken/index.bin so the file is picked up by //go:embed corpus
-at build time and auto-loaded at runtime — see docs/DECISIONS.md ADR-024
+at build time and auto-loaded at runtime — see docs/internal/DECISIONS.md ADR-024
 for the cold-start narrative.
 
 ken bench reads queries from stdin (one per line; lines starting with '#'
@@ -155,7 +155,7 @@ docs/BENCH.md.
 
 ken perf is the speed/memory measurement harness (sibling to ken bench;
 they share no state). Each invocation emits one JSON record on stdout
-plus optional pprof profiles. See docs/PERF.md and 'ken perf' for
+plus optional pprof profiles. See docs/internal/PERF.md and 'ken perf' for
 sub-command usage.
 
 ken download-model fetches the three files Model2Vec needs (model.safetensors,

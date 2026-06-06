@@ -3,7 +3,7 @@
 Written 2026-06-03 for filing upstream at
 [github.com/odvcencio/gotreesitter](https://github.com/odvcencio/gotreesitter).
 This is the diagnostic memo behind the ken-side Swift park documented
-in [`DESIGN.md` §10](DESIGN.md#10-risk-register).
+in [`DESIGN.md` §10](../DESIGN.md#10-risk-register).
 
 ## TL;DR
 

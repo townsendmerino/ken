@@ -22,10 +22,10 @@ a specific new bench gap.
 
 | What | Verdict | Memo |
 |---|---|---|
-| HyDE on rerank-on path | Killed (M0a) | [outputs/m0-hyde-results.md](../outputs/m0-hyde-results.md) |
+| HyDE on rerank-on path | Killed (M0a) | [outputs/m0-hyde-results.md](../../outputs/m0-hyde-results.md) |
 | Index-time enrichment with `callers` / `imports` / `signature` / `siblings` | Killed (M0e Track 1 floods) | outputs/m0e-results.md |
-| Query-time graph expansion (additive boost) | Killed | [outputs/stage8-qgraph-expansion-results.md](../outputs/stage8-qgraph-expansion-results.md) |
-| ColBERT MaxSim cheap-reuse on CodeRankEmbed token vectors | Parked (slim N=25, both prefix-on and prefix-off) | [outputs/stage8-maxsim-probe-parked.md](../outputs/stage8-maxsim-probe-parked.md). Companion analysis at [colbert-late-interaction-for-ken.md](colbert-late-interaction-for-ken.md). |
+| Query-time graph expansion (additive boost) | Killed | [outputs/stage8-qgraph-expansion-results.md](../../outputs/stage8-qgraph-expansion-results.md) |
+| ColBERT MaxSim cheap-reuse on CodeRankEmbed token vectors | Parked (slim N=25, both prefix-on and prefix-off) | [outputs/stage8-maxsim-probe-parked.md](../../outputs/stage8-maxsim-probe-parked.md). Companion analysis at [colbert-late-interaction-for-ken.md](colbert-late-interaction-for-ken.md). |
 | Generative LLM lever (Stage 6) | **Newly unblocked** by aikit v0.2.0 shipping a pure-Go decoder + tokenizer + GGUF. Was previously gated on Option C feasibility. Three concrete paths analysed in [stage6-paths-with-aikit-decoder.md](stage6-paths-with-aikit-decoder.md) — Path A (HyDE expansion) is the cheap probe; uses existing Stage 7a bench harness. No commitment yet; recommendation is to run the cheap probe first. |
 
 **Shipped in production:**
@@ -39,7 +39,7 @@ RRF math lives in `aikit/fuse.RRFWeighted` rather than ken-local
 code — numerically identical, just consolidated onto the toolkit.
 
 **Structural call-graph Phase 0 substrate landed 2026-06-03**
-([docs/structural-call-graph-plan.md](structural-call-graph-plan.md) —
+([docs/internal/structural-call-graph-plan.md](structural-call-graph-plan.md) —
 span fields on every symbol, per-call-site `CallRef` records,
 `CalleeNames()` accessor preserving Arm B byte-identity). This is
 substrate-only — no MCP tool surface change yet — but the data
@@ -65,14 +65,14 @@ invocations).
 |---|---|---|---:|---|
 | 1 | `callers(name)` MCP tool | 🟢 shipped | done | 2026-06-02. handleCallers + AddTool registration in mcp/server.go + types.CallersArgs. File-level granularity; honest framing in tool description + response header. |
 | 2 | Search filters: `languages` / `path_contains` / `exclude_path_contains` | 🟢 shipped | done | 2026-06-02. SearchArgs extended; runSearchWithTelemetry over-fetches 10× when filters are set, post-filters, reports candidate-vs-filter ratio in the header. Substring match (not glob); covers the canonical "find auth code in src/api/" + "exclude test files" cases. |
-| — | Windows binary | 🟡 re-opened 2026-06-05 | — | Was ⚪ deferred-until-pressure (owner preference 2026-06-02). **Re-opened 2026-06-05** as part of the hybrid-by-default onboarding push (§4) — scoop needs it and the owner chose the full distribution set. Pure-Go cross-compile is trivial; the cost is the support surface (CRLF, path separators, Windows-specific MCP quirks, PowerShell install paths). Tracked under [`docs/onboarding-plan.md`](onboarding-plan.md) workstream C1. |
+| — | Windows binary | 🟡 re-opened 2026-06-05 | — | Was ⚪ deferred-until-pressure (owner preference 2026-06-02). **Re-opened 2026-06-05** as part of the hybrid-by-default onboarding push (§4) — scoop needs it and the owner chose the full distribution set. Pure-Go cross-compile is trivial; the cost is the support surface (CRLF, path separators, Windows-specific MCP quirks, PowerShell install paths). Tracked under [`docs/internal/onboarding-plan.md`](onboarding-plan.md) workstream C1. |
 | 4 | `ken status` CLI + MCP tool | 🟢 shipped | done | 2026-06-02. New `internal/status` package builds a Status snapshot (versions, models, Arm B env, savings, optional live index + structural + cache). `ken status` CLI + `status` MCP tool registered on both NewServer and Run paths. Output modes: text (default), `--json` / `output:"json"`, markdown for MCP. Token savings surfaced as today / 7d / all-time with chars + ~tokens estimate. |
 | 5 | `recently_changed(N)` MCP tool (git-aware) | 🟢 shipped | done | 2026-06-02. mcp/recently_changed_tool.go — go-git PlainOpen, walks HEAD N commits back, formats commit + changed-file list as markdown. Args: `n` (default 10, max 100), `repo`, `path` prefix filter. Local repos only in Pass 1; URL repos return a friendly "clone first" error rather than coupling to the cache's temp clone dir. |
 | 6 | JSON output mode for `search` and structural tools | 🟢 shipped | done | 2026-06-02. Each of search / find_related / definition / references / callers / outline / symbols got an `Output` arg. `mcp/json_responses.go` defines a typed response struct per tool (1.0-stable surface) + a shared `dispatchOutput` helper. Markdown stays the default; `output: "json"` returns the typed struct as indented JSON. Unknown values like `"yaml"` get a friendly error rather than silent fallback. Tests: 13 sub-tests across `TestRun_JSONOutput` (Run-path: search + find_related + dispatch corners) and `TestJSONOutput_StructuralTools` (NewServer fixture upgraded to also build a structural index). |
-| 7 | First-class user docs | 🟢 shipped | done | 2026-06-02. Two-tier user-facing docs: [`docs/USERS.md`](USERS.md) (install per agent, ken-vs-grep decision, the 9 tools at-a-glance, common env vars, troubleshooting) + [`docs/DEVELOPERS.md`](DEVELOPERS.md) (mcp.Run library, prebuilt indices, public API stability table, JSON output mode, custom chunkers, tuning rerank, performance expectations). README + GitHub Pages index both link both docs. Audience cut (Option A): agent users vs SDK authors. |
-| — | Perf campaign: startup + query latency | 🟢 closed (ADR-036) | done | 2026-06-02. **M0 baselines** ([memo](../outputs/perf-startup-m0-baselines.md)) → **M2 lazy rerank load** ([memo](../outputs/perf-startup-m2-results.md)): −491 ms when `KEN_MCP_RERANK=on`. → **M4 parallel `structural.Build`** ([memo](../outputs/perf-startup-m4-results.md)): 3.5× on jekyll (−1,127 ms). → **M1 killed without code change** ([memo](../outputs/perf-startup-m1-results.md)): M2 superseded it. M3 + M5 killed by M0 data. **Cumulative cold-start reduction: 55-79% across corpora**; warm-search p50 already sub-ms. Closed via [ADR-036](DECISIONS.md#adr-036). |
-| — | Language coverage (post-1.0 ship list) | 🟢 13 languages shipped | done | 2026-06-03 (v0.9.1): Kotlin + Dart on top of the v0.9.0 ten (Python · Go · TypeScript · JavaScript · Java · Rust · C · C++ · PHP · Ruby). **C# added 2026-06-06** on gotreesitter v0.20.2 — the OOM that parked it (#98/#106 bounded the C# namespace-recovery sub-parses) is fixed upstream; coordinated the same three wirepoints as Dart (aikit `chunk/treesitter` v0.4.1 `KenToTreeSitter` + `.goreleaser.yml` `grammar_subset_c_sharp` + structural extractor), drift-guard green, with an OOM-trigger regression test. **Swift stays parked**: re-tested on v0.20.2 (#99/#107 license-header fix lifted Alamofire 0%→35% clean, but ~65% still fail + ~20% take 2–6s/parse — not viable). Diagnostic memos: [docs/csharp-oom-root-cause.md](csharp-oom-root-cause.md) (now resolved) + [docs/swift-parse-root-cause.md](swift-parse-root-cause.md). Developer walkthrough at [docs/add-a-language.md](add-a-language.md). |
-| — | Structural call-graph Phase 0 (substrate) | 🟢 shipped 2026-06-03 | done | Span fields on FuncDef/ClassDef, per-call-site CallRef with enclosing-symbol attribution, CalleeNames() accessor preserving Arm B byte-identity. All 10 shipping languages plus the build-tagged C# / Swift extractors. Memory budget gate cleared on jekyll / express / ripgrep. Plan doc revised per the Plan-agent independent review (Phases 1+4 bundled behind one opt-in flag, validation-harness scope explicit, silent-wrong-answer watch-mode risk elevated). Substrate only — no MCP tool surface change; Phases 1+4 trigger-gated on MCP log evidence. See [docs/structural-call-graph-plan.md](structural-call-graph-plan.md). |
+| 7 | First-class user docs | 🟢 shipped | done | 2026-06-02. Two-tier user-facing docs: [`docs/USERS.md`](../USERS.md) (install per agent, ken-vs-grep decision, the 9 tools at-a-glance, common env vars, troubleshooting) + [`docs/DEVELOPERS.md`](../DEVELOPERS.md) (mcp.Run library, prebuilt indices, public API stability table, JSON output mode, custom chunkers, tuning rerank, performance expectations). README + GitHub Pages index both link both docs. Audience cut (Option A): agent users vs SDK authors. |
+| — | Perf campaign: startup + query latency | 🟢 closed (ADR-036) | done | 2026-06-02. **M0 baselines** ([memo](../../outputs/perf-startup-m0-baselines.md)) → **M2 lazy rerank load** ([memo](../../outputs/perf-startup-m2-results.md)): −491 ms when `KEN_MCP_RERANK=on`. → **M4 parallel `structural.Build`** ([memo](../../outputs/perf-startup-m4-results.md)): 3.5× on jekyll (−1,127 ms). → **M1 killed without code change** ([memo](../../outputs/perf-startup-m1-results.md)): M2 superseded it. M3 + M5 killed by M0 data. **Cumulative cold-start reduction: 55-79% across corpora**; warm-search p50 already sub-ms. Closed via [ADR-036](DECISIONS.md#adr-036). |
+| — | Language coverage (post-1.0 ship list) | 🟢 13 languages shipped | done | 2026-06-03 (v0.9.1): Kotlin + Dart on top of the v0.9.0 ten (Python · Go · TypeScript · JavaScript · Java · Rust · C · C++ · PHP · Ruby). **C# added 2026-06-06** on gotreesitter v0.20.2 — the OOM that parked it (#98/#106 bounded the C# namespace-recovery sub-parses) is fixed upstream; coordinated the same three wirepoints as Dart (aikit `chunk/treesitter` v0.4.1 `KenToTreeSitter` + `.goreleaser.yml` `grammar_subset_c_sharp` + structural extractor), drift-guard green, with an OOM-trigger regression test. **Swift stays parked**: re-tested on v0.20.2 (#99/#107 license-header fix lifted Alamofire 0%→35% clean, but ~65% still fail + ~20% take 2–6s/parse — not viable). Diagnostic memos: [docs/internal/csharp-oom-root-cause.md](csharp-oom-root-cause.md) (now resolved) + [docs/internal/swift-parse-root-cause.md](swift-parse-root-cause.md). Developer walkthrough at [docs/internal/add-a-language.md](add-a-language.md). |
+| — | Structural call-graph Phase 0 (substrate) | 🟢 shipped 2026-06-03 | done | Span fields on FuncDef/ClassDef, per-call-site CallRef with enclosing-symbol attribution, CalleeNames() accessor preserving Arm B byte-identity. All 10 shipping languages plus the build-tagged C# / Swift extractors. Memory budget gate cleared on jekyll / express / ripgrep. Plan doc revised per the Plan-agent independent review (Phases 1+4 bundled behind one opt-in flag, validation-harness scope explicit, silent-wrong-answer watch-mode risk elevated). Substrate only — no MCP tool surface change; Phases 1+4 trigger-gated on MCP log evidence. See [docs/internal/structural-call-graph-plan.md](structural-call-graph-plan.md). |
 
 ### Lower-priority but real
 
@@ -86,10 +86,10 @@ invocations).
 | Nit | Status | Notes |
 |---|---|---|
 | Untracked / new planning docs in `docs/` | 🟢 tracked 2026-06-03 | Was 🟡 (`colbert-late-interaction-for-ken.md`, `ken-context.md`). Both now tracked. Subsequent planning + analysis docs added through v0.9.1 are tracked under their respective commits: `add-language-support-kotlin-csharp-swift-dart.md`, `structural-call-graph-plan.md`, `stage6-paths-with-aikit-decoder.md`, `csharp-oom-root-cause.md`, `swift-parse-root-cause.md`, `add-a-language.md`. |
-| MCP tool description audit | 🟢 done (2026-06-02 partial + 2026-06-03 close) | Stale "Stage 8 extractor covers Python only" copy fixed; v0.9.0 added the public-API discipline audit ([0f780b4](../README.md)). Voice/length sweep across all 7 tools held to "clean and consistent enough" per the audit's own bar. |
+| MCP tool description audit | 🟢 done (2026-06-02 partial + 2026-06-03 close) | Stale "Stage 8 extractor covers Python only" copy fixed; v0.9.0 added the public-API discipline audit ([0f780b4](../../README.md)). Voice/length sweep across all 7 tools held to "clean and consistent enough" per the audit's own bar. |
 | Deprecated functions | 🟢 un-deprecated for 1.0 | v0.9.0 dropped the Deprecated markers on `search.FromPath` + `repo.Walk` after the 1.0 API audit confirmed both signatures stable. Doc-comments now describe them as "1.0-stable" with rationale (string path vs fs.FS choice). |
 | `CHANGELOG.md` currency | 🟢 current through v0.9.1 + Phase 0 | v0.9.0 and v0.9.1 entries exist with annotated tags; the Phase 0 substrate entry lives under [Unreleased] pending the next tag. |
-| CI Docker-pulls-Postgres flake | 🟢 documented + mitigation | The flake is at GitHub Actions' service-container provisioning layer — before any step we control runs. Actions has built-in pull-retry-with-backoff; when Docker Hub is slow OR has an outage (recent release push hit this), even the built-in retry exhausts. **Live mitigation: `gh run rerun <run-id> --failed`** (already-green jobs stay green). **Permanent fix: mirror service images to ghcr.io** — deferred until the flake becomes load-bearing. Documented in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) above the `test-db-integration` job. |
+| CI Docker-pulls-Postgres flake | 🟢 documented + mitigation | The flake is at GitHub Actions' service-container provisioning layer — before any step we control runs. Actions has built-in pull-retry-with-backoff; when Docker Hub is slow OR has an outage (recent release push hit this), even the built-in retry exhausts. **Live mitigation: `gh run rerun <run-id> --failed`** (already-green jobs stay green). **Permanent fix: mirror service images to ghcr.io** — deferred until the flake becomes load-bearing. Documented in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) above the `test-db-integration` job. |
 | `internal/structural/Enrich()` unused opts | 🟡 | Arm B baseline is shipping but `Callers/Imports/Signature/Siblings` options exist and aren't on the ship path. M0e proved they don't help. Either delete or document as "experimental / not in production." |
 | Bench-side parallel impl | 🟢 documented | After ADR-035 ship, the Python materializers are docs-noted as "bench-only fallback for drift cross-checks." Retained as a known-good reference for any future drift investigation; production goes through `structural.EnrichFromFileStruct`. |
 
@@ -101,7 +101,7 @@ invocations).
   ~0.97 recall@10 and the "0.82–0.91" is the BM25-only fallback; the only
   users silently stuck on the fallback are ken-mcp users with no model
   (silent stderr downgrade at `cmd/ken-mcp/main.go:378`). Plan +
-  owner-approved scope in [`docs/onboarding-plan.md`](onboarding-plan.md):
+  owner-approved scope in [`docs/internal/onboarding-plan.md`](onboarding-plan.md):
   (A) background auto-fetch + hot-swap on first run [recall lever],
   (B) loud degraded-state notice, (C) distribution — Homebrew tap,
   bundled model-embedded binary, Scoop manifest, **and a Windows build
@@ -112,11 +112,11 @@ invocations).
 - 🟢 **Versioning / public API discipline** — closed 2026-06-03.
   Audit walked every public symbol crossing a package boundary
   (`go doc -short ./mcp` + `./mcp/db`); each is now pinned by tier in
-  [DEVELOPERS.md → Public API surface](DEVELOPERS.md#public-api-surface).
+  [DEVELOPERS.md → Public API surface](../DEVELOPERS.md#public-api-surface).
   Three internal-type leaks through the mcp package surface
   (`Config.Mode` was `search.Mode`, `Config.TelemetryLog` carried
   `search.Telemetry`, `FormatResults` took `[]search.Result`) were
-  resolved by adding [`mcp/api_aliases.go`](../mcp/api_aliases.go) —
+  resolved by adding [`mcp/api_aliases.go`](../../mcp/api_aliases.go) —
   1.0-stable `mcp.Mode` / `mcp.Telemetry` / `mcp.Result` type aliases
   so SDK authors never need to import `internal/search`. cmd/ken-mcp
   + the mcp package itself keep their existing `search.*` imports;
@@ -127,7 +127,7 @@ invocations).
   `NormalizeKey`, `ValidateEnum`) keep their existing
   "best-effort" stability notes.
 - 🟢 **Flagship demo with broad recognition** — shipped 2026-06-03 at
-  [`demos/go-stdlib/`](../demos/go-stdlib/). "ken indexes the Go
+  [`demos/go-stdlib/`](../../demos/go-stdlib/). "ken indexes the Go
   standard library, ask it questions." Same single-static-binary
   pattern as the kubernetes + postgres demos (regex chunker, hybrid
   mode, 35,708 chunks on the Go 1.26.3 stdlib at `$GOROOT/src` minus
@@ -136,8 +136,8 @@ invocations).
   queries, 4 structural-tool lookups, 3 grep-vs-ken head-to-head
   comparisons (one shows grep returning 1,103 hits across 131 files
   vs ken returning 1 chunk). Two reproducible harnesses in tree:
-  [`scripts/stdlib_demo_vet.go`](../scripts/stdlib_demo_vet.go) for
-  the semantic-bridging side, [`scripts/stdlib_phase1_close.go`](../scripts/stdlib_phase1_close.go)
+  [`scripts/stdlib_demo_vet.go`](../../scripts/stdlib_demo_vet.go) for
+  the semantic-bridging side, [`scripts/stdlib_phase1_close.go`](../../scripts/stdlib_phase1_close.go)
   for structural + head-to-head. Audience can reproduce the entire
   demo against their own `$GOROOT/src` in 30 s (rsync recipe in the
   demo README). Per the kickoff doc's recommendation: flagship +
@@ -147,7 +147,7 @@ invocations).
   landing update; tracked separately on the demo plan, not gating
   the binary itself.
 - 🟢 **Document the recommended Claude-Code-with-ken workflow** —
-  shipped 2026-06-03 at [`docs/claude-code-workflow.md`](claude-code-workflow.md).
+  shipped 2026-06-03 at [`docs/internal/claude-code-workflow.md`](claude-code-workflow.md).
   Four-layer framing: routine (just ken) → local `/review` →
   `/code-review ultra` before merging load-bearing diffs → ultracode
   sideways for genuinely parallel work. Honest about cost / time on
@@ -171,14 +171,14 @@ invocations).
   additive `embed/safetensors.go` change for GPTQ checkpoint
   sniffing. aikit's README documents its stability tiers in the
   same hard/best-effort shape ken uses;
-  [DEVELOPERS.md](DEVELOPERS.md#aikit-packages) notes that ken 1.0
+  [DEVELOPERS.md](../DEVELOPERS.md#aikit-packages) notes that ken 1.0
   requires aikit at a tagged 1.0 (or clearly within a 1.0-RC
   window) so the stability promises compose cleanly. v0.3.0's
   generative-half packages would still be best-effort under that
   requirement — a coordination point, not a blocker for ken's 1.0
   release.
 - 🟢 **Performance expectations doc** — shipped 2026-06-03 at
-  [`docs/PERF-expectations.md`](PERF-expectations.md). User-facing
+  [`docs/PERF-expectations.md`](../PERF-expectations.md). User-facing
   "what should ken feel like" layer above PERF.md's measurement
   methodology. Cold-start budget split (M2 + M4 wins from ADR-036
   cited inline), warm-search p50 sub-ms claim, cold vs warm-cache

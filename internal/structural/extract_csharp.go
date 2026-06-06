@@ -3,7 +3,7 @@
 // real-world C# (DapperLib/Dapper retest under v0.20.0-rc3: 93+ GB
 // resident before SIGKILL). Re-verified on v0.20.2: Dapper's 156 .cs
 // files parse in ~3s, 89% clean root, no OOM (the minimal reproducer
-// from docs/csharp-oom-root-cause.md now parses in ~5ms). See DESIGN.md
+// from docs/internal/csharp-oom-root-cause.md now parses in ~5ms). See DESIGN.md
 // §10 and that memo for the resolution history.
 
 package structural
@@ -20,7 +20,7 @@ import (
 // OOM'd on real-world C# (dapper retest under v0.20.0-rc3: 93+ GB
 // resident before SIGKILL). Re-verified on v0.20.2: Dapper's 156 .cs
 // files parse in ~3s, 89% clean root, no OOM; the minimal reproducer
-// from docs/csharp-oom-root-cause.md now parses in ~5ms. This file
+// from docs/internal/csharp-oom-root-cause.md now parses in ~5ms. This file
 // compiles in the default build, `.cs → c_sharp` is registered in
 // kenLangToTSLang, and `c_sharp → extractCsharp` in langExtractor.
 //

@@ -15,7 +15,7 @@
 #   small    # ken itself (sub-second iteration)
 #   medium   # ~/.cache/semble-bench (matches docs/BENCH.md corpus)
 #   large    # Linux kernel checkout at v6.10 (see WORKLOAD_LARGE)
-#   giant    # currently a stub — see docs/PERF.md Workloads
+#   giant    # currently a stub — see docs/internal/PERF.md Workloads
 #   all      # small + medium + large in sequence
 #
 # Flags:
@@ -39,7 +39,7 @@
 #              git clone --depth 1 --branch v6.10 \
 #                https://github.com/torvalds/linux $HOME/.cache/linux-v6.10
 #   giant  — stub; requires chromium or equivalent. The corpus choice
-#            is Phase-1 territory; see docs/PERF.md Workloads for the
+#            is Phase-1 territory; see docs/internal/PERF.md Workloads for the
 #            chromium-vs-synthetic discussion.
 #
 # Per-invocation outputs (under bench_out/<workload>/<date>/):
@@ -181,7 +181,7 @@ run_workload() {
   wl_path="$(resolve_workload "$wl")" || { echo "unknown workload: $wl" >&2; exit 2; }
 
   if [[ "$wl" == "giant" ]]; then
-    echo "skip: giant workload is a Phase-1-defined stub — see docs/PERF.md Workloads" >&2
+    echo "skip: giant workload is a Phase-1-defined stub — see docs/internal/PERF.md Workloads" >&2
     return 0
   fi
   if [[ -z "$wl_path" || ! -d "$wl_path" ]]; then

@@ -12,7 +12,7 @@ import (
 //
 // It is also a REGRESSION GUARD for the OOM that parked C# until
 // gotreesitter v0.20.2: the source below uses the exact minimal trigger
-// from docs/csharp-oom-root-cause.md — a block-scoped namespace plus a
+// from docs/internal/csharp-oom-root-cause.md — a block-scoped namespace plus a
 // call whose first arg is an identifier and a later arg is a bitwise-or
 // of member-accesses (`Configure(u, Flags.A | Flags.B)`). On v0.20.0-rc3
 // this shape drove unbounded namespace-recovery recursion to SIGKILL;

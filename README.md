@@ -15,7 +15,7 @@ ken is a Go port of semble. The retrieval algorithm is ported verbatim from semb
 
 - **[docs/USERS.md](docs/USERS.md)** — agent users. Install ken-mcp, point your agent at it, use the nine tools. 5-minute on-ramp.
 - **[docs/DEVELOPERS.md](docs/DEVELOPERS.md)** — SDK authors and serious tuners. mcp.Run library, public API stability, custom chunkers, tuning rerank, performance expectations.
-- **[docs/DESIGN.md](docs/DESIGN.md)** + **[docs/DECISIONS.md](docs/DECISIONS.md)** — internals + every ADR.
+- **[docs/DESIGN.md](docs/DESIGN.md)** + **[docs/internal/DECISIONS.md](docs/internal/DECISIONS.md)** — internals + every ADR.
 
 ## Embedded-corpus build pattern (v0.6.0)
 
@@ -56,7 +56,7 @@ func main() {
 }
 ```
 
-[`cmd/ken-mcp-docs/`](cmd/ken-mcp-docs/) is the canonical worked example — it bakes ken's own [`docs/*.md`](docs/) and the Model2Vec model into a 74 MB static binary built via [`scripts/build-docs-mcp.sh`](scripts/build-docs-mcp.sh). Design and rationale: [ADR-016](docs/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function).
+[`cmd/ken-mcp-docs/`](cmd/ken-mcp-docs/) is the canonical worked example — it bakes ken's own [`docs/*.md`](docs/) and the Model2Vec model into a 74 MB static binary built via [`scripts/build-docs-mcp.sh`](scripts/build-docs-mcp.sh). Design and rationale: [ADR-016](docs/internal/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function).
 
 ### Pre-building the index for faster cold start (v0.8.3)
 
@@ -83,7 +83,7 @@ Your `main.go` is unchanged from the v0.6.0 baseline — `mcp.Run` auto-discover
 
 **Lazy fallback on any load failure** — corrupt bytes, format-version mismatch, mode / chunker mismatch — produces a stderr warning + falls back to the v0.6.0 build-from-corpus path. The pre-built path is purely an optimization, never a requirement; a stale or corrupt pre-built file gets you a slower-but-still-working binary, not a crash. Re-run `ken build-index` to refresh.
 
-Design and rationale: [ADR-024](docs/DECISIONS.md#adr-024-pre-built-embedded-indices-for-mcprun-v083).
+Design and rationale: [ADR-024](docs/internal/DECISIONS.md#adr-024-pre-built-embedded-indices-for-mcprun-v083).
 
 ### Live demos (v0.1.0)
 
@@ -132,7 +132,7 @@ For plain-text corpora with no code or structured documentation (novels, journal
 
 ## Indexing database schemas (v0.7.0, expanded in v0.7.1)
 
-Agents working on a real codebase need schema context **alongside** the code. ken v0.7.0 indexes both. An agent answering "how do users get authenticated" gets the Go function doing auth, the SQL it executes, the `users` table definition, AND the FK relationships from `sessions.user_id` — all in one ranked result list. Design rationale in [ADR-017](docs/DECISIONS.md#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance).
+Agents working on a real codebase need schema context **alongside** the code. ken v0.7.0 indexes both. An agent answering "how do users get authenticated" gets the Go function doing auth, the SQL it executes, the `users` table definition, AND the FK relationships from `sessions.user_id` — all in one ranked result list. Design rationale in [ADR-017](docs/internal/DECISIONS.md#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance).
 
 ### Tier 1 — Static `.sql` parsing (automatic)
 
@@ -160,7 +160,7 @@ TABLE users
   status      VARCHAR(16) NOT NULL DEFAULT 'active'   -- added by 0002_add_status.sql
 ```
 
-Folding covers `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN ... TYPE`, `ADD CONSTRAINT`, `DROP CONSTRAINT`, and — as of **v0.8.1 Part C** ([ADR-022](docs/DECISIONS.md#adr-022-rename-column--rename-constraint-folding-via-eager-application-v081-part-c), closes [#14](https://github.com/townsendmerino/ken/issues/14)) — **`RENAME COLUMN` and `RENAME CONSTRAINT`**. RENAME is applied eagerly during replay: a `RENAME COLUMN old TO new` mutates the in-flight folded table so subsequent ALTERs see the post-rename state, and this-table column references inside constraint definitions (PK / UNIQUE / FK source-side / CHECK) get rewritten via a word-boundary regex scoped to the first parenthesized group. Cross-table FK target-side column references (the `REFERENCES other(remote)` portion) are NOT propagated — that's cross-table dependency requiring migration-DAG analysis and remains out of scope. Operators using MySQL's `CHANGE old new TYPE` syntax (rename + retype in one statement) see the BOTH-chunks fallback below.
+Folding covers `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN ... TYPE`, `ADD CONSTRAINT`, `DROP CONSTRAINT`, and — as of **v0.8.1 Part C** ([ADR-022](docs/internal/DECISIONS.md#adr-022-rename-column--rename-constraint-folding-via-eager-application-v081-part-c), closes [#14](https://github.com/townsendmerino/ken/issues/14)) — **`RENAME COLUMN` and `RENAME CONSTRAINT`**. RENAME is applied eagerly during replay: a `RENAME COLUMN old TO new` mutates the in-flight folded table so subsequent ALTERs see the post-rename state, and this-table column references inside constraint definitions (PK / UNIQUE / FK source-side / CHECK) get rewritten via a word-boundary regex scoped to the first parenthesized group. Cross-table FK target-side column references (the `REFERENCES other(remote)` portion) are NOT propagated — that's cross-table dependency requiring migration-DAG analysis and remains out of scope. Operators using MySQL's `CHANGE old new TYPE` syntax (rename + retype in one statement) see the BOTH-chunks fallback below.
 
 **RENAME folding is a Tier-1 chunk-content fidelity improvement, NOT a search-ranking improvement.** ken's hybrid retrieval recall@10 numbers ([`docs/BENCH.md`](docs/BENCH.md)) measure a different system — they're about whether the right chunk surfaces in the top-10 results, not about whether the chunk contains post-rename column names. v0.8.1 Part C closes the latter gap without affecting the former.
 
@@ -254,7 +254,7 @@ MySQL DSN examples:
 
 `parseTime=true` is forced on internally if absent — without it, DATE/DATETIME/TIMESTAMP columns deserialize as `[]byte` and don't render cleanly in row samples.
 
-**MariaDB is first-class as of v0.8.1** ([ADR-021](docs/DECISIONS.md#adr-021-mariadb-first-class-engine-support-v081-part-b)) — same `KEN_DB_DSN` env var, same MySQL DSN forms above, same `go-sql-driver/mysql` driver. CI's `test-db-integration` job now runs the integration suite against both `mysql:8` and `mariadb:11-jammy` service containers; the v0.8.1 normalization layer strips MariaDB's legacy `bigint(20)` / `int(11)` integer display widths so chunks stay byte-identical across engines. End users see no operator-visible difference — point ken at MariaDB the same way you point it at MySQL.
+**MariaDB is first-class as of v0.8.1** ([ADR-021](docs/internal/DECISIONS.md#adr-021-mariadb-first-class-engine-support-v081-part-b)) — same `KEN_DB_DSN` env var, same MySQL DSN forms above, same `go-sql-driver/mysql` driver. CI's `test-db-integration` job now runs the integration suite against both `mysql:8` and `mariadb:11-jammy` service containers; the v0.8.1 normalization layer strips MariaDB's legacy `bigint(20)` / `int(11)` integer display widths so chunks stay byte-identical across engines. End users see no operator-visible difference — point ken at MariaDB the same way you point it at MySQL.
 
 `KEN_DB_MARIADB_TEST_DSN` is a **CI / development-only** env var that the integration test suite uses to run the same tests against a live MariaDB container in parallel with `KEN_DB_MYSQL_TEST_DSN`. End users do not need to set it; both engines share `KEN_DB_DSN` for production use.
 
@@ -277,7 +277,7 @@ Default exclusions are **never user-overridable**: `pg_catalog` and `information
 
 SQLite is a single-schema engine and ignores both env vars (debug-level log when they're set with a SQLite DSN).
 
-Wildcards (e.g. `KEN_DB_SCHEMAS=tenant_*`) are explicitly out of scope for v0.7.2 — multi-tenant operators can fall back to the explicit form `KEN_DB_SCHEMAS=tenant_001,tenant_002,...` until field signal calls for wildcard syntax. See [ADR-019](docs/DECISIONS.md#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) for the rejected-alternatives audit trail.
+Wildcards (e.g. `KEN_DB_SCHEMAS=tenant_*`) are explicitly out of scope for v0.7.2 — multi-tenant operators can fall back to the explicit form `KEN_DB_SCHEMAS=tenant_001,tenant_002,...` until field signal calls for wildcard syntax. See [ADR-019](docs/internal/DECISIONS.md#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) for the rejected-alternatives audit trail.
 
 ### LISTEN/NOTIFY push notifications (v0.8.0, Postgres only)
 
@@ -300,7 +300,7 @@ This installs a single schema-level event trigger (`ken_schema_changed_trigger`)
 
 **Recommendation: use alongside `KEN_DB_REINDEX_INTERVAL`, not instead.** NOTIFY connections can drop silently (network partition, brief reconnect window); interval polling acts as defense-in-depth backstop that catches missed notifications without operator intervention. Both can run simultaneously; the `Refresher`'s internal mutex serializes concurrent refreshes so a NOTIFY arriving mid-tick collapses cleanly.
 
-See [ADR-020](docs/DECISIONS.md#adr-020-listennotify-push-based-schema-change-detection-v080-part-1) for the alternatives considered (auto-install rejected; per-table opt-in rejected; replace-interval rejected; no-debouncing rejected; faked-MySQL rejected).
+See [ADR-020](docs/internal/DECISIONS.md#adr-020-listennotify-push-based-schema-change-detection-v080-part-1) for the alternatives considered (auto-install rejected; per-table opt-in rejected; replace-interval rejected; no-debouncing rejected; faked-MySQL rejected).
 
 ### Agent-triggered reindex (`reindex_db` tool, v0.8.0 Part 2)
 
@@ -317,7 +317,7 @@ Agents can refresh ken's view of the database schema on demand by calling the `r
 
 **Pairs with LISTEN/NOTIFY and `KEN_DB_REINDEX_INTERVAL`.** Push notifications cover Postgres deployments with the trigger installed; interval polling covers MySQL / SQLite and the LISTEN-not-set-up Postgres case; `reindex_db` covers the case where the agent itself caused the schema change and knows it needs to refresh.
 
-See [ADR-020 Part 2](docs/DECISIONS.md#part-2-agent-callable-reindex-via-reindex_db-mcp-tool-v080-part-2) for the alternatives considered (cooldown, queue, async-return, env-var-disable, auto-call-from-search all rejected with mechanism-level failure modes).
+See [ADR-020 Part 2](docs/internal/DECISIONS.md#part-2-agent-callable-reindex-via-reindex_db-mcp-tool-v080-part-2) for the alternatives considered (cooldown, queue, async-return, env-var-disable, auto-call-from-search all rejected with mechanism-level failure modes).
 
 ### Embedded DB support for SDK authors (v0.8.0 Part 3, opt-in)
 
@@ -375,7 +375,7 @@ if len(os.Args) > 1 && os.Args[1] == "print-listen-script" {
 }
 ```
 
-**Chunk integration is end-to-end.** Calling `reindex_db` from an agent against an `mcp.Run + mcp/db.Setup` binary runs the introspection AND makes the new DB chunks searchable in the agent's next `search` / `find_related` call. The pipeline: `mcp.Run` wraps the embedded `*search.Index` in `atomic.Pointer[search.Index]`; `mcp/db.Refresher.Start` (called by `mcp.Run` on startup) wires the swap callback to `*search.Index.WithExtraChunks` + atomic-pointer store; each refresh rebuilds against the original corpus + the latest DB chunks. `cmd/ken-mcp` continues to use `*WatchedIndex.SetExtraChunks` for its fsnotify-rooted path; the SDK-author + CLI surfaces converge on the same `Refresher` + `reindex_db` semantics. See [ADR-020 Part 3](docs/DECISIONS.md#part-3-opt-in-mcpdb-package-preserving-v060-binary-size-contract-v080-part-3) for the full design + the rejected alternatives.
+**Chunk integration is end-to-end.** Calling `reindex_db` from an agent against an `mcp.Run + mcp/db.Setup` binary runs the introspection AND makes the new DB chunks searchable in the agent's next `search` / `find_related` call. The pipeline: `mcp.Run` wraps the embedded `*search.Index` in `atomic.Pointer[search.Index]`; `mcp/db.Refresher.Start` (called by `mcp.Run` on startup) wires the swap callback to `*search.Index.WithExtraChunks` + atomic-pointer store; each refresh rebuilds against the original corpus + the latest DB chunks. `cmd/ken-mcp` continues to use `*WatchedIndex.SetExtraChunks` for its fsnotify-rooted path; the SDK-author + CLI surfaces converge on the same `Refresher` + `reindex_db` semantics. See [ADR-020 Part 3](docs/internal/DECISIONS.md#part-3-opt-in-mcpdb-package-preserving-v060-binary-size-contract-v080-part-3) for the full design + the rejected alternatives.
 
 ## Quickstart
 
@@ -576,14 +576,14 @@ func main() {
 }
 ```
 
-For test fixtures, `testing/fstest.MapFS` works the same way: `search.FromFS(fstest.MapFS{"a.go": {Data: []byte("...")}}, …)`. The legacy `search.FromPath(root, …)` is now a thin deprecated wrapper around `search.FromFS(os.DirFS(root), …)`. See [ADR-014](docs/DECISIONS.md#adr-014-fsfs-as-canonical-walkerindexer-surface) for the design rationale.
+For test fixtures, `testing/fstest.MapFS` works the same way: `search.FromFS(fstest.MapFS{"a.go": {Data: []byte("...")}}, …)`. The legacy `search.FromPath(root, …)` is now a thin deprecated wrapper around `search.FromFS(os.DirFS(root), …)`. See [ADR-014](docs/internal/DECISIONS.md#adr-014-fsfs-as-canonical-walkerindexer-surface) for the design rationale.
 
 ## Choosing a chunker
 
 ken ships with **two chunkers** behind the same `--chunker=` flag (CLI) / `KEN_MCP_CHUNKER=` env var (MCP):
 
 - **`regex`** *(default)* — hand-rolled per-language regex rules for Python / Go / TypeScript / Java / Rust with a line-window fallback for everything else.
-- **`treesitter`** *(opt-in)* — pure-Go tree-sitter via [`gotreesitter`](https://github.com/odvcencio/gotreesitter), running the cAST split-then-merge algorithm from [arXiv 2506.15655](https://arxiv.org/html/2506.15655). Its 206 embedded grammars are ~19 MB on-disk (gotreesitter's `embed.FS` payload); importing the chunker adds ~26 MB to the linked binary (parser runtime + embed payload + symbol bookkeeping; measured darwin/arm64). Importing is per-binary at compile time — `cmd/ken` and `cmd/ken-mcp` blank-import it; `cmd/ken-mcp-docs` deliberately doesn't. Once imported, chunker choice is a runtime flag (`--chunker=treesitter` / `KEN_MCP_CHUNKER=treesitter`). (v0.8.2 found per-grammar build-tag gating couldn't shrink the binary because the embed layer was a monolithic upstream glob; gotreesitter v0.20.0-rc2 fixed that, so as of [ADR-033](docs/DECISIONS.md#adr-033-adopt-gotreesitter-grammarsubset-slim-release-binaries-v0200-rc2) ken's *release* binaries build slim — embedding only the 17 dispatched grammars (~14 MB lighter) — while the library `go build` stays all-grammars. History in [ADR-023](docs/DECISIONS.md#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome) and its [calibration amendment](docs/DECISIONS.md#calibration-amendment-post-v083-audit).)
+- **`treesitter`** *(opt-in)* — pure-Go tree-sitter via [`gotreesitter`](https://github.com/odvcencio/gotreesitter), running the cAST split-then-merge algorithm from [arXiv 2506.15655](https://arxiv.org/html/2506.15655). Its 206 embedded grammars are ~19 MB on-disk (gotreesitter's `embed.FS` payload); importing the chunker adds ~26 MB to the linked binary (parser runtime + embed payload + symbol bookkeeping; measured darwin/arm64). Importing is per-binary at compile time — `cmd/ken` and `cmd/ken-mcp` blank-import it; `cmd/ken-mcp-docs` deliberately doesn't. Once imported, chunker choice is a runtime flag (`--chunker=treesitter` / `KEN_MCP_CHUNKER=treesitter`). (v0.8.2 found per-grammar build-tag gating couldn't shrink the binary because the embed layer was a monolithic upstream glob; gotreesitter v0.20.0-rc2 fixed that, so as of [ADR-033](docs/internal/DECISIONS.md#adr-033-adopt-gotreesitter-grammarsubset-slim-release-binaries-v0200-rc2) ken's *release* binaries build slim — embedding only the 17 dispatched grammars (~14 MB lighter) — while the library `go build` stays all-grammars. History in [ADR-023](docs/internal/DECISIONS.md#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome) and its [calibration amendment](docs/internal/DECISIONS.md#calibration-amendment-post-v083-audit).)
 
 **TL;DR:** stay on `regex` unless you index one of the languages where treesitter measurably wins.
 
@@ -615,7 +615,7 @@ Notes on the auto-fallback rows:
 - **C#** — the gotreesitter v0.18.0 C# grammar OOMs on real-world C# files (1.7+ GB RSS during indexing). The treesitter chunker detects unsupported languages and routes them through the line chunker, so C# behaves identically under both selections.
 - **Bash** — the bash grammar is pathologically slow on real bash-it content (~39% of files timeout). Same auto-fallback behavior.
 
-The full per-language NDCG breakdown plus the empirical findings that informed this is in [`docs/BENCH.md`](docs/BENCH.md). The rationale for default-stays-regex is in [`docs/DECISIONS.md` ADR-011](docs/DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in).
+The full per-language NDCG breakdown plus the empirical findings that informed this is in [`docs/BENCH.md`](docs/BENCH.md). The rationale for default-stays-regex is in [`docs/internal/DECISIONS.md` ADR-011](docs/internal/DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in).
 
 ## Comparison to semble
 
@@ -632,7 +632,7 @@ The full per-language NDCG breakdown plus the empirical findings that informed t
 | NDCG@10 on CoIR-CSN-Python (external) | (not measured; semble doesn't run this bench) | **0.8743 bm25 / 0.7839 hybrid** ([see why](#benchmarks--external-reference-coir-csn-python))†† |
 | Median tokens to recall@10 on agent queries | (not measured; semble doesn't run this bench) | **4,269 tok @ 82% recall (BM25-only harness; default hybrid reaches 97%)** on semble NL queries — vs grep+Read's 189,591 tok @ 99.9% (44× cheaper; ~3 pp lower recall in default mode, 17 pp in the model-less fallback)††† |
 | MCP server | yes | yes — drop-in compatible (same tool schemas, same wire format) |
-| Binary size | n/a (Python env) | release (slim) `ken` ~22 MB · `ken-mcp` ~38 MB; default `go build` (all 206 grammars) `ken` ~36 MB · `ken-mcp` ~54 MB. Slim embeds only the 17 dispatched grammars via `grammar_subset` build tags ([ADR-033](docs/DECISIONS.md#adr-033-adopt-gotreesitter-grammarsubset-slim-release-binaries-v0200-rc2)); measured darwin/arm64 — see [Choosing a chunker](#choosing-a-chunker) |
+| Binary size | n/a (Python env) | release (slim) `ken` ~22 MB · `ken-mcp` ~38 MB; default `go build` (all 206 grammars) `ken` ~36 MB · `ken-mcp` ~54 MB. Slim embeds only the 17 dispatched grammars via `grammar_subset` build tags ([ADR-033](docs/internal/DECISIONS.md#adr-033-adopt-gotreesitter-grammarsubset-slim-release-binaries-v0200-rc2)); measured darwin/arm64 — see [Choosing a chunker](#choosing-a-chunker) |
 | Requires `huggingface-cli` for model | yes | **no** — `ken download-model` fetches direct from HF (or skip and use `--mode bm25`; BM25-only costs ~14 pp recall@10 vs the hybrid default — see [`docs/BENCH.md`](docs/BENCH.md#default-mode-hybrid-recall--the-number-that-matters)) |
 
 † **Measured at v0.1.0 / v0.2.0 against semble's published benchmark** (63 repos, 1251 queries, semble's own `benchmarks.metrics.ndcg_at_k` + `target_rank`). Reproduce: see [`docs/BENCH.md`](docs/BENCH.md). Ablation breakdown vs semble's published raw retrieval numbers:
@@ -643,13 +643,13 @@ The full per-language NDCG breakdown plus the empirical findings that informed t
 > | BM25 only | 0.675 | 0.624 | 0.621 |
 > | **Hybrid (full ranker)** | **0.854** | **0.842** | **0.838** |
 >
-> The semantic-raw match within 0.003 isolates and validates the embedding + tokenizer + ANN port. The BM25 tokenizer was also re-aligned to a verbatim port of semble's `tokens.py` (snake-case compound preservation, ASCII-only identifier extraction, compound-first emission order). The v0.2.0 tree-sitter chunker (`--chunker=treesitter` via [`gotreesitter`](https://github.com/odvcencio/gotreesitter)) trades NDCG per-language without net movement — clear wins on Kotlin / Zig / TypeScript / Java / PHP, losses on Python / Rust / C / Lua / Scala — so the **default chunker stays regex** and treesitter is opt-in. See ["Choosing a chunker"](#choosing-a-chunker) for the per-language recommendation and [`docs/DECISIONS.md` ADR-011](docs/DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in) for the full rationale.
+> The semantic-raw match within 0.003 isolates and validates the embedding + tokenizer + ANN port. The BM25 tokenizer was also re-aligned to a verbatim port of semble's `tokens.py` (snake-case compound preservation, ASCII-only identifier extraction, compound-first emission order). The v0.2.0 tree-sitter chunker (`--chunker=treesitter` via [`gotreesitter`](https://github.com/odvcencio/gotreesitter)) trades NDCG per-language without net movement — clear wins on Kotlin / Zig / TypeScript / Java / PHP, losses on Python / Rust / C / Lua / Scala — so the **default chunker stays regex** and treesitter is opt-in. See ["Choosing a chunker"](#choosing-a-chunker) for the per-language recommendation and [`docs/internal/DECISIONS.md` ADR-011](docs/internal/DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in) for the full rationale.
 
 †† CoIR-CSN-Python numbers reported separately because they tell a different story than semble's bench: on CSN, BM25 beats hybrid by ~0.09 due to a substring-leak artifact in how CoIR reframes the CodeSearchNet dataset (queries are Python function sources; documents are docstrings extracted from those same functions, so the answer is a literal substring of the query). See the ["Benchmarks — external reference"](#benchmarks--external-reference-coir-csn-python) section and [`docs/BENCH.md`](docs/BENCH.md#external-benchmark--coir-csn-python) for the corrected explanation. semble's bench is the verbatim-port confirmation; CoIR-CSN is the externally-reproducible anchor against published code-IR baselines but is read as a dataset-construction case study, not as evidence about ken's hybrid retrieval on natural NL-to-code queries.
 
 ††† Measured at v0.3.0 against semble's 63-repo benchmark (914 NL queries from semble's 1,251-query corpus, ranked by ken's regex chunker, K=10). The token harness runs BM25-only (it needs no model), so its recall column is ken's fallback floor, not the default. On the same benchmark the default hybrid mode measures **0.967 NL / 0.995 symbol recall@10** (`internal/search/recall_decomp_test.go`, build-tag `bench`). The honest framing: ~44× fewer agent-input tokens at ~3 pp lower recall than grep+Read in default mode — 17 pp only when no model is installed. Exhaustive enumeration (refactors, pre-rename audits) still belongs to grep — ken is for "find the chunk that answers this." Full per-query-class table (symbol + NL) and the methodology + caveats are in [`docs/BENCH.md`](docs/BENCH.md#token-budget-recall--agent-side-efficiency).
 
-‡ **Indexing times re-measured 2026-05-29** at commit `fe53e91` (post-perf-campaign: v0.8.5–v0.8.7 tokenizer-allocation reduction + indexing-pipeline parallelism, [ADR-027](docs/DECISIONS.md#adr-027-bm25-tokenizer-allocation-reduction--rune--byte--syncpool-scratch--lowercase-fast-path-v085)/[ADR-030](docs/DECISIONS.md#adr-030-indexing-pipeline-parallelism--phase-a-per-file-workers-for-chunk--embed-v087)), via `ken perf index <path> --mode …` (darwin/arm64, Go 1.26.3, 8 cores). "This repo" is the ken repo root — it grew from 542 to 1,710 chunks (3.2×) since the prior measurement, yet hybrid indexing *dropped* from 0.45 s to 0.36 s and BM25 held at 0.06 s for 3.2× the work.
+‡ **Indexing times re-measured 2026-05-29** at commit `fe53e91` (post-perf-campaign: v0.8.5–v0.8.7 tokenizer-allocation reduction + indexing-pipeline parallelism, [ADR-027](docs/internal/DECISIONS.md#adr-027-bm25-tokenizer-allocation-reduction--rune--byte--syncpool-scratch--lowercase-fast-path-v085)/[ADR-030](docs/internal/DECISIONS.md#adr-030-indexing-pipeline-parallelism--phase-a-per-file-workers-for-chunk--embed-v087)), via `ken perf index <path> --mode …` (darwin/arm64, Go 1.26.3, 8 cores). "This repo" is the ken repo root — it grew from 542 to 1,710 chunks (3.2×) since the prior measurement, yet hybrid indexing *dropped* from 0.45 s to 0.36 s and BM25 held at 0.06 s for 3.2× the work.
 
 semble timings cited above are from semble's own [README "Benchmarks" section](https://github.com/MinishLab/semble#benchmarks); ken's are measured on the ken repo root and on a sibling shallow clone of `/tmp/semble`. Cold-start was timed by `/usr/bin/time -p ken search testdata/repo "validate" -k 1 --mode bm25` over three trials (M2 MacBook Air, Go 1.26.3, darwin/amd64 build under Rosetta).
 
@@ -682,7 +682,7 @@ The full risk register with explicit triggers is in [docs/DESIGN.md §10](docs/D
 - **Tree-sitter chunker (Option A)** — landed in v0.2.0 via [`gotreesitter`](https://github.com/odvcencio/gotreesitter) as opt-in (`--chunker=treesitter`). Default stays `regex`. Per-language guidance in ["Choosing a chunker"](#choosing-a-chunker).
 - **Chroma chunker (Option B)** — broader language coverage via a token-stream lexer. Trigger: a polyglot repo where neither chunker covers a needed language. Not currently triggered.
 - **Class-body-aware Python chunking** — currently top-level only; large Django models / SQLAlchemy bases line-split through methods. Trigger: Python NDCG visibly below the other languages (not currently triggered).
-- **~~Incremental indexing~~ — landed in v0.3.** `ken-mcp` watches the repo file tree and republishes a snapshot 2s after any edit, so an agent querying its own working tree sees its own edits without a restart. `ken index --watch` (default) keeps the CLI alive in a similar role; `ken index --no-watch` restores the v0.2 build-and-exit behavior. Tombstones for deletes, no compaction — memory grows monotonically with cumulative edit volume, which is fine for typical agent-session lifetimes; compaction is a v0.3.x trigger if multi-day sessions hit pressure. Atomic-snapshot reads keep query latency unchanged from v0.2. Implementation: [`internal/search/watch.go`](internal/search/watch.go), design rationale in [`docs/DECISIONS.md` ADR-012](docs/DECISIONS.md#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap).
+- **~~Incremental indexing~~ — landed in v0.3.** `ken-mcp` watches the repo file tree and republishes a snapshot 2s after any edit, so an agent querying its own working tree sees its own edits without a restart. `ken index --watch` (default) keeps the CLI alive in a similar role; `ken index --no-watch` restores the v0.2 build-and-exit behavior. Tombstones for deletes, no compaction — memory grows monotonically with cumulative edit volume, which is fine for typical agent-session lifetimes; compaction is a v0.3.x trigger if multi-day sessions hit pressure. Atomic-snapshot reads keep query latency unchanged from v0.2. Implementation: [`internal/search/watch.go`](internal/search/watch.go), design rationale in [`docs/internal/DECISIONS.md` ADR-012](docs/internal/DECISIONS.md#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap).
 - **Token-budget recall — agent-side efficiency vs grep+Read.** Measured at v0.3.0; ken surfaces the qrel target chunk in ~44× fewer tokens than the tokenized-grep baseline at K=10 on semble's NL queries (82% recall BM25-only / 97% in default hybrid, vs grep's 99%), and in ~10,000× fewer tokens on the 280K-file CoIR-CSN-Python corpus (91% vs 100% recall; BM25-only, which on CoIR is the stronger mode anyway due to the substring-leak artifact — see ††). Grep wins on recall completeness; ken wins decisively on agent-input cost. See [`docs/BENCH.md` "Token-budget recall"](docs/BENCH.md#token-budget-recall--agent-side-efficiency).
 
 ## How this was built
@@ -693,7 +693,7 @@ That last rule caught five material errors during the rerank-pipeline port (see 
 
 Benchmark numbers in the [Comparison table](#comparison-to-semble) are measured against semble's own harness using its native NDCG@10 metric, not synthesized — reproducible via [`docs/BENCH.md`](docs/BENCH.md). The 11k-input tokenizer parity test ([`scripts/parity_dump.py`](scripts/parity_dump.py) + [`internal/embed/parity_test.go`](internal/embed/parity_test.go)) was a human call — "the 18-case spot-check isn't enough" — and surfaced three real bugs the spot-check missed.
 
-The ADR-style record of every architectural decision (alternatives considered, consequences) lives in [`docs/DECISIONS.md`](docs/DECISIONS.md).
+The ADR-style record of every architectural decision (alternatives considered, consequences) lives in [`docs/internal/DECISIONS.md`](docs/internal/DECISIONS.md).
 
 ## Acknowledgments
 

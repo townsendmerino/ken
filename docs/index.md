@@ -23,11 +23,11 @@ Hybrid (BM25 + Model2Vec) code search via MCP. Pure Go. [Source on GitHub](https
 
 ## Technical docs
 
-- [Architecture decision records](https://github.com/townsendmerino/ken/blob/main/docs/DECISIONS.md)
+- [Architecture decision records](https://github.com/townsendmerino/ken/blob/main/docs/internal/DECISIONS.md)
 - [Design notes](https://github.com/townsendmerino/ken/blob/main/docs/DESIGN.md)
-- [Performance discipline](https://github.com/townsendmerino/ken/blob/main/docs/PERF.md)
+- [Performance discipline](https://github.com/townsendmerino/ken/blob/main/docs/internal/PERF.md)
 - [Benchmark conventions](https://github.com/townsendmerino/ken/blob/main/docs/BENCH.md)
 
 ## Planning
 
-- [Structural call/dependency graph — plan](https://github.com/townsendmerino/ken/blob/main/docs/structural-call-graph-plan.md) — phased plan to move the structural layer from name-resolved/file-level callers to a resolved, node-level call & dependency graph, with per-phase performance budgets.
+- [Structural call/dependency graph — plan](https://github.com/townsendmerino/ken/blob/main/docs/internal/structural-call-graph-plan.md) — phased plan to move the structural layer from name-resolved/file-level callers to a resolved, node-level call & dependency graph, with per-phase performance budgets.

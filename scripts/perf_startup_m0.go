@@ -1,7 +1,7 @@
 //go:build ignore
 
 // perf_startup_m0.go — baselines for the startup + query-latency
-// perf campaign (docs/perf-campaign-startup-query.md).
+// perf campaign (docs/internal/perf-campaign-startup-query.md).
 //
 // Measures, per corpus:
 //

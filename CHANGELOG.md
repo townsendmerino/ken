@@ -37,7 +37,7 @@ with pre-built binaries.
   languages. Zero values mean "not recorded" (no extractor produces
   them as of this commit). Free at parse time — `nodeText` was already
   reading the bytes; we just record the spans. The immediate
-  user-visible effect lives in [`docs/structural-call-graph-plan.md`](docs/structural-call-graph-plan.md)'s
+  user-visible effect lives in [`docs/internal/structural-call-graph-plan.md`](docs/internal/structural-call-graph-plan.md)'s
   Phase 0 entry: future `references` / `definition` output gains line
   numbers without further extractor work.
 - **`structural.CallRef` + `FileStruct.CallRefs`** — replaces the
@@ -93,11 +93,11 @@ consume them.
 
 ## [0.9.1] — 2026-06-03 — language coverage + upstream-bug diagnostics
 
-Two new structural-extractor languages ship (Kotlin · Dart, taking total coverage to twelve); two languages that were in scope (C# · Swift) get parked behind diagnostic memos ready to file upstream at `gotreesitter`. A new `docs/add-a-language.md` walkthrough captures the end-to-end process for future contributors. Same Stage 8 architecture as v0.9.0 — no API changes, no behavior changes for existing languages.
+Two new structural-extractor languages ship (Kotlin · Dart, taking total coverage to twelve); two languages that were in scope (C# · Swift) get parked behind diagnostic memos ready to file upstream at `gotreesitter`. A new `docs/internal/add-a-language.md` walkthrough captures the end-to-end process for future contributors. Same Stage 8 architecture as v0.9.0 — no API changes, no behavior changes for existing languages.
 
 ### Added — Kotlin structural extractor
 
-- **`extract_kotlin.go`** lights up the structural index on `.kt` and `.kts` files. Tree-sitter-kotlin doesn't expose useful field names (`FieldNameForChild` returns `""` on most nodes), so the walker uses positional + `Type()` access — the same fallback pattern documented in [`docs/add-a-language.md`](docs/add-a-language.md) and used by `extract_rust.go`. The grammar lumps `class` / `interface` / `data class` under one `class_declaration` node; `object_declaration` handles singletons. `jump_expression` covers BOTH `return` and `throw`, discriminated via the node's source-text prefix.
+- **`extract_kotlin.go`** lights up the structural index on `.kt` and `.kts` files. Tree-sitter-kotlin doesn't expose useful field names (`FieldNameForChild` returns `""` on most nodes), so the walker uses positional + `Type()` access — the same fallback pattern documented in [`docs/internal/add-a-language.md`](docs/internal/add-a-language.md) and used by `extract_rust.go`. The grammar lumps `class` / `interface` / `data class` under one `class_declaration` node; `object_declaration` handles singletons. `jump_expression` covers BOTH `return` and `throw`, discriminated via the node's source-text prefix.
 - **Dogfood validation against [square/okhttp](https://github.com/square/okhttp):** 537 files indexed in ~1.0 s; 5,017 functions (4,816 methods) + 716 classes. Top calls are real okhttp-builder vocabulary (`build` / `Builder` / `newCall` / `execute` / `url` / `assertThat`); imports correctly bound to rightmost-segment names (`IOException` / `OkHttpClient` / `Request`); raises are real exception types — no noise leakage.
 
 ### Added — Dart structural extractor
@@ -111,17 +111,17 @@ Two new structural-extractor languages ship (Kotlin · Dart, taking total covera
 
 ### Documented — C# OOM root cause (upstream-ready memo)
 
-- **`docs/csharp-oom-root-cause.md`** — full diagnostic of the gotreesitter C# grammar's unbounded recursion in its post-parse namespace recovery pass. The 65-byte minimal reproducer (`namespace N { class C { void M(string n) { F(n, E.A | E.B); } } }`) allocates 9M+ objects / 3 GB Go heap in ~3 s before OOM. Root cause: `parser_result_csharp.go`'s `normalizeCSharpRecoveredNamespaces` triggers `parseWithSnippetParser` on a sub-range, which re-enters the same recovery pass with a fresh `recoveryCount = 0`. The `csharpMaxNamespaceRecoveries = 32` cap bounds breadth within one frame, but not depth across frames. Memo includes the captured goroutine stack showing 5 nested recursions on the same 65-byte source range, an `alloc_objects` pprof profile dominated by `NewParser → buildSmallLookup` (>94%), three suggested fix directions (depth counter via `parseWithSnippetParser` opts; range-progress guard; pool-acquisition depth cap), and a test that would have caught it.
+- **`docs/internal/csharp-oom-root-cause.md`** — full diagnostic of the gotreesitter C# grammar's unbounded recursion in its post-parse namespace recovery pass. The 65-byte minimal reproducer (`namespace N { class C { void M(string n) { F(n, E.A | E.B); } } }`) allocates 9M+ objects / 3 GB Go heap in ~3 s before OOM. Root cause: `parser_result_csharp.go`'s `normalizeCSharpRecoveredNamespaces` triggers `parseWithSnippetParser` on a sub-range, which re-enters the same recovery pass with a fresh `recoveryCount = 0`. The `csharpMaxNamespaceRecoveries = 32` cap bounds breadth within one frame, but not depth across frames. Memo includes the captured goroutine stack showing 5 nested recursions on the same 65-byte source range, an `alloc_objects` pprof profile dominated by `NewParser → buildSmallLookup` (>94%), three suggested fix directions (depth counter via `parseWithSnippetParser` opts; range-progress guard; pool-acquisition depth cap), and a test that would have caught it.
 - **Three reproducer scripts** in tree under public gotreesitter APIs so upstream can re-run them: [`scripts/csharp_oom_diag.go`](scripts/csharp_oom_diag.go) (`--mode=leak / --mode=per-file / --mode=single`), [`scripts/csharp_bisect.go`](scripts/csharp_bisect.go) (fork-and-budget bisection), [`scripts/csharp_pprof.go`](scripts/csharp_pprof.go) (in-process pprof dump when heap crosses 1.5 GB; HTTP pprof can't be used because the parse goroutine starves the scheduler).
 - **`extract_csharp.go`** stays in tree behind a `csharp` build tag (compiles only with `go build -tags=csharp`), so re-enabling C# is a two-line registration change once the upstream fix lands. `kenLangToTSLang` and `langExtractor` map entries are commented out with the rationale inline.
 
 ### Documented — Swift parse misbehavior (upstream-ready memo)
 
-- **`docs/swift-parse-root-cause.md`** — diagnostic of the gotreesitter Swift grammar's lexer misbehavior on real-world Swift. The line-comment lexer fails to recognize `//` followed by common English words like "and" / "software" / "associated" / "Permission" — a 35-byte file `//\n//  software\n\nclass Foo {}` already parses to `root=ERROR`. Cross-corpus survey (`scripts/swift_survey.go`) measured **0% / 2% / 8% / 35% clean-parse rates** on Alamofire / swift-nio / swift-collections / Defaults respectively — universally broken on shipping code because every MIT-license-headered file fails. Different failure mode from C# (this one finishes promptly but produces garbage trees), same downstream effect (extractor returns zero useful data).
+- **`docs/internal/swift-parse-root-cause.md`** — diagnostic of the gotreesitter Swift grammar's lexer misbehavior on real-world Swift. The line-comment lexer fails to recognize `//` followed by common English words like "and" / "software" / "associated" / "Permission" — a 35-byte file `//\n//  software\n\nclass Foo {}` already parses to `root=ERROR`. Cross-corpus survey (`scripts/swift_survey.go`) measured **0% / 2% / 8% / 35% clean-parse rates** on Alamofire / swift-nio / swift-collections / Defaults respectively — universally broken on shipping code because every MIT-license-headered file fails. Different failure mode from C# (this one finishes promptly but produces garbage trees), same downstream effect (extractor returns zero useful data).
 - **`extract_swift.go`** parked behind a `swift` build tag (the chunker layer keeps the Swift grammar via the slim subset — it still produces some boundaries even from ERROR roots — but the structural extractor needs a clean AST). Memo includes the minimal reproducer, the per-trigger-word list, the cross-corpus failure rates, and a test that would have caught it. Re-enabling is a two-line registration change once upstream fixes the lexer.
 - **DESIGN.md §10 risk register** updated with the Swift entry alongside the existing C# and bash entries. The chunker still embeds the Swift grammar in slim binaries (it produces *some* chunks from ERROR roots, which is better than the line-chunker fallback for retrieval); only the structural extractor is gated off.
 
-### Added — `docs/add-a-language.md` walkthrough
+### Added — `docs/internal/add-a-language.md` walkthrough
 
 - Step-by-step guide for adding a new language to ken's structural index: AST probing via `KEN_DEBUG_AST=1 KEN_DEBUG_LANG=<grammar> go test -run TestDebug_ASTShape` (with `KEN_DEBUG_AST_DEPTH` knob added in this release), writing the extractor, registering in `kenLangToTSLang` + `langExtractor`, fixture tests, dogfood validation, precision-sample check, lint / commit. Documents the field-name-dropping quirk (Rust / Kotlin / Dart fallback pattern), common patterns (method receivers, generic-type instantiation, import binding), and what to do when the dogfood pass kills the language (the C# and Swift parks are the worked examples).
 - **DEVELOPERS.md "Adding a structural extractor"** entry now links to the walkthrough instead of carrying the inline summary.
@@ -172,11 +172,11 @@ The feature-complete 1.0-RC: Stage 8 closes (structural-navigation tools shipped
 - **M4 — Parallel `structural.Build`.** Refactored Pass 1 of structural.Build to `runtime.NumCPU()` workers using the per-file pattern from ADR-030. Determinism preserved by writing per-file results into idx-aligned slots + merging in lexical order before Pass 2. **3.5× on jekyll (−1,127 ms), 4.5× on ken itself (−360 ms).**
 - **Cumulative cold-start budget reduction**: tiny 627 ms → 134 ms (−79%); medium (ken) 1,405 ms → 555 ms (−60%); large (jekyll) 2,927 ms → 1,309 ms (−55%). Warm-search p50 unchanged (already sub-millisecond at M0; H4 confirmed).
 - **M1, M3, M5 killed**: M2 superseded M1 (Q8 rerank default); H2 refuted M3 (warm-up Encode penalty <0.3 ms); H4 confirmed M5 (query-path already sub-ms).
-- **Campaign closure** in [ADR-036](docs/DECISIONS.md#adr-036-close-the-startup--query-latency-perf-campaign). Out-of-band trigger: real user latency report against a hot path none of M0's measurements touched.
+- **Campaign closure** in [ADR-036](docs/internal/DECISIONS.md#adr-036-close-the-startup--query-latency-perf-campaign). Out-of-band trigger: real user latency report against a hot path none of M0's measurements touched.
 
 ### Changed — extracted reusable packages into separate `aikit` module (ADR-034)
 
-- **New module [`github.com/townsendmerino/aikit`](https://github.com/townsendmerino/aikit) at v0.1.0** (now pinned at `v0.1.1`). ken's reusable algorithm packages — `topk`, `ann`, `bm25`, `embed`, `coderank` (renamed `encoder`), and `chunk` (+ `regex` / `markdown` / `treesitter`) — moved out of `internal/` (and out of public `chunk/`) into a second module that any project can import. ken now consumes them via `require github.com/townsendmerino/aikit`. Closes the "reusable by another project" path that `internal/` foreclosed. See [ADR-034](docs/DECISIONS.md#adr-034-extract-reusable-algorithm-packages-into-a-separate-aikit-module).
+- **New module [`github.com/townsendmerino/aikit`](https://github.com/townsendmerino/aikit) at v0.1.0** (now pinned at `v0.1.1`). ken's reusable algorithm packages — `topk`, `ann`, `bm25`, `embed`, `coderank` (renamed `encoder`), and `chunk` (+ `regex` / `markdown` / `treesitter`) — moved out of `internal/` (and out of public `chunk/`) into a second module that any project can import. ken now consumes them via `require github.com/townsendmerino/aikit`. Closes the "reusable by another project" path that `internal/` foreclosed. See [ADR-034](docs/internal/DECISIONS.md#adr-034-extract-reusable-algorithm-packages-into-a-separate-aikit-module).
 - **`coderank` renamed to `encoder`** on the move. The package is a transformer encoder, not a PageRank-style ranker; the old name misled. The rename ripples through error prefixes, the env var (`KEN_MCP_RERANK_QUANT` and friends unchanged — those name the operator-facing knob), `testdata/coderank-model` → `testdata/encoder-model`, scripts (`scripts/pin_coderank.py` → `scripts/pin_encoder.py`, etc.), and ken's `.gitignore`. HuggingFace model name (`nomic-ai/CodeRankEmbed`) and on-disk cache scope key are unchanged.
 - **Breaking change for the public `chunk` path**: was `github.com/townsendmerino/ken/chunk` (added in ADR-032 two days prior, never tagged in a release); now `github.com/townsendmerino/aikit/chunk`. GitHub code search returns zero downstream consumers — hard break, no shim.
 
@@ -184,7 +184,7 @@ The feature-complete 1.0-RC: Stage 8 closes (structural-navigation tools shipped
 
 ### Changed — slim release binaries via gotreesitter `grammar_subset` (ADR-033)
 
-- **gotreesitter `v0.19.1` → `v0.20.0-rc2`**, and ken's release binaries (`ken`, `ken-mcp`) now build **slim** — embedding only the 17 tree-sitter grammars `chunk/treesitter` actually dispatches (per `kenToTreeSitter`) instead of all 206 — via the `grammar_subset` build tags in `.goreleaser.yml`. **Measured: `ken-mcp` 52.3 → 38.3 MB, `ken` 36.0 → 22.0 MB** (M1 Pro / `CGO_ENABLED=0`). The C-only `ken-demo-postgres` similarly drops ~16 MB of download. Resolves the embed-layer limitation [ADR-023](docs/DECISIONS.md#adr-023) flagged in v0.8.2.
+- **gotreesitter `v0.19.1` → `v0.20.0-rc2`**, and ken's release binaries (`ken`, `ken-mcp`) now build **slim** — embedding only the 17 tree-sitter grammars `chunk/treesitter` actually dispatches (per `kenToTreeSitter`) instead of all 206 — via the `grammar_subset` build tags in `.goreleaser.yml`. **Measured: `ken-mcp` 52.3 → 38.3 MB, `ken` 36.0 → 22.0 MB** (M1 Pro / `CGO_ENABLED=0`). The C-only `ken-demo-postgres` similarly drops ~16 MB of download. Resolves the embed-layer limitation [ADR-023](docs/internal/DECISIONS.md#adr-023) flagged in v0.8.2.
 - **Library `go build` / `mcp.Run` is unaffected** — build tags are set by whoever compiles, not by importers; external embedded-corpus authors who don't pass the tags still get all 206 grammars. Slim is opt-in to ken's own release pipeline.
 - **Drift guard**: `chunk/treesitter`'s `TestSubsetTagsMatchKenToTreeSitter` asserts the `.goreleaser.yml` subset tag set equals `kenToTreeSitter` (both directions); a CI compile-smoke builds the slim binaries on every PR.
 
@@ -220,11 +220,11 @@ The feature-complete 1.0-RC: Stage 8 closes (structural-navigation tools shipped
 
 ## [0.8.7] — 2026-05-27
 
-**Parallel index build — per-file workers for chunk + embed.** [ADR-030](docs/DECISIONS.md#adr-030-indexing-pipeline-parallelism--phase-a-per-file-workers-for-chunk--embed-v087): hybrid INDEX wall 165.3 s → 45.4 s (3.64× speedup); GC share on hybrid 38% → 8%; bm25 1.15×. N=20 determinism stress confirmed bit-identical (one unique SHA per mode). NDCG@10 exact-match all three modes. Tag exists at commit b3ec110 with corresponding GitHub release artifacts. (Calibration retrospectively documented in `outputs/project-v087.md`-equivalent memory entry; not separately changelogged at the time.)
+**Parallel index build — per-file workers for chunk + embed.** [ADR-030](docs/internal/DECISIONS.md#adr-030-indexing-pipeline-parallelism--phase-a-per-file-workers-for-chunk--embed-v087): hybrid INDEX wall 165.3 s → 45.4 s (3.64× speedup); GC share on hybrid 38% → 8%; bm25 1.15×. N=20 determinism stress confirmed bit-identical (one unique SHA per mode). NDCG@10 exact-match all three modes. Tag exists at commit b3ec110 with corresponding GitHub release artifacts. (Calibration retrospectively documented in `outputs/project-v087.md`-equivalent memory entry; not separately changelogged at the time.)
 
 ## [0.8.3] — 2026-05-26
 
-**Cold-start optimization for the v0.6.0 embedded-corpus build pattern.** Narrative: "v0.6.0 shipped embedded corpora; v0.8.3 makes their cold start fast." [ADR-024](docs/DECISIONS.md#adr-024-pre-built-embedded-indices-for-mcprun-v083) closes the optimization gap [ADR-016](docs/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) left open. SDK authors using `mcp.Run` can now pre-build their search index at `go generate` / build time and ship it inside their `//go:embed` corpus; `mcp.Run` auto-loads it at startup and skips the per-launch walk + chunk + embed pass. Closes [#10](https://github.com/townsendmerino/ken/issues/10).
+**Cold-start optimization for the v0.6.0 embedded-corpus build pattern.** Narrative: "v0.6.0 shipped embedded corpora; v0.8.3 makes their cold start fast." [ADR-024](docs/internal/DECISIONS.md#adr-024-pre-built-embedded-indices-for-mcprun-v083) closes the optimization gap [ADR-016](docs/internal/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) left open. SDK authors using `mcp.Run` can now pre-build their search index at `go generate` / build time and ship it inside their `//go:embed` corpus; `mcp.Run` auto-loads it at startup and skips the per-launch walk + chunk + embed pass. Closes [#10](https://github.com/townsendmerino/ken/issues/10).
 
 The v0.6.0 single-static-binary contract is preserved: pre-built indices live inside the SDK author's `//go:embed corpus`, not as sidecar assets. Lazy fallback on any load failure (corrupt bytes, format-version mismatch, mode/chunker mismatch, missing file) keeps the optimization opt-in to the upside, not opt-in to the failure mode — a stale or corrupt pre-built file produces a slower-but-still-working binary with a stderr warning naming the reason, not a deployment outage.
 
@@ -259,20 +259,20 @@ A post-v0.8.3 re-measurement against `gotreesitter` v0.18.0 (cross-checked again
 - **On-disk grammar bundle: ~19 MB** (20,011,313 bytes; 206 `*.bin` files in `gotreesitter/grammars/grammar_blobs/`). Stable across v0.18.0 and v0.19.1 — did NOT grow from ~19 MB to ~26 MB despite the grammar count growth from 17 to ~206.
 - **Linked-binary cost when treesitter is imported: ~26 MB** (`cmd/ken-mcp` darwin/arm64: 55,712,704 B with the blank import vs 28,726,752 B without — delta 26,985,952 B). Includes the embed payload + parser runtime + symbol bookkeeping.
 
-v0.8.2's amendment merged both into one number. The v0.8.3 sweep corrected the three in-code comments (`cmd/ken-mcp/main.go`, `cmd/ken-mcp-docs/main.go`, `internal/search/index.go`), DESIGN.md §1, and added the [calibration-amendment block to ADR-023](docs/DECISIONS.md#calibration-amendment-post-v083-audit). This CHANGELOG note completes the sweep by amending the v0.8.2 entry (the original source of the conflation) without overwriting its body — same amend-don't-overwrite discipline that v0.8.2 itself applied to v0.6.0.
+v0.8.2's amendment merged both into one number. The v0.8.3 sweep corrected the three in-code comments (`cmd/ken-mcp/main.go`, `cmd/ken-mcp-docs/main.go`, `internal/search/index.go`), DESIGN.md §1, and added the [calibration-amendment block to ADR-023](docs/internal/DECISIONS.md#calibration-amendment-post-v083-audit). This CHANGELOG note completes the sweep by amending the v0.8.2 entry (the original source of the conflation) without overwriting its body — same amend-don't-overwrite discipline that v0.8.2 itself applied to v0.6.0.
 
 **Canonical figures going forward**: ~19 MB on-disk grammar bundle, ~26 MB binary cost when treesitter is imported. See ADR-023's calibration amendment for the full audit trail.
 
 ## [0.8.2] — 2026-05-25
 
-**Investigation outcome release.** v0.8.2 ships no new features. v0.8.x's calibration-release discipline applied to [#16](https://github.com/townsendmerino/ken/issues/16) (selective tree-sitter grammar embedding for smaller binaries): we investigated whether `gotreesitter`'s package shape permits per-language binary-size reduction via source-file build tags, found that the embed layer's monolithic `//go:embed grammar_blobs/*.bin` glob defeats the approach at the v0.18.0 layout, documented the finding honestly, named the specific upstream change that would unblock the feature, and closed #16 as wontfix-without-upstream-cooperation. The 74 MB `cmd/ken-mcp-docs` binary measured in [ADR-016](docs/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) stays 74 MB after v0.8.2.
+**Investigation outcome release.** v0.8.2 ships no new features. v0.8.x's calibration-release discipline applied to [#16](https://github.com/townsendmerino/ken/issues/16) (selective tree-sitter grammar embedding for smaller binaries): we investigated whether `gotreesitter`'s package shape permits per-language binary-size reduction via source-file build tags, found that the embed layer's monolithic `//go:embed grammar_blobs/*.bin` glob defeats the approach at the v0.18.0 layout, documented the finding honestly, named the specific upstream change that would unblock the feature, and closed #16 as wontfix-without-upstream-cooperation. The 74 MB `cmd/ken-mcp-docs` binary measured in [ADR-016](docs/internal/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) stays 74 MB after v0.8.2.
 
 This release is the kind of outcome v0.8.x's calibration framing makes legitimate: when an investigation closes a door, ship the honest answer instead of pretending the work is more than it is. Same calibration discipline v0.8.1 Part C applied to Tier-1 SQL chunk fidelity vs retrieval recall, and v0.8.1 Part B applied to chunk-rendering consistency vs search-ranking improvement, now applied to "the answer is no, here's why, here's what would change it."
 
 ### Documented (ADR-023; closes #16)
 
-- **`gotreesitter` v0.18.0 package-shape investigation finding** ([ADR-023](docs/DECISIONS.md#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome)). Registration layer is per-language-gateable via the existing `grammar_subset` + `grammar_subset_<lang>` tag pair (cooperative). Embed layer is monolithic via a single `//go:embed grammar_blobs/*.bin` glob in `blob_source_embedded.go` (uncooperative — the per-language source split needed to make build-tag gating actually shrink the binary does not exist upstream at v0.18.0). The `grammar_blobs_external` runtime-load tag exists but breaks ken's single-static-binary value proposition by requiring operators to ship grammar blobs as sidecar assets. ADR-023 documents the finding + the concrete upstream-PR proposal that would change the answer (split `blob_source_embedded.go` into per-language source files, each with `//go:embed grammar_blobs/<lang>.bin` + `//go:build !grammar_blobs_external && grammar_subset_<lang>`).
-- **[ADR-016](docs/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) amended** with the v0.8.2 source-tag-layer finding — the original linker-DCE rejection of per-language tree-sitter sub-packages stands as written for v0.5.0; the amendment adds the parallel rejection at the source-file-build-tag layer under the same alternative. Both layers fail for the same fundamental reason at the current `gotreesitter` layout: the `embed.FS` payload is shared, so neither package-import-level nor source-file-tag-level mechanisms can drop unreferenced grammar bytes.
+- **`gotreesitter` v0.18.0 package-shape investigation finding** ([ADR-023](docs/internal/DECISIONS.md#adr-023-gotreesitter-grammar_subset-machinery--binary-size-reduction-outcome-v082-investigation-outcome)). Registration layer is per-language-gateable via the existing `grammar_subset` + `grammar_subset_<lang>` tag pair (cooperative). Embed layer is monolithic via a single `//go:embed grammar_blobs/*.bin` glob in `blob_source_embedded.go` (uncooperative — the per-language source split needed to make build-tag gating actually shrink the binary does not exist upstream at v0.18.0). The `grammar_blobs_external` runtime-load tag exists but breaks ken's single-static-binary value proposition by requiring operators to ship grammar blobs as sidecar assets. ADR-023 documents the finding + the concrete upstream-PR proposal that would change the answer (split `blob_source_embedded.go` into per-language source files, each with `//go:embed grammar_blobs/<lang>.bin` + `//go:build !grammar_blobs_external && grammar_subset_<lang>`).
+- **[ADR-016](docs/internal/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function) amended** with the v0.8.2 source-tag-layer finding — the original linker-DCE rejection of per-language tree-sitter sub-packages stands as written for v0.5.0; the amendment adds the parallel rejection at the source-file-build-tag layer under the same alternative. Both layers fail for the same fundamental reason at the current `gotreesitter` layout: the `embed.FS` payload is shared, so neither package-import-level nor source-file-tag-level mechanisms can drop unreferenced grammar bytes.
 - **Vendor + patch stop-gap documented as available, not pursued.** ADR-023's alternatives section names the maintenance-cost analysis (one-patch maintenance vs ongoing upstream-tracking against an actively-developed dependency) for when (if) size pain becomes acute enough to justify a vendor fork. The trigger is concrete: an SDK author or operator filing an issue with measured size pain from a use case that needs the treesitter chunker AND a smaller binary AND cannot use sidecar assets.
 
 ### Documented (stale-claim correction)
@@ -289,7 +289,7 @@ This release is the kind of outcome v0.8.x's calibration framing makes legitimat
 
 ### Notes (backwards compatibility)
 
-- **No code changes.** No new dependencies; no new env vars; no new build tags consumed by ken's own build; no test invariants regressed. `go build`, `go test`, `go vet`, and `gofmt` produce identical output to v0.8.1 modulo the documentation-only diffs in [`docs/DECISIONS.md`](docs/DECISIONS.md), [`docs/DESIGN.md`](docs/DESIGN.md), and [README.md](README.md).
+- **No code changes.** No new dependencies; no new env vars; no new build tags consumed by ken's own build; no test invariants regressed. `go build`, `go test`, `go vet`, and `gofmt` produce identical output to v0.8.1 modulo the documentation-only diffs in [`docs/internal/DECISIONS.md`](docs/internal/DECISIONS.md), [`docs/DESIGN.md`](docs/DESIGN.md), and [README.md](README.md).
 - **Stdout-cleanliness invariants unchanged.** All seven stdout-clean variants (stock / Postgres / SQLite / MySQL / LISTEN/NOTIFY / reindex_db / MariaDB) continue to pass byte-identically to v0.8.1.
 
 ## [0.8.1] — 2026-05-25
@@ -298,9 +298,9 @@ This release is the kind of outcome v0.8.x's calibration framing makes legitimat
 
 - **Part A — Cleanup pass + agent-instruction polish.** ADR-018-era `mcp/server.go` default instructions told agent planners ken is suitable for code search, with a hardcoded "82–91% recall at K=10" line steering them toward grep for exhaustive enumeration. Hardcoded numbers date the planner-visible guidance the moment ken's pipeline improves — an agent reading stale instructions over-defers to grep. Part A replaces the line with qualitative framing ("ken is relevance-optimized; fall back to your native grep / file-search tool for refactors, renames, or any operation that must be exhaustive — grep gives 100% recall on literal matches") and adds a regression-guard test that asserts the banned hardcoded numbers don't sneak back in. Part A also lands two pure refactors (`internal/repo/walk.go` → sibling `ignore.go`; `internal/sql/fold.go` → sibling `migrations.go`) that reduce mental load when reading + give Part C's rename-map work a clean dedicated file to land in.
 
-- **Part B — MariaDB first-class engine** ([ADR-021](docs/DECISIONS.md#adr-021-mariadb-first-class-engine-support-v081-part-b)). [ADR-019](docs/DECISIONS.md#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) documented MariaDB as "compatible-but-not-CI-tested" in v0.7.2. v0.8.1 Part B makes that load-bearing-tested via a `mariadb:11-jammy` service container in the existing `test-db-integration` job + a divergence audit + targeted normalization of the one substantive INFORMATION_SCHEMA divergence the audit found (integer display widths: MariaDB 11.x still emits the legacy `bigint(20)` / `int(11)` syntax MySQL 8.0 deprecated; ken now strips `(N)` from integer-family types unconditionally so cross-engine chunks are byte-identical). ADR-021 documents the Tier 2 (DEFAULT-expression quote-stripping + function-name normalization) and Tier 3 (view-body parenthesization) divergences as deliberately-non-normalized cosmetic differences — quote-stripping carries mangling risk on escaped values, view bodies need a SQL parser. No operator-visible config changes; `KEN_DB_DSN` continues to route both engines identically.
+- **Part B — MariaDB first-class engine** ([ADR-021](docs/internal/DECISIONS.md#adr-021-mariadb-first-class-engine-support-v081-part-b)). [ADR-019](docs/internal/DECISIONS.md#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases) documented MariaDB as "compatible-but-not-CI-tested" in v0.7.2. v0.8.1 Part B makes that load-bearing-tested via a `mariadb:11-jammy` service container in the existing `test-db-integration` job + a divergence audit + targeted normalization of the one substantive INFORMATION_SCHEMA divergence the audit found (integer display widths: MariaDB 11.x still emits the legacy `bigint(20)` / `int(11)` syntax MySQL 8.0 deprecated; ken now strips `(N)` from integer-family types unconditionally so cross-engine chunks are byte-identical). ADR-021 documents the Tier 2 (DEFAULT-expression quote-stripping + function-name normalization) and Tier 3 (view-body parenthesization) divergences as deliberately-non-normalized cosmetic differences — quote-stripping carries mangling risk on escaped values, view bodies need a SQL parser. No operator-visible config changes; `KEN_DB_DSN` continues to route both engines identically.
 
-- **Part C — RENAME COLUMN + RENAME CONSTRAINT folding** ([ADR-022](docs/DECISIONS.md#adr-022-rename-column--rename-constraint-folding-via-eager-application-v081-part-c), closes [#14](https://github.com/townsendmerino/ken/issues/14)). [ADR-018](docs/DECISIONS.md#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay) listed RENAME as out-of-scope for v0.7.1's Tier-1 migration-folding pass. The BOTH-chunks fallback preserved correctness, but folded chunks showed pre-rename column names while the live database (via Tier 2) had post-rename names — "fold gives current schema shape" wasn't quite true for RENAME-heavy migration histories. v0.8.1 Part C closes that gap via eager application: `applyColumnRename` mutates the in-flight `foldedTable` directly so subsequent ALTERs see the post-rename state, and `renameInFirstParens` rewrites this-table column references inside constraint strings via a word-boundary regex scoped to the first parenthesized group (FK source-side rewritten; FK target-side `REFERENCES other(remote)` left verbatim per the per-table scope ADR-022 documents). 13 new tests cover the chain (A→B→C), the cycle round-trip (A→B→A → A), the rename-then-re-add interaction, drop-then-re-add-then-rename, cross-table FK source-side-rewritten / target-untouched, multi-column constraint participation, the word-boundary regex regression guard, the named-constraint rename, the anonymous-constraint BOTH-chunks fallback, the missing-source BOTH-chunks fallback, the idempotence regression guard, SQLite syntax variant, and the MySQL `CHANGE` BOTH-chunks fallback.
+- **Part C — RENAME COLUMN + RENAME CONSTRAINT folding** ([ADR-022](docs/internal/DECISIONS.md#adr-022-rename-column--rename-constraint-folding-via-eager-application-v081-part-c), closes [#14](https://github.com/townsendmerino/ken/issues/14)). [ADR-018](docs/internal/DECISIONS.md#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay) listed RENAME as out-of-scope for v0.7.1's Tier-1 migration-folding pass. The BOTH-chunks fallback preserved correctness, but folded chunks showed pre-rename column names while the live database (via Tier 2) had post-rename names — "fold gives current schema shape" wasn't quite true for RENAME-heavy migration histories. v0.8.1 Part C closes that gap via eager application: `applyColumnRename` mutates the in-flight `foldedTable` directly so subsequent ALTERs see the post-rename state, and `renameInFirstParens` rewrites this-table column references inside constraint strings via a word-boundary regex scoped to the first parenthesized group (FK source-side rewritten; FK target-side `REFERENCES other(remote)` left verbatim per the per-table scope ADR-022 documents). 13 new tests cover the chain (A→B→C), the cycle round-trip (A→B→A → A), the rename-then-re-add interaction, drop-then-re-add-then-rename, cross-table FK source-side-rewritten / target-untouched, multi-column constraint participation, the word-boundary regex regression guard, the named-constraint rename, the anonymous-constraint BOTH-chunks fallback, the missing-source BOTH-chunks fallback, the idempotence regression guard, SQLite syntax variant, and the MySQL `CHANGE` BOTH-chunks fallback.
 
   **Framing discipline (load-bearing for the calibration narrative).** RENAME folding is a **Tier-1 SQL chunk-content fidelity** improvement. It is **NOT** a recall / search-ranking improvement — `docs/BENCH.md`'s hybrid-retrieval recall@10 numbers (82–91%) measure a completely different system. v0.8.1 Part C closes the chunk-content gap; the retrieval-pipeline numbers are unchanged.
 
@@ -351,7 +351,7 @@ The operator-control-loop release. Three features round out the database-integra
 
 ### Added (Part 1: LISTEN/NOTIFY push notifications)
 
-- **Postgres LISTEN/NOTIFY push-based schema change detection** (operator-provided event trigger; ken does NOT modify your database without explicit consent — run the script once). Activate with `KEN_DB_LISTEN=1` after the one-time setup: `ken-mcp print-listen-script | psql $KEN_DB_DSN`. Schema changes now propagate to ken's index within ~100ms instead of waiting for the next `KEN_DB_REINDEX_INTERVAL` tick. Closes Part 1 of [#12](https://github.com/townsendmerino/ken/issues/12). ([ADR-020](docs/DECISIONS.md#adr-020-listennotify-push-based-schema-change-detection-v080-part-1))
+- **Postgres LISTEN/NOTIFY push-based schema change detection** (operator-provided event trigger; ken does NOT modify your database without explicit consent — run the script once). Activate with `KEN_DB_LISTEN=1` after the one-time setup: `ken-mcp print-listen-script | psql $KEN_DB_DSN`. Schema changes now propagate to ken's index within ~100ms instead of waiting for the next `KEN_DB_REINDEX_INTERVAL` tick. Closes Part 1 of [#12](https://github.com/townsendmerino/ken/issues/12). ([ADR-020](docs/internal/DECISIONS.md#adr-020-listennotify-push-based-schema-change-detection-v080-part-1))
 - **`KEN_DB_LISTEN`** env var (`1` / `true` / `yes` activates; default off). Validated via the existing `envBool` helper. Non-Postgres DSNs log debug and silently no-op — MySQL and SQLite have no equivalent push mechanism; interval polling continues to work for them.
 - **`ken-mcp print-listen-script`** CLI subcommand — emits the SQL setup script to stdout, embedded into the binary via `//go:embed` (so it's versioned with the release). Script installs a single schema-level event trigger (`ken_schema_changed_trigger`) that fires `pg_notify('ken_schema_changed', ...)` on tracked DDL (`CREATE / ALTER / DROP` for `TABLE`, `INDEX`, `VIEW`, `MATERIALIZED VIEW`, `FUNCTION`, `TRIGGER`, `TYPE`). Idempotent (`DROP IF EXISTS` + `CREATE`); safe to re-run.
 - **`internal/db.Listener` type** — dedicated `pgx.Conn` separate from the introspection pool (so a long `WaitForNotification` call doesn't tie up the connection introspection needs). Exponential-backoff reconnect (100ms → 30s cap), reset on each successful re-LISTEN. Debounced notification handling (50ms window coalesces bursts into one refresh). Trigger-existence check on every (re)connect; missing trigger logs a clear warn naming the fix command and idles until the next reconnect.
@@ -372,7 +372,7 @@ The operator-control-loop release. Three features round out the database-integra
 
 ### Added (Part 2: `reindex_db` MCP tool)
 
-- **`reindex_db` MCP tool** (operator-zero-config; the tool registers automatically when `KEN_DB_DSN` is set). Agents call it to refresh ken's view of the database schema mid-conversation — typically after running a migration through psql, an ORM CLI, or a separate MCP server. Returns `Reindexed in Nms.` on success, `Reindex already in progress; nothing to do.` if another refresh holds the Refresher mutex (interval ticker, SIGHUP, LISTEN/NOTIFY listener, or a prior `reindex_db` call), or `Reindex failed: <err>` on connection / introspection failure. Closes Part 2 of [#12](https://github.com/townsendmerino/ken/issues/12). ([ADR-020 Part 2](docs/DECISIONS.md#part-2-agent-callable-reindex-via-reindex_db-mcp-tool-v080-part-2))
+- **`reindex_db` MCP tool** (operator-zero-config; the tool registers automatically when `KEN_DB_DSN` is set). Agents call it to refresh ken's view of the database schema mid-conversation — typically after running a migration through psql, an ORM CLI, or a separate MCP server. Returns `Reindexed in Nms.` on success, `Reindex already in progress; nothing to do.` if another refresh holds the Refresher mutex (interval ticker, SIGHUP, LISTEN/NOTIFY listener, or a prior `reindex_db` call), or `Reindex failed: <err>` on connection / introspection failure. Closes Part 2 of [#12](https://github.com/townsendmerino/ken/issues/12). ([ADR-020 Part 2](docs/internal/DECISIONS.md#part-2-agent-callable-reindex-via-reindex_db-mcp-tool-v080-part-2))
 - **`internal/db.Refresher.TryRefresh`** + **`internal/db.ErrReindexInProgress`** sentinel — the fail-fast variant of `Refresh`. Uses `sync.Mutex.TryLock` so a concurrent caller sees the in-flight signal immediately instead of queuing. The existing four trigger sources (startup / `KEN_DB_REINDEX_INTERVAL` ticker / SIGHUP / LISTEN/NOTIFY listener) keep using `Refresh` — their semantics genuinely want to serialize, not skip. `TryRefresh` is specifically the fifth, agent-callable path. `Refresh` and `TryRefresh` share an internal `doRefresh` body so the introspection + swap semantics stay exactly 1:1.
 - **`mcp.ReindexFunc` + `mcp.ReindexResult`** — callback shape `NewServer` uses to register `reindex_db`. Returns `ReindexResult{InProgress, Elapsed, Err}`. The result-struct shape (rather than an error sentinel) keeps the `mcp` package free of `internal/db` imports — `cmd/ken-mcp` bridges `db.ErrReindexInProgress` into `ReindexResult{InProgress: true}` via a small closure. The same callback shape will be the seam for Part 3's `mcp.Run` DBSource path.
 - **`cmd/ken-mcp` rearrangement.** `wireDBTier2` now runs BEFORE `NewServer` and returns the `*db.Refresher` so the tool can be registered with the configured Reindexer. When `wireDBTier2` returns nil (no DSN, http(s) default repo, connect failure, etc.), `reindexCallback` returns nil too and `NewServer` skips `reindex_db` registration entirely — tools/list stays honest for FS-only deployments.
@@ -395,7 +395,7 @@ The operator-control-loop release. Three features round out the database-integra
 
 ### Added (Part 3: opt-in `mcp/db` package for SDK authors)
 
-- **`mcp/db` opt-in package** — SDK authors using `mcp.Run` can now wire Tier 2 DB support via `mcpdb.Setup(ctx, mcpdb.Config{DSN: ..., EnableListen: true, ReindexInterval: 5 * time.Minute, ...})`, which returns a `*mcpdb.Refresher` (satisfies the new `mcp.DBIntegration` interface) to pass as `opts.DB`. Activates schema introspection + LISTEN/NOTIFY (Part 1) + interval reindex + `reindex_db` MCP tool (Part 2) **AND chunk integration into the embedded search results** — DB chunks become searchable in the next `search`/`find_related` call after a successful refresh. **v0.6.0 binary-size contract preserved** — SDK authors who don't import `mcp/db` get a binary identical in dep tree to v0.7.2's `mcp.Run` use case. DB driver tree (pgx + sqlite + mysql + internal/db) is opt-in by import. Closes Part 3 of [#12](https://github.com/townsendmerino/ken/issues/12). ([ADR-020 Part 3](docs/DECISIONS.md#part-3-opt-in-mcpdb-package-preserving-v060-binary-size-contract-v080-part-3))
+- **`mcp/db` opt-in package** — SDK authors using `mcp.Run` can now wire Tier 2 DB support via `mcpdb.Setup(ctx, mcpdb.Config{DSN: ..., EnableListen: true, ReindexInterval: 5 * time.Minute, ...})`, which returns a `*mcpdb.Refresher` (satisfies the new `mcp.DBIntegration` interface) to pass as `opts.DB`. Activates schema introspection + LISTEN/NOTIFY (Part 1) + interval reindex + `reindex_db` MCP tool (Part 2) **AND chunk integration into the embedded search results** — DB chunks become searchable in the next `search`/`find_related` call after a successful refresh. **v0.6.0 binary-size contract preserved** — SDK authors who don't import `mcp/db` get a binary identical in dep tree to v0.7.2's `mcp.Run` use case. DB driver tree (pgx + sqlite + mysql + internal/db) is opt-in by import. Closes Part 3 of [#12](https://github.com/townsendmerino/ken/issues/12). ([ADR-020 Part 3](docs/internal/DECISIONS.md#part-3-opt-in-mcpdb-package-preserving-v060-binary-size-contract-v080-part-3))
 - **`mcp.DBIntegration` interface** — the new public seam that bundles tool invocation (`TryRefresh`) and chunk integration (`Start(ctx, onExtras)`) into one interface. `*mcpdb.Refresher` implements it; mock impls in tests. Replaces Part 2's `mcp.ReindexFunc` (unreleased-branch API churn: ReindexFunc shipped to branch `v0.8.0-listen` but not to tagged main).
 - **`mcp.Options.DB DBIntegration` + `mcp.Config.DB DBIntegration`** — replace Part 2's `Reindex ReindexFunc` field on both embedded-corpus (`mcp.Run`) and cache-backed (`mcp.NewServer`) paths. Conditional `reindex_db` tool registration switches from "Reindex != nil" to "DB != nil"; same wire behavior.
 - **`*search.Index.WithExtraChunks([]chunk.Chunk) *Index`** — the new primitive that powers `mcp.Run`'s chunk integration. Returns a freshly-built immutable Index containing original ∪ extras chunks; receiver is unchanged. `*Index` now retains a vecs `[][]float32` field alongside the existing `model *embed.StaticModel` so the rebuild path can re-embed extras under hybrid/semantic mode without re-encoding the original corpus. `WatchedIndex.SetExtraChunks` (cmd/ken-mcp's fsnotify-rooted in-place mutation path) is unaffected — the asymmetry (`Set` on `WatchedIndex`, `With` on `Index`) reflects the different mutation models.
@@ -425,7 +425,7 @@ The "complete the v0.7.x Tier-2 polish" release. MySQL engine + `KEN_DB_SCHEMAS`
   - native TCP: `KEN_DB_DSN=user:pass@tcp(host:3306)/db?parseTime=true`
   - native Unix socket: `KEN_DB_DSN=user:pass@unix(/var/run/mysqld/mysqld.sock)/db`
 
-  Compatible with MySQL 5.7+, MySQL 8.x, and MariaDB 10.x+ (MariaDB documented compatible, not first-class CI-tested). `parseTime=true` is force-set internally so DATE/DATETIME/TIMESTAMP columns render cleanly in row samples; VARCHAR / CHAR / TEXT cells (which the driver returns as `[]byte` by default, unlike pgx) are converted to strings at the scan boundary. Same chunk shape as Postgres + SQLite; same `Refresher` / `SetExtraChunks` / SIGHUP machinery. Closes the engine half of [#11](https://github.com/townsendmerino/ken/issues/11). ([ADR-019](docs/DECISIONS.md#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases))
+  Compatible with MySQL 5.7+, MySQL 8.x, and MariaDB 10.x+ (MariaDB documented compatible, not first-class CI-tested). `parseTime=true` is force-set internally so DATE/DATETIME/TIMESTAMP columns render cleanly in row samples; VARCHAR / CHAR / TEXT cells (which the driver returns as `[]byte` by default, unlike pgx) are converted to strings at the scan boundary. Same chunk shape as Postgres + SQLite; same `Refresher` / `SetExtraChunks` / SIGHUP machinery. Closes the engine half of [#11](https://github.com/townsendmerino/ken/issues/11). ([ADR-019](docs/internal/DECISIONS.md#adr-019-mysql-engine--schema-filtering-for-multi-schema-dev-databases))
 - **Added: `KEN_DB_SCHEMAS` allow-list + `KEN_DB_EXCLUDE_SCHEMAS` deny-list.** Comma-separated schema names for Postgres + MySQL filtering. Default exclusions (`pg_catalog`, `information_schema`, `mysql`, `performance_schema`, `sys`) always apply; user's deny-list extends, doesn't replace. Both env vars set → stderr warn and allow-list wins; deny-list ignored. SQLite ignores the env vars with a debug-level log (single-schema engine). The canonical filter source is `internal/db.filterSchema`, applied per-row in each engine's introspection path. Closes the filtering half of [#11](https://github.com/townsendmerino/ken/issues/11).
 - **Added: `db.Options.IncludeSchemas` + `db.Options.ExcludeSchemas`.** Library-level threading for the new env vars. Empty defaults; behavior matches v0.7.1 byte-for-byte when both empty.
 - **Added: `envCommaList` helper** in `cmd/ken-mcp/env.go`. Whitespace-trimming around comma-separated env values. Used by `KEN_DB_SCHEMAS` + `KEN_DB_EXCLUDE_SCHEMAS`; would extend cleanly to any future comma-list env var.
@@ -448,7 +448,7 @@ Backwards compatibility: stock `cmd/ken-mcp` with no DB env vars behaves byte-id
 
 The "make SQLite-based dev workflows great" release. SQLite support in Tier 2 + migration-history folding in Tier 1, paired in one ship because the migration-driven workflows on SQLite are exactly where the v0.7.0 per-file chunk explosion hurt most.
 
-- **Added: SQLite engine in Tier 2.** New file `internal/db/sqlite.go` (sibling to `introspect.go`). Pure Go via `modernc.org/sqlite` — no cgo, single static binary preserved. Engine routing inside `internal/db.IndexSchema` dispatches on the DSN scheme. `KEN_DB_DSN=sqlite:///abs/path.db` or `KEN_DB_DSN=sqlite://./rel/path.db` (relative to `KEN_MCP_DEFAULT_REPO`) activates introspection. Both `sqlite://` and `sqlite3://` schemes accepted. Same chunk shape as Postgres; same `Refresher` / `SetExtraChunks` / SIGHUP machinery. Closes the engine half of [#9](https://github.com/townsendmerino/ken/issues/9). ([ADR-018](docs/DECISIONS.md#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay))
+- **Added: SQLite engine in Tier 2.** New file `internal/db/sqlite.go` (sibling to `introspect.go`). Pure Go via `modernc.org/sqlite` — no cgo, single static binary preserved. Engine routing inside `internal/db.IndexSchema` dispatches on the DSN scheme. `KEN_DB_DSN=sqlite:///abs/path.db` or `KEN_DB_DSN=sqlite://./rel/path.db` (relative to `KEN_MCP_DEFAULT_REPO`) activates introspection. Both `sqlite://` and `sqlite3://` schemes accepted. Same chunk shape as Postgres; same `Refresher` / `SetExtraChunks` / SIGHUP machinery. Closes the engine half of [#9](https://github.com/townsendmerino/ken/issues/9). ([ADR-018](docs/internal/DECISIONS.md#adr-018-sqlite-engine--migration-history-folding-via-lightweight-alter-replay))
 - **Added: Tier-1 migration-history folding.** New `internal/sql.FoldMigrations` + `internal/sql.IsMigrationDir`. When `internal/search`'s walker detects a directory of numbered `.sql` files (Goose / dbmate / Rails-4 `\d+_*.sql`, Flyway `V\d+__*.sql`, Rails-5 / Alembic `\d{14}_*.sql`), it folds CREATE TABLE + later ALTER TABLE statements into a single "current state" chunk per table. Covers `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN ... TYPE`, `ADD CONSTRAINT`, `DROP CONSTRAINT`. Closes the folding half of [#9](https://github.com/townsendmerino/ken/issues/9).
 - **Added: `KEN_SQL_NO_AUTO_MIGRATIONS`** env var (`1` / `true` / `yes` to disable). Restores v0.7.0 per-file behavior for operators who maintain a canonical `schema/current.sql` and don't want migration history surfaced separately. Default: folding enabled.
 - **Added: `search.FSOptions` + `search.FromFSWithOptions` + `search.NewWatchedIndexWithOptions`.** Threading point for the migration-folding opt-out plus a logger writer for fold-skip diagnostics. The zero value matches the v0.7.0 default exactly, so existing `FromFS` / `FromPath` / `NewWatchedIndex` callers (including all the bench harnesses and CLI sub-commands) get folding transparently without source changes.
@@ -485,7 +485,7 @@ The database-schema indexing release. Two tiers, both shipping together:
 Design rationale, alternatives considered (column-exclusion DSL,
 per-call introspection, LISTEN/NOTIFY, agent-triggerable reindex tool),
 and the PII stance are in
-[ADR-017](docs/DECISIONS.md#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance).
+[ADR-017](docs/internal/DECISIONS.md#adr-017-database-schema-indexing--two-tier-static-sql--live-postgres-with-documented-pii-stance).
 
 ### Added
 
@@ -612,7 +612,7 @@ single static MCP server binary with high-quality local retrieval, no
 backend, no per-query network egress, and structural agent sandboxing
 (no path resolution → no path-traversal escape). Closes
 [#7](https://github.com/townsendmerino/ken/issues/7); design rationale
-in [ADR-016](docs/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function).
+in [ADR-016](docs/internal/DECISIONS.md#adr-016-embedded-corpus-mcp-build-pattern-via-mcprun-library-function).
 
 The stock `cmd/ken-mcp` binary is **unchanged**: same env vars, same
 tool surface, same watch mode, same multi-repo path/URL resolution.
@@ -734,7 +734,7 @@ into one tag:
   stack on top of the existing handwritten rule engine — no new
   dependency, no swap to `github.com/sabhiram/go-gitignore` (kept as
   a documented future option for edge-case pathspec parity inside the
-  rule engine itself; see [ADR-015](docs/DECISIONS.md#adr-015-nested-gitignore-support-via-scope-stack-on-existing-rule-engine)).
+  rule engine itself; see [ADR-015](docs/internal/DECISIONS.md#adr-015-nested-gitignore-support-via-scope-stack-on-existing-rule-engine)).
   `Matcher` (the watch-path seam) gains the same nested awareness via
   a one-shot tree walk at construction. Closes [#5](https://github.com/townsendmerino/ken/issues/5).
 
@@ -773,8 +773,8 @@ into one tag:
   after the watcher starts are NOT picked up — a full re-index
   (restart `ken index`) is required. Tracked for a future release.
 
-See [ADR-014](docs/DECISIONS.md#adr-014-fsfs-as-canonical-walkerindexer-surface)
-and [ADR-015](docs/DECISIONS.md#adr-015-nested-gitignore-support-via-scope-stack-on-existing-rule-engine)
+See [ADR-014](docs/internal/DECISIONS.md#adr-014-fsfs-as-canonical-walkerindexer-surface)
+and [ADR-015](docs/internal/DECISIONS.md#adr-015-nested-gitignore-support-via-scope-stack-on-existing-rule-engine)
 for the alternatives considered and the full consequences lists.
 
 ## [0.4.0] — 2026-05-21
@@ -835,7 +835,7 @@ caught a misread of the CSN-Python benchmark.
   optional `(compacted N tombstones)` suffix that's emitted only when
   N > 0, so pure-write flushes keep the v0.3.0 format. Closes the
   v0.3.x compaction trigger named in
-  [`docs/DECISIONS.md` ADR-012](docs/DECISIONS.md#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap).
+  [`docs/internal/DECISIONS.md` ADR-012](docs/internal/DECISIONS.md#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap).
 
 ### Documentation
 
@@ -846,10 +846,10 @@ caught a misread of the CSN-Python benchmark.
   extracted from those same functions, so BM25's win on this benchmark
   is a substring-leak artifact of dataset reframing, not a query-class
   signal an α-routing lever could exploit. `docs/BENCH.md`,
-  `docs/DESIGN.md`, `docs/DECISIONS.md`, and `README.md` corrected
+  `docs/DESIGN.md`, `docs/internal/DECISIONS.md`, and `README.md` corrected
   correspondingly. The CSN-Python NDCG and token-budget numbers
   themselves are unchanged; only the causal explanation shifts. See
-  [`docs/DECISIONS.md` ADR-013](docs/DECISIONS.md#adr-013-corpus-adaptive-α--adding-a-third-query-class-branch).
+  [`docs/internal/DECISIONS.md` ADR-013](docs/internal/DECISIONS.md#adr-013-corpus-adaptive-α--adding-a-third-query-class-branch).
 
 ## [0.3.0] — 2026-05-21
 
@@ -871,7 +871,7 @@ README; methodology and per-query-class numbers are in
   and an `atomic.Pointer[Index]` snapshot swap. Reader path is one
   atomic load per query and never blocks; deletes are tombstones (no
   compaction in v0.3, monotonic-growth is bounded by edit volume).
-  Design rationale in [`docs/DECISIONS.md` ADR-012](docs/DECISIONS.md#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap).
+  Design rationale in [`docs/internal/DECISIONS.md` ADR-012](docs/internal/DECISIONS.md#adr-012-incremental-indexing-via-fsnotify--atomic-snapshot-swap).
 - `ken index --watch` / `--no-watch` flags. `--watch` is the default in
   v0.3+; `--no-watch` restores the v0.2 build-once-and-exit behavior for
   batch / CI / huge-corpus scenarios.
@@ -943,7 +943,7 @@ Kotlin/Zig/TypeScript/Java/PHP and losses on Python/C/Rust/Lua/Scala.
   ([`internal/chunk/treesitter/`](internal/chunk/treesitter/)), opt-in
   via `--chunker=treesitter` or `KEN_MCP_CHUNKER=treesitter`. Runs cAST
   split-then-merge from [arXiv 2506.15655](https://arxiv.org/html/2506.15655).
-  206 grammars embedded. [`docs/DECISIONS.md` ADR-010](docs/DECISIONS.md#adr-010-pure-go-tree-sitter-via-gotreesitter).
+  206 grammars embedded. [`docs/internal/DECISIONS.md` ADR-010](docs/internal/DECISIONS.md#adr-010-pure-go-tree-sitter-via-gotreesitter).
 - "Choosing a chunker" subsection in the README — per-language
   recommendation table based on the full 63-repo bench.
 - "How this was built" notice on the README — frames the human/AI
@@ -958,7 +958,7 @@ Kotlin/Zig/TypeScript/Java/PHP and losses on Python/C/Rust/Lua/Scala.
 - `KEN_MCP_*` env-var validation: every typoed enum / non-integer /
   bad path now logs a stderr warning and falls back to the documented
   default, replacing the silent-fallthrough mode where `Atoi("of")`
-  returned 0 and disabled the cache. [`docs/DECISIONS.md` ADR-009](docs/DECISIONS.md#adr-009-env-var-validation-instead-of-silent-fallthrough).
+  returned 0 and disabled the cache. [`docs/internal/DECISIONS.md` ADR-009](docs/internal/DECISIONS.md#adr-009-env-var-validation-instead-of-silent-fallthrough).
 - `regen_golden.sh` — idempotent helper that bootstraps `.venv/`,
   pip-installs the Python reference deps, regenerates the embedding
   golden fixture, prints a sanity summary.
@@ -970,7 +970,7 @@ Kotlin/Zig/TypeScript/Java/PHP and losses on Python/C/Rust/Lua/Scala.
   `tokens.py` — snake-case compound preservation, ASCII-only run
   extraction matching `_TOKEN_RE`, compound-first emission order.
   Moved hybrid NDCG +0.002 and BM25-raw +0.002 on semble's bench.
-  [`docs/DECISIONS.md` ADR-008](docs/DECISIONS.md#adr-008-bm25-tokenizer-as-verbatim-port-of-sembles-tokenspy).
+  [`docs/internal/DECISIONS.md` ADR-008](docs/internal/DECISIONS.md#adr-008-bm25-tokenizer-as-verbatim-port-of-sembles-tokenspy).
 - C# and bash grammars in the tree-sitter chunker route through the
   line chunker (C# OOMs on real-world files at ~1.7 GB RSS; bash is
   pathologically slow on real bash-it content). Auto-fallback;
@@ -981,7 +981,7 @@ Kotlin/Zig/TypeScript/Java/PHP and losses on Python/C/Rust/Lua/Scala.
 - **Default chunker stays `regex` in v0.2.0**; tree-sitter is opt-in.
   Net NDCG difference is within bench noise (0.838 vs 0.842, Δ −0.004);
   per-language wins on Kotlin/Zig/TypeScript/Java/PHP, losses on
-  Python/C/Rust/Lua/Scala. [`docs/DECISIONS.md` ADR-011](docs/DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in).
+  Python/C/Rust/Lua/Scala. [`docs/internal/DECISIONS.md` ADR-011](docs/internal/DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in).
 
 ### Dependencies
 
@@ -999,7 +999,7 @@ format as semble's, so existing semble-trained agents work unchanged.
 
 - Pure-Go, no-cgo port of semble's hybrid retrieval pipeline. Single
   static binary; `GOOS`/`GOARCH` cross-compiles for free.
-  [`docs/DECISIONS.md` ADR-001](docs/DECISIONS.md#adr-001-pure-go-no-cgo).
+  [`docs/internal/DECISIONS.md` ADR-001](docs/internal/DECISIONS.md#adr-001-pure-go-no-cgo).
 - [`internal/repo/walk.go`](internal/repo/walk.go) — gitignore-respecting
   filesystem walk (common-subset matcher), with binary-file (NUL sniff)
   and oversized-file skips.
@@ -1007,13 +1007,13 @@ format as semble's, so existing semble-trained agents work unchanged.
   via `database/sql`-style blank imports to avoid an import cycle).
   Line chunker (50-line / 5-overlap) and per-language regex chunkers
   for Python / Go / TypeScript / Java / Rust (JavaScript routes through
-  TypeScript). [`docs/DECISIONS.md` ADR-005](docs/DECISIONS.md#adr-005-regex-chunkers-as-stage-2-default).
+  TypeScript). [`docs/internal/DECISIONS.md` ADR-005](docs/internal/DECISIONS.md#adr-005-regex-chunkers-as-stage-2-default).
 - [`internal/bm25/`](internal/bm25/) — Lucene-variant BM25 (`k1=1.5`,
   `b=0.75`, non-negative IDF; ATIRE TF formula — rank-equivalent
-  cosmetic divergence vs Lucene). [`docs/DECISIONS.md` ADR-006](docs/DECISIONS.md#adr-006-bm25-formula-choice-lucene-variant).
+  cosmetic divergence vs Lucene). [`docs/internal/DECISIONS.md` ADR-006](docs/internal/DECISIONS.md#adr-006-bm25-formula-choice-lucene-variant).
 - [`internal/embed/`](internal/embed/) — Model2Vec inference: hand-rolled
-  WordPiece tokenizer ([ADR-003](docs/DECISIONS.md#adr-003-hand-rolled-wordpiece-tokenizer)),
-  hand-rolled safetensors mmap reader ([ADR-004](docs/DECISIONS.md#adr-004-hand-rolled-safetensors-reader)),
+  WordPiece tokenizer ([ADR-003](docs/internal/DECISIONS.md#adr-003-hand-rolled-wordpiece-tokenizer)),
+  hand-rolled safetensors mmap reader ([ADR-004](docs/internal/DECISIONS.md#adr-004-hand-rolled-safetensors-reader)),
   three-tensor pooling (`Σ embeddings[mapping[id]]·weights[id] / Σ
   weights[id]`) with float64 accumulators (float32 silently fails ≥1−1e-5
   cosine on longer inputs).
@@ -1024,14 +1024,14 @@ format as semble's, so existing semble-trained agents work unchanged.
   stem-match boosts + three-tier path penalties + file-saturation
   decay. Ported verbatim from semble's `search.py` +
   `ranking/{boosting,penalties,weighting}.py` + `tokens.py`.
-  [`docs/DECISIONS.md` ADR-002](docs/DECISIONS.md#adr-002-retrieval-algorithm-verbatim-from-semble).
+  [`docs/internal/DECISIONS.md` ADR-002](docs/internal/DECISIONS.md#adr-002-retrieval-algorithm-verbatim-from-semble).
 - [`cmd/ken`](cmd/ken/) — CLI subcommands `index` / `search` / `bench`.
 - [`cmd/ken-mcp`](cmd/ken-mcp/) — MCP server speaking JSON-RPC over
   stdio. Two tools (`search`, `find_related`) with arg shapes ported
   verbatim from `/tmp/semble/src/semble/mcp.py`. Same markdown-string
   return format as semble's `_format_results`, so existing
   semble-trained agents work unchanged.
-  [`docs/DECISIONS.md` ADR-007](docs/DECISIONS.md#adr-007-mcp-server-as-drop-in-replacement-for-semble).
+  [`docs/internal/DECISIONS.md` ADR-007](docs/internal/DECISIONS.md#adr-007-mcp-server-as-drop-in-replacement-for-semble).
 - Per-process repo→Index cache in [`mcp/`](mcp/) (LRU + singleflight
   dedup); `http(s)://` URLs shallow-clone via `go-git` to
   `$TMPDIR/ken-mcp/<sha256>/`.

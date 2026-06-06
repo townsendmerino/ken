@@ -99,7 +99,7 @@ usage:
 
 Emits exactly one JSON record on stdout per invocation; pprof profiles
 land at the --cpuprofile / --memprofile paths. Sibling to 'ken bench'
-(NDCG/quality harness) — the two share no state. See docs/PERF.md.
+(NDCG/quality harness) — the two share no state. See docs/internal/PERF.md.
 `)
 }
 

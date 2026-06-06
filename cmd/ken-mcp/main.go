@@ -238,7 +238,7 @@ func main() {
 		// constructed when the FIRST hybrid+rerank query lands — for
 		// the common case where ken-mcp boots with KEN_MCP_RERANK=on
 		// but the user issues hybrid-only queries, the cost is never
-		// paid. See docs/perf-campaign-startup-query.md M2.
+		// paid. See docs/internal/perf-campaign-startup-query.md M2.
 		lazyReranker    *search.LazyReranker
 		rerankerOptions []search.RerankerOption
 		// M9 persistent doc cache: shutdown path saves the LRU here

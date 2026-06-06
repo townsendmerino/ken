@@ -13,7 +13,7 @@ import (
 // kotlin). Note: this grammar does not expose named fields on most
 // nodes (FieldNameForChild returns ""), so the walker uses positional
 // + Type() access — the same fallback pattern documented in
-// docs/add-a-language.md and used by extract_rust.go.
+// docs/internal/add-a-language.md and used by extract_rust.go.
 //
 //   - function_declaration   — fun foo(...) {...}. First named child
 //     of Type "simple_identifier" is the

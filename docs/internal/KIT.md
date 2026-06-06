@@ -3,7 +3,7 @@
 Plan to extract ken's reusable algorithm packages into a standalone,
 importable Go module (`aikit`) and make ken consume it. This is the full
 "Phase 2" — a real module split, not in-repo curation. Companion to
-[`docs/DESIGN.md`](DESIGN.md) (design spec) and [`docs/DECISIONS.md`](DECISIONS.md)
+[`docs/DESIGN.md`](../DESIGN.md) (design spec) and [`docs/internal/DECISIONS.md`](DECISIONS.md)
 (ADRs). When executed, this plan produces **ADR-034**.
 
 > **Constraint reminder.** Keep the whole tree `gofmt`-clean, `go vet ./...`
@@ -325,7 +325,7 @@ know what can shift:
 
 ## 11. Docs, licensing, tooling to update
 
-- **ADR-034** in [`docs/DECISIONS.md`](DECISIONS.md): record the split — decision,
+- **ADR-034** in [`docs/internal/DECISIONS.md`](DECISIONS.md): record the split — decision,
   alternatives (in-repo `kit/` vs separate module vs status quo), the `chunk`
   public-API break and its mitigation, the `coderank`→`encoder` rename.
 - **CLAUDE.md** (ken): update "Architecture" (packages now external), the

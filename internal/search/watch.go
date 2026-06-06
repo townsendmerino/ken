@@ -38,7 +38,7 @@ const WatchDebounce = 2 * time.Second
 // atomic.Pointer.Store. Readers do one atomic.Pointer.Load at query
 // entry and use that pointer for the entire call. Readers never wait
 // on the writer; writers never invalidate an in-flight reader. See
-// docs/DECISIONS.md ADR-012 for the rationale (and why this isn't
+// docs/internal/DECISIONS.md ADR-012 for the rationale (and why this isn't
 // RWMutex).
 //
 // Methods Search / FindRelated / ResolveChunk wrap Load() + delegate so

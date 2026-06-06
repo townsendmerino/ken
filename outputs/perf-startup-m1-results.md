@@ -86,7 +86,7 @@ platform. **H1 is now fully addressed by M2 alone.**
 This is the last milestone of the startup + query-latency
 campaign. With M2 + M4 shipped and M1/M3/M5 closed (refuted or
 superseded), the campaign meets its closure criteria from
-`docs/perf-campaign-startup-query.md`:
+`docs/internal/perf-campaign-startup-query.md`:
 
 > Closure. The campaign closes via an ADR when one of:
 > - Every milestone that confirmed its hypothesis has shipped,
