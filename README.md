@@ -27,6 +27,20 @@ ken is a Go port of [semble](https://github.com/MinishLab/semble): BM25 lexical 
 
 ## Quickstart
 
+Install via a package manager:
+
+```bash
+# macOS / Linux (Homebrew) — installs both `ken` and `ken-mcp`:
+brew install --cask townsendmerino/tap/ken
+```
+```powershell
+# Windows (Scoop):
+scoop bucket add townsendmerino https://github.com/townsendmerino/scoop-bucket
+scoop install ken
+```
+
+Or with Go:
+
 ```bash
 # Install both binaries (Go 1.26+).
 go install github.com/townsendmerino/ken/cmd/ken@latest

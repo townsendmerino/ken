@@ -31,3 +31,7 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT with contents:write on townsendmerino/homebrew-tap + scoop-bucket,
+          # so GoReleaser can push the generated cask + scoop manifest cross-repo
+          # (the default GITHUB_TOKEN is scoped to this repo only). See .goreleaser.yml.
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}

@@ -61,15 +61,18 @@ command = "/absolute/path/to/ken-mcp"
 
 ### Get the binary
 
-Three options:
+Options:
 
-1. **Pre-built release**: download from
-   [github.com/townsendmerino/ken/releases](https://github.com/townsendmerino/ken/releases).
-   Linux (amd64/arm64) and macOS (amd64/arm64) shipped per release.
-2. **Build from source**: `git clone` the repo, `go build -o
-   ken-mcp ./cmd/ken-mcp`.
-3. **Demo binaries** (kubernetes + postgres pre-indexed): see
-   [releases/demos/v0.1.0](https://github.com/townsendmerino/ken/releases/tag/demos/v0.1.0).
+1. **Package manager** (installs both `ken` and `ken-mcp`):
+   - macOS / Linux: `brew install --cask townsendmerino/tap/ken`
+   - Windows: `scoop bucket add townsendmerino https://github.com/townsendmerino/scoop-bucket` then `scoop install ken`
+2. **Pre-built release**: download from
+   [github.com/townsendmerino/ken/releases](https://github.com/townsendmerino/ken/releases)
+   — macOS / Linux (`.tar.gz`) and Windows (`.zip`), amd64/arm64.
+3. **Go**: `go install github.com/townsendmerino/ken/cmd/ken-mcp@latest`
+   (and `.../cmd/ken@latest`).
+4. **Demo binaries** (Go-stdlib / kubernetes / postgres, pre-indexed): see
+   [releases/demos/v0.2.0](https://github.com/townsendmerino/ken/releases/tag/demos/v0.2.0).
 
 ### Get the embedding model
 
