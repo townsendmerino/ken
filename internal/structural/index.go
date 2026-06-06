@@ -214,6 +214,15 @@ type Index struct {
 //
 // The combined-survivors arm sets multiple booleans true after Track 1
 // determines which additions earned their place.
+//
+// EXPERIMENTAL — none of the four arms below are on the production ship
+// path. M0e proved that Callers/Imports/Signature/Siblings do NOT improve
+// retrieval (they flood the label and net-regress NDCG; see
+// outputs/m0e-results.md). The shipping Arm B baseline (ADR-035) builds
+// EnrichOptions{} (all false) — func/calls/raises only. These fields are
+// retained solely for the scripts/materialize_heur.go research/drift
+// harness (road-to-1.0 §3 keeps that harness as a known-good reference);
+// do not enable them on the indexer path.
 type EnrichOptions struct {
 	// Callers prepends "called by: A, B, C" (the reverse call graph
 	// — files that call this file's defining functions). Brings

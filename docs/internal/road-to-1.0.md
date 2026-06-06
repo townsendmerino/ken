@@ -2,13 +2,14 @@
 
 Living document tracking what stands between ken's current state and a
 v1.0 release. Updated as items ship or change. Last updated:
-2026-06-03 — **v0.9.0 and v0.9.1 tagged + released** with the
-seven-item ship-list complete (closed 2026-06-02). v0.9.1 also
-captures the language-coverage adds (Kotlin + Dart) and the
-structural-call-graph Phase 0 substrate. **C# added 2026-06-06**
-(gotreesitter v0.20.2 fixed the OOM); Swift remains parked.
-ken is feature-complete for 1.0; what remains is polish + the
-strategic items in §4.
+2026-06-06 — **v0.10.0 tagged + released**: C# (13th language), ken-mcp
+model **auto-fetch** on first run (ADR-037), **Windows binaries**, and
+the structural-call-graph Phase 0 substrate. Plus the recall-narrative
+correction — the headline "82–91%" was the BM25-only fallback; default
+hybrid measures **~0.97 recall@10** (0.967 NL / 0.995 symbol) — and the
+docs reorg (working docs → `docs/internal/`, README 711 → 184 lines).
+ken is feature-complete and **at its retrieval ceiling** for 1.0. What
+gates `v1.0.0` is now narrow: **aikit 1.0 + distribution polish** (§4).
 
 Status legend: 🟢 done · 🟡 open · 🔴 blocked · ⚪ deferred / killed
 
@@ -90,7 +91,7 @@ invocations).
 | Deprecated functions | 🟢 un-deprecated for 1.0 | v0.9.0 dropped the Deprecated markers on `search.FromPath` + `repo.Walk` after the 1.0 API audit confirmed both signatures stable. Doc-comments now describe them as "1.0-stable" with rationale (string path vs fs.FS choice). |
 | `CHANGELOG.md` currency | 🟢 current through v0.9.1 + Phase 0 | v0.9.0 and v0.9.1 entries exist with annotated tags; the Phase 0 substrate entry lives under [Unreleased] pending the next tag. |
 | CI Docker-pulls-Postgres flake | 🟢 documented + mitigation | The flake is at GitHub Actions' service-container provisioning layer — before any step we control runs. Actions has built-in pull-retry-with-backoff; when Docker Hub is slow OR has an outage (recent release push hit this), even the built-in retry exhausts. **Live mitigation: `gh run rerun <run-id> --failed`** (already-green jobs stay green). **Permanent fix: mirror service images to ghcr.io** — deferred until the flake becomes load-bearing. Documented in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) above the `test-db-integration` job. |
-| `internal/structural/Enrich()` unused opts | 🟡 | Arm B baseline is shipping but `Callers/Imports/Signature/Siblings` options exist and aren't on the ship path. M0e proved they don't help. Either delete or document as "experimental / not in production." |
+| `internal/structural/Enrich()` unused opts | 🟢 documented 2026-06-06 | Marked experimental rather than deleted: `Callers/Imports/Signature/Siblings` (M0e-disproven) now carry an EXPERIMENTAL doc on `EnrichOptions` stating they're off the production ship path (which builds `EnrichOptions{}` — func/calls/raises only). NOT deleted because their one live consumer is `scripts/materialize_heur.go`, the drift/research harness nit #94 deliberately retains; deleting the opts would cascade into that harness + tests. |
 | Bench-side parallel impl | 🟢 documented | After ADR-035 ship, the Python materializers are docs-noted as "bench-only fallback for drift cross-checks." Retained as a known-good reference for any future drift investigation; production goes through `structural.EnrichFromFileStruct`. |
 
 ## (4) Strategic / positioning items
@@ -107,11 +108,14 @@ invocations).
   `KEN_MCP_AUTO_FETCH` default-on, `KEN_MCP_MODEL_DIR` defaults to
   `~/.ken/model`, `Cache.Purge()` + rebuild on model arrival, DB case gets
   a restart prompt. A fresh install now lands on the ~0.97 hybrid path.**
-  (B) loud degraded-state notice, (C) distribution — Homebrew tap,
-  bundled model-embedded binary, Scoop manifest, **and a Windows build
-  (re-opens the §2 deferred item by explicit owner choice 2026-06-05)**.
-  A is the only piece that moves the number; land A+B first. Needs an ADR
-  for the network-egress-on-first-run default.
+  **(B) loud degraded-state notice — ⚪ moot:** auto-fetch makes the bm25
+  window transient, so there's no persistent degraded state to warn
+  about. **(C) distribution:** **Windows binaries 🟢 shipped in v0.10.0**
+  (`.goreleaser.yml` windows/amd64+arm64, `.zip`); **Homebrew tap + Scoop
+  manifest still 🟡** (each needs a tap/bucket repo + a publish PAT —
+  owner infra); bundled model-embedded binary ⚪ optional. ADR-037
+  captured the network-egress default. **Net: the recall lever (A) is
+  done; what remains here is brew/scoop packaging.**
 
 - 🟢 **Versioning / public API discipline** — closed 2026-06-03.
   Audit walked every public symbol crossing a package boundary
@@ -157,9 +161,13 @@ invocations).
   sideways for genuinely parallel work. Honest about cost / time on
   the cloud-side skills and consistent with USERS.md's existing
   ken-vs-grep decision matrix.
-- 🟢 **Aikit's 1.0** — coordination ongoing. ken pins `aikit v0.3.0`
-  in go.mod (bumped from v0.1.1 → v0.2.0 on 2026-06-03 in commit
-  `b3ea116`; v0.2.0 → v0.3.0 on 2026-06-03 in commit `a1104a7`).
+- 🟡 **Aikit's 1.0 — the one substantive `v1.0.0` gate.** ken now pins
+  `aikit v0.4.1` + `aikit/chunk/treesitter v0.4.1` (the C# add re-tagged
+  the treesitter submodule). DEVELOPERS.md states ken 1.0 **requires
+  aikit at a tagged 1.0 (or a clear 1.0-RC window)** so the stability
+  tiers compose — `v1.0.0` can't ship until aikit is 1.0. A
+  coordination/release task, not research. (History: v0.1.1 → v0.2.0 →
+  v0.3.0 on 2026-06-03, then → v0.4.x with the aikit-extraction + C# work.)
   v0.2.0 added the generative half — pure-Go `decoder` + `tokenizer`
   + GGUF support — without disturbing the v0.1 hard tier; both new
   packages are best-effort. **v0.3.0 is decoder/quant maturation:**
@@ -177,10 +185,10 @@ invocations).
   same hard/best-effort shape ken uses;
   [DEVELOPERS.md](../DEVELOPERS.md#aikit-packages) notes that ken 1.0
   requires aikit at a tagged 1.0 (or clearly within a 1.0-RC
-  window) so the stability promises compose cleanly. v0.3.0's
+  window) so the stability promises compose cleanly. The
   generative-half packages would still be best-effort under that
-  requirement — a coordination point, not a blocker for ken's 1.0
-  release.
+  requirement — a coordination point, and **the gating dependency for
+  ken's own `v1.0.0`** (which must pin a tagged aikit 1.0).
 - 🟢 **Performance expectations doc** — shipped 2026-06-03 at
   [`docs/PERF-expectations.md`](../PERF-expectations.md). User-facing
   "what should ken feel like" layer above PERF.md's measurement
@@ -194,17 +202,29 @@ invocations).
 
 ## Honest summary
 
-ken is **1.0-ready on the retrieval axis** and **feature-complete
-on the ship list** as of v0.9.1 (2026-06-03). What remains for the
-v1.0 cut is the strategic-items list in §4 — flagship demo,
-performance expectations doc, the final public-API freeze — plus
-any 🟡 nits that surface as load-bearing. None of it is research;
-all of it is well-scoped polish, and several items are
-"decide-and-document" rather than "build."
+As of **v0.10.0 (2026-06-06)** ken is at its **retrieval ceiling** —
+default hybrid measures ~0.97 recall@10 (0.967 NL / 0.995 symbol;
+`internal/search/recall_decomp_test.go`), further gains are 0.005-level,
+and **rerank/ColBERT is explicitly NOT a 1.0 item** (the opt-in neural
+reranker already covers the high-value chunk-retrieval case; ColBERT is
+parked — §1). It is also **feature-complete** on the ship list, and the §4
+strategic items — public-API freeze, flagship demo, perf-expectations
+doc, claude-code-workflow doc, and the recall-lever onboarding
+(auto-fetch, ADR-037) — are all **shipped**.
 
-Two newer items that became possible only via the aikit v0.2.0 bump
-and the structural-call-graph Phase 0 substrate are deliberately
-post-1.0:
+`v1.0.0` is now gated on a short, non-research list:
+
+1. **Aikit 1.0** — pin ken to a tagged aikit 1.0 / 1.0-RC so the
+   stability tiers compose (§4). The one substantive gate.
+2. **Distribution** — Homebrew tap + Scoop manifest (Windows binaries
+   already ship). Not a hard gate, but it's the remaining user-facing
+   work and pairs with the auto-fetch onboarding. Each needs a tap/bucket
+   repo + a publish PAT (owner infra).
+
+The §3 nits are closed (the `Enrich()` opts marked experimental
+2026-06-06). Then cut `v1.0.0-rc1`, soak, and `v1.0.0`.
+
+Deliberately post-1.0 (substrate ready, trigger-gated):
 
 - **Stage 6 (generative-LLM lever).** Now feasible — see
   [stage6-paths-with-aikit-decoder.md](stage6-paths-with-aikit-decoder.md).
