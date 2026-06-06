@@ -5,7 +5,7 @@ title: ken
 
 # ken
 
-Hybrid (BM25 + Model2Vec) code search via MCP. Pure Go. [Source on GitHub](https://github.com/townsendmerino/ken).
+Hybrid (BM25 + Model2Vec) code search + structural navigation via MCP. Pure Go. **~97% recall@10** in default mode at **~44× fewer agent tokens** than grep+Read. [Source on GitHub](https://github.com/townsendmerino/ken).
 
 ## Get started
 
@@ -14,7 +14,8 @@ Hybrid (BM25 + Model2Vec) code search via MCP. Pure Go. [Source on GitHub](https
 
 ## Demos
 
-- [**ken-demo-kubernetes / ken-demo-postgres** (downloadable binaries)](https://github.com/townsendmerino/ken/releases/tag/demos/v0.1.0)
+- ⭐ **[go-stdlib](https://github.com/townsendmerino/ken/tree/main/demos/go-stdlib) (flagship)** — ken indexes the Go standard library (35,708 chunks). Every Go dev knows the corpus, so you can verify the answers instantly — and reproduce the whole thing against your own `$GOROOT/src` in ~30 s. See the [example queries](https://github.com/townsendmerino/ken/blob/main/demos/go-stdlib/QUERIES.md).
+- **Scale / polyglot proof:** [ken-demo-kubernetes / ken-demo-postgres downloadable binaries](https://github.com/townsendmerino/ken/releases/tag/demos/v0.1.0) — Kubernetes Go (59,795 chunks) and PostgreSQL C (64,506 chunks, real tree-sitter AST).
 - [Audit transcripts under `demos/`](https://github.com/townsendmerino/ken/tree/main/demos)
 
 ## Writing
