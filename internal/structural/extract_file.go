@@ -6,6 +6,11 @@ import (
 	"github.com/odvcencio/gotreesitter"
 )
 
+// maxEnrichBytes is the per-file size ceiling for Arm B enrichment. Files
+// larger than this skip gotreesitter parsing (see ExtractFile) to avoid
+// the GLR stack overflow on pathological inputs. 64 KiB.
+const maxEnrichBytes = 64 << 10
+
 // ExtractFile parses a single file's bytes via the gotreesitter
 // grammar matching the path's extension and returns the per-file
 // FileStruct (functions, classes, calls, imports, raises). Returns
@@ -27,6 +32,22 @@ func ExtractFile(rel string, data []byte) *FileStruct {
 	ext := filepath.Ext(rel)
 	gram, ok := kenLangToTSLang[ext]
 	if !ok {
+		return nil
+	}
+	// gotreesitter's GLR parser recurses on parse-stack depth; for
+	// pathological inputs (huge table-driven test files — e.g. cobra's
+	// 117 KB completions_test.go, 80 KB command_test.go) that recursion
+	// overflows the goroutine stack. A stack overflow is a FATAL runtime
+	// error, not an error return, so the err guard on Parse below cannot
+	// catch it — it crashes the whole process, and the Stage 8 indexer
+	// runs this on every file by default (`ken index` with enrichment on).
+	// Skip enrichment for oversized files: they pass through unenriched,
+	// the same graceful no-op as an unregistered extension. 64 KiB clears
+	// every crasher observed on the semble corpus while preserving normal
+	// source (cobra's 61 KB command.go parses fine). Heuristic, not a
+	// formal depth bound — gotreesitter exposes no node/depth cap (only a
+	// wall-clock timeout, which a synchronous stack overflow outruns).
+	if len(data) > maxEnrichBytes {
 		return nil
 	}
 	lc := langCacheFor(gram)
