@@ -10,6 +10,40 @@ with pre-built binaries.
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-06-06 — ken 1.0
+
+**ken 1.0.** The public API surface — `mcp.Run`, `mcp.NewServer`,
+`mcp.NewCache`, `FormatResults`, the `chunk.Chunker` interface, and the
+typed JSON-output structs — is frozen and 1.0-stable. The retrieval axis
+is at its measured ceiling (default hybrid **~0.97 recall@10** — 0.967 NL
+/ 0.995 symbol at ~46× fewer agent tokens than grep+Read); 13 languages;
+structural navigation; database-schema indexing; first-run model
+auto-fetch; and macOS / Linux / Windows binaries via direct download,
+Homebrew, and Scoop.
+
+### Changed
+
+- **Pinned aikit at its 1.0**: `aikit v0.4.1 → v1.0.0` and
+  `aikit/chunk/treesitter v0.4.1 → v1.0.0`, so the algorithm-package
+  stability tiers compose with ken's own. The ken-imported surface is
+  byte-identical — validated: full `go test ./...`, `build_parity`, and
+  the `grammar_subset` drift guard all green; encoder cosine parity stays
+  1.000000 on aikit's side — so retrieval output is unchanged.
+
+Everything from v0.10.0 (C#, model auto-fetch, Windows binaries) and
+v0.10.1 (Homebrew + Scoop) is part of the 1.0 release.
+
+## [0.10.1] — 2026-06-06 — Homebrew cask + Scoop manifest
+
+### Added
+
+- **`brew install --cask townsendmerino/tap/ken` / `scoop install ken`** —
+  GoReleaser now publishes a Homebrew cask (macOS/Linux) + Scoop manifest
+  (Windows) to `townsendmerino/homebrew-tap` and
+  `townsendmerino/scoop-bucket` on each release; both install `ken` +
+  `ken-mcp`. (Also: a `windows-latest` CI smoke job — build · slim · run ·
+  core tests — guards the Windows surface at PR time.)
+
 ## [0.10.0] — 2026-06-06 — C# + auto-fetch onboarding + Windows binaries
 
 ### Added — Windows binaries (amd64 + arm64)

@@ -211,16 +211,13 @@ external code — they may break without ADR.
 ken consumes aikit (
 [github.com/townsendmerino/aikit](https://github.com/townsendmerino/aikit))
 as a separate module — `require github.com/townsendmerino/aikit
-v0.2.0` in [go.mod](../go.mod) at the time of this writing
-(bumped from v0.1.1 on 2026-06-03; v0.2.0 added the generative
-half — `decoder` + `tokenizer` + GGUF — without disturbing the
-v0.1 hard tier). aikit is `0.x` (pre-1.0); its "hard, 1.0-committed"
-surfaces are expected to stay stable through aikit's own path to
-1.0, but breaking changes between `0.x` minors are technically
-still permitted by semver. ken's CHANGELOG records every aikit
-bump. When ken cuts 1.0, the aikit dep should be at a tagged 1.0
-or clearly within a 1.0-RC window so the stability promise composes
-cleanly.
+v1.0.0` + `aikit/chunk/treesitter v1.0.0` in [go.mod](../go.mod).
+**aikit is at 1.0**, so its hard-tier algorithm packages (`topk`,
+`ann`, `bm25`, `embed`, `encoder`, `fuse`, `chunk` + subpackages) are
+1.0-committed — ken 1.0's own stability promise composes cleanly on top
+of them. ken's CHANGELOG records every aikit bump; the v0.4.1 → v1.0.0
+pin (2026-06-06) was validated byte-identical (full suite + build-parity
++ the `grammar_subset` drift guard green), so it changed no behavior.
 
 The full aikit stability table is in
 [aikit/README.md](https://github.com/townsendmerino/aikit#stability).

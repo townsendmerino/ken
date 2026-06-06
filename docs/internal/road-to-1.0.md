@@ -8,8 +8,12 @@ the structural-call-graph Phase 0 substrate. Plus the recall-narrative
 correction — the headline "82–91%" was the BM25-only fallback; default
 hybrid measures **~0.97 recall@10** (0.967 NL / 0.995 symbol) — and the
 docs reorg (working docs → `docs/internal/`, README 711 → 184 lines).
-ken is feature-complete and **at its retrieval ceiling** for 1.0. What
-gates `v1.0.0` is now narrow: **aikit 1.0 + distribution polish** (§4).
+ken is feature-complete and **at its retrieval ceiling** for 1.0. Both
+remaining gates are now **cleared** (2026-06-06): aikit 1.0 pinned
+(`aikit v1.0.0` + `chunk/treesitter v1.0.0`, validated byte-identical),
+and distribution done (Homebrew cask + Scoop manifest shipped in v0.10.1
+alongside the v0.10.0 Windows binaries). **`v1.0.0` is ready to cut** —
+straight to 1.0, no RC.
 
 Status legend: 🟢 done · 🟡 open · 🔴 blocked · ⚪ deferred / killed
 
@@ -110,12 +114,14 @@ invocations).
   a restart prompt. A fresh install now lands on the ~0.97 hybrid path.**
   **(B) loud degraded-state notice — ⚪ moot:** auto-fetch makes the bm25
   window transient, so there's no persistent degraded state to warn
-  about. **(C) distribution:** **Windows binaries 🟢 shipped in v0.10.0**
-  (`.goreleaser.yml` windows/amd64+arm64, `.zip`); **Homebrew tap + Scoop
-  manifest still 🟡** (each needs a tap/bucket repo + a publish PAT —
-  owner infra); bundled model-embedded binary ⚪ optional. ADR-037
-  captured the network-egress default. **Net: the recall lever (A) is
-  done; what remains here is brew/scoop packaging.**
+  about. **(C) distribution — 🟢 DONE:** Windows binaries shipped in
+  v0.10.0; **Homebrew cask + Scoop manifest shipped in v0.10.1** (GoReleaser
+  publishes to `townsendmerino/homebrew-tap` + `scoop-bucket`; both install
+  `ken` + `ken-mcp`; PAT + cross-repo push verified live) + a `windows-latest`
+  CI smoke job. Bundled model-embedded binary ⚪ optional (not needed —
+  auto-fetch covers first-run). ADR-037 captured the network-egress default.
+  **Net: onboarding + distribution fully shipped.** winget remains a
+  post-1.0 nice-to-have.
 
 - 🟢 **Versioning / public API discipline** — closed 2026-06-03.
   Audit walked every public symbol crossing a package boundary
@@ -161,13 +167,14 @@ invocations).
   sideways for genuinely parallel work. Honest about cost / time on
   the cloud-side skills and consistent with USERS.md's existing
   ken-vs-grep decision matrix.
-- 🟡 **Aikit's 1.0 — the one substantive `v1.0.0` gate.** ken now pins
-  `aikit v0.4.1` + `aikit/chunk/treesitter v0.4.1` (the C# add re-tagged
-  the treesitter submodule). DEVELOPERS.md states ken 1.0 **requires
-  aikit at a tagged 1.0 (or a clear 1.0-RC window)** so the stability
-  tiers compose — `v1.0.0` can't ship until aikit is 1.0. A
-  coordination/release task, not research. (History: v0.1.1 → v0.2.0 →
-  v0.3.0 on 2026-06-03, then → v0.4.x with the aikit-extraction + C# work.)
+- 🟢 **Aikit's 1.0 — CLEARED 2026-06-06.** aikit shipped 1.0; ken now
+  pins `aikit v1.0.0` + `aikit/chunk/treesitter v1.0.0`. Validated against
+  the published modules (GOWORK=off): full `go test ./...` 15/15,
+  `build_parity` + the `grammar_subset` drift guard green, slim release
+  build compiles — the ken-imported surface is byte-identical, so
+  retrieval output is unchanged. The stability tiers now compose: ken 1.0
+  rests on aikit 1.0's hard-tier packages. (History: aikit v0.1.1 → v0.2.0
+  → v0.3.0 → v0.4.x extraction/C# → **v1.0.0**.)
   v0.2.0 added the generative half — pure-Go `decoder` + `tokenizer`
   + GGUF support — without disturbing the v0.1 hard tier; both new
   packages are best-effort. **v0.3.0 is decoder/quant maturation:**
@@ -212,17 +219,18 @@ strategic items — public-API freeze, flagship demo, perf-expectations
 doc, claude-code-workflow doc, and the recall-lever onboarding
 (auto-fetch, ADR-037) — are all **shipped**.
 
-`v1.0.0` is now gated on a short, non-research list:
+**Both 1.0 gates are now cleared (2026-06-06):**
 
-1. **Aikit 1.0** — pin ken to a tagged aikit 1.0 / 1.0-RC so the
-   stability tiers compose (§4). The one substantive gate.
-2. **Distribution** — Homebrew tap + Scoop manifest (Windows binaries
-   already ship). Not a hard gate, but it's the remaining user-facing
-   work and pairs with the auto-fetch onboarding. Each needs a tap/bucket
-   repo + a publish PAT (owner infra).
+1. **Aikit 1.0 — 🟢 done.** ken pins `aikit v1.0.0` +
+   `aikit/chunk/treesitter v1.0.0`; validated byte-identical against the
+   published modules (full suite + build-parity + drift guard green).
+2. **Distribution — 🟢 done.** Windows binaries (v0.10.0) + Homebrew cask +
+   Scoop manifest (v0.10.1), cross-repo publish verified live.
 
-The §3 nits are closed (the `Enrich()` opts marked experimental
-2026-06-06). Then cut `v1.0.0-rc1`, soak, and `v1.0.0`.
+The §3 nits are closed (the `Enrich()` opts marked experimental). **Nothing
+substantive remains — `v1.0.0` is ready to cut (straight to 1.0, no RC, per
+owner).** Just push the aikit-1.0-pin commit, roll the CHANGELOG to
+`[1.0.0]` (done), and tag.
 
 Deliberately post-1.0 (substrate ready, trigger-gated):
 
