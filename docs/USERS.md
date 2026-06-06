@@ -125,7 +125,13 @@ Use **grep** (or `rg`, `ag`, etc.) for:
 - **Exhaustive enumeration**: refactors, pre-rename audits, "find
   EVERY place that uses this string" — grep guarantees 100%
   recall on literal matches; ken optimizes for relevance and
-  caps around 82-91% recall at top-10.
+  reaches ~97% recall at top-10 in its default hybrid mode (0.967
+  NL / 0.995 symbol on semble's benchmark). Without the embedding
+  model installed it falls back to BM25-only at ~82–91% — run
+  `ken download-model` once to stay on the default path. grep
+  remains the right tool when you need every match. See
+  [`docs/BENCH.md`](BENCH.md#default-mode-hybrid-recall--the-number-that-matters)
+  "Default-mode (hybrid) recall."
 - **Literal-string searches**: SQL fragments, error message text,
   config keys you know verbatim.
 - **Speed-critical scripted searches**: `rg foo` returns in
@@ -242,7 +248,11 @@ the `KEN_MCP_RERANK_*` knobs.
 ### "No model at ~/.ken/model — downgrading to bm25"
 
 Run `ken download-model` to fetch it. ~60 MB; one-time. After it
-lands, restart ken-mcp.
+lands, restart ken-mcp. This is the single biggest retrieval-quality
+lever you control: the BM25-only fallback caps around 82–91%
+recall@10, while the default hybrid mode (model present) reaches
+~97% (0.967 NL / 0.995 symbol) — see
+[`docs/BENCH.md`](BENCH.md#default-mode-hybrid-recall--the-number-that-matters).
 
 ### "ken returns no results / weird results"
 

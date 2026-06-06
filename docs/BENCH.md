@@ -251,6 +251,16 @@ For each (query, qrel) pair in two bench corpora:
 
 ### Results
 
+> **The `ken recall@K` columns below are BM25-ONLY.** This harness builds
+> the index in `ModeBM25` (no model required), so the recall here is ken's
+> *lexical-only floor*, not the shipped default. ken's default **hybrid**
+> mode reaches **0.967 NL / 0.995 symbol / 0.971 overall** recall@10 on
+> this same corpus — the semantic arm adds +0.13. See
+> [Default-mode (hybrid) recall](#default-mode-hybrid-recall--the-number-that-matters)
+> for the full decomposition. The token counts are mode-independent (K
+> formatted chunks either way), so the cost-vs-grep story is unchanged;
+> only the recall column understates the default.
+
 #### semble bench (63 repos, 1072 queries — 158 symbol, 914 NL)
 
 | Class  | K  | ken med tokens | ken recall@K | grep med tokens | grep recall | grep variant |
@@ -277,11 +287,52 @@ For each (query, qrel) pair in two bench corpora:
 
 ### Headline finding
 
-On semble's diverse-query benchmark, **at K=10 ken catches 82% of NL queries' qrel target in 4,269 median tokens; tokenized grep+Read catches 99.9% but in 189,591 tokens — for the 82% of queries ken covers, agents pay ~44× fewer tokens going through ken than running grep+Read.** Symbol queries are a closer fight (16× cheaper at 87%/99% recall) because literal grep on a unique identifier is already pretty efficient.
+On semble's diverse-query benchmark, **at K=10 ken (BM25-only here) catches 84% of NL queries' qrel target in 4,269 median tokens; tokenized grep+Read catches 99.9% but in 189,591 tokens — for the queries ken covers, agents pay ~44× fewer tokens going through ken than running grep+Read.** Symbol queries are a closer fight (16× cheaper at 89%/99% recall) because literal grep on a unique identifier is already pretty efficient. **In the default hybrid mode those recall figures rise to 0.967 NL / 0.995 symbol** (next section) — the token-cost ratios hold, the coverage gap to grep nearly closes.
 
 The CoIR-CSN-Python numbers amplify the same pattern at corpus scale: on a 280K-file repo, any NL query's tokens match thousands of files; grep+Read sums to **16M tokens** (well past any agent context window) for 100% recall, while ken finds the target chunk in 1,296 tokens at 91% recall — a >10,000× token reduction for a 9 percentage-point recall trade.
 
-Important nuance: **grep wins on recall completeness**. If an agent's task absolutely must enumerate every match (pre-rename audits, exhaustive refactors), grep+Read is the right tool — that's exactly what ken-mcp's CLAUDE.md routing advice says. If the task is "find me the chunk that answers this" — which is most of what code-search-using agents do — ken's recall ceiling around 82–91% covers the typical case at 1-2 orders of magnitude lower token cost.
+Important nuance: **grep wins on recall completeness**. If an agent's task absolutely must enumerate every match (pre-rename audits, exhaustive refactors), grep+Read is the right tool — that's exactly what ken-mcp's CLAUDE.md routing advice says. If the task is "find me the chunk that answers this" — which is most of what code-search-using agents do — ken's default-mode recall around 0.97 covers the typical case at 1-2 orders of magnitude lower token cost.
+
+### Default-mode (hybrid) recall — the number that matters
+
+The recall columns in the tables above are BM25-only, because the
+token-budget harness builds `ModeBM25`. ken's shipped default — for both
+`ken search` and `ken-mcp` — is **hybrid**, and on the same semble corpus
+(1251 tasks; reproduced by `internal/search/recall_decomp_test.go`,
+build-tag `bench`) the semantic arm lifts recall@10 by **+0.13**:
+
+| recall@10 | bm25-only (token-bench tables) | **hybrid (default)** |
+|---|---:|---:|
+| NL      | 0.832 | **0.967** |
+| symbol  | 0.892 | **0.995** |
+| overall | 0.841 | **0.971** |
+
+Decomposing the residual NL miss (1 − 0.967 = 0.033) localizes where any
+further recall would have to come from — and which lever fixes it:
+
+| component of the miss | value | recoverable by |
+|---|---:|---|
+| candidate-generation loss (target never in the 50/arm fused pool) | 0.010 | wider retrieval / HyDE / a better embedder |
+| ranking loss (in pool, ranked 11–50) | 0.023 | rerank / fusion tuning |
+| — of which path penalties *cost* | −0.005 | nothing: penalties net-**help** recall@10 (they clear test/example noise) |
+| hard ceiling at N=500, depth 100 | (recall 0.999) | only 0.1% is genuinely unreachable |
+
+Two product consequences:
+
+1. **The agent-facing "82% recall" framing is a BM25-only artifact.** Users
+   on the default hybrid mode (model present) get ~0.97; the miss rate is
+   ~1 in 30 NL queries, ~1 in 200 symbol — not 1 in 5.
+2. **Recall and first-run footprint are the same lever.** Because `ken-mcp`
+   downgrades to BM25 when the model dir is missing, a fresh install with
+   no model *is* on the 0.84 path. Getting that install onto hybrid (bundle
+   / auto-fetch the model) moves recall@10 from ~0.84 to ~0.97 with zero
+   algorithm change — a higher-leverage 1.0 item than any reranker work.
+
+Measured with `KEN_ENRICH=off` for a crash-free full-corpus run (a few
+oversized table-driven test files overflow gotreesitter's parser — see the
+`maxEnrichBytes` guard in `internal/structural/extract_file.go`).
+Enrichment-on shifts BM25 recall@10 by <0.001 on this corpus, so the
+hybrid figures are representative of the default.
 
 ### Reproduce
 
@@ -294,6 +345,17 @@ KEN_COIR_QUERY_LIMIT=200 go test -tags=bench ./bench/tokens/ -run TestTokens_CoI
 
 # Render the markdown tables from results JSON:
 python scripts/plot_token_budget.py
+
+# Default-mode (hybrid) recall decomposition — the table just above
+# (~90s; needs the model at ~/.ken/model. KEN_ENRICH=off avoids the
+# gotreesitter overflow on a few oversized test files):
+KEN_ENRICH=off go test -tags=bench ./internal/search/ -run TestRecallDecomp$ -v -timeout 40m
+
+# Confirm the token-bench recall column is BM25-only (reproduces ~0.84 NL):
+KEN_ENRICH=off go test -tags=bench ./internal/search/ -run TestRecallDecomp_BM25Baseline -v
+
+# Optional slow neural-rerank arm (opt-in; ~30s/query cold before the M9 cache warms):
+KEN_RERANK=1 go test -tags=bench ./internal/search/ -run TestRecallDecomp_Rerank -v -timeout 60m
 ```
 
 The bench writes `bench/tokens/results/{semble,coir}-tokens.json` — gitignored, regenerate at will.
