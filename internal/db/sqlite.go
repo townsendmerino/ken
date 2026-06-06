@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -126,6 +127,14 @@ func resolveSQLiteDSN(dsn, defaultRepo string) (filePath, driverDSN string, err 
 	path := u.Path
 	if u.Host != "" {
 		path = u.Host + u.Path
+	}
+	// Windows file URLs: `sqlite:///C:/path` parses to Path="/C:/path".
+	// Drop the leading slash before the drive letter so the result is the
+	// real absolute path "C:/path" — filepath.IsAbs("/C:/...") is false on
+	// Windows, so without this the path would be mis-anchored at defaultRepo.
+	if runtime.GOOS == "windows" && len(path) >= 3 && path[0] == '/' && path[2] == ':' &&
+		((path[1] >= 'A' && path[1] <= 'Z') || (path[1] >= 'a' && path[1] <= 'z')) {
+		path = path[1:]
 	}
 	if path == "" {
 		return "", "", errors.New("DSN missing file path")

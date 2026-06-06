@@ -30,6 +30,20 @@ func kenMCPBin() string {
 	return "ken-mcp"
 }
 
+// sqliteFileDSN builds a cross-platform `sqlite:///<abs path>` DSN from a
+// filesystem path: on Unix `/tmp/x.db` → `sqlite:///tmp/x.db`; on Windows
+// `C:\…\x.db` → `sqlite:///C:/…/x.db` (forward slashes; resolveSQLiteDSN
+// drops the leading slash before the drive letter). Concatenating
+// `sqlite://` + a raw Windows path would yield `sqlite://C:\…`, where `C:`
+// parses as host:port.
+func sqliteFileDSN(dbPath string) string {
+	p := filepath.ToSlash(dbPath)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return "sqlite://" + p
+}
+
 // safeBuf is a goroutine-safe wrapper around bytes.Buffer used by the
 // stdout-cleanliness tests below. The exec.Cmd's stderr-copy
 // goroutine (launched by sdk.CommandTransport) writes to it while
@@ -1238,7 +1252,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithSQLite(t *testing.T) {
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info",
 		"KEN_MCP_DEFAULT_REPO=" + fixture,
-		"KEN_DB_DSN=sqlite://" + dbPath,
+		"KEN_DB_DSN=" + sqliteFileDSN(dbPath),
 		"KEN_DB_SAMPLE_ROWS=2",
 	}
 	var stderr safeBuf
