@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -52,6 +53,7 @@ import (
 	// the embed layer so per-language gating doesn't shrink it.
 	_ "github.com/townsendmerino/aikit/chunk/markdown"
 	_ "github.com/townsendmerino/aikit/chunk/treesitter"
+	"github.com/townsendmerino/ken/internal/modelfetch"
 	"github.com/townsendmerino/ken/internal/search"
 	"github.com/townsendmerino/ken/internal/structural"
 	"github.com/townsendmerino/ken/internal/usage"
@@ -72,6 +74,75 @@ func modelAvailable(dir string) bool {
 	}
 	_, err := os.Stat(filepath.Join(dir, "model.safetensors"))
 	return err == nil
+}
+
+// buildState is the cache Builder's live mode/model. It is mutable so the
+// background auto-fetch can flip bm25 → the requested hybrid/semantic mode
+// once the embedding model lands. Read once per build under RLock.
+type buildState struct {
+	mu       sync.RWMutex
+	mode     search.Mode
+	modeStr  string
+	modelDir string
+}
+
+func (b *buildState) snapshot() (search.Mode, string, string) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.mode, b.modeStr, b.modelDir
+}
+
+func (b *buildState) set(mode search.Mode, modeStr, modelDir string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.mode, b.modeStr, b.modelDir = mode, modeStr, modelDir
+}
+
+// autoFetchFunc fetches the model into dest and returns the count of files
+// newly downloaded. Injected so autoFetchModel is unit-testable without a
+// network; autoFetchRealFetch is the production implementation.
+type autoFetchFunc func(ctx context.Context, dest string) (int, error)
+
+// autoFetchRealFetch downloads the default Model2Vec snapshot into dest.
+// Progress MUST go to stderr — stdout is the JSON-RPC channel.
+func autoFetchRealFetch(ctx context.Context, dest string) (int, error) {
+	return modelfetch.Fetch(ctx, modelfetch.Options{
+		Model:    modelfetch.DefaultModel,
+		Dest:     dest,
+		Progress: os.Stderr,
+	})
+}
+
+// autoFetchModel runs in a goroutine. It fetches the model, then on success
+// flips buildState to the wanted (hybrid/semantic) mode. With no DB
+// attached it purges the cache and re-warms the default repo in the
+// background, so subsequent queries serve a hybrid index. With a DB
+// attached it logs a restart prompt instead — the DB Refresher holds the
+// default repo's index instance, so a live purge would orphan its chunks.
+// On fetch failure it stays bm25.
+func autoFetchModel(ctx context.Context, bs *buildState, wantMode search.Mode, wantStr, dest string, hasDB bool, cache *kenmcp.Cache, defaultRepo string, fetch autoFetchFunc, logger *kenmcp.Logger) {
+	if _, err := fetch(ctx, dest); err != nil {
+		logger.Logf(kenmcp.LogWarn,
+			"auto-fetch: model download failed (%v) — staying in bm25 mode; "+
+				"run `ken download-model` or set KEN_MCP_MODEL_DIR (KEN_MCP_AUTO_FETCH=0 disables this)", err)
+		return
+	}
+	bs.set(wantMode, wantStr, dest)
+	if hasDB {
+		logger.Logf(kenmcp.LogWarn,
+			"auto-fetch: model ready at %s — restart ken-mcp to enable %s "+
+				"(a database is attached to the default repo's index, so a live upgrade is skipped)",
+			dest, wantStr)
+		return
+	}
+	cache.Purge()
+	logger.Logf(kenmcp.LogInfo,
+		"auto-fetch: model ready at %s — %s enabled; indices rebuild with embeddings on next query", dest, wantStr)
+	if defaultRepo != "" {
+		if _, err := cache.Get(ctx, defaultRepo); err != nil {
+			logger.Logf(kenmcp.LogWarn, "auto-fetch: background re-warm of %s failed (%v); next query rebuilds", defaultRepo, err)
+		}
+	}
 }
 
 // prebuiltIndexPath is the ADR-024 convention for a pre-built index
@@ -212,6 +283,16 @@ func main() {
 	chunker := envEnum("KEN_MCP_CHUNKER", chunk.Names(), "regex", logger)
 	modeStr := envEnum("KEN_MCP_MODE", search.ModeNames(), "hybrid", logger)
 	modelDir := envPath("KEN_MCP_MODEL_DIR", logger)
+	// Onboarding: when KEN_MCP_MODEL_DIR is unset, fall back to the
+	// canonical end-user location ~/.ken/model (where `ken download-model`
+	// writes), matching the CLI's resolution order. A user who ran
+	// `ken download-model` then lands on hybrid without also setting the
+	// env; a user with neither gets the auto-fetch below.
+	if modelDir == "" {
+		if d, derr := modelfetch.DefaultDest(); derr == nil {
+			modelDir = d
+		}
+	}
 	defaultRepo := envPathOrURL("KEN_MCP_DEFAULT_REPO", logger)
 	// v0.7.1: KEN_SQL_NO_AUTO_MIGRATIONS=1 disables Tier-1 migration
 	// folding (sql.FoldMigrations). Default is "folding enabled".
@@ -375,16 +456,33 @@ func main() {
 			modeStr, err)
 		mode = search.ModeBM25
 	}
+	// wantMode/wantStr capture the requested mode before any
+	// model-missing downgrade, so the background auto-fetch knows what to
+	// upgrade to once the model lands.
+	wantMode, wantStr := mode, modeStr
+	autoFetch := envBool("KEN_MCP_AUTO_FETCH", true, logger)
+	autoFetchDest := ""
 	if mode != search.ModeBM25 && !modelAvailable(modelDir) {
-		logger.Logf(kenmcp.LogWarn,
-			"no Model2Vec model at KEN_MCP_MODEL_DIR=%q — downgrading to bm25 mode "+
-				"(run `ken download-model` to fetch one into ~/.ken/model, then set "+
-				"KEN_MCP_MODEL_DIR to that path to enable semantic/hybrid)",
-			modelDir)
+		if autoFetch && modelDir != "" {
+			autoFetchDest = modelDir
+			logger.Logf(kenmcp.LogInfo,
+				"no Model2Vec model at %q — fetching %s in the background (~62 MB); "+
+					"serving bm25 until it lands, then upgrading to %s "+
+					"(KEN_MCP_AUTO_FETCH=0 disables this; `ken download-model` pre-seeds it)",
+				modelDir, modelfetch.DefaultModel, wantStr)
+		} else {
+			logger.Logf(kenmcp.LogWarn,
+				"no Model2Vec model at %q — serving bm25 mode "+
+					"(run `ken download-model`, or set KEN_MCP_AUTO_FETCH=1 to fetch it automatically)",
+				modelDir)
+		}
 		mode = search.ModeBM25
 		modeStr = "bm25"
 		modelDir = ""
 	}
+	// buildState is the live mode/model the cache Builder reads; the
+	// auto-fetch goroutine flips it bm25 → hybrid once the model arrives.
+	bs := &buildState{mode: mode, modeStr: modeStr, modelDir: modelDir}
 	rerankStatus := "off"
 	if lazyReranker != nil {
 		rerankStatus = "on (lazy)"
@@ -422,7 +520,8 @@ func main() {
 			DisableFoldMigrations: noAutoMigrations,
 			LogWriter:             os.Stderr,
 		}
-		ix, err := loadOrBuildWatched(dir, mode, modeStr, chunker, modelDir, fsOpts, logger)
+		bMode, bModeStr, bModelDir := bs.snapshot()
+		ix, err := loadOrBuildWatched(dir, bMode, bModeStr, chunker, bModelDir, fsOpts, logger)
 		if err != nil {
 			if cleanup != nil {
 				cleanup()
@@ -505,6 +604,17 @@ func main() {
 	// or initial connection fails (the latter logs warn and continues
 	// with FS-only rather than crashing startup).
 	refresher, dbCleanup := wireDBTier2(ctx, logger, cache, defaultRepo)
+
+	// Background model auto-fetch (KEN_MCP_AUTO_FETCH, default on). When the
+	// model was missing at startup we serve bm25 now; this pulls the model,
+	// flips the build state to the requested hybrid/semantic mode, and
+	// purges the cache so the next query rebuilds with embeddings (search
+	// reads the index's own mode per query, so the rebuild upgrades search
+	// automatically). Skipped — with a restart prompt — when a database is
+	// attached, since the DB Refresher holds the default repo's index.
+	if autoFetchDest != "" {
+		go autoFetchModel(ctx, bs, wantMode, wantStr, autoFetchDest, refresher != nil, cache, defaultRepo, autoFetchRealFetch, logger)
+	}
 
 	// M8d telemetry wiring. Two independent gates:
 	//   - log: ON when reranker is loaded AND log level ≤ info. Emits

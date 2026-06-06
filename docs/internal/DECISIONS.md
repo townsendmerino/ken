@@ -2564,3 +2564,23 @@ Warm-search p50 unchanged (already sub-ms; H4 confirmed in M0).
 - **Campaign re-opens** only on a real user latency report that hits a hot path none of M0's measurements touched (matches the out-of-band trigger in the campaign plan).
 
 This is the second "perf-campaign close" ADR in ken's history; ADR-029 closed project-perf-phase0. Both follow the same pattern: profile → ship the confirmed wins → kill the refuted ones with evidence → close.
+
+---
+
+## ADR-037: ken-mcp auto-fetches the embedding model on first run (background, default-on)
+
+**Status:** Accepted (shipped). **Date:** 2026-06-06.
+
+**Context.** The recall decomposition (BENCH.md "Default-mode (hybrid) recall") established that ken's default hybrid mode measures ~0.97 recall@10 while the BM25-only fallback is ~0.84 — and that the *only* users silently stuck on the fallback were ken-mcp users with no embedding model installed. ken-mcp previously **downgraded to bm25 with a stderr warning** that agents/users almost never read, so a fresh install sat on the 0.84 path invisibly. Getting fresh installs onto hybrid is therefore the single highest-leverage 1.0 onboarding lever (it moves recall@10 ~0.84 → ~0.97 with no algorithm change). Planned in `onboarding-plan.md` (owner chose "background fetch + hot-swap").
+
+**Decision.** When ken-mcp starts in a model-needing mode with no model present, it **fetches `potion-code-16M` (~60 MB) in the background by default** (`KEN_MCP_AUTO_FETCH=1`), serving bm25 immediately and upgrading to hybrid once the model lands. Also: `KEN_MCP_MODEL_DIR` now defaults to `~/.ken/model` (where `ken download-model` writes), so a user who pre-seeded the model gets hybrid without setting the env.
+
+**Mechanism (deliberately minimal).** The search handler reads `ix.Mode()` per query, so the only state that must change at runtime is the cache **Builder's** mode/model — held in a small mutex-guarded `buildState`. On fetch success the goroutine flips it to the requested mode and calls a new `Cache.Purge()` (evict-all, keep-open), then re-warms the default repo in the background; the next query rebuilds with embeddings and search upgrades automatically. No server-state surgery, no per-index hot-swap plumbing.
+
+**Consequences / guardrails.**
+- **Network egress on first run is a real default change.** Mitigated by: a clear info log naming the opt-out (`KEN_MCP_AUTO_FETCH=0`), firing only when the mode wants a model AND none is present (an explicit `KEN_MCP_MODE=bm25` never triggers it), and **fetch progress on stderr only** (`autoFetchRealFetch` hardcodes `os.Stderr` — stdout is the JSON-RPC channel; the contract is unchanged).
+- **DB Tier-2 case is scoped out of the live swap:** the `mcpdb.Refresher` holds the default repo's `WatchedIndex` instance, so purging would orphan its DB chunks. With a DB attached, auto-fetch still downloads the model but logs a **restart prompt** instead of swapping.
+- **Failure stays bm25** with a clear warning; no retry storm.
+- Tested via `autoFetchModel` unit tests (injected fetcher: success-flips-and-rebuilds, failure-stays-bm25, DB-flips-but-no-purge) + `Cache.Purge` test. The binary stdout-cleanliness tests are unaffected (they pin `KEN_MCP_MODE=bm25` or an explicit model dir, so they never auto-fetch).
+
+**Rejected alternatives:** synchronous fetch at startup (blocks the MCP client's connect, risks its startup timeout); per-`WatchedIndex` in-place re-embed hot-swap (needs a cache-iteration API + more plumbing for no UX gain over purge+rebuild); opt-in default (defeats the "fresh install lands on hybrid" goal — the whole point is the silent-downgrade surface).

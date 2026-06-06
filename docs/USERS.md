@@ -74,8 +74,12 @@ Three options:
 ### Get the embedding model
 
 Most ken features need the Model2Vec embedding model
-(`potion-code-16M`, ~60 MB). It downloads automatically when
-ken-mcp starts and notices it's missing; alternatively:
+(`potion-code-16M`, ~60 MB). **ken-mcp fetches it automatically in
+the background on first run** when it's missing — serving BM25-only
+until it lands (a few seconds, one-time), then upgrading to hybrid.
+Set `KEN_MCP_AUTO_FETCH=0` to disable that. The CLI (`ken search`)
+does not auto-fetch; run `ken download-model` once to pre-seed it
+(or pass `--mode bm25`):
 
 ```bash
 ken download-model
@@ -118,7 +122,8 @@ Use **ken** for:
 - **Exploring an unfamiliar codebase**: `outline` and `symbols`
   give a structural overview without you reading every file.
 - **When the agent will read the result anyway** — ken's snippets
-  cost ~40× fewer tokens than `grep + Read` for the same recall.
+  cost ~40× fewer tokens than `grep + Read` at near-parity recall
+  (~0.97 vs ~0.999 in default hybrid mode).
 
 Use **grep** (or `rg`, `ag`, etc.) for:
 

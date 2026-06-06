@@ -102,7 +102,11 @@ invocations).
   users silently stuck on the fallback are ken-mcp users with no model
   (silent stderr downgrade at `cmd/ken-mcp/main.go:378`). Plan +
   owner-approved scope in [`docs/internal/onboarding-plan.md`](onboarding-plan.md):
-  (A) background auto-fetch + hot-swap on first run [recall lever],
+  **(A) background auto-fetch on first run [recall lever] — 🟢 SHIPPED
+  2026-06-06 ([ADR-037](DECISIONS.md#adr-037-ken-mcp-auto-fetches-the-embedding-model-on-first-run-background-default-on)):
+  `KEN_MCP_AUTO_FETCH` default-on, `KEN_MCP_MODEL_DIR` defaults to
+  `~/.ken/model`, `Cache.Purge()` + rebuild on model arrival, DB case gets
+  a restart prompt. A fresh install now lands on the ~0.97 hybrid path.**
   (B) loud degraded-state notice, (C) distribution — Homebrew tap,
   bundled model-embedded binary, Scoop manifest, **and a Windows build
   (re-opens the §2 deferred item by explicit owner choice 2026-06-05)**.

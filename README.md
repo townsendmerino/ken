@@ -16,7 +16,7 @@ ken is a Go port of [semble](https://github.com/MinishLab/semble): BM25 lexical 
 - **Drop-in for semble.** Same `search` / `find_related` MCP tool schemas and the same markdown-string wire format — swap the `command:` path and existing agents work unchanged.
 - **Local, CPU-only.** Embedding inference, BM25, and fusion all run on the CPU. No API keys, no GPU, no vector DB, air-gapped friendly.
 
-> **One knob controls recall.** The **82–91%** recall figure in the token-budget tables is the **BM25-only fallback** ken runs in when no embedding model is installed. `ken download-model` (~64 MB, one-time, pure-Go fetch — no Python) puts you on the **~97%** hybrid path. Exhaustive enumeration (refactors, pre-rename audits) still belongs to grep; ken is for "find the chunk that answers this."
+> **One knob controls recall.** The **82–91%** figure in the token-budget tables is the **BM25-only fallback** ken runs in when no embedding model is installed. **ken-mcp fetches the model automatically on first run** (~60 MB, pure-Go, no Python — serves bm25 until it lands, then upgrades to the **~97%** hybrid path; `KEN_MCP_AUTO_FETCH=0` to disable). For the CLI, run `ken download-model` once. Exhaustive enumeration (refactors, pre-rename audits) still belongs to grep; ken is for "find the chunk that answers this."
 
 ## Where to start
 
@@ -32,7 +32,8 @@ ken is a Go port of [semble](https://github.com/MinishLab/semble): BM25 lexical 
 go install github.com/townsendmerino/ken/cmd/ken@latest
 go install github.com/townsendmerino/ken/cmd/ken-mcp@latest
 
-# Download the default Model2Vec model (~64 MB, one-time). Pure Go, no Python.
+# Download the default Model2Vec model (~60 MB, one-time). Pure Go, no Python.
+# (ken-mcp auto-fetches this on first run; the CLI needs it explicitly.)
 # This is the single biggest retrieval-quality lever — it puts you on the ~97% path.
 ken download-model
 
@@ -81,7 +82,8 @@ command = "/absolute/path/to/ken-mcp"
 |---|---|---|
 | `KEN_MCP_DEFAULT_REPO` | (unset) | Pre-indexed source; lets tools omit the `repo` arg. |
 | `KEN_MCP_MODE` | `hybrid` | `bm25` / `semantic` / `hybrid`. Auto-downgrades to `bm25` (with a stderr warning) if the model dir is unreachable. |
-| `KEN_MCP_MODEL_DIR` | (unset) | Path to a Model2Vec snapshot containing `model.safetensors`. Empty ⇒ `bm25`-only. |
+| `KEN_MCP_MODEL_DIR` | `~/.ken/model` | Path to a Model2Vec snapshot containing `model.safetensors`. Falls back to `~/.ken/model` (where `ken download-model` writes) when unset. |
+| `KEN_MCP_AUTO_FETCH` | `1` | On first run with a model-needing mode and no model present, fetch `potion-code-16M` (~60 MB) in the background, serving `bm25` until it lands then upgrading to hybrid. `0` disables (serve bm25, warn). |
 | `KEN_MCP_CHUNKER` | `regex` | `regex` / `treesitter` / `line` / `markdown`. See [Choosing a chunker](#choosing-a-chunker). |
 | `KEN_MCP_CACHE_SIZE` | `16` | LRU bound on the repo→Index cache. |
 | `KEN_MCP_LOG_LEVEL` | `warn` | `debug` / `info` / `warn` / `error`. All logs go to stderr; **stdout is the JSON-RPC channel** ([details](docs/DESIGN.md#hard-rule--stdoutstderr-contract)). |

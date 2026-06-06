@@ -36,6 +36,42 @@ func makeFakeBuilder(t *testing.T) (Builder, *atomic.Int64, *atomic.Int64) {
 	return b, &builds, &cleanups
 }
 
+// TestCache_Purge: Purge evicts all entries (running cleanups, closing
+// watchers) but leaves the cache usable so a subsequent Get rebuilds.
+// This is the auto-fetch upgrade contract — after the model lands, the
+// next query must rebuild rather than serve the stale bm25 index.
+func TestCache_Purge(t *testing.T) {
+	build, builds, cleanups := makeFakeBuilder(t)
+	c := NewCache(8, build)
+	t.Cleanup(c.Close)
+	a, b := t.TempDir(), t.TempDir()
+	if _, err := c.Get(context.Background(), a); err != nil {
+		t.Fatalf("Get a: %v", err)
+	}
+	if _, err := c.Get(context.Background(), b); err != nil {
+		t.Fatalf("Get b: %v", err)
+	}
+	if c.Len() != 2 || builds.Load() != 2 {
+		t.Fatalf("pre-purge: Len=%d builds=%d, want 2/2", c.Len(), builds.Load())
+	}
+
+	c.Purge()
+	if c.Len() != 0 {
+		t.Errorf("post-purge Len=%d, want 0", c.Len())
+	}
+	if got := cleanups.Load(); got != 2 {
+		t.Errorf("post-purge cleanups=%d, want 2 (both entries reaped)", got)
+	}
+
+	// Cache stays OPEN: a re-Get rebuilds (builds increments).
+	if _, err := c.Get(context.Background(), a); err != nil {
+		t.Fatalf("post-purge Get a: %v", err)
+	}
+	if builds.Load() != 3 {
+		t.Errorf("builds=%d after re-Get, want 3 (purge forced a rebuild)", builds.Load())
+	}
+}
+
 func TestCache_HitMiss(t *testing.T) {
 	build, builds, _ := makeFakeBuilder(t)
 	c := NewCache(8, build)

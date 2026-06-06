@@ -104,6 +104,35 @@ func (c *Cache) Capacity() int {
 	return c.max
 }
 
+// Purge evicts every cached entry — stopping each watcher (wix.Close())
+// and running its cleanup (rm -rf for temp clones) — but, unlike Close,
+// leaves the cache OPEN so subsequent Get() calls rebuild on demand.
+//
+// Used by ken-mcp's auto-fetch upgrade path: once the embedding model
+// lands in the background, purging forces the next Get to rebuild each
+// repo's index WITH embeddings (hybrid) instead of continuing to serve
+// the bm25 index built while the model was absent (search reads the
+// index's own mode per query, so a rebuilt hybrid index upgrades search
+// automatically). In-flight queries that already hold a bundle keep
+// reading their consistent snapshot; only new Get calls rebuild — same
+// safety profile as LRU eviction.
+func (c *Cache) Purge() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	for e := c.ll.Front(); e != nil; e = e.Next() {
+		ent := e.Value.(*cacheEntry)
+		_ = ent.bundle.Index.Close()
+		if ent.cleanup != nil {
+			ent.cleanup()
+		}
+	}
+	c.items = map[string]*list.Element{}
+	c.ll.Init()
+}
+
 // scpishURL catches `user@host:path` SCP-form git URLs (semble's MCP
 // rejects these; only http(s) is allowed via the MCP boundary).
 var scpishURL = regexp.MustCompile(`^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:.+`)

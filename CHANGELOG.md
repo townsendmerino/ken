@@ -10,6 +10,23 @@ with pre-built binaries.
 
 ## [Unreleased]
 
+### Added — ken-mcp auto-fetches the embedding model on first run (onboarding)
+
+- **`ken-mcp` now fetches `potion-code-16M` (~60 MB) in the background on
+  first run** when a model-needing mode is requested and no model is
+  present (`KEN_MCP_AUTO_FETCH`, default on). It serves bm25 immediately,
+  downloads the model, then purges the per-repo cache so the next query
+  rebuilds with embeddings and search upgrades to hybrid automatically
+  (the handler reads `ix.Mode()` per query). This is the doc face of the
+  recall decomposition: a fresh install now lands on the ~0.97 hybrid path
+  instead of silently sitting on the ~0.84 BM25-only fallback. Also:
+  `KEN_MCP_MODEL_DIR` defaults to `~/.ken/model` when unset, so a user who
+  ran `ken download-model` gets hybrid without setting the env. Progress
+  stays on stderr (the JSON-RPC contract is unchanged); the DB-Tier-2 case
+  logs a restart prompt rather than a live swap; `KEN_MCP_AUTO_FETCH=0`
+  reverts to downgrade-and-warn. New `Cache.Purge()` (evict-all, keep-open).
+  See [ADR-037](docs/internal/DECISIONS.md#adr-037-ken-mcp-auto-fetches-the-embedding-model-on-first-run-background-default-on).
+
 ### Added — C# language support (13th language)
 
 - **C# (`.cs`) un-parked and shipped** now that gotreesitter **v0.20.2**

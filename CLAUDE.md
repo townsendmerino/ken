@@ -35,7 +35,7 @@ go run ./cmd/ken search <path> <query>...  [-k N] [--chunker=...] [--mode=...] [
 go run ./cmd/ken-mcp                               # stdio MCP server (env-configured; see MCP section)
 ```
 
-Default mode is **hybrid** (Stage 4). hybrid/semantic need a model directory; the CLI resolves one in priority order: `--model <DIR>` → `$KEN_MODEL_DIR` → `~/.ken/model` (canonical end-user location) → `./testdata/model` (repo-developer fallback). Run `ken download-model` to populate `~/.ken/model` without Python tooling. If none of those resolve, the loader errors clearly with the suggested fix. `ken-mcp` instead **downgrades to bm25 with a stderr warning** if the model dir is missing — first-launch usability for agents.
+Default mode is **hybrid** (Stage 4). hybrid/semantic need a model directory; the CLI resolves one in priority order: `--model <DIR>` → `$KEN_MODEL_DIR` → `~/.ken/model` (canonical end-user location) → `./testdata/model` (repo-developer fallback). Run `ken download-model` to populate `~/.ken/model` without Python tooling. If none of those resolve, the loader errors clearly with the suggested fix. `ken-mcp` resolves `KEN_MCP_MODEL_DIR` → `~/.ken/model` and, if the model is still missing, **auto-fetches it in the background** (ADR-037, `KEN_MCP_AUTO_FETCH`, default on): it serves bm25 immediately, downloads `potion-code-16M`, then purges the per-repo cache so the next query rebuilds hybrid (search reads `ix.Mode()` per query). `KEN_MCP_AUTO_FETCH=0` reverts to the prior **downgrade-to-bm25-with-stderr-warning** behavior. The DB-Tier-2 case logs a restart prompt instead of a live swap (the Refresher holds the default repo's index).
 
 As of v0.3, **`ken index <path>` defaults to `--watch`** — the process stays alive and re-publishes the index 2 s after any file change (fsnotify + atomic snapshot swap, ADR-012). `--no-watch` is the v0.2-compatible build-once-and-exit opt-out for batch / CI / huge-corpus scenarios. `ken-mcp` **always watches**; no env var to disable it in v0.3.
 
@@ -76,8 +76,9 @@ stdin and stdout **are** the JSON-RPC channel. ANY write to stdout outside of th
 
 ### Env vars (configure ken-mcp at startup)
 - `KEN_MCP_DEFAULT_REPO` — optional pre-indexed source; tools may then be called without `repo`.
-- `KEN_MCP_MODE` — `bm25`/`semantic`/`hybrid` (default `hybrid`; auto-downgrades to bm25 with a stderr warning if the model is unreachable).
-- `KEN_MCP_MODEL_DIR` — Model2Vec snapshot dir (must contain `model.safetensors`). Empty ⇒ bm25-only.
+- `KEN_MCP_MODE` — `bm25`/`semantic`/`hybrid` (default `hybrid`; serves bm25 while the model is missing — see `KEN_MCP_AUTO_FETCH`).
+- `KEN_MCP_MODEL_DIR` — Model2Vec snapshot dir (must contain `model.safetensors`). Defaults to `~/.ken/model` when unset.
+- `KEN_MCP_AUTO_FETCH` — `1`/`0` (default `1`). On first run with no model + a model-needing mode, fetch `potion-code-16M` in the background and upgrade bm25→hybrid (ADR-037). `0` = downgrade-and-warn only.
 - `KEN_MCP_CHUNKER` — `regex`/`treesitter`/`line` (default `regex`).
 - `KEN_MCP_CACHE_SIZE` — LRU bound (default 16); `0` means caching is disabled (re-index on every request).
 - `KEN_MCP_LOG_LEVEL` — `debug`/`info`/`warn`/`error` (default `warn`); all logs go to stderr.
