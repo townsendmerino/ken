@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,17 @@ import (
 
 	kenmcp "github.com/townsendmerino/ken/mcp"
 )
+
+// kenMCPBin is the ken-mcp test-binary filename. On Windows an executable
+// must carry the ".exe" extension to be exec'd (go build produces
+// ken-mcp.exe, and exec.Command needs that exact name); elsewhere it's
+// bare. Caught by the windows-latest CI smoke job.
+func kenMCPBin() string {
+	if runtime.GOOS == "windows" {
+		return "ken-mcp.exe"
+	}
+	return "ken-mcp"
+}
 
 // safeBuf is a goroutine-safe wrapper around bytes.Buffer used by the
 // stdout-cleanliness tests below. The exec.Cmd's stderr-copy
@@ -480,7 +492,7 @@ func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "ken-mcp")
+	binPath := filepath.Join(binDir, kenMCPBin())
 	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
@@ -637,7 +649,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithRerank(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "ken-mcp")
+	binPath := filepath.Join(binDir, kenMCPBin())
 	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
@@ -721,7 +733,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithDB(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "ken-mcp")
+	binPath := filepath.Join(binDir, kenMCPBin())
 	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
@@ -799,7 +811,7 @@ func TestBinary_PrintListenScript_StdoutIsScript(t *testing.T) {
 		t.Skip("skipping subprocess subcommand test in -short mode")
 	}
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "ken-mcp")
+	binPath := filepath.Join(binDir, kenMCPBin())
 	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
@@ -852,7 +864,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithListen(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "ken-mcp")
+	binPath := filepath.Join(binDir, kenMCPBin())
 	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
@@ -950,7 +962,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithReindexDB(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "ken-mcp")
+	binPath := filepath.Join(binDir, kenMCPBin())
 	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
@@ -1035,7 +1047,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithMySQL(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "ken-mcp")
+	binPath := filepath.Join(binDir, kenMCPBin())
 	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
@@ -1117,7 +1129,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithMariaDB(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "ken-mcp")
+	binPath := filepath.Join(binDir, kenMCPBin())
 	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
@@ -1203,7 +1215,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithSQLite(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "ken-mcp")
+	binPath := filepath.Join(binDir, kenMCPBin())
 	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build ken-mcp: %v\n%s", err, out)

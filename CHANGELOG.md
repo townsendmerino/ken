@@ -4,9 +4,14 @@ All notable changes to ken are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-ken is pre-1.0 (`v0.x.y`); breaking changes can land in minor versions
-until v1.0.0. Each release tag has a corresponding GitHub release page
-with pre-built binaries.
+As of **1.0**, ken's public API surface (`mcp.Run`, `mcp.NewServer`,
+`mcp.NewCache`, `FormatResults`, the `chunk.Chunker` interface, and the
+typed JSON-output structs) is stable: breaking changes to it require a
+major (2.x) bump; new features land in minor (1.x) releases and fixes in
+patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
+[DEVELOPERS.md](docs/DEVELOPERS.md#public-api-surface)) may still evolve
+within 1.x. Each release tag has a corresponding GitHub release page with
+pre-built binaries.
 
 ## [Unreleased]
 
