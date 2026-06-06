@@ -10,6 +10,17 @@ with pre-built binaries.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-06-06 — C# + auto-fetch onboarding + Windows binaries
+
+### Added — Windows binaries (amd64 + arm64)
+
+- **Release binaries now ship for Windows** (`.zip`) alongside macOS/Linux.
+  The code already cross-compiled (`sighup_windows.go` no-ops the Unix-only
+  SIGHUP path; the aikit v0.4.1 Windows build fix landed earlier) — this
+  enables `windows/amd64`+`arm64` in `.goreleaser.yml` with `.zip`
+  archives. Re-opens the previously deferred Windows item. Still open: a
+  scoop manifest (needs a bucket repo) + a Windows CI smoke job.
+
 ### Added — ken-mcp auto-fetches the embedding model on first run (onboarding)
 
 - **`ken-mcp` now fetches `potion-code-16M` (~60 MB) in the background on
