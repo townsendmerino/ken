@@ -74,3 +74,7 @@ outputs/
 # (typically a symlink into ~/.cache/huggingface), never committed.
 # Companion to testdata/model/ above.
 testdata/encoder-model
+
+# local multi-module dev workspace (never commit)
+go.work
+go.work.sum
