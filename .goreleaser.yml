@@ -108,3 +108,37 @@ changelog:
       - "^chore:"
       - "Merge pull request"
       - "Merge branch"
+
+# Homebrew tap (macOS/Linux). GoReleaser generates the cask and pushes it
+# to townsendmerino/homebrew-tap on each release. Requires a PAT with
+# contents:write on that repo, exposed to CI as $TAP_GITHUB_TOKEN.
+# (Homebrew now ships precompiled-binary CLI tools as casks; the old
+# `brews` formula key is deprecated in GoReleaser v2.)
+homebrew_casks:
+  - name: ken
+    # The archive carries both binaries; install both (default would be `ken` only).
+    binaries:
+      - ken
+      - ken-mcp
+    repository:
+      owner: townsendmerino
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/townsendmerino/ken"
+    description: "Fast hybrid code search for agents — pure Go, MCP-compatible with semble"
+    license: "MIT"
+
+# Scoop bucket (Windows). GoReleaser generates the manifest and pushes it
+# to townsendmerino/scoop-bucket on each release. Same PAT.
+scoops:
+  - name: ken
+    repository:
+      owner: townsendmerino
+      name: scoop-bucket
+      branch: main
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    directory: bucket
+    homepage: "https://github.com/townsendmerino/ken"
+    description: "Fast hybrid code search for agents — pure Go, MCP-compatible with semble"
+    license: MIT
