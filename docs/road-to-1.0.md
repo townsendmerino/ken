@@ -64,7 +64,7 @@ invocations).
 |---|---|---|---:|---|
 | 1 | `callers(name)` MCP tool | 🟢 shipped | done | 2026-06-02. handleCallers + AddTool registration in mcp/server.go + types.CallersArgs. File-level granularity; honest framing in tool description + response header. |
 | 2 | Search filters: `languages` / `path_contains` / `exclude_path_contains` | 🟢 shipped | done | 2026-06-02. SearchArgs extended; runSearchWithTelemetry over-fetches 10× when filters are set, post-filters, reports candidate-vs-filter ratio in the header. Substring match (not glob); covers the canonical "find auth code in src/api/" + "exclude test files" cases. |
-| — | ~~Windows binary~~ | ⚪ deferred-until-pressure | — | Owner preference (2026-06-02): defer until extreme user pressure. Pure-Go cross-compile is technically trivial but the support surface (CRLF, path separators, Windows-specific MCP quirks, npm/PowerShell install paths) is not free. Re-open ONLY if a real user reports being blocked. |
+| — | Windows binary | 🟡 re-opened 2026-06-05 | — | Was ⚪ deferred-until-pressure (owner preference 2026-06-02). **Re-opened 2026-06-05** as part of the hybrid-by-default onboarding push (§4) — scoop needs it and the owner chose the full distribution set. Pure-Go cross-compile is trivial; the cost is the support surface (CRLF, path separators, Windows-specific MCP quirks, PowerShell install paths). Tracked under [`docs/onboarding-plan.md`](onboarding-plan.md) workstream C1. |
 | 4 | `ken status` CLI + MCP tool | 🟢 shipped | done | 2026-06-02. New `internal/status` package builds a Status snapshot (versions, models, Arm B env, savings, optional live index + structural + cache). `ken status` CLI + `status` MCP tool registered on both NewServer and Run paths. Output modes: text (default), `--json` / `output:"json"`, markdown for MCP. Token savings surfaced as today / 7d / all-time with chars + ~tokens estimate. |
 | 5 | `recently_changed(N)` MCP tool (git-aware) | 🟢 shipped | done | 2026-06-02. mcp/recently_changed_tool.go — go-git PlainOpen, walks HEAD N commits back, formats commit + changed-file list as markdown. Args: `n` (default 10, max 100), `repo`, `path` prefix filter. Local repos only in Pass 1; URL repos return a friendly "clone first" error rather than coupling to the cache's temp clone dir. |
 | 6 | JSON output mode for `search` and structural tools | 🟢 shipped | done | 2026-06-02. Each of search / find_related / definition / references / callers / outline / symbols got an `Output` arg. `mcp/json_responses.go` defines a typed response struct per tool (1.0-stable surface) + a shared `dispatchOutput` helper. Markdown stays the default; `output: "json"` returns the typed struct as indented JSON. Unknown values like `"yaml"` get a friendly error rather than silent fallback. Tests: 13 sub-tests across `TestRun_JSONOutput` (Run-path: search + find_related + dispatch corners) and `TestJSONOutput_StructuralTools` (NewServer fixture upgraded to also build a structural index). |
@@ -93,6 +93,20 @@ invocations).
 | Bench-side parallel impl | 🟢 documented | After ADR-035 ship, the Python materializers are docs-noted as "bench-only fallback for drift cross-checks." Retained as a known-good reference for any future drift investigation; production goes through `structural.EnrichFromFileStruct`. |
 
 ## (4) Strategic / positioning items
+
+- 🟡 **Hybrid-by-default onboarding** — opened 2026-06-05. The recall
+  decomposition (BENCH.md "Default-mode (hybrid) recall";
+  `internal/search/recall_decomp_test.go`) showed default hybrid measures
+  ~0.97 recall@10 and the "0.82–0.91" is the BM25-only fallback; the only
+  users silently stuck on the fallback are ken-mcp users with no model
+  (silent stderr downgrade at `cmd/ken-mcp/main.go:378`). Plan +
+  owner-approved scope in [`docs/onboarding-plan.md`](onboarding-plan.md):
+  (A) background auto-fetch + hot-swap on first run [recall lever],
+  (B) loud degraded-state notice, (C) distribution — Homebrew tap,
+  bundled model-embedded binary, Scoop manifest, **and a Windows build
+  (re-opens the §2 deferred item by explicit owner choice 2026-06-05)**.
+  A is the only piece that moves the number; land A+B first. Needs an ADR
+  for the network-egress-on-first-run default.
 
 - 🟢 **Versioning / public API discipline** — closed 2026-06-03.
   Audit walked every public symbol crossing a package boundary
