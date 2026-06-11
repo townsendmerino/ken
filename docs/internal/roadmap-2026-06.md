@@ -2,7 +2,7 @@
 
 Source: full-repo review (code quality, maintainability, docs currency, security, competitive position), 2026-06-09. Companion to [road-to-1.0.md](road-to-1.0.md); this picks up where that tracker ends. Items are ordered by priority within each section. Effort: S (<1 h), M (half-day), L (multi-day).
 
-**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 18/28 done (incl. #2, #6–#17, #21). P2 code-health (#10–#14) AND P3 security (#15–#17) fully clear; #21 (competitive comparison table) shipped. Next up: P5 #20 (get listed in MCP registries/awesome lists — S/M) or P4 ownership (#18/#19, M/L).
+**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 19/28 resolved (incl. #2, #6–#17, #21; #25 gated out — evaluated, don't build). P2 code-health (#10–#14) AND P3 security (#15–#17) fully clear. Next up: P5 #20 (get listed in MCP registries/awesome lists — S/M) or P4 ownership (#18/#19, M/L).
 
 ---
 
@@ -107,8 +107,8 @@ Nobody in the surveyed set offers (a) the `mcp.Run` embedded-corpus story — do
 ### 24. Watch the semble cold-start gap — **ongoing**
 The 25–50× cold-start advantage erodes if semble ships a compiled/standalone distribution. The durable moats are the Go SDK surface, DB indexing, and Windows support — invest there, not in latency marketing. *(1.0.1 note: the aikit v1.4 SIMD bump — hybrid `search` p50 4.58 ms → 1.56 ms, recall re-verified identical at NL 0.969 / symbol 0.995 — widens the query-latency story too; fold these numbers into the #21 comparison table.)*
 
-### 25. Per-language treesitter routing — **L, data-gated**
-BENCH shows treesitter wins for Kotlin/Zig/TS/Java/PHP and loses for Python/C/Rust/Lua/Scala (net −0.004, hence opt-in per ADR-011). A per-extension chunker routing table could capture the wins without the losses. Only worth it if the per-language deltas are outside noise; gate on a re-run of the harness.
+### 25. Per-language treesitter routing — **L, data-gated** — ❌ **GATE FAILED — don't build (evaluated 2026-06-11)**
+The gate already has data: BENCH.md's v0.2.0 per-language measurement IS the harness output, and it characterizes the deltas as noise ("within bench noise", "directionally mixed … reshuffling not systematic improvement"). Statistical structure confirms it: the corpus is **3 repos / ~60 queries per language**, so the paired per-language SE ≈ `std(per-query Δ)/√60 ≈ 0.023`; the largest observed delta (|Δ|=0.022, Lua/Scala) is ~1 SE — **not significant** — and within-language repo-level deltas **flip sign** (nlohmann-json +0.039 vs aiohttp −0.018). A per-extension routing table would fit per-language sampling noise (≤0.01-scale, unstable) while adding a dispatch layer. **Decision: don't build; keep treesitter opt-in (ADR-011).** A fresh full re-run wouldn't move the small-N noise floor; it needs `pip install -e <semble>` (pulls the model2vec stack) + ~45 min and would re-confirm the documented null. Re-open only if the corpus grows to many repos/language or a paired per-query test shows stable, >2·SE deltas.
 
 ---
 
