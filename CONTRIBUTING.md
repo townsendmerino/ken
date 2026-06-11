@@ -36,6 +36,30 @@ Two project-specific disciplines worth knowing up front:
   [docs/internal/PERF.md](docs/internal/PERF.md). A change that moves a
   ranking number needs the before/after.
 
+## Concurrency
+
+`ken-mcp` dispatches every tool call (`search`, `find_related`, the
+structural tools) on its own goroutine, so anything on the search path runs
+concurrently. **A package-level `var` that is written at runtime needs a
+guard from day one** — a lazy memoization cache at package scope is the easy
+trap (it once shipped a real `-race` bug in `defPatternCache`).
+
+Convention: tag package-level shared state with a `// concurrency:` line so
+the next reader (and reviewer) sees the contract immediately:
+
+- **Mutated at runtime** → `// concurrency: guarded by <mutex>` (or use a
+  `sync.Map`). Canonical examples: `defPatternCache` (RWMutex,
+  `internal/search/rerank.go`) and `parserPools` (sync.Map,
+  `internal/structural/index.go`).
+- **Read-only after init** → `// concurrency: read-only after init` — safe
+  for concurrent reads, but it documents that adding a runtime write would
+  introduce a race.
+
+When you add concurrency-relevant state, add a `-race` regression test that
+actually drives the contended path (a shared input often won't — see
+`TestDefPatternCache_ConcurrentDistinctSymbols_NoRace` for why distinct
+inputs matter).
+
 ## Where things go
 
 - **Architecture / why it's built this way** — [ARCHITECTURE.md](ARCHITECTURE.md)

@@ -249,6 +249,8 @@ type EnrichOptions struct {
 // kenLangToTSLang maps file extensions to gotreesitter grammar names.
 // Extending to other languages is a matter of adding extract_<lang>.go
 // and adding rows here.
+// concurrency: read-only after init (extended only by source edits, never
+// at runtime) — safe for concurrent reads.
 var kenLangToTSLang = map[string]string{
 	".py":   "python",
 	".go":   "go",
@@ -296,6 +298,7 @@ var kenLangToTSLang = map[string]string{
 // ChildByFieldName() call — gotreesitter requires the language to
 // resolve node type names + field-name indices), and the FileStruct
 // to populate.
+// concurrency: read-only after init — safe for concurrent reads.
 var langExtractor = map[string]func([]byte, *gotreesitter.Node, *gotreesitter.Language, *FileStruct){
 	"python":     extractPython,
 	"go":         extractGo,
@@ -328,6 +331,9 @@ type langCache struct {
 // sync.Map for the read-heavy access pattern (same shape as the
 // treesitter chunker — allocating a fresh parser per file is
 // measurably expensive on real corpora).
+// concurrency: sync.Map — concurrent-safe by design (the canonical pattern
+// for a package-level cache that IS mutated at runtime; cf. defPatternCache's
+// RWMutex in internal/search).
 var (
 	parserPools sync.Map // map[string]*langCache
 )

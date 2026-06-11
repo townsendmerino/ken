@@ -47,6 +47,9 @@ var sqlDefinitionKeywords = []string{
 	"CREATE TABLE", "CREATE VIEW", "CREATE PROCEDURE", "CREATE FUNCTION",
 }
 
+// concurrency: built once at init, read-only thereafter — safe for
+// concurrent reads. Do NOT add runtime writes (would race the search path;
+// see defPatternCache + CONTRIBUTING.md → Concurrency).
 var stopwords = func() map[string]struct{} {
 	m := map[string]struct{}{}
 	for w := range strings.FieldsSeq(
@@ -155,6 +158,11 @@ type defPattern struct{ general, sql *regexp.Regexp }
 // paths race-free. Regex compilation happens outside the lock — a racing
 // miss on the same symbol may compile twice, but both results are
 // equivalent and last-writer-wins is harmless.
+//
+// concurrency: MUTATED AT RUNTIME — guarded by defPatternMu. This is the
+// canonical lazy-memoization-at-package-scope pattern; any new package-level
+// cache reachable from the search path needs the same guard from day one
+// (see CONTRIBUTING.md → Concurrency).
 var (
 	defPatternMu    sync.RWMutex
 	defPatternCache = map[string]defPattern{}

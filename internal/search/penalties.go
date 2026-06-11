@@ -29,6 +29,8 @@ const (
 	fileSaturationDecay  = 0.5
 )
 
+// concurrency: read-only after init — safe for concurrent reads; no runtime
+// writes (see CONTRIBUTING.md → Concurrency).
 var reexportFilenames = map[string]struct{}{
 	"__init__.py": {}, "package-info.java": {},
 }
