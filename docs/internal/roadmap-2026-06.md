@@ -2,7 +2,7 @@
 
 Source: full-repo review (code quality, maintainability, docs currency, security, competitive position), 2026-06-09. Companion to [road-to-1.0.md](road-to-1.0.md); this picks up where that tracker ends. Items are ordered by priority within each section. Effort: S (<1 h), M (half-day), L (multi-day).
 
-**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 8/28 done (incl. #7 CONTRIBUTING.md, #8 SECURITY.md, #10 main() decompose, #2 concurrency audit). Next up: #6 (document the go.work workspace) or #11 (untrack stale outputs/) — both quick.
+**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 9/28 done (incl. #2 concurrency audit, #7 CONTRIBUTING.md, #8 SECURITY.md, #9 recently_changed JSON, #10 main() decompose). Next up: #6 (document the go.work workspace) or #11 (untrack stale outputs/) — both quick.
 
 ---
 
@@ -39,8 +39,8 @@ Short top-level `CONTRIBUTING.md`: setup, the CI bar, the gofmt-clean + reproduc
 ### 8. Add SECURITY.md — **S** — ✅ **DONE (981f1c3)**
 Top-level `SECURITY.md`: private-disclosure policy (GitHub advisories), the `KEN_DB_DSN` PII stance (dev-only, schema-only default; ADR-017), and the remote-clone SSRF guard + its documented limits (DNS-rebinding TOCTOU, no size cap) + untrusted-index DoS-ceiling framing.
 
-### 9. Track the `recently_changed` JSON gap — **S**
-Documented as "JSON support is a follow-up" but tracked nowhere. Add it here / road-to-1.0 successor so it doesn't get lost.
+### 9. Track the `recently_changed` JSON gap — **S** — ✅ **DONE (420be3d) — closed, not just tracked**
+Rather than track the follow-up, closed it: `recently_changed` now supports `output: "json"` (typed `RecentlyChangedResponse`, built from the same rows as the markdown render). All nine MCP tools now accept `output: "json"`. Test + DEVELOPERS.md + CHANGELOG updated.
 
 ---
 
