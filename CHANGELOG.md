@@ -17,16 +17,22 @@ pre-built binaries.
 
 ### Changed
 
-- **Bumped `aikit` v1.0.0 → v1.4.0.** Non-breaking for ken (no surface ken
-  imports changed; the only breaking change in the range — `linalg.Workspace`
-  — is transitive-only). Brings free wins on ken's hot paths: the `ann.Flat`
-  cosine retriever picked up the SIMD dot kernel + 8-vectors-per-pass
-  streaming, and the `encoder` neural reranker got its `scores·V` context and
-  `forward_q8` path vectorized. Plus robustness hardening on exactly the paths
-  ken runs: a safetensors mmap-lifetime guardrail, two fuzz-fixed
-  untrusted-tensor crashes in `embed`, and `bm25`/`chunk` indexing-pipeline
-  fuzzing. Embedding parity preserved (golden cosine ≥ 1 − 1e-5 vs the Python
-  reference, all cases). `chunk/treesitter` stays at its own v1.0.0.
+- **Bumped `aikit` v1.0.0 → v1.4.0 — ~3× faster hybrid search, no quality
+  change.** Non-breaking for ken (no surface ken imports changed; the only
+  breaking change in the range — `linalg.Workspace` — is transitive-only).
+  The `ann.Flat` cosine retriever moved from a scalar-f64 loop to a SIMD-f32
+  dot kernel + 8-vectors-per-pass streaming: **`Flat.Query` 11.7× faster** in
+  isolation, and end-to-end **hybrid `search` p50 −66 % (4.58 ms → 1.56 ms** on
+  a ~13 k-chunk corpus; the scan is O(N), so the win grows with corpus size).
+  (The `encoder` reranker also gained vectorized `scores·V`/`forward_q8`, but
+  that targets the int8 path — ken's default f32 reranker is unchanged: a
+  50-doc cold rerank measured 7.40 s → 7.53 s, p=0.31.) **recall@10
+  re-verified identical** (NL 0.969 /
+  symbol 0.995) and embedding parity preserved (golden cosine ≥ 1 − 1e-5 vs the
+  Python reference). Plus robustness hardening on exactly the paths ken runs: a
+  safetensors mmap-lifetime guardrail, two fuzz-fixed untrusted-tensor crashes
+  in `embed`, and `bm25`/`chunk` indexing-pipeline fuzzing.
+  `chunk/treesitter` stays at its own v1.0.0.
 
 ### Added
 

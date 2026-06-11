@@ -35,6 +35,20 @@ medians.
 | large (jekyll-class) | ~750 | **~1.3 s** | 0.92 ms | ~7 s | 110 ms |
 | huge (semble bench) | ~80k repos × ~378k chunks | ~45 s (hybrid index) | TBD | not measured at this scale | not measured |
 
+> **aikit v1.4.0 speedup (measured 2026-06-11, M-series).** The bump moved
+> the semantic-arm cosine scan (`aikit/ann.Flat.Query`) from a scalar-f64
+> loop to a SIMD-f32 dot kernel: **11.7× faster** in isolation (micro-bench
+> 2061 µs → 176 µs over 8 000×256). Because the scan is **O(N) in chunks**,
+> the win is invisible at the sub-ms small-corpus scales in the table above
+> but compounds with corpus size — on laravel-framework (~13 k chunks)
+> end-to-end hybrid `search` p50 dropped **4.58 ms → 1.56 ms (−66 %, ≈3×)**,
+> allocations unchanged, **recall@10 re-verified identical**. Index time is
+> unchanged (the bump didn't touch the index path). The **neural reranker is
+> also unchanged** — a 50-doc cold rerank measured 7.40 s → 7.53 s (p=0.31,
+> n=6, no significant difference): the encoder vectorization in this aikit
+> range targets the int8 `forward_q8` path, and ken's default reranker runs
+> f32. So the bump's ken-facing win is entirely the `ann.Flat` search speedup.
+
 **Cold start is the budget cmd/ken-mcp pays before any tool can
 return.** It splits into four pieces — embed model load (~53 ms,
 fixed), rerank model load (~491 ms; **lazy as of v0.9.0 / ADR-036
