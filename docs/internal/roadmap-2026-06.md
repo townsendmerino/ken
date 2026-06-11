@@ -2,17 +2,17 @@
 
 Source: full-repo review (code quality, maintainability, docs currency, security, competitive position), 2026-06-09. Companion to [road-to-1.0.md](road-to-1.0.md); this picks up where that tracker ends. Items are ordered by priority within each section. Effort: S (<1 h), M (half-day), L (multi-day).
 
-**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **Top open item remains #1, the `defPatternCache` race** — verified still present at rerank.go:151–176 as of 1.0.1. Scoreboard: 3/28 done, 25 open.
+**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Scoreboard: 7/28 done (incl. #7 CONTRIBUTING.md, #8 SECURITY.md, #10 main() decompose). Next up: #2 (audit the rest of package-level state for sibling races).
 
 ---
 
 ## P0 — Correctness
 
-### 1. Fix the `defPatternCache` data race — **S** — **OPEN (re-verified in 1.0.1)**
-`internal/search/rerank.go:151` — package-level `map[string]defPattern{}` written in `definitionPattern` (rerank.go:176) and read in the same function, no mutex. The MCP SDK dispatches tool calls on separate goroutines, so concurrent `Search` calls race. Current `-race` CI doesn't catch it: `TestWatchedIndex_ConcurrentReads_DuringWrite` uses the query "alpha", which doesn't drive concurrent writes to the cache.
+### 1. Fix the `defPatternCache` data race — **S** — ✅ **DONE (1381c51)**
+`internal/search/rerank.go:151` — package-level `map[string]defPattern{}` written in `definitionPattern` (rerank.go:176) and read in the same function, no mutex. The MCP SDK dispatches tool calls on separate goroutines, so concurrent `Search` calls race. Current `-race` CI didn't catch it: `TestWatchedIndex_ConcurrentReads_DuringWrite` uses the query "alpha", which doesn't drive concurrent writes to the cache.
 
-- Fix: `sync.RWMutex` around the map, or `sync.Map`.
-- Add a regression test: concurrent searches with distinct definition-shaped queries (`func Foo`, `class Bar`, …) under `-race`.
+- ✅ Fixed with `sync.RWMutex` (RLock hit path, Lock only the store; regex compile stays outside the lock).
+- ✅ Regression test `TestDefPatternCache_ConcurrentDistinctSymbols_NoRace` — 64 distinct symbols × 8 goroutines hammering `chunkDefinesSymbol` (drives `definitionPattern` directly: the boost path is hybrid-only/model-gated, so a Search-based test would `t.Skip` in CI's no-model `-race` job). Verified it trips the detector with the locks removed.
 
 ### 2. Race-proof the rest of package-level state — **S**
 Audit `internal/search` and `mcp` for other package-level mutable state reachable from the concurrent search path. The defPatternCache pattern (lazy memoization at package scope) is easy to repeat; add a lint note or a `// concurrency:` comment convention so the next cache gets a mutex from day one.
@@ -33,11 +33,11 @@ Index table now carries all 37 ADRs including 034–037. The table-count CI chec
 ### 6. Document the `go.work` / aikit workspace setup — **S**
 `go.work` references a sibling `../aikit` checkout and is gitignored with no developer docs. Add a DEVELOPERS.md subsection: when you need the workspace, how to set it up, and that `GOWORK=off` (or no go.work) is the proxy-pinned production path.
 
-### 7. Add CONTRIBUTING.md — **S**
-DEVELOPERS.md §"Internals + contributing" has the substance; GitHub conventions (and tooling) look for the top-level file. A short CONTRIBUTING.md that links into DEVELOPERS.md is enough.
+### 7. Add CONTRIBUTING.md — **S** — ✅ **DONE (981f1c3)**
+Short top-level `CONTRIBUTING.md`: setup, the CI bar, the gofmt-clean + reproducible-claim disciplines, links into DEVELOPERS.md / ARCHITECTURE.md / add-a-language.md / aikit.
 
-### 8. Add SECURITY.md — **S**
-ken can be pointed at live databases (`KEN_DB_DSN`) and clones remote URLs. Publish a disclosure policy, restate the PII stance from db-indexing.md, and summarize the SSRF guard + its documented limits.
+### 8. Add SECURITY.md — **S** — ✅ **DONE (981f1c3)**
+Top-level `SECURITY.md`: private-disclosure policy (GitHub advisories), the `KEN_DB_DSN` PII stance (dev-only, schema-only default; ADR-017), and the remote-clone SSRF guard + its documented limits (DNS-rebinding TOCTOU, no size cap) + untrusted-index DoS-ceiling framing.
 
 ### 9. Track the `recently_changed` JSON gap — **S**
 Documented as "JSON support is a follow-up" but tracked nowhere. Add it here / road-to-1.0 successor so it doesn't get lost.
@@ -46,8 +46,8 @@ Documented as "JSON support is a follow-up" but tracked nowhere. Add it here / r
 
 ## P2 — Code health & maintainability
 
-### 10. Decompose `cmd/ken-mcp/main.go` `main()` — **M**
-457 lines wiring every startup concern sequentially. Worst offender: the lazy reranker loader closure (~main.go:402–443), 40 lines capturing 7 enclosing variables. Extract a named type with a `Load() (search.Reranker, error)` method; pull mode-resolution and auto-fetch wiring into testable helpers alongside the existing `wireDBTier2`.
+### 10. Decompose `cmd/ken-mcp/main.go` `main()` — **M** — ✅ **DONE (a8f66e4)**
+Was 457 lines; now 294. Extracted `rerankerLoader` (named type, `Load() (search.Reranker, error)` method — the cache scope/dim it records are fields the shutdown path reads), `setupReranker` (wraps the whole `KEN_MCP_RERANK*` block, mirrors `wireDBTier2`), `resolveStartupMode` (ParseMode + model-missing downgrade + auto-fetch-dest, pure logic), and `parseRerankAdaptive` / `resolveRerankCachePath`. `startup_test.go` covers the decision logic; behavior byte-for-byte preserved (full suite incl. stdout-contract green).
 
 ### 11. Untrack the stale `outputs/` files — **S**
 8 markdown files under gitignored `outputs/` (`perf-startup-m*.md`, `stage8-*.md`) were committed before the ignore rule. `git rm --cached` them; if the perf baselines are load-bearing references (DESIGN/BENCH cite them), move those into `docs/internal/perf/` instead and keep them tracked deliberately.
