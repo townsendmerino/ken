@@ -298,191 +298,27 @@ func main() {
 	// folding (sql.FoldMigrations). Default is "folding enabled".
 	noAutoMigrations := envBool("KEN_SQL_NO_AUTO_MIGRATIONS", false, logger)
 
-	// M5: neural reranker (M4 NeuralReranker + ModeHybridRerank). Opt-in
-	// while it's new; default off. The model is loaded ONCE at startup
-	// and shared across every WatchedIndex via wi.SetReranker, so the
-	// content-hash LRU cache (plan §8 perf keystone) survives both per-
-	// source rebuilds and snapshot swaps from the live watcher.
-	//
-	// Failure mode is "warn + leave reranker nil". Combined with the
-	// SearchMode transparent downgrade (M4), this means:
-	//   - KEN_MCP_RERANK=off                       ⇒ reranker never loaded
-	//   - KEN_MCP_RERANK=on  + model dir resolvable ⇒ reranker active
-	//   - KEN_MCP_RERANK=on  + model dir missing    ⇒ warn, reranker nil,
-	//                                                  hybrid-rerank queries
-	//                                                  silently downgrade to hybrid
-	rerankEnabled := envBool("KEN_MCP_RERANK", false, logger)
-	var (
-		// lazyReranker wraps the model load + cache hydration so the
-		// 491 ms encoder.Load cost (M0 baseline) doesn't land on the
-		// cold-start critical path. The actual NeuralReranker is
-		// constructed when the FIRST hybrid+rerank query lands — for
-		// the common case where ken-mcp boots with KEN_MCP_RERANK=on
-		// but the user issues hybrid-only queries, the cost is never
-		// paid. See docs/internal/perf-campaign-startup-query.md M2.
-		lazyReranker    *search.LazyReranker
-		rerankerOptions []search.RerankerOption
-		// M9 persistent doc cache: shutdown path saves the LRU here
-		// IFF the lazy reranker has actually loaded (gate on
-		// lazyReranker.Loaded()). Empty path = persistence disabled.
-		rerankCachePath  string
-		rerankCacheScope string
-		rerankCacheDim   int
-	)
-	if rerankEnabled {
-		rerankModelDir := envPath("KEN_MCP_RERANK_MODEL_DIR", logger)
-		rerankTopN := envInt("KEN_MCP_RERANK_TOP_N", 50, logger)
-		rerankCacheSize := envInt("KEN_MCP_RERANK_CACHE_SIZE", search.DefaultRerankerCacheSize, logger)
-		rerankBeta := envFloat("KEN_MCP_RERANK_BETA", 0.25, logger)
-		rerankQuant := envEnum("KEN_MCP_RERANK_QUANT", []string{"f32", "int8"}, "f32", logger)
-		// M8d adaptive: "THRESHOLD:MINN" (e.g. "0.30:10"). Empty disables.
-		// On confident-stage-1 queries (top-1 margin > threshold), rerank
-		// only the top minN instead of full top_n. 2-5× win on the typical
-		// agent workload where most queries have unambiguous stage-1.
-		rerankAdaptive := strings.TrimSpace(os.Getenv("KEN_MCP_RERANK_ADAPTIVE"))
-		var adaptiveThreshold float64
-		var adaptiveMinN int
-		if rerankAdaptive != "" {
-			parts := strings.SplitN(rerankAdaptive, ":", 2)
-			if len(parts) == 2 {
-				if t, terr := strconv.ParseFloat(parts[0], 64); terr == nil {
-					if m, merr := strconv.Atoi(parts[1]); merr == nil {
-						adaptiveThreshold = t
-						adaptiveMinN = m
-					}
-				}
-			}
-			if adaptiveThreshold == 0 || adaptiveMinN == 0 {
-				logger.Logf(kenmcp.LogWarn,
-					"invalid KEN_MCP_RERANK_ADAPTIVE=%q: expected THRESHOLD:MINN (e.g. 0.30:10) — adaptive disabled",
-					rerankAdaptive)
-			}
-		}
-		if rerankModelDir == "" {
-			logger.Logf(kenmcp.LogWarn,
-				"KEN_MCP_RERANK=on but KEN_MCP_RERANK_MODEL_DIR is empty — "+
-					"hybrid-rerank queries will downgrade to hybrid "+
-					"(set KEN_MCP_RERANK_MODEL_DIR to a CodeRankEmbed snapshot; "+
-					"`ken download-model --rerank` fetches one to ~/.ken/rerank-model)")
-		} else if !modelAvailable(rerankModelDir) {
-			logger.Logf(kenmcp.LogWarn,
-				"no CodeRankEmbed model at KEN_MCP_RERANK_MODEL_DIR=%q — "+
-					"hybrid-rerank queries will downgrade to hybrid", rerankModelDir)
-		} else {
-			rerankerOptions = []search.RerankerOption{
-				search.WithRerankN(rerankTopN),
-				search.WithRerankBlendBeta(rerankBeta),
-			}
-			if adaptiveThreshold > 0 && adaptiveMinN > 0 {
-				rerankerOptions = append(rerankerOptions,
-					search.WithAdaptiveRerankN(adaptiveThreshold, adaptiveMinN))
-			}
+	// M5: neural reranker — opt-in (default off), loaded lazily on the
+	// first hybrid+rerank query so the ~491 ms encoder.Load stays off the
+	// cold-start path. The model is shared across every WatchedIndex (via
+	// wi.SetReranker), so the content-hash LRU survives per-source rebuilds
+	// and watcher snapshot swaps. setupReranker reads KEN_MCP_RERANK* and
+	// returns the lazy loader + per-index options; rl carries the cache
+	// scope/dim/path the shutdown save path reads. Failure mode: lazyReranker
+	// stays nil and hybrid-rerank queries transparently downgrade to hybrid.
+	// See docs/internal/perf-campaign-startup-query.md M2.
+	lazyReranker, rl, rerankerOptions, rerankEnabled := setupReranker(logger)
 
-			// Cache path resolution stays eager — it's cheap (env
-			// lookup + home-dir join) and the shutdown save path
-			// needs the path even when no rerank query landed.
-			// `KEN_MCP_RERANK_CACHE=""` (explicit empty) disables
-			// persistence. Per-quant filename keeps an f32 and an
-			// int8 cache side-by-side.
-			if raw, set := os.LookupEnv("KEN_MCP_RERANK_CACHE"); set {
-				rerankCachePath = strings.TrimSpace(raw)
-			} else {
-				home, _ := os.UserHomeDir()
-				if home != "" {
-					rerankCachePath = filepath.Join(home, ".ken", fmt.Sprintf("rerank-cache-%s.bin", rerankQuant))
-				}
-			}
-
-			// LAZY LOADER. Runs on the first hybrid+rerank query.
-			// Performs the three expensive steps that used to be
-			// startup work: encoder.Load (~491 ms f32), NeuralReranker
-			// construction, persistent cache hydration. Errors here
-			// surface as a pass-through (LazyReranker.Rerank returns
-			// nil → orchestrator skips rerank).
-			loader := func() (search.Reranker, error) {
-				var (
-					enc     encoder.Encoder
-					loadErr error
-				)
-				switch rerankQuant {
-				case "int8":
-					enc, loadErr = encoder.LoadQ8(rerankModelDir)
-				default:
-					enc, loadErr = encoder.Load(rerankModelDir)
-				}
-				if loadErr != nil {
-					logger.Logf(kenmcp.LogWarn,
-						"lazy rerank load: failed to load model from %q (quant=%s): %v — "+
-							"hybrid-rerank queries will downgrade to hybrid", rerankModelDir, rerankQuant, loadErr)
-					return nil, loadErr
-				}
-				nr := search.NewNeuralReranker(enc, search.WithCacheSize(rerankCacheSize))
-				rerankCacheDim = enc.HiddenDim()
-				rerankCacheScope = search.CacheScopeKey(filepath.Base(rerankModelDir), rerankQuant, rerankCacheDim)
-				if rerankCachePath != "" {
-					loaded, lerr := search.LoadCacheFromFile(nr, rerankCachePath, rerankCacheScope, rerankCacheDim)
-					switch {
-					case lerr == nil:
-						logger.Logf(kenmcp.LogInfo, "rerank cache: loaded %d entries from %s", loaded, rerankCachePath)
-					case errors.Is(lerr, os.ErrNotExist):
-						logger.Logf(kenmcp.LogInfo, "rerank cache: %s not present yet (first run); starting cold", rerankCachePath)
-					case errors.Is(lerr, search.ErrCacheScopeMismatch), errors.Is(lerr, search.ErrCacheEmbedDimMismatch):
-						logger.Logf(kenmcp.LogWarn, "rerank cache: %s scope/dim mismatch (%v); starting cold, next save will overwrite", rerankCachePath, lerr)
-					case errors.Is(lerr, search.ErrCacheCorrupt), errors.Is(lerr, search.ErrCacheFormatVersion):
-						logger.Logf(kenmcp.LogWarn, "rerank cache: %s unusable (%v); starting cold, next save will overwrite", rerankCachePath, lerr)
-					default:
-						logger.Logf(kenmcp.LogWarn, "rerank cache: load failed (%v); starting cold", lerr)
-					}
-				}
-				logger.Logf(kenmcp.LogInfo,
-					"rerank: loaded %s on first query (quant=%s top_n=%d cache_size=%d beta=%v adaptive=%v:%d cache_path=%q)",
-					rerankModelDir, rerankQuant, rerankTopN, rerankCacheSize, rerankBeta,
-					adaptiveThreshold, adaptiveMinN, rerankCachePath)
-				return nr, nil
-			}
-			lazyReranker = search.NewLazyReranker(loader)
-			logger.Logf(kenmcp.LogInfo,
-				"rerank: lazy-load configured (quant=%s top_n=%d beta=%v adaptive=%v:%d); model will load on first hybrid+rerank query",
-				rerankQuant, rerankTopN, rerankBeta, adaptiveThreshold, adaptiveMinN)
-		}
-	}
-
-	// modeStr is now guaranteed to be one of ModeNames(); ParseMode can
-	// never fail here. Keep the call so a future ParseMode addition
-	// (e.g. a new mode wired into ModeNames before the parser) is caught.
-	mode, err := search.ParseMode(modeStr)
-	if err != nil {
-		logger.Logf(kenmcp.LogError, "internal: KEN_MCP_MODE=%q passed envEnum but failed ParseMode: %v — defaulting to bm25",
-			modeStr, err)
-		mode = search.ModeBM25
-	}
-	// wantMode/wantStr capture the requested mode before any
-	// model-missing downgrade, so the background auto-fetch knows what to
-	// upgrade to once the model lands.
-	wantMode, wantStr := mode, modeStr
+	// Resolve the effective serving mode: a non-bm25 mode with no model
+	// downgrades to bm25 and (with KEN_MCP_AUTO_FETCH on) marks the model
+	// dir for a background fetch + later upgrade. sm.want* records the
+	// requested mode so the auto-fetch goroutine knows the upgrade target.
 	autoFetch := envBool("KEN_MCP_AUTO_FETCH", true, logger)
-	autoFetchDest := ""
-	if mode != search.ModeBM25 && !modelAvailable(modelDir) {
-		if autoFetch && modelDir != "" {
-			autoFetchDest = modelDir
-			logger.Logf(kenmcp.LogInfo,
-				"no Model2Vec model at %q — fetching %s in the background (~62 MB); "+
-					"serving bm25 until it lands, then upgrading to %s "+
-					"(KEN_MCP_AUTO_FETCH=0 disables this; `ken download-model` pre-seeds it)",
-				modelDir, modelfetch.DefaultModel, wantStr)
-		} else {
-			logger.Logf(kenmcp.LogWarn,
-				"no Model2Vec model at %q — serving bm25 mode "+
-					"(run `ken download-model`, or set KEN_MCP_AUTO_FETCH=1 to fetch it automatically)",
-				modelDir)
-		}
-		mode = search.ModeBM25
-		modeStr = "bm25"
-		modelDir = ""
-	}
+	sm := resolveStartupMode(modeStr, modelDir, modelAvailable(modelDir), autoFetch, logger)
+
 	// buildState is the live mode/model the cache Builder reads; the
 	// auto-fetch goroutine flips it bm25 → hybrid once the model arrives.
-	bs := &buildState{mode: mode, modeStr: modeStr, modelDir: modelDir}
+	bs := &buildState{mode: sm.mode, modeStr: sm.modeStr, modelDir: sm.modelDir}
 	rerankStatus := "off"
 	if lazyReranker != nil {
 		rerankStatus = "on (lazy)"
@@ -490,7 +326,7 @@ func main() {
 		rerankStatus = "on-but-unavailable"
 	}
 	logger.Logf(kenmcp.LogInfo, "starting (mode=%s chunker=%s cache_size=%d default_repo=%q fold_migrations=%v rerank=%s)",
-		modeStr, chunker, size, defaultRepo, !noAutoMigrations, rerankStatus)
+		sm.modeStr, chunker, size, defaultRepo, !noAutoMigrations, rerankStatus)
 
 	// Builder: clone http(s) URLs to a temp dir; index local paths
 	// in-place. mcp.NormalizeKey hands us either a canonical URL or an
@@ -612,8 +448,8 @@ func main() {
 	// reads the index's own mode per query, so the rebuild upgrades search
 	// automatically). Skipped — with a restart prompt — when a database is
 	// attached, since the DB Refresher holds the default repo's index.
-	if autoFetchDest != "" {
-		go autoFetchModel(ctx, bs, wantMode, wantStr, autoFetchDest, refresher != nil, cache, defaultRepo, autoFetchRealFetch, logger)
+	if sm.autoFetchDest != "" {
+		go autoFetchModel(ctx, bs, sm.wantMode, sm.wantStr, sm.autoFetchDest, refresher != nil, cache, defaultRepo, autoFetchRealFetch, logger)
 	}
 
 	// M8d telemetry wiring. Two independent gates:
@@ -661,7 +497,7 @@ func main() {
 	srv := kenmcp.NewServer(kenmcp.Config{
 		Cache:       cache,
 		DefaultRepo: defaultRepo,
-		Mode:        mode,
+		Mode:        sm.mode,
 		Chunker:     chunker,
 		// v0.8.0 Part 3 addendum: *mcpdb.Refresher satisfies
 		// mcp.DBIntegration. nil refresher → reindex_db tool NOT
@@ -689,13 +525,13 @@ func main() {
 		// save). Guards against the M2 happy path where ken-mcp
 		// boots with KEN_MCP_RERANK=on but no rerank query ever
 		// landed: skip the save, the disk file stays untouched.
-		if lazyReranker != nil && lazyReranker.Loaded() && rerankCachePath != "" {
+		if lazyReranker != nil && lazyReranker.Loaded() && rl != nil && rl.cachePath != "" {
 			if nr, ok := lazyReranker.Inner().(*search.NeuralReranker); ok && nr != nil {
 				if _, _, sz := nr.CacheStats(); sz > 0 {
-					if serr := search.SaveCacheToFile(nr, rerankCachePath, rerankCacheScope, rerankCacheDim); serr != nil {
-						logger.Logf(kenmcp.LogWarn, "rerank cache: save to %s failed: %v", rerankCachePath, serr)
+					if serr := search.SaveCacheToFile(nr, rl.cachePath, rl.cacheScope, rl.cacheDim); serr != nil {
+						logger.Logf(kenmcp.LogWarn, "rerank cache: save to %s failed: %v", rl.cachePath, serr)
 					} else {
-						logger.Logf(kenmcp.LogInfo, "rerank cache: saved %d entries to %s", sz, rerankCachePath)
+						logger.Logf(kenmcp.LogInfo, "rerank cache: saved %d entries to %s", sz, rl.cachePath)
 					}
 				}
 			}
@@ -715,6 +551,224 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+// startupMode is the effective serving configuration resolved by
+// resolveStartupMode: the mode/modelDir the server actually runs with
+// (after any model-missing downgrade to bm25), the originally-requested
+// mode (so the background auto-fetch knows what to upgrade to), and the
+// dir to fetch the model into (empty ⇒ no auto-fetch).
+type startupMode struct {
+	mode     search.Mode
+	modeStr  string
+	modelDir string
+
+	wantMode search.Mode
+	wantStr  string
+
+	autoFetchDest string
+}
+
+// resolveStartupMode turns the requested mode + whether a model is present
+// into the effective serving config. A non-bm25 mode with no model
+// downgrades to bm25 (lexical-only); if autoFetch is on and a model dir is
+// known, autoFetchDest is set so the caller kicks off a background fetch +
+// later upgrade. modelPresent is passed in (not stat'd here) so the
+// decision logic is unit-testable without a filesystem.
+func resolveStartupMode(modeStr, modelDir string, modelPresent, autoFetch bool, logger *kenmcp.Logger) startupMode {
+	mode, err := search.ParseMode(modeStr)
+	if err != nil {
+		// modeStr already passed envEnum(ModeNames()), so this is
+		// unreachable today; kept so a future ModeNames/ParseMode skew is
+		// caught rather than silently mis-served.
+		logger.Logf(kenmcp.LogError, "internal: KEN_MCP_MODE=%q passed envEnum but failed ParseMode: %v — defaulting to bm25",
+			modeStr, err)
+		mode = search.ModeBM25
+	}
+	sm := startupMode{mode: mode, modeStr: modeStr, modelDir: modelDir, wantMode: mode, wantStr: modeStr}
+	if mode == search.ModeBM25 || modelPresent {
+		return sm
+	}
+	if autoFetch && modelDir != "" {
+		sm.autoFetchDest = modelDir
+		logger.Logf(kenmcp.LogInfo,
+			"no Model2Vec model at %q — fetching %s in the background (~62 MB); "+
+				"serving bm25 until it lands, then upgrading to %s "+
+				"(KEN_MCP_AUTO_FETCH=0 disables this; `ken download-model` pre-seeds it)",
+			modelDir, modelfetch.DefaultModel, sm.wantStr)
+	} else {
+		logger.Logf(kenmcp.LogWarn,
+			"no Model2Vec model at %q — serving bm25 mode "+
+				"(run `ken download-model`, or set KEN_MCP_AUTO_FETCH=1 to fetch it automatically)",
+			modelDir)
+	}
+	sm.mode = search.ModeBM25
+	sm.modeStr = "bm25"
+	sm.modelDir = ""
+	return sm
+}
+
+// rerankerLoader lazily constructs the neural reranker on the first
+// hybrid+rerank query: encoder.Load (~491 ms f32) + NeuralReranker +
+// persistent-cache hydration. Extracted from main's startup closure so the
+// load is a named, testable Load() method rather than a 7-variable
+// capture. Load() records the cache scope + dim, which the shutdown save
+// path reads to persist the LRU under the same key.
+type rerankerLoader struct {
+	modelDir          string
+	quant             string
+	cacheSize         int
+	cachePath         string
+	topN              int
+	beta              float64
+	adaptiveThreshold float64
+	adaptiveMinN      int
+	logger            *kenmcp.Logger
+
+	cacheScope string // set by Load() on success
+	cacheDim   int    // set by Load() on success
+}
+
+// Load is the search.NewLazyReranker loader. On model-load failure it
+// returns the error (LazyReranker passes through → query downgrades to
+// hybrid).
+func (l *rerankerLoader) Load() (search.Reranker, error) {
+	var (
+		enc     encoder.Encoder
+		loadErr error
+	)
+	switch l.quant {
+	case "int8":
+		enc, loadErr = encoder.LoadQ8(l.modelDir)
+	default:
+		enc, loadErr = encoder.Load(l.modelDir)
+	}
+	if loadErr != nil {
+		l.logger.Logf(kenmcp.LogWarn,
+			"lazy rerank load: failed to load model from %q (quant=%s): %v — "+
+				"hybrid-rerank queries will downgrade to hybrid", l.modelDir, l.quant, loadErr)
+		return nil, loadErr
+	}
+	nr := search.NewNeuralReranker(enc, search.WithCacheSize(l.cacheSize))
+	l.cacheDim = enc.HiddenDim()
+	l.cacheScope = search.CacheScopeKey(filepath.Base(l.modelDir), l.quant, l.cacheDim)
+	if l.cachePath != "" {
+		loaded, lerr := search.LoadCacheFromFile(nr, l.cachePath, l.cacheScope, l.cacheDim)
+		switch {
+		case lerr == nil:
+			l.logger.Logf(kenmcp.LogInfo, "rerank cache: loaded %d entries from %s", loaded, l.cachePath)
+		case errors.Is(lerr, os.ErrNotExist):
+			l.logger.Logf(kenmcp.LogInfo, "rerank cache: %s not present yet (first run); starting cold", l.cachePath)
+		case errors.Is(lerr, search.ErrCacheScopeMismatch), errors.Is(lerr, search.ErrCacheEmbedDimMismatch):
+			l.logger.Logf(kenmcp.LogWarn, "rerank cache: %s scope/dim mismatch (%v); starting cold, next save will overwrite", l.cachePath, lerr)
+		case errors.Is(lerr, search.ErrCacheCorrupt), errors.Is(lerr, search.ErrCacheFormatVersion):
+			l.logger.Logf(kenmcp.LogWarn, "rerank cache: %s unusable (%v); starting cold, next save will overwrite", l.cachePath, lerr)
+		default:
+			l.logger.Logf(kenmcp.LogWarn, "rerank cache: load failed (%v); starting cold", lerr)
+		}
+	}
+	l.logger.Logf(kenmcp.LogInfo,
+		"rerank: loaded %s on first query (quant=%s top_n=%d cache_size=%d beta=%v adaptive=%v:%d cache_path=%q)",
+		l.modelDir, l.quant, l.topN, l.cacheSize, l.beta,
+		l.adaptiveThreshold, l.adaptiveMinN, l.cachePath)
+	return nr, nil
+}
+
+// parseRerankAdaptive parses KEN_MCP_RERANK_ADAPTIVE ("THRESHOLD:MINN",
+// e.g. "0.30:10"). Empty → (0, 0) silently; malformed → (0, 0) with a
+// warn. (0, 0) means adaptive rerank is disabled.
+func parseRerankAdaptive(logger *kenmcp.Logger) (threshold float64, minN int) {
+	raw := strings.TrimSpace(os.Getenv("KEN_MCP_RERANK_ADAPTIVE"))
+	if raw == "" {
+		return 0, 0
+	}
+	if parts := strings.SplitN(raw, ":", 2); len(parts) == 2 {
+		if t, terr := strconv.ParseFloat(parts[0], 64); terr == nil {
+			if m, merr := strconv.Atoi(parts[1]); merr == nil {
+				threshold, minN = t, m
+			}
+		}
+	}
+	if threshold == 0 || minN == 0 {
+		logger.Logf(kenmcp.LogWarn,
+			"invalid KEN_MCP_RERANK_ADAPTIVE=%q: expected THRESHOLD:MINN (e.g. 0.30:10) — adaptive disabled",
+			raw)
+		return 0, 0
+	}
+	return threshold, minN
+}
+
+// resolveRerankCachePath returns the M9 persistent rerank-cache path.
+// KEN_MCP_RERANK_CACHE overrides (explicit empty disables persistence);
+// otherwise ~/.ken/rerank-cache-<quant>.bin — per-quant so an f32 and an
+// int8 cache coexist. "" ⇒ persistence disabled.
+func resolveRerankCachePath(quant string) string {
+	if raw, set := os.LookupEnv("KEN_MCP_RERANK_CACHE"); set {
+		return strings.TrimSpace(raw)
+	}
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".ken", fmt.Sprintf("rerank-cache-%s.bin", quant))
+}
+
+// setupReranker reads the KEN_MCP_RERANK* env. Returns (nil, nil, nil,
+// false) when rerank is off; (nil, nil, nil, true) when it's on but the
+// model is unavailable (hybrid-rerank queries transparently downgrade);
+// and the wired (LazyReranker, loader, per-index options, true) otherwise.
+// The loader is returned so main's shutdown path can persist the rerank
+// LRU under the scope/dim Load() recorded. Mirrors wireDBTier2's shape:
+// reads env, logs, returns the wired components.
+func setupReranker(logger *kenmcp.Logger) (*search.LazyReranker, *rerankerLoader, []search.RerankerOption, bool) {
+	if !envBool("KEN_MCP_RERANK", false, logger) {
+		return nil, nil, nil, false
+	}
+	modelDir := envPath("KEN_MCP_RERANK_MODEL_DIR", logger)
+	topN := envInt("KEN_MCP_RERANK_TOP_N", 50, logger)
+	cacheSize := envInt("KEN_MCP_RERANK_CACHE_SIZE", search.DefaultRerankerCacheSize, logger)
+	beta := envFloat("KEN_MCP_RERANK_BETA", 0.25, logger)
+	quant := envEnum("KEN_MCP_RERANK_QUANT", []string{"f32", "int8"}, "f32", logger)
+	adaptiveThreshold, adaptiveMinN := parseRerankAdaptive(logger)
+
+	if modelDir == "" {
+		logger.Logf(kenmcp.LogWarn,
+			"KEN_MCP_RERANK=on but KEN_MCP_RERANK_MODEL_DIR is empty — "+
+				"hybrid-rerank queries will downgrade to hybrid "+
+				"(set KEN_MCP_RERANK_MODEL_DIR to a CodeRankEmbed snapshot; "+
+				"`ken download-model --rerank` fetches one to ~/.ken/rerank-model)")
+		return nil, nil, nil, true
+	}
+	if !modelAvailable(modelDir) {
+		logger.Logf(kenmcp.LogWarn,
+			"no CodeRankEmbed model at KEN_MCP_RERANK_MODEL_DIR=%q — "+
+				"hybrid-rerank queries will downgrade to hybrid", modelDir)
+		return nil, nil, nil, true
+	}
+
+	opts := []search.RerankerOption{
+		search.WithRerankN(topN),
+		search.WithRerankBlendBeta(beta),
+	}
+	if adaptiveThreshold > 0 && adaptiveMinN > 0 {
+		opts = append(opts, search.WithAdaptiveRerankN(adaptiveThreshold, adaptiveMinN))
+	}
+	loader := &rerankerLoader{
+		modelDir:          modelDir,
+		quant:             quant,
+		cacheSize:         cacheSize,
+		cachePath:         resolveRerankCachePath(quant),
+		topN:              topN,
+		beta:              beta,
+		adaptiveThreshold: adaptiveThreshold,
+		adaptiveMinN:      adaptiveMinN,
+		logger:            logger,
+	}
+	lazy := search.NewLazyReranker(loader.Load)
+	logger.Logf(kenmcp.LogInfo,
+		"rerank: lazy-load configured (quant=%s top_n=%d beta=%v adaptive=%v:%d); model will load on first hybrid+rerank query",
+		quant, topN, beta, adaptiveThreshold, adaptiveMinN)
+	return lazy, loader, opts, true
 }
 
 // wireDBTier2 wires the v0.7.0 Tier-2 database introspection path. No-op
