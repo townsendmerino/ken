@@ -199,7 +199,7 @@ the value is the gotreesitter grammar name from step 1.
 ## Step 4: write `extract_<lang>_test.go`
 
 Fixture-based unit tests. Look at
-[`extract_python_test.go`](../../internal/structural/extract_python_test.go)
+[`extract_go_test.go`](../../internal/structural/extract_go_test.go)
 or [`extract_ruby_test.go`](../../internal/structural/extract_ruby_test.go)
 for the standard shape: write a small inline source string with
 known function / class / call / import / raise content, run
