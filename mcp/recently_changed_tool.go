@@ -121,15 +121,35 @@ func handleRecentlyChanged(ctx context.Context, cfg *Config, args RecentlyChange
 		})
 	}
 
+	// Structured response (json output mode) — built from the same rows
+	// the markdown render uses, so the two formats can't drift.
+	resp := &RecentlyChangedResponse{
+		PathPrefix: pathFilter,
+		Considered: considered,
+		Commits:    make([]RecentlyChangedCommit, 0, len(rows)),
+	}
+	for _, r := range rows {
+		resp.Commits = append(resp.Commits, RecentlyChangedCommit{
+			Hash:         r.Hash.String(),
+			ShortHash:    r.ShortHash,
+			Subject:      r.Subject,
+			AuthorName:   r.AuthorName,
+			AuthorEmail:  r.AuthorEmail,
+			When:         r.When.Format(time.RFC3339),
+			ChangedFiles: r.ChangedFiles,
+		})
+	}
+
 	if len(rows) == 0 {
-		if pathFilter != "" {
-			return textResult(fmt.Sprintf(
-				"No commits in the last %d touched %q. Try a larger n or a less-specific path.",
-				considered, pathFilter)), nil, nil
-		}
-		return textResult(fmt.Sprintf(
+		msg := fmt.Sprintf(
 			"No commits found in the last %d (empty repo or detached HEAD with no history).",
-			considered)), nil, nil
+			considered)
+		if pathFilter != "" {
+			msg = fmt.Sprintf(
+				"No commits in the last %d touched %q. Try a larger n or a less-specific path.",
+				considered, pathFilter)
+		}
+		return dispatchOutput(args.Output, resp, msg)
 	}
 
 	var b strings.Builder
@@ -150,7 +170,7 @@ func handleRecentlyChanged(ctx context.Context, cfg *Config, args RecentlyChange
 		fmt.Fprintln(&b)
 	}
 	_ = ctx
-	return textResult(strings.TrimRight(b.String(), "\n")), nil, nil
+	return dispatchOutput(args.Output, resp, strings.TrimRight(b.String(), "\n"))
 }
 
 // commitChangedFiles returns the set of paths a commit touched

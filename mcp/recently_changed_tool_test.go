@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,6 +108,44 @@ func TestRecentlyChanged_HappyPath(t *testing.T) {
 	// Header should report 3 commits.
 	if !strings.Contains(txt, "Recent commits (3 shown)") {
 		t.Errorf("expected '3 shown' header, got:\n%s", txt)
+	}
+}
+
+// TestRecentlyChanged_JSONOutput exercises output:"json" — the structured
+// response shape (roadmap #9: closing the markdown-only gap).
+func TestRecentlyChanged_JSONOutput(t *testing.T) {
+	dir, repo := makeTempRepo(t)
+	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
+	commitFile(t, dir, repo, "a.txt", "alpha\n", "first commit", base)
+	commitFile(t, dir, repo, "b.txt", "bravo\n", "second commit", base.Add(time.Hour))
+
+	res, _, err := handleRecentlyChanged(context.Background(), &Config{}, RecentlyChangedArgs{
+		N: 10, Repo: dir, Output: "json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := extractText(t, res)
+	var resp RecentlyChangedResponse
+	if uerr := json.Unmarshal([]byte(raw), &resp); uerr != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", uerr, raw)
+	}
+	if resp.Considered != 2 || len(resp.Commits) != 2 {
+		t.Fatalf("considered=%d commits=%d, want 2/2", resp.Considered, len(resp.Commits))
+	}
+	// Newest first.
+	if resp.Commits[0].Subject != "second commit" || resp.Commits[1].Subject != "first commit" {
+		t.Errorf("ordering: got %q,%q want second,first", resp.Commits[0].Subject, resp.Commits[1].Subject)
+	}
+	c := resp.Commits[0]
+	if c.Hash == "" || len(c.ShortHash) != 12 || c.AuthorName == "" {
+		t.Errorf("commit fields not populated: %+v", c)
+	}
+	if _, perr := time.Parse(time.RFC3339, c.When); perr != nil {
+		t.Errorf("When %q is not RFC3339: %v", c.When, perr)
+	}
+	if len(c.ChangedFiles) != 1 || c.ChangedFiles[0] != "b.txt" {
+		t.Errorf("changed files: got %v want [b.txt]", c.ChangedFiles)
 	}
 }
 

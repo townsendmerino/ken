@@ -241,7 +241,7 @@ own release rhythm.
 
 ## JSON output mode
 
-Eight of the nine MCP tools accept `output: "json"` for a typed
+All nine MCP tools accept `output: "json"` for a typed
 JSON response instead of markdown. The response shapes are
 defined in [mcp/json_responses.go](../mcp/json_responses.go) and
 are part of the 1.0-stable surface.
@@ -255,11 +255,11 @@ are part of the 1.0-stable surface.
 - `CallersResponse{Symbol, Files[]}` — `callers`.
 - `OutlineResponse{Path, Entries[], ByFile?}` — `outline`.
 - `SymbolsResponse{PathPrefix, Symbols[]}` — `symbols`.
+- `RecentlyChangedResponse{PathPrefix?, Considered, Commits[]}` —
+  `recently_changed` (each commit: hash, short_hash, subject,
+  author_name/email, when (RFC3339), changed_files).
 - The `status` tool also accepts `output: "json"` and returns
   the full `status.Status` struct.
-
-`recently_changed` returns markdown only in Pass 1; JSON support
-is a follow-up.
 
 ### Behavior
 

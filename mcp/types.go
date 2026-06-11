@@ -142,9 +142,10 @@ type SymbolsArgs struct {
 // error. Pass 2 can plumb the local clone path through when there's
 // demand.
 type RecentlyChangedArgs struct {
-	N    int    `json:"n,omitempty" jsonschema:"Number of recent commits to include (default 10, max 100)."`
-	Repo string `json:"repo,omitempty" jsonschema:"Local directory path containing a git working tree. Required when no default index was configured at startup. Pass 1 of this tool does NOT support https:// URLs — for those, clone manually first."`
-	Path string `json:"path,omitempty" jsonschema:"Optional path prefix to filter the file list. Commits with no matching file changes are skipped from the output. E.g. 'src/api' returns only commits that touched something under src/api/."`
+	N      int    `json:"n,omitempty" jsonschema:"Number of recent commits to include (default 10, max 100)."`
+	Repo   string `json:"repo,omitempty" jsonschema:"Local directory path containing a git working tree. Required when no default index was configured at startup. Pass 1 of this tool does NOT support https:// URLs — for those, clone manually first."`
+	Path   string `json:"path,omitempty" jsonschema:"Optional path prefix to filter the file list. Commits with no matching file changes are skipped from the output. E.g. 'src/api' returns only commits that touched something under src/api/."`
+	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with considered/commits — see RecentlyChangedResponse)."`
 }
 
 // StatusArgs is the argument schema for the `status` tool. All

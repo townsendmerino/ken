@@ -154,6 +154,28 @@ type SymbolsResponse struct {
 	Symbols    []string `json:"symbols"`
 }
 
+// RecentlyChangedResponse is the `recently_changed` tool's JSON shape.
+// Considered is how many commits were walked (≥ len(Commits) when a path
+// filter dropped some); PathPrefix echoes the filter if one was passed.
+type RecentlyChangedResponse struct {
+	PathPrefix string                  `json:"path_prefix,omitempty"`
+	Considered int                     `json:"considered"`
+	Commits    []RecentlyChangedCommit `json:"commits"`
+}
+
+// RecentlyChangedCommit is one commit in the recently_changed list.
+// When is RFC3339; ChangedFiles is sorted and (if PathPrefix was set)
+// filtered to that prefix.
+type RecentlyChangedCommit struct {
+	Hash         string   `json:"hash"`
+	ShortHash    string   `json:"short_hash"`
+	Subject      string   `json:"subject"`
+	AuthorName   string   `json:"author_name"`
+	AuthorEmail  string   `json:"author_email"`
+	When         string   `json:"when"`
+	ChangedFiles []string `json:"changed_files"`
+}
+
 // dispatchOutput routes a handler result to either the JSON
 // serialization of `resp` or the agent-provided `markdown` string.
 // Empty/unspecified Output defaults to markdown.

@@ -15,6 +15,14 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Added
+
+- **`recently_changed` now supports `output: "json"`** — the one tool that
+  was markdown-only. Returns a typed `RecentlyChangedResponse` (considered
+  count + per-commit hash / short_hash / subject / author / RFC3339 when /
+  changed_files), built from the same rows the markdown render uses so the
+  two can't drift. All nine MCP tools now accept `output: "json"`.
+
 ### Changed
 
 - **Bumped `aikit` v1.4.0 → v1.5.0 and made the int8 reranker the default.**
