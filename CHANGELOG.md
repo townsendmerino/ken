@@ -23,6 +23,18 @@ pre-built binaries.
   changed_files), built from the same rows the markdown render uses so the
   two can't drift. All nine MCP tools now accept `output: "json"`.
 
+### Security
+
+- **Clone SSRF guard hardened + a clone byte cap.** `ken-mcp`'s remote-repo
+  clone now (1) routes go-git through a guarded transport that re-validates
+  the IP at **connect time** and dials it literally (TLS still verifies the
+  hostname via SNI) — closing the DNS-rebinding TOCTOU the pre-flight check
+  couldn't, and covering redirects to internal hosts; and (2) **byte-caps the
+  clone stream** (`KEN_MAX_CLONE_BYTES`, default 2 GiB) so a hostile server
+  can't stream an unbounded/pathological pack (aborts + cleans up). Both the
+  pre-flight and dial-time checks honor `KEN_ALLOW_PRIVATE_CLONE_TARGETS=1`.
+  Resolves the two documented SSRF-guard limitations in `clone.go`.
+
 ### Changed
 
 - **Bumped `aikit` v1.4.0 → v1.5.0 and made the int8 reranker the default.**

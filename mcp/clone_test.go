@@ -1,11 +1,98 @@
 package mcp
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"testing"
 )
+
+// readOnlyConn is a minimal net.Conn whose Read serves from r; the other
+// net.Conn methods are unused by cappedConn so the embedded nil is fine.
+type readOnlyConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (c readOnlyConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+// TestCappedConn_AbortsOverCap: a stream larger than the byte budget reads
+// up to the cap then fails with ErrCloneTooLarge (the #15 pack-size guard).
+func TestCappedConn_AbortsOverCap(t *testing.T) {
+	src := readOnlyConn{r: bytes.NewReader(make([]byte, 100))}
+	c := &cappedConn{Conn: src, remaining: 50}
+	buf := make([]byte, 256)
+	total := 0
+	var last error
+	for {
+		n, err := c.Read(buf)
+		total += n
+		if err != nil {
+			last = err
+			break
+		}
+	}
+	if !errors.Is(last, ErrCloneTooLarge) {
+		t.Fatalf("expected ErrCloneTooLarge, got %v (read %d)", last, total)
+	}
+	if total > 50 {
+		t.Errorf("read %d bytes past the 50-byte cap", total)
+	}
+}
+
+// TestCappedConn_UnderCap: a stream within budget reads fully and ends in
+// EOF, never ErrCloneTooLarge.
+func TestCappedConn_UnderCap(t *testing.T) {
+	src := readOnlyConn{r: bytes.NewReader(make([]byte, 100))}
+	c := &cappedConn{Conn: src, remaining: 200}
+	buf := make([]byte, 256)
+	total := 0
+	for {
+		n, err := c.Read(buf)
+		total += n
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("unexpected error under cap: %v", err)
+		}
+	}
+	if total != 100 {
+		t.Errorf("read %d bytes, want 100", total)
+	}
+}
+
+// TestGuardedCloneDial_RejectsPrivate is the #16 dial-time SSRF guard: the
+// connection-time re-validation rejects a private/loopback target even
+// though no pre-flight check runs here. (Literal IP → resolver short-circuit,
+// so no network.)
+func TestGuardedCloneDial_RejectsPrivate(t *testing.T) {
+	t.Setenv(envAllowPrivateClone, "") // ensure guard is on
+	for _, addr := range []string{"127.0.0.1:443", "169.254.169.254:80", "10.0.0.5:443"} {
+		_, err := guardedCloneDial(context.Background(), "tcp", addr)
+		if !errors.Is(err, ErrPrivateCloneTarget) {
+			t.Errorf("guardedCloneDial(%q) = %v, want ErrPrivateCloneTarget", addr, err)
+		}
+	}
+}
+
+func TestMaxCloneBytes(t *testing.T) {
+	t.Setenv(envMaxCloneBytes, "1048576")
+	if got := maxCloneBytes(); got != 1048576 {
+		t.Errorf("explicit: got %d want 1048576", got)
+	}
+	t.Setenv(envMaxCloneBytes, "0") // 0 = disable cap
+	if got := maxCloneBytes(); got != 0 {
+		t.Errorf("disable: got %d want 0", got)
+	}
+	t.Setenv(envMaxCloneBytes, "garbage") // bad value → default
+	if got := maxCloneBytes(); got != defaultMaxCloneBytes {
+		t.Errorf("bad value: got %d want default %d", got, defaultMaxCloneBytes)
+	}
+}
 
 // TestIsPrivateAddr pins the address-family classification used by
 // the M2 SSRF guard. Failure here means the underlying net.IP

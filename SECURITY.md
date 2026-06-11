@@ -48,23 +48,27 @@ Full rationale and the PII stance:
 
 `ken-mcp` shallow-clones `http(s)` URLs that an agent supplies, which is
 an SSRF surface (a hostile prompt could ask it to clone an internal
-endpoint). Before invoking git, ken resolves the URL's host and
-**rejects targets that resolve to a loopback, link-local, RFC1918, or
-RFC4193 address** — blocking cloud-metadata endpoints
-(`169.254.169.254`), `localhost`, and private hosts. Operators with a
-legitimate internal git host can opt out with
+endpoint). The guard has two layers:
+
+1. **Pre-flight:** before invoking git, ken resolves the URL's host and
+   **rejects targets that resolve to a loopback, link-local, RFC1918, or
+   RFC4193 address** — blocking cloud-metadata endpoints
+   (`169.254.169.254`), `localhost`, and private hosts.
+2. **Dial-time:** go-git connects through a guarded transport that
+   **re-validates the IP at connect time and dials it literally** (TLS
+   still verifies the real hostname via SNI). This closes the
+   DNS-rebinding TOCTOU — a hostname that re-resolves to a private address
+   between the pre-flight check and git's own lookup is rejected at the
+   dial — and also covers HTTP redirects to internal hosts (each redirect
+   gets its own validated dial).
+
+Operators with a legitimate internal git host opt out of both layers with
 `KEN_ALLOW_PRIVATE_CLONE_TARGETS=1`.
 
-Documented limits of this guard (it is a pre-flight, best-effort defense,
-not part of the 1.0 hard-committed surface):
-
-- **DNS-rebinding TOCTOU:** the check resolves the host up front; a
-  hostname that re-resolves to a private address at git-connect time can
-  slip past. The guard does not pin the resolved IP through to the
-  connection.
-- **No size cap:** there is no max-bytes / max-objects limit on a clone,
-  so a hostile or pathologically large repository can exhaust disk or
-  bandwidth (DoS), even though it can't reach an internal address.
+The clone stream is also **byte-capped** (`KEN_MAX_CLONE_BYTES`, default
+2 GiB): a hostile server streaming an unbounded / pathological pack aborts
+with a clear error and the partial clone is cleaned up, so it can't exhaust
+disk or bandwidth. The MCP request context still bounds wall-clock time.
 
 ### Untrusted inputs in general
 
@@ -79,8 +83,10 @@ crash on attacker-controlled input as a vulnerability.
 
 In scope: anything that lets attacker-controlled input (a malicious repo,
 a crafted query, a hostile MCP request, a serialized index/cache file)
-cause memory unsafety, reach an unintended network/host, exfiltrate
-credentials, or escalate beyond the documented DoS ceiling. Out of scope:
-the documented limits above (size caps, DNS-rebinding) unless you have a
-concrete exploit, and "ken sent my data to my LLM provider" when sample
-rows were explicitly enabled.
+cause memory unsafety, reach an unintended network/host (including a
+clone-guard bypass — SSRF reaching a private address, or a DNS-rebinding /
+redirect that defeats the dial-time check), exfiltrate credentials, or
+escalate beyond the documented DoS ceiling. Out of scope: "ken sent my
+data to my LLM provider" when sample rows were explicitly enabled, and
+resource use within the documented caps (e.g. a clone up to
+`KEN_MAX_CLONE_BYTES`).

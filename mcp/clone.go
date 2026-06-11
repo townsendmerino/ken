@@ -7,11 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
+	"time"
 
 	git "github.com/go-git/go-git/v5"
+	gitclient "github.com/go-git/go-git/v5/plumbing/transport/client"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
 
 // ErrPrivateCloneTarget is returned by CloneShallow when the supplied
@@ -38,25 +44,22 @@ const envAllowPrivateClone = "KEN_ALLOW_PRIVATE_CLONE_TARGETS"
 // stale dirs from previous processes are detectable and reusable should
 // we ever add cross-process caching (we don't yet; Close() always rms).
 //
-// M2 SSRF guard: before invoking go-git, the URL's host is resolved
-// and rejected if any of its A/AAAA records points at a loopback /
-// link-local / RFC1918 / RFC4193 / unspecified address. This is a
-// pre-flight defense: it doesn't survive a DNS rebinding TOCTOU, but
-// it blocks the dominant attack shape (a hostile agent naming a
-// metadata or internal endpoint by literal IP or by a hostname that
-// resolves to one). Operators with a legitimate internal git host
-// can opt out via the documented env var.
+// SSRF guard (two layers): (1) a pre-flight check resolves the URL's host
+// and rejects if any A/AAAA record is loopback / link-local / RFC1918 /
+// RFC4193 / unspecified — a fast, clear rejection of the obvious shape (a
+// metadata or internal endpoint by literal IP or hostname). (2) go-git
+// dials through guardedCloneDial, which RE-validates the IP at connect time
+// and dials it literally — so a DNS-rebinding TOCTOU (the host re-resolving
+// to a private IP between the pre-flight check and go-git's own lookup) and
+// redirects to internal hosts are both blocked, not just the pre-flight
+// shape. Operators with a legitimate internal git host opt out via the
+// documented env var (both layers honor it).
 //
-// L3 (documented limitation): there is no max-bytes / max-objects cap
-// on the clone. A malicious host can serve a huge or pathological
-// pack file; the only timeout in play is the MCP request ctx. If
-// this becomes a real problem in production, the fix is a custom
-// http.Transport wrapping the go-git client with a bounded-body
-// reader — deferred until a deployment scenario justifies the
-// per-platform complexity. Mitigation in the meantime: enforce
-// reasonable ctx timeouts at the MCP layer, run ken-mcp in a
-// network-bandwidth-limited container if the input source is
-// untrusted.
+// Byte cap: guardedCloneDial also wraps each connection in a per-clone byte
+// budget (KEN_MAX_CLONE_BYTES, default 2 GiB), so a hostile host can't
+// stream an unbounded / pathological pack — the clone aborts with
+// ErrCloneTooLarge and the partial dir is cleaned up. The MCP request ctx
+// still bounds wall-clock time.
 //
 // Stability: best-effort (NOT part of the 1.0 hard-committed
 // surface). The function signature is stable; the temp-dir naming
@@ -69,6 +72,9 @@ func CloneShallow(ctx context.Context, urlStr string) (string, func(), error) {
 			return "", nil, err
 		}
 	}
+	// Route go-git's clone through the guarded http client: re-validates
+	// the IP at dial time (DNS-rebinding-safe) and caps the pack stream.
+	installGuardedCloneClient()
 
 	sum := sha256.Sum256([]byte(urlStr))
 	dir := filepath.Join(os.TempDir(), "ken-mcp", hex.EncodeToString(sum[:])[:16])
@@ -152,4 +158,106 @@ func privateCloneAllowed() bool {
 		return true
 	}
 	return false
+}
+
+// ── clone byte cap (#15) + DNS-rebinding-safe dial (#16) ────────────────
+
+// defaultMaxCloneBytes caps the total bytes a single clone may read over
+// the wire (TLS framing + the git pack). A shallow Depth-1 clone of a
+// normal repo is a few MB to a few hundred MB; the cap stops a hostile
+// server from streaming an unbounded / zip-bomb-style pack (the former L3
+// limitation). Override with KEN_MAX_CLONE_BYTES (a byte count; 0 disables).
+const defaultMaxCloneBytes int64 = 2 << 30 // 2 GiB
+
+const envMaxCloneBytes = "KEN_MAX_CLONE_BYTES"
+
+// ErrCloneTooLarge wraps into the clone error when a clone stream exceeds
+// the byte cap. The partial clone dir is removed by CloneShallow's error path.
+var ErrCloneTooLarge = errors.New("mcp: clone exceeded the byte cap (possible unbounded/hostile pack; raise KEN_MAX_CLONE_BYTES if legitimate)")
+
+func maxCloneBytes() int64 {
+	if v := os.Getenv(envMaxCloneBytes); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return defaultMaxCloneBytes
+}
+
+// cappedConn wraps a net.Conn and fails reads once the per-connection byte
+// budget is exhausted. unlimited (cap ≤ 0) passes through untouched.
+type cappedConn struct {
+	net.Conn
+	remaining int64
+	unlimited bool
+}
+
+func (c *cappedConn) Read(p []byte) (int, error) {
+	if c.unlimited {
+		return c.Conn.Read(p)
+	}
+	if c.remaining <= 0 {
+		return 0, ErrCloneTooLarge
+	}
+	if int64(len(p)) > c.remaining {
+		p = p[:c.remaining]
+	}
+	n, err := c.Conn.Read(p)
+	c.remaining -= int64(n)
+	return n, err
+}
+
+// guardedCloneDial is the DialContext go-git's clones use. It re-validates
+// the resolved IP at CONNECT time — closing the DNS-rebinding TOCTOU the
+// pre-flight guardCloneTarget can't (the OS resolver runs again here, and
+// HTTP redirects each get their own dial) — by resolving the host, dialing
+// only a non-private IP literally (so TLS still verifies the real hostname
+// via SNI), and wrapping the connection in the byte cap.
+func guardedCloneDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	allowPrivate := privateCloneAllowed()
+	var dialIP net.IP
+	for _, ipa := range ips {
+		if allowPrivate || !isPrivateAddr(ipa.IP) {
+			dialIP = ipa.IP
+			break
+		}
+	}
+	if dialIP == nil {
+		return nil, fmt.Errorf("%w: host=%s resolved only to private/loopback addresses (set %s=1 to override)",
+			ErrPrivateCloneTarget, host, envAllowPrivateClone)
+	}
+	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	conn, err := d.DialContext(ctx, network, net.JoinHostPort(dialIP.String(), port))
+	if err != nil {
+		return nil, err
+	}
+	limit := maxCloneBytes()
+	return &cappedConn{Conn: conn, remaining: limit, unlimited: limit <= 0}, nil
+}
+
+var installGuardedCloneClientOnce sync.Once
+
+// installGuardedCloneClient registers (process-once) a go-git http(s)
+// client that dials through guardedCloneDial. Global to go-git's protocol
+// registry, but ken-mcp's only go-git network use is CloneShallow, so it
+// scopes to clones. Keep-alive is disabled so each clone gets a fresh byte
+// budget (no pooled-conn carry-over between clones).
+func installGuardedCloneClient() {
+	installGuardedCloneClientOnce.Do(func() {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.DialContext = guardedCloneDial
+		t.DisableKeepAlives = true
+		c := &http.Client{Transport: t} // no Client.Timeout — the MCP ctx bounds the clone
+		gc := githttp.NewClient(c)
+		gitclient.InstallProtocol("https", gc)
+		gitclient.InstallProtocol("http", gc)
+	})
 }
