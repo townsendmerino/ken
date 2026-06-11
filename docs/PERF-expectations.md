@@ -43,11 +43,18 @@ medians.
 > but compounds with corpus size — on laravel-framework (~13 k chunks)
 > end-to-end hybrid `search` p50 dropped **4.58 ms → 1.56 ms (−66 %, ≈3×)**,
 > allocations unchanged, **recall@10 re-verified identical**. Index time is
-> unchanged (the bump didn't touch the index path). The **neural reranker is
-> also unchanged** — a 50-doc cold rerank measured 7.40 s → 7.53 s (p=0.31,
-> n=6, no significant difference): the encoder vectorization in this aikit
-> range targets the int8 `forward_q8` path, and ken's default reranker runs
-> f32. So the bump's ken-facing win is entirely the `ann.Flat` search speedup.
+> unchanged (the bump didn't touch the index path).
+>
+> **aikit v1.5.0 — int8 reranker is now the default.** The q8 reranker path
+> had an allocation + matmul bug (4.4 GiB scratch + `matmulBTQ8` re-widening
+> int8→f32 inside the GEMM) that made it ~5× slower than f32. aikit v1.5.0
+> fixes both (pooled scratch + dequant-once-then-SIMD), so on ken's rerank
+> path int8 now reaches **f32 latency parity** (50-doc cold: 7.35 s vs 7.75 s,
+> arm64) at **~21× less runtime memory** (18 MiB vs 379 MiB) and ¼ the weight
+> storage (~140 MB resident vs ~547 MB), cosine 0.997 vs f32 unchanged. So
+> `KEN_MCP_RERANK_QUANT` / `--rerank-quant` now default to `int8`; pass `f32`
+> for the full-precision path. (This reverses the v1.4.0-era note that int8
+> was slower on Apple Silicon — that was the pre-fix aikit q8 path.)
 
 **Cold start is the budget cmd/ken-mcp pays before any tool can
 return.** It splits into four pieces — embed model load (~53 ms,

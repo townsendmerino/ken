@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -66,6 +67,23 @@ func TestSetupReranker_EnabledButNoModel(t *testing.T) {
 	}
 	if lazy != nil || loader != nil || opts != nil {
 		t.Fatalf("model unavailable: want nil wiring, got lazy=%v loader=%v opts=%v", lazy, loader, opts)
+	}
+}
+
+func TestSetupReranker_DefaultQuantIsInt8(t *testing.T) {
+	const modelDir = "../../testdata/encoder-model"
+	if _, err := os.Stat(filepath.Join(modelDir, "model.safetensors")); err != nil {
+		t.Skip("no rerank model at testdata/encoder-model")
+	}
+	t.Setenv("KEN_MCP_RERANK", "1")
+	t.Setenv("KEN_MCP_RERANK_MODEL_DIR", modelDir)
+	t.Setenv("KEN_MCP_RERANK_QUANT", "") // unset → the envEnum default applies
+	lazy, loader, _, enabled := setupReranker(testLogger())
+	if !enabled || lazy == nil || loader == nil {
+		t.Fatalf("want a wired reranker; enabled=%v lazy=%v loader=%v", enabled, lazy, loader)
+	}
+	if loader.quant != "int8" {
+		t.Errorf("default rerank quant = %q, want int8 (flipped from f32 with aikit v1.5.0)", loader.quant)
 	}
 }
 

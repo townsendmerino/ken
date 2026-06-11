@@ -15,6 +15,20 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Changed
+
+- **Bumped `aikit` v1.4.0 → v1.5.0 and made the int8 reranker the default.**
+  aikit v1.5.0 fixes the q8 reranker (pooled scratch + dequant-once-then-SIMD
+  matmul — the pre-fix path re-widened int8→f32 inside the GEMM and allocated
+  4.4 GiB of scratch). On ken's rerank path int8 now reaches **f32 latency
+  parity** (50-doc cold: 7.35 s vs 7.75 s, arm64) at **~21× less runtime
+  memory** (18 MiB vs 379 MiB) and ¼ the weight storage (~140 MB resident vs
+  ~547 MB), with cosine 0.997 vs f32 unchanged. `KEN_MCP_RERANK_QUANT` and the
+  `--rerank-quant` CLI flag now default to `int8`; pass `f32` for the
+  full-precision path. (Reverses the 1.0.1-era "int8 slower on Apple Silicon"
+  note — that was the pre-fix aikit q8 path.) No re-download needed: `LoadQ8`
+  quantizes the existing CodeRankEmbed snapshot in-process.
+
 ## [1.0.1] — 2026-06-11 — faster hybrid search
 
 A patch release: same retrieval quality, **~3× faster hybrid search** from an

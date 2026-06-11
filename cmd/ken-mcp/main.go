@@ -728,7 +728,9 @@ func setupReranker(logger *kenmcp.Logger) (*search.LazyReranker, *rerankerLoader
 	topN := envInt("KEN_MCP_RERANK_TOP_N", 50, logger)
 	cacheSize := envInt("KEN_MCP_RERANK_CACHE_SIZE", search.DefaultRerankerCacheSize, logger)
 	beta := envFloat("KEN_MCP_RERANK_BETA", 0.25, logger)
-	quant := envEnum("KEN_MCP_RERANK_QUANT", []string{"f32", "int8"}, "f32", logger)
+	// Default int8: aikit ≥v1.5.0's q8 reranker reaches f32 latency parity at
+	// ~21× less runtime memory + ¼ weight storage, cosine 0.997 unchanged.
+	quant := envEnum("KEN_MCP_RERANK_QUANT", []string{"f32", "int8"}, "int8", logger)
 	adaptiveThreshold, adaptiveMinN := parseRerankAdaptive(logger)
 
 	if modelDir == "" {

@@ -506,7 +506,7 @@ type searchArgs struct {
 	rerankModel    string // --rerank-model DIR; "" → resolveRerankModelDir resolves
 	rerankTopN     string // --rerank-top-n N; "" → use default 50
 	rerankBeta     string // --rerank-beta β; "" → use default 0.25
-	rerankQuant    string // --rerank-quant f32|int8; "" → default f32
+	rerankQuant    string // --rerank-quant f32|int8; "" → default int8 (aikit ≥v1.5.0 parity)
 	rerankAdaptive string // --rerank-adaptive THRESHOLD:MINN; "" → adaptive disabled
 	jsonOut        bool   // --json: emit structured JSON instead of the markdown preview
 	verbose        bool   // --verbose: print per-query telemetry breakdown to stderr
@@ -522,10 +522,11 @@ type searchArgs struct {
 // downgrades to ModeHybrid.
 //
 // topNStr/betaStr/quant are pass-through from the flag parser
-// ("" = default). quant="int8" loads the M8 quantized model
-// (~140 MB resident vs ~547 MB f32); on Apple Silicon f32+NEON
-// dominates int8 in both speed AND accuracy, so int8 is mainly
-// useful on memory-constrained amd64/Linux deployments.
+// ("" = default). The default is int8: as of aikit v1.5.0 the q8 reranker
+// reaches f32 latency parity (the matmulBTQ8 dequant-then-SIMD fix) at
+// ~140 MB resident vs ~547 MB f32 and ~21× less runtime scratch, with
+// cosine 0.997 vs f32 — strictly better-or-equal, so it's the default.
+// Pass --rerank-quant f32 for the full-precision path.
 func attachRerankerIfNeeded(ix *search.Index, mode search.Mode, rerankModelFlag, topNStr, betaStr, quant, adaptiveStr string) (saveCache func(), err error) {
 	if mode != search.ModeHybridRerank {
 		return func() {}, nil
@@ -536,16 +537,16 @@ func attachRerankerIfNeeded(ix *search.Index, mode search.Mode, rerankModelFlag,
 	}
 	var enc encoder.Encoder
 	switch quant {
-	case "", "f32":
-		m, lerr := encoder.Load(dir)
-		if lerr != nil {
-			return nil, fmt.Errorf("loading rerank model from %s: %w", dir, lerr)
-		}
-		enc = m
-	case "int8":
+	case "", "int8":
 		m, lerr := encoder.LoadQ8(dir)
 		if lerr != nil {
 			return nil, fmt.Errorf("loading rerank model (int8) from %s: %w", dir, lerr)
+		}
+		enc = m
+	case "f32":
+		m, lerr := encoder.Load(dir)
+		if lerr != nil {
+			return nil, fmt.Errorf("loading rerank model from %s: %w", dir, lerr)
 		}
 		enc = m
 	default:
@@ -563,7 +564,7 @@ func attachRerankerIfNeeded(ix *search.Index, mode search.Mode, rerankModelFlag,
 	// Quant normalized to "f32" or "int8" so the path is stable.
 	normalizedQuant := quant
 	if normalizedQuant == "" {
-		normalizedQuant = "f32"
+		normalizedQuant = "int8"
 	}
 	cachePath := resolveRerankCachePath(normalizedQuant)
 	if cachePath == "" {

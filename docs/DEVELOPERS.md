@@ -359,7 +359,7 @@ public bench: +0.165 NDCG@10 on CoIR-CSN-Python.
 | `KEN_MCP_RERANK_MODEL_DIR` | `~/.ken/rerank-model` | CodeRankEmbed snapshot. `ken download-model --rerank` fetches it. |
 | `KEN_MCP_RERANK_TOP_N` | `50` | How many hybrid candidates to rerank. Higher = better quality but slower. 50 is the M0-validated sweet spot. |
 | `KEN_MCP_RERANK_BETA` | `0.25` | Blend weight. `0` = pure hybrid (no rerank effect); `1` = pure neural (regresses on semble's bench). `0.25` is the M0-validated default. |
-| `KEN_MCP_RERANK_QUANT` | `f32` | `f32` is faster + more accurate on Apple Silicon. `int8` saves ~400 MB resident memory; use on amd64/Linux deployments where memory matters. |
+| `KEN_MCP_RERANK_QUANT` | `int8` | As of aikit v1.5.0 `int8` reaches `f32` latency parity (matmulBTQ8 dequant-then-SIMD fix) at ~140 MB resident vs ~547 MB and ~21× less runtime scratch, cosine 0.997 vs f32 — so it's the default. Pass `f32` for the full-precision path. |
 | `KEN_MCP_RERANK_ADAPTIVE` | empty | `THRESHOLD:MINN` (e.g. `0.30:10`). When stage-1 is confident, rerank only the top MINN. 2-5× win on the typical workload. |
 | `KEN_MCP_RERANK_CACHE_SIZE` | `32768` | LRU bound for the per-process rerank cache (doc-embedding entries). |
 | `KEN_MCP_RERANK_CACHE` | `~/.ken/rerank-cache-<quant>.bin` | Persistent cache path. Empty string disables persistence. |
