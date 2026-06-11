@@ -15,6 +15,27 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Changed
+
+- **Bumped `aikit` v1.0.0 → v1.4.0.** Non-breaking for ken (no surface ken
+  imports changed; the only breaking change in the range — `linalg.Workspace`
+  — is transitive-only). Brings free wins on ken's hot paths: the `ann.Flat`
+  cosine retriever picked up the SIMD dot kernel + 8-vectors-per-pass
+  streaming, and the `encoder` neural reranker got its `scores·V` context and
+  `forward_q8` path vectorized. Plus robustness hardening on exactly the paths
+  ken runs: a safetensors mmap-lifetime guardrail, two fuzz-fixed
+  untrusted-tensor crashes in `embed`, and `bm25`/`chunk` indexing-pipeline
+  fuzzing. Embedding parity preserved (golden cosine ≥ 1 − 1e-5 vs the Python
+  reference, all cases). `chunk/treesitter` stays at its own v1.0.0.
+
+### Added
+
+- **Fuzz coverage for the KEN1 + KNRC binary deserializers**
+  (`internal/search`). `FuzzDeserializeIndex` (the untrusted-input parser —
+  ken-mcp auto-loads `<repo>/.ken/index.bin` from shallow-cloned remote repos)
+  and `FuzzDecodeRerankCache`, validating the hand-written adversarial-input
+  defenses. 2.6M executions, zero crashers.
+
 ## [1.0.0] — 2026-06-06 — ken 1.0
 
 **ken 1.0.** The public API surface — `mcp.Run`, `mcp.NewServer`,
