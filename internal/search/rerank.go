@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/townsendmerino/aikit/chunk"
 )
@@ -148,7 +149,16 @@ func splitIdentifier(token string) []string {
 
 type defPattern struct{ general, sql *regexp.Regexp }
 
-var defPatternCache = map[string]defPattern{}
+// defPatternCache memoizes compiled definition regexes per symbol. The MCP
+// SDK dispatches tool calls on separate goroutines, so concurrent Search
+// calls hit this map; the RWMutex makes the read (hit) and store (miss)
+// paths race-free. Regex compilation happens outside the lock — a racing
+// miss on the same symbol may compile twice, but both results are
+// equivalent and last-writer-wins is harmless.
+var (
+	defPatternMu    sync.RWMutex
+	defPatternCache = map[string]defPattern{}
+)
 
 func quoteAlt(words []string) string {
 	q := make([]string, len(words))
@@ -162,18 +172,23 @@ func quoteAlt(words []string) string {
 // has no look-behind, so `(?:^|(?<=\s))` becomes `(?:^|\s)` under (?m):
 // equivalent for a boolean "does this chunk define the symbol" search.
 func definitionPattern(symbol string) defPattern {
-	if p, ok := defPatternCache[symbol]; ok {
+	defPatternMu.RLock()
+	p, ok := defPatternCache[symbol]
+	defPatternMu.RUnlock()
+	if ok {
 		return p
 	}
 	esc := regexp.QuoteMeta(symbol)
 	nsPrefix := `(?:[A-Za-z_][A-Za-z0-9_]*(?:\.|::))*`
 	suffix := `)\s+` + nsPrefix + esc + `(?:\s|[<({:\[;]|$)`
 	prefix := `(?m)(?:^|\s)(?:`
-	p := defPattern{
+	p = defPattern{
 		general: regexp.MustCompile(prefix + quoteAlt(definitionKeywords) + suffix),
 		sql:     regexp.MustCompile(`(?i)` + prefix + quoteAlt(sqlDefinitionKeywords) + suffix),
 	}
+	defPatternMu.Lock()
 	defPatternCache[symbol] = p
+	defPatternMu.Unlock()
 	return p
 }
 
