@@ -170,8 +170,8 @@ func dedupeByFile(results []search.Result) []rankedHit {
 //
 //   - For each function defined in a frontier file, add all files
 //     that CALL that function (Callers).
-//   - For each callee mentioned in a frontier file's fs.Calls, add
-//     all files that DEFINE that callee (Defs).
+//   - For each callee mentioned in a frontier file's fs.CalleeNames(),
+//     add all files that DEFINE that callee (Defs).
 //
 // Sparse-by-construction: walked only from the top-K frontier, not
 // from every chunk in the corpus. That's the structural difference
@@ -207,7 +207,7 @@ func graphExpand(base []rankedHit, _ *search.Index, sx *structural.Index, fronti
 			}
 		}
 		// Inbound: definitions of every name this file calls.
-		for _, callee := range fileStruct.Calls {
+		for _, callee := range fileStruct.CalleeNames() {
 			for _, defFile := range sx.Defs(callee) {
 				if defFile == base[i].File {
 					continue
