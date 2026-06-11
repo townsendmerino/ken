@@ -2,7 +2,7 @@
 
 Source: full-repo review (code quality, maintainability, docs currency, security, competitive position), 2026-06-09. Companion to [road-to-1.0.md](road-to-1.0.md); this picks up where that tracker ends. Items are ordered by priority within each section. Effort: S (<1 h), M (half-day), L (multi-day).
 
-**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 14/28 done (incl. #2, #6, #7, #8, #9, #10, #11, #12, #13, #14). The whole P2 code-health section (#10–#14) is now clear. Next up: P3 security hardening (#15 cap clone size, #16 DNS-rebinding TOCTOU, #17 govulncheck CI) or P1 #9-adjacent docs.
+**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 17/28 done (incl. #2, #6–#14, #15–#17). P2 code-health (#10–#14) AND P3 security hardening (#15–#17) are both fully clear — #17's govulncheck caught + fixed 9 reachable CVEs on its first run. Next up: P4 ownership (#18/#19, M/L) or P5 competitiveness (#20 listings, #21 comparison table).
 
 ---
 
@@ -65,16 +65,16 @@ Added a `Makefile`: `clean` (build products), `clean-bench` (the heavy 37 GB `be
 
 ## P3 — Security hardening
 
-> 1.0.1 progress: fuzz coverage landed for the two untrusted-input binary deserializers (`FuzzDeserializeIndex` for KEN1 — auto-loaded from shallow-cloned remote repos — and `FuzzDecodeRerankCache`; 2.6M execs, zero crashers), and aikit v1.4 brought fuzz-fixed `embed` tensor parsing + `bm25`/`chunk` pipeline fuzzing. This materially de-risks the hostile-repo input surface; #15–#17 below remain open.
+> 1.0.1 progress: fuzz coverage landed for the two untrusted-input binary deserializers (`FuzzDeserializeIndex` for KEN1 — auto-loaded from shallow-cloned remote repos — and `FuzzDecodeRerankCache`; 2.6M execs, zero crashers), and aikit v1.4 brought fuzz-fixed `embed` tensor parsing + `bm25`/`chunk` pipeline fuzzing. This materially de-risks the hostile-repo input surface. **#15–#17 are now all done (2026-06-11):** clone byte cap + dial-time DNS-rebinding-safe SSRF guard (#15/#16, d186d60) and a govulncheck CI workflow that caught + fixed 9 reachable CVEs (#17, 8a2f22a).
 
-### 15. Cap clone size — **M**
-Tracked as L3 in clone.go: no max-bytes cap, so a hostile git server can serve an unbounded pack (current mitigation: ctx timeout). Add a byte-count limit on the clone stream or a post-clone size check + cleanup.
+### 15. Cap clone size — **M** — ✅ **DONE (d186d60)**
+go-git's clone now dials through a guarded transport; each connection is wrapped in `cappedConn`, a per-clone byte budget (`KEN_MAX_CLONE_BYTES`, default 2 GiB). A hostile unbounded pack aborts with `ErrCloneTooLarge` + the partial dir is cleaned up. Done together with #16 (same transport).
 
-### 16. DNS-rebinding TOCTOU on the SSRF guard — **M**
-Acknowledged in clone.go: the guard resolves DNS, then go-git resolves again. Closing it fully means dialing through a pinned-IP transport. Low likelihood / contained blast radius; do it when touching clone.go for #15.
+### 16. DNS-rebinding TOCTOU on the SSRF guard — **M** — ✅ **DONE (d186d60)**
+The guarded transport's `DialContext` re-validates the resolved IP at connect time and dials it literally (TLS still verifies the hostname via SNI) — closing the rebinding window between the pre-flight check and git's own lookup, and covering redirects to internal hosts. Pre-flight check kept as the fast early rejection. Tests cover dial-time rejection of private literals.
 
-### 17. Periodic `govulncheck` — **S**
-Add a `govulncheck ./...` CI job (or scheduled workflow). go-git in particular has a CVE history; the SSRF guard covers one attack shape, not all of them.
+### 17. Periodic `govulncheck` — **S** — ✅ **DONE (8a2f22a)**
+Added `.github/workflows/govulncheck.yml` (weekly schedule + PR/push to main + manual). The first run was NOT clean — it caught **9 reachable CVEs**, all fixed in the same commit: `x/crypto` v0.50.0→v0.52.0 (7 ssh-transport CVEs via go-git) + toolchain 1.26.3→1.26.4 (2 stdlib: crypto/x509, net/textproto). `govulncheck ./...` now reports 0 affecting vulns. (Like the Windows CI smoke job, it earned its keep on the first run.)
 
 ---
 
