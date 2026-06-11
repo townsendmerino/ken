@@ -2,7 +2,7 @@
 
 Source: full-repo review (code quality, maintainability, docs currency, security, competitive position), 2026-06-09. Companion to [road-to-1.0.md](road-to-1.0.md); this picks up where that tracker ends. Items are ordered by priority within each section. Effort: S (<1 h), M (half-day), L (multi-day).
 
-**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 12/28 done (incl. #2, #6, #7, #8, #9, #10, #11, #14). Next up: #12 (NormalizePath trust boundary) or #13 (name the candidate-multiplier constant) — both quick S.
+**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 14/28 done (incl. #2, #6, #7, #8, #9, #10, #11, #12, #13, #14). The whole P2 code-health section (#10–#14) is now clear. Next up: P3 security hardening (#15 cap clone size, #16 DNS-rebinding TOCTOU, #17 govulncheck CI) or P1 #9-adjacent docs.
 
 ---
 
@@ -52,11 +52,11 @@ Was 457 lines; now 294. Extracted `rerankerLoader` (named type, `Load() (search.
 ### 11. Untrack the stale `outputs/` files — **S** — ✅ **DONE (1c00d22)**
 All 8 turned out to be load-bearing (PERF-expectations cites `perf-startup-m0-baselines` as its number source; DEVELOPERS/road-to-1.0/DECISIONS/add-a-language link them), so rather than untrack-and-dangle they were `git mv`'d into a deliberately-tracked `docs/internal/results/` (4 perf-campaign baselines + 4 Stage 8 gate memos) with all citations rewired + a README. `outputs/` stays gitignored for live scratch. (The ~15 OTHER `outputs/` files docs cite were never tracked — pre-existing local-only pattern, out of scope.)
 
-### 12. Document the `NormalizePath` trust boundary — **S**
-`internal/structural/lookups.go:429` — `filepath.Clean` doesn't block `../` traversal. Harmless today (the path is only an in-memory map key, never opened), but the name implies sanitization it doesn't provide. Add a comment stating the boundary ("never used for filesystem access; if that changes, add containment checks") or rename, so a future change doesn't introduce a traversal bug.
+### 12. Document the `NormalizePath` trust boundary — **S** — ✅ **DONE (6c03013)**
+Added a "TRUST BOUNDARY" doc comment: `filepath.Clean` doesn't strip `../`; harmless because all callers (`Outline` / `SymbolsInPath`) use the result only as an in-memory lookup key, never to open a file; a future filesystem-access caller must add containment checks first. Comment (not rename) — the name is fair, it was only the unstated guarantee that was the gap.
 
-### 13. Name the candidate-multiplier constant — **S**
-`hybrid.go:43` `candidateCount := topK * 5` — the one un-named constant in the retrieval path. Trivial, but the rest of the pipeline sets the standard.
+### 13. Name the candidate-multiplier constant — **S** — ✅ **DONE (d09acaf)**
+`topK * 5` → `topK * candidateOverfetch` (named const with a doc comment on the per-arm over-fetch rationale). Pure rename, no behavior change.
 
 ### 14. Working-tree clutter — **S** — ✅ **DONE (5a776dd)**
 Added a `Makefile`: `clean` (build products), `clean-bench` (the heavy 37 GB `bench_out/` + bench results, split out so a routine clean doesn't nuke bench data), `clean-all`, plus `build`/`test`/`vet`/`fmt`/`check` + self-documenting `help`. CONTRIBUTING.md points at it.
