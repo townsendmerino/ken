@@ -426,6 +426,16 @@ func (ix *Index) FilesUnderPath(path string) []string {
 // trailing slash. Mirrors filepath.Clean behavior but always emits
 // forward slashes regardless of OS — the MCP wire format and the
 // index are both unix-shaped.
+//
+// TRUST BOUNDARY: this is a canonicalizer for index LOOKUP KEYS, not a
+// path sanitizer. filepath.Clean does NOT strip a leading "../", so the
+// result can still contain traversal segments. That is harmless today
+// because every caller uses it only as an in-memory lookup key
+// (Outline / SymbolsInPath / Symbol lookups), never to open a file — a
+// "../../etc/passwd" argument simply matches no index key. If you ever
+// use the result for filesystem access, add explicit containment checks
+// first (reject paths that escape the corpus root); the name does not
+// promise that guarantee.
 func NormalizePath(p string) string {
 	return strings.TrimPrefix(filepath.ToSlash(filepath.Clean(p)), "./")
 }
