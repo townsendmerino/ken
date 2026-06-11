@@ -188,7 +188,7 @@ prebuilt index) or fsnotify isn't seeing your edits at all.
 
 A red flag for any of these means run `scripts/perf_startup_m0.go`
 on a known corpus and compare to the M0 baseline in
-[`outputs/perf-startup-m0-baselines.md`](../outputs/perf-startup-m0-baselines.md):
+[`internal/results/perf-startup-m0-baselines.md`](internal/results/perf-startup-m0-baselines.md):
 
 1. **`ken-mcp` cold start with `KEN_MCP_RERANK=on` is materially
    above 30 ms median.** ADR-036 M2 made rerank load lazy; if
@@ -235,7 +235,7 @@ go run scripts/perf_startup_m0.go /path/to/your/corpus
 ```
 
 That prints the same record format
-[`outputs/perf-startup-m0-baselines.md`](../outputs/perf-startup-m0-baselines.md)
+[`internal/results/perf-startup-m0-baselines.md`](internal/results/perf-startup-m0-baselines.md)
 was built from. Compare embed-load + rerank-load + search.FromFS +
 structural.Build to the table at the top of this doc.
 
@@ -276,6 +276,6 @@ References:
 - [BENCH.md](BENCH.md) — NDCG / quality methodology (companion to PERF.md)
 - [DECISIONS.md ADR-026 → ADR-031](internal/DECISIONS.md) — the v0.8.x perf campaign trail
 - [DECISIONS.md ADR-036](internal/DECISIONS.md#adr-036) — startup + query latency campaign close (M2 + M4)
-- [`outputs/perf-startup-m0-baselines.md`](../outputs/perf-startup-m0-baselines.md) — M0 cold-start baselines
+- [`internal/results/perf-startup-m0-baselines.md`](internal/results/perf-startup-m0-baselines.md) — M0 cold-start baselines
 - [`internal/search/neural_rerank_bench_test.go`](../internal/search/neural_rerank_bench_test.go) — neural rerank bench (cold vs warm-cache)
 - [`scripts/perf_startup_m0.go`](../scripts/perf_startup_m0.go) — quick health-check harness

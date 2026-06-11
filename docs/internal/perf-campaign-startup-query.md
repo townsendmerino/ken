@@ -119,7 +119,7 @@ For each corpus:
   populated by `SearchModeWithTelemetry`.
 - `runtime/pprof` for CPU profiles where breakdowns are unclear.
 
-**Output:** `outputs/perf-startup-m0-baselines.md` with the numbers,
+**Output:** `docs/internal/results/perf-startup-m0-baselines.md` with the numbers,
 the methodology, and a hypothesis-by-hypothesis verdict (each H_i
 labeled confirmed / refuted / unclear). No code changes; this
 milestone is read-only.

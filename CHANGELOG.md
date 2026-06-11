@@ -288,7 +288,7 @@ The feature-complete 1.0-RC: Stage 8 closes (structural-navigation tools shipped
 
 - **Deterministic per-file label** (`# func: NAME | calls: A, B | raises: X\n`) prepended to every chunk's text before BM25 tokenization + embedding. Pure-Go, no extra model. Default-on; opt out via `KEN_ENRICH=off` or `FSOptions.DisableEnrichment=true`. **+0.0208 NDCG@10 hybrid on csn-python-nl-stripped (N=500); +0.0321 on CoSQA dev** — both within 0.002 of the validated Gate-1 numbers on the production code path.
 - **Single source of truth**: `structural.EnrichFromFileStruct` (per-file, index-free) and `(Index).Enrich` (with optional cross-file callers) both delegate to `enrichCore`. Future bench materializers route through the same function; the Python bench materializer remains as a drift cross-check reference.
-- **Closes Stage 8**, with the two validation gates published in `outputs/stage8-gate-1-cosqa-armb-results.md` and `outputs/stage8-gate-2-call-edge-precision.md`. Track 1 (callers-as-chunk-enrichment) closed negative under M0e; query-time graph expansion explored separately, closed negative (`outputs/stage8-qgraph-expansion-results.md`); ColBERT MaxSim probe explored, parked (`outputs/stage8-maxsim-probe-parked.md`).
+- **Closes Stage 8**, with the two validation gates published in `docs/internal/results/stage8-gate-1-cosqa-armb-results.md` and `docs/internal/results/stage8-gate-2-call-edge-precision.md`. Track 1 (callers-as-chunk-enrichment) closed negative under M0e; query-time graph expansion explored separately, closed negative (`docs/internal/results/stage8-qgraph-expansion-results.md`); ColBERT MaxSim probe explored, parked (`docs/internal/results/stage8-maxsim-probe-parked.md`).
 
 ### Added — 1.0 ship-list user-facing surfaces
 
@@ -342,7 +342,7 @@ The feature-complete 1.0-RC: Stage 8 closes (structural-navigation tools shipped
 
 ### Other
 
-- **MaxSim probe parked** with a closing memo and reopen-trigger list (`outputs/stage8-maxsim-probe-parked.md`). Slim N=25 sample shows MaxSim consistently underperforms CLS-pool on CodeRankEmbed's token vectors; the cheap-reuse path for ColBERT is killed.
+- **MaxSim probe parked** with a closing memo and reopen-trigger list (`docs/internal/results/stage8-maxsim-probe-parked.md`). Slim N=25 sample shows MaxSim consistently underperforms CLS-pool on CodeRankEmbed's token vectors; the cheap-reuse path for ColBERT is killed.
 - **Windows binary deferred until pressure** — pure-Go cross-compile is technically trivial but the support surface (CRLF, path separators, MCP quirks) isn't free; re-opens on real user reports.
 - **CI Docker-pulls-Postgres flake documented** with mitigation (`gh run rerun --failed`) and the permanent-fix path (mirror service images to ghcr.io). Deferred until load-bearing.
 - **Aikit alignment**: ken's CHANGELOG notes that ken 1.0 requires aikit at a tagged 1.0 (or clearly within a 1.0-RC window) for the stability promises to compose. Coordination point, not a blocker.

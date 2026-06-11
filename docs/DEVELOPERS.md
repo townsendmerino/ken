@@ -388,8 +388,8 @@ is never paid.
 
 Measured on M-series Mac, darwin/arm64, Go 1.26.3, GOMAXPROCS=8.
 Numbers from [perf-startup-m0-baselines.md](
-../outputs/perf-startup-m0-baselines.md) +
-[perf-startup-m4-results.md](../outputs/perf-startup-m4-results.md)
+internal/results/perf-startup-m0-baselines.md) +
+[perf-startup-m4-results.md](internal/results/perf-startup-m4-results.md)
 (post-M2 + M4).
 
 ### Cold-start budget (first servable query)

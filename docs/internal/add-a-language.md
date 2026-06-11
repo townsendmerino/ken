@@ -287,7 +287,7 @@ file), the extractor is producing spurious edges and needs
 fixing.
 
 This is the same gate Stage 8 Gate 2 ran across 8 languages
-([memo](../../outputs/stage8-gate-2-call-edge-precision.md)).
+([memo](results/stage8-gate-2-call-edge-precision.md)).
 
 ## Step 7: integrate, lint, commit
 
