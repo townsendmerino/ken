@@ -64,6 +64,22 @@ const DefaultBaseURL = "https://huggingface.co"
 // first and short ones at the end.
 var modelFiles = []string{"model.safetensors", "tokenizer.json", "config.json"}
 
+// minPlausibleSize is a per-file byte floor used to decide whether an
+// already-on-disk file is the real artifact or a stub. Existence alone is
+// not enough: a leftover Git-LFS / HF-hub pointer file (~130 B), a broken
+// symlink resolving to a tiny blob, an empty file, or a half-written
+// download all pass os.Stat but would make inference fail later with a
+// cryptic safetensors error. Real artifacts are far larger than these
+// floors; the smallest real file is config.json (~1.5 KB for both
+// potion-code-16M and CodeRankEmbed), so 512 B sits comfortably between a
+// pointer stub and a genuine config. A file smaller than its floor is
+// treated as absent and re-downloaded.
+var minPlausibleSize = map[string]int64{
+	"model.safetensors": 1 << 20, // ≥1 MiB  (real: ~60 MB potion / ~547 MB rerank)
+	"tokenizer.json":    1 << 12, // ≥4 KiB  (real: ~0.7–2 MB)
+	"config.json":       512,     // ≥512 B  (real: ~1.5 KB; LFS pointer ~130 B)
+}
+
 // Options configures Fetch. Zero-value Options is invalid — Model and
 // Dest must be non-empty. Helper DefaultDest() resolves "~/.ken/model"
 // for callers that want the standard location.
@@ -123,9 +139,15 @@ func Fetch(ctx context.Context, opts Options) (int, error) {
 	for _, name := range modelFiles {
 		target := filepath.Join(opts.Dest, name)
 		if !opts.Force {
-			if _, err := os.Stat(target); err == nil {
-				fmt.Fprintf(opts.Progress, "  ✓ %s (already present; --force to re-download)\n", name)
-				continue
+			if info, err := os.Stat(target); err == nil {
+				if info.Size() >= minPlausibleSize[name] {
+					fmt.Fprintf(opts.Progress, "  ✓ %s (already present; --force to re-download)\n", name)
+					continue
+				}
+				// Present but implausibly small — a pointer stub, broken
+				// symlink, empty file, or truncated run. Re-fetch the real
+				// bytes rather than silently leaving a model that won't load.
+				fmt.Fprintf(opts.Progress, "  ↻ %s (%d B — looks like a stub, not the real file; re-downloading)\n", name, info.Size())
 			}
 		}
 		if err := fetchOne(ctx, opts, name, target); err != nil {

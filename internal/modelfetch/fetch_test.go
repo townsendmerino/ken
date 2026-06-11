@@ -91,10 +91,12 @@ func TestFetch_SuccessDownloadsAllThree(t *testing.T) {
 }
 
 func TestFetch_SkipsAlreadyPresentFiles(t *testing.T) {
+	// Bodies must clear minPlausibleSize so the second pass recognizes them
+	// as real artifacts (not stubs) and skips.
 	srv := fakeHF(t, map[string][]byte{
-		"model.safetensors": []byte("model-bytes"),
-		"tokenizer.json":    []byte(`{"version":"1.0"}`),
-		"config.json":       []byte(`{"hidden_size":256}`),
+		"model.safetensors": bytes.Repeat([]byte{0xab}, 1<<20), // ≥1 MiB floor
+		"tokenizer.json":    bytes.Repeat([]byte("x"), 8<<10),  // ≥4 KiB floor
+		"config.json":       bytes.Repeat([]byte("y"), 1024),   // ≥512 B floor
 	})
 	dest := t.TempDir()
 
@@ -115,6 +117,51 @@ func TestFetch_SkipsAlreadyPresentFiles(t *testing.T) {
 	}
 	if second != 0 {
 		t.Errorf("expected 0 re-downloads on the second pass, got %d", second)
+	}
+}
+
+// TestFetch_ReplacesStubFiles is the regression guard for the
+// existence-only "already present" bug: leftover Git-LFS / HF-hub pointer
+// stubs (or broken-symlink / truncated files) used to be reported as
+// present, silently leaving a model that fails to load. A present-but-
+// too-small file must now be re-downloaded.
+func TestFetch_ReplacesStubFiles(t *testing.T) {
+	real := map[string][]byte{
+		"model.safetensors": bytes.Repeat([]byte{0xab}, 1<<20),
+		"tokenizer.json":    bytes.Repeat([]byte("x"), 8<<10),
+		"config.json":       bytes.Repeat([]byte("y"), 1024),
+	}
+	srv := fakeHF(t, real)
+	dest := t.TempDir()
+
+	// Pre-seed each path with a sub-floor "pointer" stub, the shape the
+	// existence-only check used to accept.
+	stub := []byte("version https://git-lfs.github.com/spec/v1\noid sha256:deadbeef\nsize 547000000\n")
+	for name := range real {
+		if err := os.WriteFile(filepath.Join(dest, name), stub, 0o644); err != nil {
+			t.Fatalf("seed stub %s: %v", name, err)
+		}
+	}
+
+	got, err := Fetch(context.Background(), Options{
+		Model: "x/y", Dest: dest, BaseURL: srv.URL, Progress: nopWriter{},
+	})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if got != 3 {
+		t.Errorf("expected all 3 stubs replaced, got %d re-downloads", got)
+	}
+	// Each file is now the real artifact, not the stub.
+	for name, want := range real {
+		info, err := os.Stat(filepath.Join(dest, name))
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if info.Size() != int64(len(want)) {
+			t.Errorf("%s: size %d after Fetch, want real %d (stub not replaced)", name, info.Size(), len(want))
+		}
 	}
 }
 
