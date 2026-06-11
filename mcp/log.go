@@ -18,6 +18,9 @@ import (
 // LogLevel selects which Logger.Logf calls actually write.
 type LogLevel int
 
+// The LogLevel values, in increasing severity. A Logger emits a Logf call
+// only when its configured level is ≤ the call's level (e.g. a LogWarn
+// logger drops LogDebug and LogInfo). All output goes to stderr.
 const (
 	LogDebug LogLevel = iota
 	LogInfo
