@@ -2,7 +2,7 @@
 
 Source: full-repo review (code quality, maintainability, docs currency, security, competitive position), 2026-06-09. Companion to [road-to-1.0.md](road-to-1.0.md); this picks up where that tracker ends. Items are ordered by priority within each section. Effort: S (<1 h), M (half-day), L (multi-day).
 
-**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Scoreboard: 7/28 done (incl. #7 CONTRIBUTING.md, #8 SECURITY.md, #10 main() decompose). Next up: #2 (audit the rest of package-level state for sibling races).
+**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 8/28 done (incl. #7 CONTRIBUTING.md, #8 SECURITY.md, #10 main() decompose, #2 concurrency audit). Next up: #6 (document the go.work workspace) or #11 (untrack stale outputs/) — both quick.
 
 ---
 
@@ -14,8 +14,8 @@ Source: full-repo review (code quality, maintainability, docs currency, security
 - ✅ Fixed with `sync.RWMutex` (RLock hit path, Lock only the store; regex compile stays outside the lock).
 - ✅ Regression test `TestDefPatternCache_ConcurrentDistinctSymbols_NoRace` — 64 distinct symbols × 8 goroutines hammering `chunkDefinesSymbol` (drives `definitionPattern` directly: the boost path is hybrid-only/model-gated, so a Search-based test would `t.Skip` in CI's no-model `-race` job). Verified it trips the detector with the locks removed.
 
-### 2. Race-proof the rest of package-level state — **S**
-Audit `internal/search` and `mcp` for other package-level mutable state reachable from the concurrent search path. The defPatternCache pattern (lazy memoization at package scope) is easy to repeat; add a lint note or a `// concurrency:` comment convention so the next cache gets a mutex from day one.
+### 2. Race-proof the rest of package-level state — **S** — ✅ **DONE (a1c6525)**
+Audited `internal/search`, `mcp`, and `internal/structural`. Result: `defPatternCache` (fixed in #1) was the **only** unguarded runtime-written package var — everything else is immutable (`regexp`/`errors`/read-only static slices+maps) or already correct (`parserPools` is a `sync.Map`; WatchedIndex/Cache/NeuralReranker mutexes are instance-level). Established the `// concurrency:` tag convention (CONTRIBUTING.md → Concurrency) + annotated the shared package vars so a future runtime write is an obvious red flag.
 
 ---
 
