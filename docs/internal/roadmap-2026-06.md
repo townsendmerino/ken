@@ -2,7 +2,7 @@
 
 Source: full-repo review (code quality, maintainability, docs currency, security, competitive position), 2026-06-09. Companion to [road-to-1.0.md](road-to-1.0.md); this picks up where that tracker ends. Items are ordered by priority within each section. Effort: S (<1 h), M (half-day), L (multi-day).
 
-**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 17/28 done (incl. #2, #6–#14, #15–#17). P2 code-health (#10–#14) AND P3 security hardening (#15–#17) are both fully clear — #17's govulncheck caught + fixed 9 reachable CVEs on its first run. Next up: P4 ownership (#18/#19, M/L) or P5 competitiveness (#20 listings, #21 comparison table).
+**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 18/28 done (incl. #2, #6–#17, #21). P2 code-health (#10–#14) AND P3 security (#15–#17) fully clear; #21 (competitive comparison table) shipped. Next up: P5 #20 (get listed in MCP registries/awesome lists — S/M) or P4 ownership (#18/#19, M/L).
 
 ---
 
@@ -95,8 +95,8 @@ Context: technically ken's claims hold up (verbatim-port parity, quantified 0.01
 ### 20. Get listed where agents' users look — **S/M**
 Submit to mcp.so, mcpservers.org, lobehub, awesome-mcp-servers lists, and the registries that surface semble today. This is hours of work for the single largest visibility delta available.
 
-### 21. Publish a comparison table vs the actual competitive set — **M**
-README compares only against semble. Add grepai (closest analog: Go, single binary, watcher) and claude-context (most visible) on: index time, query latency, recall/NDCG where measurable, token cost, deps required (Docker/API keys/vector DB vs none), license. ken's no-external-services + measured-benchmarks position is strong; show it.
+### 21. Publish a comparison table vs the actual competitive set — **M** — ✅ **DONE (09a8452)**
+Added a "Compared to other agent code-search tools" section to the README: ken vs grepai (Go single binary, but Ollama-dependent embeddings) vs claude-context (Zilliz — Milvus/vector-DB + embedding-provider backed) on runtime / embeddings / **external services needed** / retrieval / recall+NDCG / token savings / speed / languages / license. Framed honestly — ken's numbers are reproducible (BENCH.md), competitor perf is vendor-claimed or "not published"; the verifiable axes are architecture/deps/license. ken's zero-external-services + measured-benchmarks position carries it. Facts checked against each project's GitHub (June 2026).
 
 ### 22. Run the NDCG/token harness against one or two competitors — **L**
 The bench harness already exists. Even a single reproducible head-to-head (e.g., vs grepai on the 1,251-query set) would be the only measured comparison in the category and is the kind of artifact that travels (HN/blog/release notes).
