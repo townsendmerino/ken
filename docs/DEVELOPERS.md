@@ -61,10 +61,10 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    if err := mcp.Run(context.Background(), mcp.Options{
-        Corpus:      sub,
+    // The corpus FS is the second positional argument; Options carries
+    // the rest. ModelFS wins over ModelDir (ModelDir is ignored when set).
+    if err := mcp.Run(context.Background(), sub, mcp.Options{
         ModelFS:     msub,
-        ModelDir:    ".",         // root of ModelFS
         Mode:        "hybrid",
         ChunkerName: "markdown",
         LogWriter:   os.Stderr,
@@ -75,11 +75,14 @@ func main() {
 ```
 
 That's the full server. `mcp.Run` blocks on stdio, handling
-JSON-RPC, the SDK transport, all 9 MCP tools (search /
-find_related / definition / references / callers / outline /
-symbols / status / recently_changed), and graceful shutdown. The
-embedded model in `model/` is `~60 MB`; binary lands at roughly
-that plus the corpus.
+JSON-RPC, the SDK transport, and graceful shutdown. The `mcp.Run`
+path registers the **`search`, `find_related`, and `status`** tools
+(plus `reindex_db` when `Options.DB` is set) — the embedded-corpus
+surface. The full nine-tool surface including the structural tools
+(`definition` / `references` / `callers` / `outline` / `symbols` /
+`recently_changed`) is the `cmd/ken-mcp` / `mcp.NewServer` path, which
+indexes a live checkout. The embedded model in `model/` is `~60 MB`;
+binary lands at roughly that plus the corpus.
 
 ### When to use vs not
 
@@ -211,7 +214,7 @@ external code — they may break without ADR.
 ken consumes aikit (
 [github.com/townsendmerino/aikit](https://github.com/townsendmerino/aikit))
 as a separate module — `require github.com/townsendmerino/aikit
-v1.0.0` + `aikit/chunk/treesitter v1.0.0` in [go.mod](../go.mod).
+v1.4.0` + `aikit/chunk/treesitter v1.0.0` in [go.mod](../go.mod).
 **aikit is at 1.0**, so its hard-tier algorithm packages (`topk`,
 `ann`, `bm25`, `embed`, `encoder`, `fuse`, `chunk` + subpackages) are
 1.0-committed — ken 1.0's own stability promise composes cleanly on top
@@ -358,7 +361,7 @@ public bench: +0.165 NDCG@10 on CoIR-CSN-Python.
 | `KEN_MCP_RERANK_BETA` | `0.25` | Blend weight. `0` = pure hybrid (no rerank effect); `1` = pure neural (regresses on semble's bench). `0.25` is the M0-validated default. |
 | `KEN_MCP_RERANK_QUANT` | `f32` | `f32` is faster + more accurate on Apple Silicon. `int8` saves ~400 MB resident memory; use on amd64/Linux deployments where memory matters. |
 | `KEN_MCP_RERANK_ADAPTIVE` | empty | `THRESHOLD:MINN` (e.g. `0.30:10`). When stage-1 is confident, rerank only the top MINN. 2-5× win on the typical workload. |
-| `KEN_MCP_RERANK_CACHE_SIZE` | `4096` | LRU bound for the per-process rerank cache. |
+| `KEN_MCP_RERANK_CACHE_SIZE` | `32768` | LRU bound for the per-process rerank cache (doc-embedding entries). |
 | `KEN_MCP_RERANK_CACHE` | `~/.ken/rerank-cache-<quant>.bin` | Persistent cache path. Empty string disables persistence. |
 
 ### M9 persistent cache
@@ -469,8 +472,8 @@ golangci-lint run ./...` — all three should be clean before pushing.
   probing via `debug_ast_test.go`, writing the extractor,
   registering in `kenLangToTSLang` + `langExtractor` maps,
   fixture tests, dogfood validation against a real repo,
-  precision-sample check. The existing twelve extractors are the
-  canonical templates.
+  precision-sample check. The existing extractors covering ken's
+  thirteen languages are the canonical templates.
 - **MCP tool**: define `*Args` + `*Response` in
   `mcp/types.go` + `mcp/json_responses.go`. Add handler in
   `mcp/*.go`. Register via `sdk.AddTool` in `mcp/server.go`

@@ -1,5 +1,11 @@
 # Road to 1.0
 
+> **✅ CLOSED — `v1.0.0` shipped + tagged 2026-06-06.** All gates below are
+> 🟢 done (aikit pinned — now at **v1.4.0**; distribution via Homebrew cask +
+> Scoop + Windows binaries; Windows CI smoke job; C#; auto-fetch). This
+> tracker is retained as the record of how 1.0 was reached; post-1.0 work
+> lives in the CHANGELOG `[Unreleased]` section.
+
 Living document tracking what stands between ken's current state and a
 v1.0 release. Updated as items ship or change. Last updated:
 2026-06-06 — **v0.10.0 tagged + released**: C# (13th language), ken-mcp

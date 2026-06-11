@@ -5,9 +5,10 @@ tools (`definition` / `references` / `callers` / `outline` /
 `symbols`) to cover a new programming language. Aimed at
 contributors comfortable writing Go.
 
-At the time of writing, ken's structural index covers ten
+At the time of writing, ken's structural index covers thirteen
 languages: Python, Go, TypeScript, JavaScript, Java, Rust, C,
-C++, PHP, Ruby. Adding an eleventh is well-paved.
+C++, C#, PHP, Ruby, Kotlin, Dart. Adding a fourteenth is well-paved.
+(Swift is the one parked extractor — see swift-parse-root-cause.md.)
 
 ## The shape
 
@@ -302,9 +303,27 @@ golangci-lint run ./...
 
 Update [`CLAUDE.md`](../../CLAUDE.md)'s structural-extractor
 language list if your contribution adds another language
-(the current list is "twelve languages: Python · Go · TypeScript
-· JavaScript · Java · Rust · C · C++ · PHP · Ruby · Kotlin ·
+(the current list is "thirteen languages: Python · Go · TypeScript
+· JavaScript · Java · Rust · C · C++ · C# · PHP · Ruby · Kotlin ·
 Dart").
+
+**Cross-repo wiring (post-ADR-034).** The structural extractor
+lives in ken (`internal/structural`), but the tree-sitter *chunker*
+now lives in the sibling `aikit` repo. A complete language add
+therefore touches three more places beyond this guide:
+
+1. `aikit/chunk/treesitter`'s `KenToTreeSitter` language map (the
+   chunker side) — and a tagged `aikit/chunk/treesitter` release
+   that ken then re-pins in `go.mod`.
+2. The `grammar_subset_<lang>` build tag in
+   [`.goreleaser.yml`](../../.goreleaser.yml) (so slim release
+   binaries embed the new grammar).
+3. The drift guard in `internal/buildchecks`
+   (`TestSubsetTagsMatchKenToTreeSitter`) ties (1) and (2) together
+   and will fail until both are consistent.
+
+See [add-language-support-kotlin-csharp-swift-dart.md](add-language-support-kotlin-csharp-swift-dart.md)
+for a worked cross-repo example.
 
 Commit per the project conventions
 (see [DEVELOPERS.md → Pull requests](../DEVELOPERS.md#pull-requests)).
@@ -341,11 +360,13 @@ Two failure modes shipped recently and have documented
 mitigations:
 
 1. **Grammar OOMs on real-world files.** The gotreesitter
-   v0.18.0 C# grammar grows parse tables unboundedly during
-   dapper indexing (1.7+ GB RSS → SIGKILL). DESIGN.md §10
-   documents this; the language is excluded from
-   `kenLangToTSLang` until either gotreesitter ships a fix or
-   ken adds a per-parse memory cap.
+   v0.18.0 C# grammar grew parse tables unboundedly during
+   dapper indexing (1.7+ GB RSS → SIGKILL), and C# was excluded
+   from `kenLangToTSLang` for it. **Resolved 2026-06-06:**
+   gotreesitter v0.20.2 fixed the OOM and C# shipped as ken's
+   13th language (a 64 KiB `maxEnrichBytes` guard in
+   `extract_file.go` also backstops the per-file blow-up path).
+   The pattern still applies to any future grammar that misbehaves.
 2. **Grammar is pathologically slow.** The gotreesitter v0.18.0
    bash grammar times out on ~39% of real bash-it files at
    1s/parse. Same exclusion treatment.

@@ -1,7 +1,12 @@
 # Hybrid-by-default onboarding — plan
 
-**Status:** proposed 2026-06-05. Scoping decisions made by the owner (see
-"Decisions" below). Not yet started.
+**Status:** ✅ SHIPPED (2026-06-06). (A) model auto-fetch shipped as
+**ADR-037** (`KEN_MCP_AUTO_FETCH`, default-on); (C) distribution shipped —
+Windows binaries + Homebrew cask + Scoop manifest; (B) the "loud
+degraded-state notice" was resolved as moot (auto-fetch makes the BM25-only
+window transient), and the C4 bundled-model binary was dropped as
+unnecessary. The plan-of-record below is retained as history. Proposed
+2026-06-05; scoping decisions by the owner (see "Decisions" below).
 
 ## Why
 

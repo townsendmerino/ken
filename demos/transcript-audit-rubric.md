@@ -36,7 +36,7 @@ Best-estimate target locations (to confirm against the transcripts; a miss here 
 3. *scheduler extender plugins* → `pkg/scheduler/extender.go` (`HTTPExtender.Filter`/`Prioritize`/`Bind`), call sites in `pkg/scheduler/schedule_one.go` (`findNodesThatFitPod` / `prioritizeNodes`), framework wiring under `pkg/scheduler/framework/`.
 
 **postgres**
-1. *hash vs merge join* → `src/backend/optimizer/path/joinpath.go` (`add_paths_to_joinrel`, `hash_inner_and_outer`, `sort_inner_and_outer`, `match_unsorted_outer`), `optimizer/path/costsize.go` (`initial_cost_hashjoin`/`final_cost_hashjoin`, `cost_mergejoin`).
+1. *hash vs merge join* → `src/backend/optimizer/path/joinpath.c` (`add_paths_to_joinrel`, `hash_inner_and_outer`, `sort_inner_and_outer`, `match_unsorted_outer`), `optimizer/path/costsize.c` (`initial_cost_hashjoin`/`final_cost_hashjoin`, `cost_mergejoin`).
 2. *WAL flush + checkpoint* → `src/backend/access/transam/xlog.c` (`XLogFlush`, `XLogWrite`, `CreateCheckPoint`), `src/backend/postmaster/checkpointer.c` (`CheckpointerMain`, checkpoint triggering / `CheckPointTimeout` / `max_wal_size`).
 3. *autovacuum trigger* → `src/backend/postmaster/autovacuum.c` — specifically `relation_needs_vacanalyze` and the threshold formula (`vac_base_thresh + vac_scale_factor * reltuples`); plus `AutoVacLauncherMain` / `do_autovacuum`. (Hybrid already pulled `autovacuum.c` to #1; check whether the *threshold* chunk specifically is what surfaces, since that's the precise answer.)
 

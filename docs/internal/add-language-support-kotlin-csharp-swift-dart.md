@@ -1,5 +1,14 @@
 # Plan: structural-index support for Kotlin, C#, Swift, Dart
 
+> **Status: SUPERSEDED — outcome differs from this proposal.** Kotlin, Dart,
+> and **C#** all shipped (C# landed 2026-06-06 once gotreesitter v0.20.2 fixed
+> the OOM this plan predicted as a blocker). **Swift** is the one parked — not
+> the "clean add" predicted here, but a license-header lexer misparse (see
+> [swift-parse-root-cause.md](swift-parse-root-cause.md) /
+> [csharp-oom-root-cause.md](csharp-oom-root-cause.md)). Read the per-language
+> "Where each language starts today" calls below as a 2026-06-03 forecast, not
+> current status.
+
 **Status:** proposal · **Date:** 2026-06-03 · **Owner:** TBD
 
 This plan scopes adding Kotlin, C#, Swift, and Dart to ken. "Support"

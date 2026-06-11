@@ -37,7 +37,7 @@ right code *without sharing its words* — the case for hybrid retrieval.
 
 ## (B) Structural tools — exact-answer lookups (no ranking)
 
-The new Track 2 capability. These resolve by name (tree-sitter-grade), not by retrieval. Every result either exists or doesn't.
+The Track 2 capability. These resolve by name (tree-sitter-grade), not by retrieval. Every result either exists or doesn't. **Note:** these were reproduced via the full `ken-mcp` / CLI against a `$GOROOT/src` checkout (the structural tools aren't in the embedded-corpus demo binary, which serves `search` / `find_related` / `status` only — see the demo README).
 
 | # | Query | Result | Notes |
 |---|---|---|---|

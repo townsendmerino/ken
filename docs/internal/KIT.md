@@ -1,5 +1,7 @@
 # Kit extraction plan — `ken` → `aikit`
 
+> **Status: ✅ SHIPPED as [ADR-034](DECISIONS.md#adr-034-extract-reusable-algorithm-packages-into-a-separate-aikit-module).** The extraction is done — ken now pins `aikit v1.4.0` + `aikit/chunk/treesitter v1.0.0` in [go.mod](../../go.mod) (the `coderank` package was renamed `encoder` in the move). This doc is retained as the extraction plan-of-record; version numbers below (e.g. `aikit v0.1.0`) are the original targets, not the current pin.
+
 Plan to extract ken's reusable algorithm packages into a standalone,
 importable Go module (`aikit`) and make ken consume it. This is the full
 "Phase 2" — a real module split, not in-repo curation. Companion to

@@ -1,64 +1,35 @@
 # testdata
 
-Golden fixtures for the Go test suite. The Python reference scripts that
-produce them live under [`../scripts/`](../scripts/); the Go tests only
-read these files, never write them.
+Fixtures for ken's Go test suite. The Go tests only read these files, never
+write them.
 
-## `golden.json`
+> **Embedding / tokenizer goldens moved to aikit (ADR-034).** The Model2Vec
+> embedding spot-check (`golden.json`, 18 cases) and the corpus-scale
+> tokenizer parity fixture (`parity.jsonl`) — plus their Python generators
+> (`pin_inference.py`, `parity_dump.py`) and the Go tests that read them —
+> now live in [`github.com/townsendmerino/aikit`](https://github.com/townsendmerino/aikit)
+> under `embed/` + `scripts/`, since the `embed` package was extracted there.
+> ken inherits that guarantee by pinning a tagged aikit; there's no embedding
+> golden test in ken anymore. (A gitignored `parity.jsonl` may linger here
+> from before the extraction — it's unused by ken's suite.)
 
-Produced by `scripts/pin_inference.py`. 18 hand-picked cases. For each:
-
-- input text
-- WordPiece token strings and IDs (from HF tokenizer reference)
-- per-token weights (from the `weights` tensor)
-- ground-truth output vector (from `StaticModel.encode()`)
-- three candidate pooling-recipe outputs (for debugging)
-
-The empty-string and all-`[UNK]` rows have `ground_truth: null` and a
-`degenerate_ground_truth` flag — the Go golden test asserts the
-zero-vector contract for those directly rather than via cosine.
-
-To regenerate (from repo root):
-
-```bash
-./scripts/regen_golden.sh
-```
-
-The script bootstraps `.venv/` if it doesn't exist, pip-installs the Python reference deps (`model2vec`, `safetensors`, `tokenizers`, `huggingface_hub`, `numpy`), runs `scripts/pin_inference.py`, copies the produced `ken_golden.json` into `testdata/golden.json`, and prints a one-line summary (case count + byte size) so a truncated fixture is visible immediately. Idempotent — re-run safely.
-
-Manual fallback if `regen_golden.sh` can't be used (e.g. existing venv with conflicting deps):
-
-```bash
-.venv/bin/python scripts/pin_inference.py
-cp ken_golden.json testdata/golden.json
-```
-
-## `parity.jsonl` (gitignored)
-
-Produced by `scripts/parity_dump.py`. The 100k-input corpus-scale
-tokenizer parity fixture. Run the `parity`-tagged Go test against it:
-
-```bash
-.venv/bin/python scripts/parity_dump.py
-go test -tags=parity ./internal/embed/ -run TestParity -v
-```
+What ken's `testdata/` holds now:
 
 ## `model/` (gitignored, per-machine)
 
-A local snapshot of `minishlab/potion-code-16M` for tests that exercise
-the full inference pipeline (the golden cosine assertion, and the parity
-harness). Tests using it `t.Skip()` when it's absent — CI without HF
-access stays green.
+A local snapshot of `minishlab/potion-code-16M` for ken's tests that exercise
+semantic / hybrid search end-to-end. Tests using it `t.Skip()` when it's
+absent — CI without HF access stays green.
 
 ken's CLI resolves a model dir via the priority order `--model` →
-`$KEN_MODEL_DIR` → `~/.ken/model` → `./testdata/model`, so repo
-developers have two equally-supported options:
+`$KEN_MODEL_DIR` → `~/.ken/model` → `./testdata/model`, so repo developers
+have two equally-supported options:
 
 - **Follow the public convention** (preferred — same as end users):
   ```bash
   ken download-model            # → ~/.ken/model
   ```
-- **Repo-local override** (useful when iterating on the model code):
+- **Repo-local override** (useful when iterating on model-dependent code):
   ```bash
   ken download-model --to testdata/model
   ```
@@ -71,8 +42,21 @@ huggingface-cli download minishlab/potion-code-16M \
     --local-dir testdata/model     # or ~/.ken/model
 ```
 
+## `encoder-model/` (gitignored, per-machine)
+
+A local snapshot of `nomic-ai/CodeRankEmbed` (~547 MB) for tests that exercise
+the opt-in neural reranker (`--mode=hybrid-rerank`). Fetch with
+`ken download-model --rerank` (→ `~/.ken/rerank-model`) or
+`ken download-model --rerank --to testdata/encoder-model`. Reranker tests
+`t.Skip()` when it's absent.
+
+## `bench/` (committed)
+
+Small benchmark fixtures (CoIR-CSN-Python, CoSQA, CSN-Python-NL shortlists)
+used by the `-tags=bench` retrieval-quality tests under `bench/`. See
+[`docs/BENCH.md`](../docs/BENCH.md) for the full reproduction harness.
+
 ## `repo/`
 
-The polyglot smoke fixture (tiny files in Python/Go/TypeScript/Java/Rust
-plus a markdown stub). Used by chunker tests and the search/MCP
-integration tests.
+The polyglot smoke fixture (tiny files in Python/Go/TypeScript/Java/Rust plus
+a markdown stub). Used by chunker tests and the search/MCP integration tests.

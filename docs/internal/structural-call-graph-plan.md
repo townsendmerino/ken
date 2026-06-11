@@ -5,8 +5,9 @@
 - **Phase 0 — node-level data model:** **SHIPPED** (2026-06-03, this commit).
   Span fields on `FuncDef` / `ClassDef`, per-call-site `CallRef` records
   with `Callee` / `Receiver` / `Line` / `EnclosingSymbol`, `CalleeNames()`
-  accessor preserving Arm B byte-identity, all 10 shipping languages
-  (plus the parked C# / Swift extractors behind their build tags).
+  accessor preserving Arm B byte-identity, all 13 shipping languages
+  (C# shipped 2026-06-06; only the Swift extractor remains parked behind
+  its build tag).
   Memory measured well within the ≤2× budget on three corpora — jekyll
   (Ruby, 167 files, 9350 CallRefs, +29 MiB HeapAlloc), express
   (JavaScript, 141 files, 10855 CallRefs, +25 MiB), ripgrep (Rust, 101

@@ -12,7 +12,7 @@ The **go-stdlib** demo is the flagship: instant audience recognition, instant ve
 
 ## Demo transcripts
 
-Captured agent conversations against these binaries — the actual deliverable the demo write-up draws from — live in [`transcripts/`](transcripts/) (3 questions per codebase; postgres has both a regex and a treesitter arm for the A/B comparison). [`transcript-audit-rubric.md`](transcript-audit-rubric.md) is the rubric each transcript was graded against (grounding, citation accuracy, retrieval quality).
+Captured agent conversations against these binaries — the actual deliverable the demo write-up draws from — live in [`transcripts/`](transcripts/) (3 questions each for kubernetes and postgres, the latter with both a regex and a treesitter arm for the A/B comparison; go-stdlib transcripts are pending). [`transcript-audit-rubric.md`](transcript-audit-rubric.md) is the rubric each transcript was graded against (grounding, citation accuracy, retrieval quality).
 
 ## Why in-tree
 

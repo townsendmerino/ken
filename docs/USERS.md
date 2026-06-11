@@ -92,7 +92,7 @@ This puts it under `~/.ken/model/`. ken-mcp finds it from there
 by default; override with `KEN_MCP_MODEL_DIR=/path/to/model`.
 
 If you want the optional neural reranker (better quality for
-ambiguous queries, ~520 MB): `ken download-model --rerank`,
+ambiguous queries, ~547 MB): `ken download-model --rerank`,
 then enable with `KEN_MCP_RERANK=on`.
 
 ## First query
@@ -239,7 +239,7 @@ The env vars you'll actually touch:
 | `KEN_MCP_DEFAULT_REPO` | empty | Pre-indexed source. Tools work without `repo` arg when set. |
 | `KEN_MCP_MODE` | `hybrid` | Retrieval mode: `bm25`/`semantic`/`hybrid`. Serves `bm25` while the model is missing — fetched on first run by default (`KEN_MCP_AUTO_FETCH`). |
 | `KEN_MCP_MODEL_DIR` | `~/.ken/model` | Model2Vec snapshot dir. Empty ⇒ bm25-only. |
-| `KEN_MCP_CHUNKER` | `regex` | Chunker: `regex`/`treesitter`/`line`. |
+| `KEN_MCP_CHUNKER` | `regex` | Chunker: `regex`/`treesitter`/`line`/`markdown`. |
 | `KEN_MCP_CACHE_SIZE` | `16` | Repo LRU bound. `0` disables caching. |
 | `KEN_MCP_LOG_LEVEL` | `warn` | `debug`/`info`/`warn`/`error`. Logs go to stderr. |
 | `KEN_ENRICH` | (enabled) | Arm B structural enrichment. Set to `off` to disable. |

@@ -105,7 +105,7 @@ Tier 2 going dark never crashes `ken-mcp`. Restart picks up a recovered DSN.
 
 ### Engine scope
 
-As of **v0.7.2**, Tier 2 supports **Postgres + SQLite + MySQL**. Engine routing inside `internal/db.IndexSchema` dispatches on the DSN scheme:
+Tier 2 supports **Postgres + MySQL + MariaDB + SQLite**. Engine routing inside `internal/db.IndexSchema` dispatches on the DSN scheme:
 
 | Scheme | Driver | Typical use |
 |---|---|---|

@@ -20,6 +20,7 @@ ken is a Go port of [semble](https://github.com/MinishLab/semble): BM25 lexical 
 
 ## Where to start
 
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — current-state map: module layout, runtime/concurrency model, data flow, invariants. Start here for the code.
 - **[docs/USERS.md](docs/USERS.md)** — agent users. Install ken-mcp, point your agent at it, use the nine tools. 5-minute on-ramp.
 - **[docs/DEVELOPERS.md](docs/DEVELOPERS.md)** — SDK authors and tuners. The `mcp.Run` embedded-corpus library, prebuilt indices, `fs.FS` indexing, custom chunkers, tuning rerank, performance expectations.
 - **[docs/DESIGN.md](docs/DESIGN.md)** + **[docs/internal/DECISIONS.md](docs/internal/DECISIONS.md)** — algorithm spec + every architectural decision (ADRs).

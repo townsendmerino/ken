@@ -39,6 +39,10 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-031](#adr-031-mysql-introspection-sample-loop-parallelism-postgres-deferred-with-trigger-v088) | MySQL introspection sample-loop parallelism; Postgres deferred-with-trigger (v0.8.8) | Accepted |
 | [ADR-032](#adr-032-promote-the-chunk-package-to-public-chunk--chunkers-chunker-interface-is-the-10-boundary) | Promote the chunk package to public (`chunk/` + chunkers); Chunker interface is the 1.0 boundary | Accepted |
 | [ADR-033](#adr-033-adopt-gotreesitter-grammarsubset-slim-release-binaries-v0200-rc2) | Adopt gotreesitter `grammar_subset`; slim release binaries (v0.20.0-rc2) | Accepted (resolves ADR-023) |
+| [ADR-034](#adr-034-extract-reusable-algorithm-packages-into-a-separate-aikit-module) | Extract reusable algorithm packages into a separate `aikit` module | Accepted |
+| [ADR-035](#adr-035-ship-arm-b-structural-enrichment-in-the-production-indexer-stage-8-close) | Ship Arm B structural enrichment in the production indexer (Stage 8 close) | Accepted |
+| [ADR-036](#adr-036-close-the-startup--query-latency-perf-campaign) | Close the startup + query-latency perf campaign | Accepted |
+| [ADR-037](#adr-037-ken-mcp-auto-fetches-the-embedding-model-on-first-run-background-default-on) | ken-mcp auto-fetches the embedding model on first run (background, default-on) | Accepted |
 
 ---
 

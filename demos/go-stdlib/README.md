@@ -41,7 +41,7 @@ Claude Desktop (`claude_desktop_config.json`) / any stdio-MCP client:
 }
 ```
 
-No environment variables and no `repo` argument — the corpus is fixed inside the binary. Restart your client; the `search` / `find_related` / `definition` / `references` / `outline` / `symbols` tools appear.
+No environment variables and no `repo` argument — the corpus is fixed inside the binary. Restart your client; the `search`, `find_related`, and `status` tools appear. (The embedded-corpus demo is built on `mcp.Run`, which exposes those three. The structural tools — `definition` / `references` / `callers` / `outline` / `symbols` / `recently_changed` — belong to the full `ken-mcp` server run against a live checkout, not the embedded binary.)
 
 ## What to ask
 
@@ -51,13 +51,13 @@ The 14 vetted demo queries are at [`QUERIES.md`](QUERIES.md) with the canonical 
 - *"how does context cancellation reach an in-flight HTTP request"* — lands on `net/http/transport.go::prepareTransportCancel`, vs **345 grep hits across 22 files**.
 - *"where do goroutines block on a full channel"* — single hit at `runtime/chan.go`, vs **1,103 grep hits across 131 files**.
 
-Try `definition("WithCancel")`, `references("Marshal")`, `outline("net/http/server.go")`, `outline("encoding/json/encode.go")` to exercise the structural tools.
+To exercise the structural tools (`definition("WithCancel")`, `references("Marshal")`, `outline("net/http/server.go")`, `outline("encoding/json/encode.go")`), run the full `ken-mcp` against a `$GOROOT/src` checkout — the embedded demo binary serves `search` / `find_related` / `status` only.
 
 ## Resource usage (Apple M1 Pro, measured)
 
 | | |
 |---|---|
-| download size | ~190 MB per platform |
+| download size | ~129 MB per platform (compressed tarball; ~190 MB extracted) |
 | startup (one-time, loads the embedded index) | ~2 s |
 | query latency after startup | tens of ms |
 | resident memory while running | ~600 MB |

@@ -139,7 +139,7 @@ of those — well inside the plan's ≤2× memory envelope. See
 - `ken-mcp`: **~38 MB** (was ~52 MB pre-slim).
 - `ken`: **~22 MB** (was ~36 MB pre-slim).
 
-Slim builds embed only the 17 tree-sitter grammars ken actually
+Slim builds embed only the 19 tree-sitter grammars ken actually
 dispatches (per `aikit/chunk/treesitter.KenToTreeSitter`). Fat
 builds (no `grammar_subset` build tags) embed all ~206 grammars
 gotreesitter ships — ~+15 MB. Slim is the release default;
