@@ -85,7 +85,7 @@ const (
 	// stamped into every serialized index. Helps diagnose stale
 	// builds ("this binary was built against ken v0.8.3") without
 	// gating loadability. Bump on each ken release.
-	serializedKenVersion = "v1.0.0"
+	serializedKenVersion = "v1.0.1"
 
 	// minSerializedChunkBytes is the minimum on-disk size of a single
 	// serialized chunk: 4 (file LP len) + 0 (empty file bytes) + 4

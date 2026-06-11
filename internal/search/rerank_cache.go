@@ -73,7 +73,7 @@ const (
 
 	// rerankCacheKenVersion — informational; helps diagnose stale
 	// caches in the field without gating loadability.
-	rerankCacheKenVersion = "v1.0.0"
+	rerankCacheKenVersion = "v1.0.1"
 
 	// maxRerankCacheEntries is a sanity cap on entryCount from a
 	// header — protects against a hostile / corrupt file claiming

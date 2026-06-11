@@ -15,6 +15,13 @@ pre-built binaries.
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-06-11 — faster hybrid search
+
+A patch release: same retrieval quality, **~3× faster hybrid search** from an
+`aikit` bump, plus deserializer fuzzing, a model-download fix, and a docs
+accuracy sweep. No API changes — `mcp.Run` / `mcp.NewServer` / `chunk.Chunker`
+and the wire format are unchanged from 1.0.0.
+
 ### Changed
 
 - **Bumped `aikit` v1.0.0 → v1.4.0 — ~3× faster hybrid search, no quality
@@ -41,6 +48,16 @@ pre-built binaries.
   ken-mcp auto-loads `<repo>/.ken/index.bin` from shallow-cloned remote repos)
   and `FuzzDecodeRerankCache`, validating the hand-written adversarial-input
   defenses. 2.6M executions, zero crashers.
+
+### Fixed
+
+- **`ken download-model` now replaces stub/pointer files instead of skipping
+  them.** The "already present" check was existence-only, so a leftover
+  Git-LFS / HF-hub pointer stub (~130 B), a broken symlink, an empty file, or a
+  truncated run was reported as present — silently leaving a model that fails
+  to load. A per-file size floor now re-downloads any present-but-implausibly-
+  small artifact (real files clear the floor by orders of magnitude; no real
+  file is ever rejected).
 
 ## [1.0.0] — 2026-06-06 — ken 1.0
 
