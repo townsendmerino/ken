@@ -2,7 +2,7 @@
 
 Source: full-repo review (code quality, maintainability, docs currency, security, competitive position), 2026-06-09. Companion to [road-to-1.0.md](road-to-1.0.md); this picks up where that tracker ends. Items are ordered by priority within each section. Effort: S (<1 h), M (half-day), L (multi-day).
 
-**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 9/28 done (incl. #2 concurrency audit, #7 CONTRIBUTING.md, #8 SECURITY.md, #9 recently_changed JSON, #10 main() decompose). Next up: #6 (document the go.work workspace) or #11 (untrack stale outputs/) — both quick.
+**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 11/28 done (incl. #2 concurrency audit, #6 go.work docs, #7 CONTRIBUTING.md, #8 SECURITY.md, #9 recently_changed JSON, #10 main() decompose, #11 outputs/ promotion). Next up: #12 (NormalizePath trust boundary) or #13 (name the candidate-multiplier constant) — both quick S.
 
 ---
 
@@ -30,8 +30,8 @@ Index table now carries all 37 ADRs including 034–037. The table-count CI chec
 ### 5. ~~Relabel or refresh DESIGN.md "Status"~~ — **DONE (1.0.1)**
 §Status now opens with the 1.0.0-shipped line, is explicitly framed as recording the original build order, and defers current state to ARCHITECTURE.md + CHANGELOG.
 
-### 6. Document the `go.work` / aikit workspace setup — **S**
-`go.work` references a sibling `../aikit` checkout and is gitignored with no developer docs. Add a DEVELOPERS.md subsection: when you need the workspace, how to set it up, and that `GOWORK=off` (or no go.work) is the proxy-pinned production path.
+### 6. Document the `go.work` / aikit workspace setup — **S** — ✅ **DONE (next commit)**
+Added a "Local aikit development (`go.work`)" subsection to DEVELOPERS.md (under aikit packages): when you need the workspace, `go work init` / `go work use` setup, the gitignored-per-machine note, the cross-repo change workflow (edit local → tag aikit → `go get @tag` → re-validate), and that `GOWORK=off` is the proxy-pinned production path CI runs. Also fixed the stale `require aikit v1.4.0` → `v1.5.0` in that section.
 
 ### 7. Add CONTRIBUTING.md — **S** — ✅ **DONE (981f1c3)**
 Short top-level `CONTRIBUTING.md`: setup, the CI bar, the gofmt-clean + reproducible-claim disciplines, links into DEVELOPERS.md / ARCHITECTURE.md / add-a-language.md / aikit.
@@ -49,8 +49,8 @@ Rather than track the follow-up, closed it: `recently_changed` now supports `out
 ### 10. Decompose `cmd/ken-mcp/main.go` `main()` — **M** — ✅ **DONE (a8f66e4)**
 Was 457 lines; now 294. Extracted `rerankerLoader` (named type, `Load() (search.Reranker, error)` method — the cache scope/dim it records are fields the shutdown path reads), `setupReranker` (wraps the whole `KEN_MCP_RERANK*` block, mirrors `wireDBTier2`), `resolveStartupMode` (ParseMode + model-missing downgrade + auto-fetch-dest, pure logic), and `parseRerankAdaptive` / `resolveRerankCachePath`. `startup_test.go` covers the decision logic; behavior byte-for-byte preserved (full suite incl. stdout-contract green).
 
-### 11. Untrack the stale `outputs/` files — **S**
-8 markdown files under gitignored `outputs/` (`perf-startup-m*.md`, `stage8-*.md`) were committed before the ignore rule. `git rm --cached` them; if the perf baselines are load-bearing references (DESIGN/BENCH cite them), move those into `docs/internal/perf/` instead and keep them tracked deliberately.
+### 11. Untrack the stale `outputs/` files — **S** — ✅ **DONE (1c00d22)**
+All 8 turned out to be load-bearing (PERF-expectations cites `perf-startup-m0-baselines` as its number source; DEVELOPERS/road-to-1.0/DECISIONS/add-a-language link them), so rather than untrack-and-dangle they were `git mv`'d into a deliberately-tracked `docs/internal/results/` (4 perf-campaign baselines + 4 Stage 8 gate memos) with all citations rewired + a README. `outputs/` stays gitignored for live scratch. (The ~15 OTHER `outputs/` files docs cite were never tracked — pre-existing local-only pattern, out of scope.)
 
 ### 12. Document the `NormalizePath` trust boundary — **S**
 `internal/structural/lookups.go:429` — `filepath.Clean` doesn't block `../` traversal. Harmless today (the path is only an in-memory map key, never opened), but the name implies sanitization it doesn't provide. Add a comment stating the boundary ("never used for filesystem access; if that changes, add containment checks") or rename, so a future change doesn't introduce a traversal bug.

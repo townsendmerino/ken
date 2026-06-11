@@ -214,7 +214,7 @@ external code — they may break without ADR.
 ken consumes aikit (
 [github.com/townsendmerino/aikit](https://github.com/townsendmerino/aikit))
 as a separate module — `require github.com/townsendmerino/aikit
-v1.4.0` + `aikit/chunk/treesitter v1.0.0` in [go.mod](../go.mod).
+v1.5.0` + `aikit/chunk/treesitter v1.0.0` in [go.mod](../go.mod).
 **aikit is at 1.0**, so its hard-tier algorithm packages (`topk`,
 `ann`, `bm25`, `embed`, `encoder`, `fuse`, `chunk` + subpackages) are
 1.0-committed — ken 1.0's own stability promise composes cleanly on top
@@ -238,6 +238,39 @@ The summary:
 
 ken pins aikit via `require`; bumping the minor follows ken's
 own release rhythm.
+
+### Local aikit development (`go.work`)
+
+ken and aikit are **separate repos**, normally consumed via the
+proxy-pinned versions in [go.mod](../go.mod). When you need to change
+aikit and ken together — before aikit is tagged — use a Go workspace so
+ken builds against your local aikit checkout instead of the pinned release:
+
+```bash
+git clone https://github.com/townsendmerino/aikit   # as a sibling of ken/
+cd ken
+go work init
+go work use . ../aikit ../aikit/chunk/treesitter
+```
+
+That writes a `go.work` (gitignored — a per-machine dev convenience, never
+committed) pointing ken at `../aikit`, so `go build` / `go test` pick up
+your local aikit edits immediately — no tag-and-publish round-trip.
+
+**`GOWORK=off` is the production path.** With the workspace active you're
+building against *uncommitted* aikit, which is NOT what ships. Validate the
+real, proxy-pinned dependency graph by disabling the workspace:
+
+```bash
+GOWORK=off go build ./...   # build against the go.mod-pinned aikit
+GOWORK=off go test ./...     # exactly what CI runs — CI has no go.work
+```
+
+Cross-repo change workflow: edit aikit locally (workspace picks it up) →
+commit + **tag** aikit → `GOWORK=off go get github.com/townsendmerino/aikit@<tag>`
+in ken → re-validate with `GOWORK=off`. Never pin ken's `go.mod` to an
+untagged aikit commit — the workspace is for iteration, the tag is for
+shipping.
 
 ## JSON output mode
 
