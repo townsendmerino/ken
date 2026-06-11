@@ -22,6 +22,14 @@ import (
 // 1-indexed `w/(k+rank)`), but now shared with other consumers of the
 // toolkit. k=60 stays explicit at the call site (= fuse.DefaultK).
 
+// candidateOverfetch is the per-arm over-fetch factor: each retrieval arm
+// (semantic flat scan + BM25) returns topK*candidateOverfetch candidates so
+// the downstream fusion + boost + penalty stages rerank from a pool deeper
+// than the final topK — a chunk ranked mid-pack in one arm can still surface
+// in the top-K after RRF. Pinned to semble's pipeline (verbatim port; see
+// docs/DESIGN.md §7).
+const candidateOverfetch = 5
+
 // hybridSearch runs the full semble hybrid pipeline and returns ranked
 // (chunkIndex, score) pairs. alphaOverride < 0 ⇒ auto-detect from query.
 //
@@ -41,7 +49,7 @@ func hybridSearch(
 	predicted []string,
 ) []rankedItem {
 	alpha := resolveAlpha(query, alphaOverride)
-	candidateCount := topK * 5
+	candidateCount := topK * candidateOverfetch
 
 	// Semantic candidates (cosine similarity, already sorted desc).
 	var semOrder []int
