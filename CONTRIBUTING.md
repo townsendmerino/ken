@@ -16,6 +16,11 @@ go build ./...     # build everything
 go test ./...      # all tests (model-gated tests skip cleanly without a model)
 ```
 
+A [`Makefile`](Makefile) wraps the common tasks — `make build` / `test` /
+`vet` / `fmt` / `check` (the pre-push gate), plus `make clean` (build
+products), `make clean-bench` (the heavy `bench_out/` scratch, which can
+reach tens of GB), and `make clean-all`. `make help` lists them.
+
 ## The bar for a change
 
 CI runs `golangci-lint` + `go vet` + `gofmt -l cmd internal mcp bench`
