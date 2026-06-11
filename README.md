@@ -166,6 +166,27 @@ The retrieval algorithm is a verbatim port of semble's `search.py` + `ranking/*.
 
 Full methodology, the per-ablation breakdown (semantic-raw matches semble within 0.003, validating the embedding + tokenizer + ANN port), the CoIR-CSN-Python external anchor, and every footnote are in **[docs/BENCH.md](docs/BENCH.md)**.
 
+## Compared to other agent code-search tools
+
+The crowded part of this category splits on one axis: **what you have to run.** ken's bet is that the embedding model belongs *inside* the binary — pure-Go Model2Vec inference, no cgo — so there's nothing else to stand up: no embedding daemon, no vector database, no API key, air-gapped. The two closest points of comparison:
+
+- **[grepai](https://github.com/yoanbernabeu/grepai)** — the closest architectural analog: a single Go binary with a file watcher and an MCP server, 100% local. It offloads embeddings to a separate **Ollama** server (you install + run Ollama and pull a model).
+- **[claude-context](https://github.com/zilliztech/claude-context)** (Zilliz) — the most visible: hybrid BM25 + dense search, but backed by a **vector database** (self-hosted Milvus via Docker, or managed Zilliz Cloud) and an **embedding provider** (OpenAI / VoyageAI / Gemini API, or local Ollama).
+
+| | **ken** | grepai | claude-context |
+|---|---|---|---|
+| Runtime | single static Go binary (no cgo) | single Go binary | Node/TS (npm) |
+| Embeddings | **in-process, pure Go** (Model2Vec) | external **Ollama** daemon | external provider (OpenAI / Voyage / Gemini, or Ollama) |
+| **External services needed** | **none** — auto-fetches a ~60 MB model, then runs offline | Ollama (daemon + model) | **vector DB** (Milvus/Docker or Zilliz Cloud) **+** an embedding API/daemon |
+| Retrieval | BM25 + dense + RRF + code-aware rerank | dense + call graphs | hybrid (BM25 + dense) |
+| Recall / NDCG | **0.967 recall@10 · 0.842 NDCG@10**, with a reproduction harness | not published | not published |
+| Token savings | **~46× vs grep+Read**, measured + reproducible | not published | vendor-claimed −39% vs a baseline |
+| Speed | index ~1.6 s / 13 k chunks; hybrid search p50 ~1.5 ms (measured) | vendor: "10 k files in seconds, ms queries" | depends on the vector DB + network |
+| Languages (structural) | 13 (tree-sitter) | 10 | chunk-level, language-agnostic |
+| License | MIT | MIT | MIT |
+
+Two honest caveats. **First**, ken's numbers ship with reproduction commands ([docs/BENCH.md](docs/BENCH.md)); the cells marked "not published" mean we found no standard-benchmark figure to cite and have not independently benchmarked the others' speed — architecture, dependencies, and license are the verifiable axes (as of June 2026). **Second**, the tools optimize for different things — grepai adds call-graph tracing; claude-context leans on a managed vector DB for scale-out. ken's specific claim is **near-grep recall at ~1–2 orders of magnitude fewer tokens, from one binary with no external services, every number reproducible.**
+
 ## Choosing a chunker
 
 The default `regex` chunker handles most cases well. The opt-in `treesitter` chunker (`--chunker=treesitter` / `KEN_MCP_CHUNKER=treesitter`, pure-Go [`gotreesitter`](https://github.com/odvcencio/gotreesitter)) measurably wins for **Kotlin, Zig, TypeScript, Java, PHP** and loses on **Python, C, Rust, Lua, Scala** — net Δ −0.004 NDCG overall (within noise), so it stays opt-in. The full per-language recommendation table is in [docs/BENCH.md](docs/BENCH.md#per-language-chunker-recommendation-full-table); the default-stays-regex rationale is [ADR-011](docs/internal/DECISIONS.md#adr-011-default-chunker-stays-regex-in-v020-treesitter-is-opt-in).
