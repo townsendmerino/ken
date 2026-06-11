@@ -2,7 +2,7 @@
 
 Source: full-repo review (code quality, maintainability, docs currency, security, competitive position), 2026-06-09. Companion to [road-to-1.0.md](road-to-1.0.md); this picks up where that tracker ends. Items are ordered by priority within each section. Effort: S (<1 h), M (half-day), L (multi-day).
 
-**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 11/28 done (incl. #2 concurrency audit, #6 go.work docs, #7 CONTRIBUTING.md, #8 SECURITY.md, #9 recently_changed JSON, #10 main() decompose, #11 outputs/ promotion). Next up: #12 (NormalizePath trust boundary) or #13 (name the candidate-multiplier constant) — both quick S.
+**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 12/28 done (incl. #2, #6, #7, #8, #9, #10, #11, #14). Next up: #12 (NormalizePath trust boundary) or #13 (name the candidate-multiplier constant) — both quick S.
 
 ---
 
@@ -58,8 +58,8 @@ All 8 turned out to be load-bearing (PERF-expectations cites `perf-startup-m0-ba
 ### 13. Name the candidate-multiplier constant — **S**
 `hybrid.go:43` `candidateCount := topK * 5` — the one un-named constant in the retrieval path. Trivial, but the rest of the pipeline sets the standard.
 
-### 14. Working-tree clutter — **S**
-37 GB `bench_out/` plus 38/56 MB binaries at repo root on the dev machine. All correctly gitignored — purely local hygiene, but worth a `make clean` target so the cost of cleanup is zero.
+### 14. Working-tree clutter — **S** — ✅ **DONE (5a776dd)**
+Added a `Makefile`: `clean` (build products), `clean-bench` (the heavy 37 GB `bench_out/` + bench results, split out so a routine clean doesn't nuke bench data), `clean-all`, plus `build`/`test`/`vet`/`fmt`/`check` + self-documenting `help`. CONTRIBUTING.md points at it.
 
 ---
 
