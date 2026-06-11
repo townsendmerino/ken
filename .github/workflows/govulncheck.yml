@@ -1,0 +1,38 @@
+name: govulncheck
+
+# Scan ken's dependencies (notably go-git + the x/crypto it pulls, which
+# have a CVE history) and the Go standard library for known vulnerabilities.
+# govulncheck is symbol-level — it only fails on vulns ken's code actually
+# reaches, so the gate is meaningful and low-noise.
+#
+# Triggers:
+#   - schedule: weekly, to catch a newly-disclosed CVE in an unchanged dep.
+#   - pull_request / push to main: to catch a vuln introduced by a dependency
+#     bump (e.g. a Dependabot PR) before it merges.
+#   - workflow_dispatch: manual.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Mondays 06:00 UTC
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: known-CVE scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: govulncheck ./...
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
