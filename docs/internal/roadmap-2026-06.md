@@ -2,7 +2,7 @@
 
 Source: full-repo review (code quality, maintainability, docs currency, security, competitive position), 2026-06-09. Companion to [road-to-1.0.md](road-to-1.0.md); this picks up where that tracker ends. Items are ordered by priority within each section. Effort: S (<1 h), M (half-day), L (multi-day).
 
-**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 19/28 resolved (incl. #2, #6–#17, #21; #25 gated out — evaluated, don't build). P2 code-health (#10–#14) AND P3 security (#15–#17) fully clear. Next up: P5 #20 (get listed in MCP registries/awesome lists — S/M) or P4 ownership (#18/#19, M/L).
+**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 21/28 resolved (incl. #2, #6–#17, #21, #26, #28; #25 gated out). P2 code-health, P3 security, and the doc-drift/godoc guards (#26/#28) all clear. Remaining: P4 ownership (#18/#19, M/L — org-namespace question), P5 distribution (#20 registry listings), and the strategic items (#22–#24, #27).
 
 ---
 
@@ -114,11 +114,11 @@ The gate already has data: BENCH.md's v0.2.0 per-language measurement IS the har
 
 ## P6 — Process
 
-### 26. Doc-drift CI checks — **S**
-The two staleness findings (#3, #4) share a root cause: hand-maintained indexes/diagrams with no check. Cheap guards: ADR table-count check, a link checker over docs/, and a grep that DESIGN.md's layout block mentions no `internal/` package that doesn't exist.
+### 26. Doc-drift CI checks — **S** — ✅ **DONE (42bf195)**
+Two guards in `internal/buildchecks` (ride the existing `go test ./...` CI job): `TestADRIndexMatchesSections` (DECISIONS.md index ↔ sections — the #4 drift) and `TestDocLinksResolve` (every relative markdown link resolves — the #3 drift; skips external/anchor, gitignored `outputs/`, the `cmd/ken-mcp-docs` embedded copy, the append-only CHANGELOG, and the Pages index). Caught + fixed 4 real broken links on the first run. (The DESIGN §1 internal/-grep was omitted: §1 is historical-banner'd on purpose.)
 
 ### 27. Stress-test queries in the race job — **S**
 Extend the concurrent-search tests to cover symbol-shaped and definition-shaped queries concurrently (the gap that hid #1).
 
-### 28. godoc audit of the public surface — **M**
-DEVELOPERS.md describes the 1.0-stable API in prose; verify every exported symbol in `mcp/` and `mcp/db/` carries a doc comment (`golangci-lint` `revive` exported-comment rule, or `gopls check`), since pkg.go.dev is part of the SDK pitch.
+### 28. godoc audit of the public surface — **M** — ✅ **DONE (376e609)**
+Audited every exported symbol in `mcp/` + `mcp/db/` via a `go/doc` walk. `mcp/db` was already 100% documented; `mcp/` had exactly one gap (the `LogLevel` const block) — now documented. `TestPublicSurfaceDocumented` (in `mcp/`) keeps it complete in CI without depending on a golangci revive-rule config.
