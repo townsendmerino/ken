@@ -13,7 +13,14 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
-## [Unreleased]
+## [1.1.0] — 2026-06-11 — security hardening + int8 reranker by default
+
+A feature-and-hardening release: the int8 reranker becomes the default (now
+that aikit v1.5.0 makes it free), `output: "json"` reaches the last tool, the
+remote-clone path closes its two known SSRF limitations, and a `govulncheck`
+CI gate joins the suite. No breaking changes — `mcp.Run` / `mcp.NewServer` /
+`chunk.Chunker` and the wire format are unchanged from 1.0; the int8 default
+and the new `KEN_MAX_CLONE_BYTES` knob are both backward-compatible.
 
 ### Added
 
@@ -22,6 +29,11 @@ pre-built binaries.
   count + per-commit hash / short_hash / subject / author / RFC3339 when /
   changed_files), built from the same rows the markdown render uses so the
   two can't drift. All nine MCP tools now accept `output: "json"`.
+- **Contributor + adopter docs and tooling.** Top-level `CONTRIBUTING.md` and
+  `SECURITY.md`; a `Makefile` (build/test/vet/fmt/check/clean targets); a
+  "Compared to other agent code-search tools" table in the README; a
+  "Personally-namespaced dependencies" section in `DEVELOPERS.md` documenting
+  the `gotreesitter` dependency delta + the `go.work` local-aikit workflow.
 
 ### Security
 
@@ -34,6 +46,18 @@ pre-built binaries.
   can't stream an unbounded/pathological pack (aborts + cleans up). Both the
   pre-flight and dial-time checks honor `KEN_ALLOW_PRIVATE_CLONE_TARGETS=1`.
   Resolves the two documented SSRF-guard limitations in `clone.go`.
+- **`govulncheck` CI gate + the 9 CVEs it surfaced, fixed.** A new workflow
+  runs Go's symbol-level vulnerability scanner on every push; bringing it green
+  required bumping `golang.org/x/crypto` to v0.52.0 and the toolchain to
+  go 1.26.4 (the go-directive floor doubles as the toolchain floor). The gate
+  now blocks any reachable-CVE regression from landing.
+
+### Fixed
+
+- **Data race in the definition-pattern cache.** `internal/search`'s
+  `defPatternCache` (the per-query compiled-regex memo behind the `definition`
+  tool) was read and written without synchronization; concurrent queries could
+  race it. Now guarded by an `RWMutex`, with a race-detector regression test.
 
 ### Changed
 
