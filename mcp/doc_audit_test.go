@@ -5,7 +5,7 @@ import (
 	"go/doc"
 	"go/parser"
 	"go/token"
-	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -15,52 +15,62 @@ import (
 // completeness is part of the SDK-author pitch (DEVELOPERS.md describes this
 // surface as 1.0-stable), so an undocumented export is a regression. Roadmap
 // #28. Runs from the mcp/ package dir, so "." is mcp and "db" is mcp/db.
+//
+// Parses files individually via parser.ParseFile rather than the deprecated
+// parser.ParseDir (SA1019); each dir is a single non-test package once
+// _test.go files are filtered, so collecting the files by hand is equivalent.
 func TestPublicSurfaceDocumented(t *testing.T) {
 	for _, dir := range []string{".", "db"} {
 		fset := token.NewFileSet()
-		pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
-			return !strings.HasSuffix(fi.Name(), "_test.go")
-		}, parser.ParseComments)
+		goFiles, err := filepath.Glob(filepath.Join(dir, "*.go"))
 		if err != nil {
-			t.Fatalf("parse %s: %v", dir, err)
+			t.Fatalf("glob %s: %v", dir, err)
 		}
-		for _, pkg := range pkgs {
-			var files []*ast.File
-			for _, f := range pkg.Files {
-				files = append(files, f)
+		var files []*ast.File
+		for _, gf := range goFiles {
+			if strings.HasSuffix(gf, "_test.go") {
+				continue
 			}
-			dp, err := doc.NewFromFiles(fset, files, "x/"+dir)
+			f, err := parser.ParseFile(fset, gf, nil, parser.ParseComments)
 			if err != nil {
-				t.Fatalf("doc %s: %v", dir, err)
+				t.Fatalf("parse %s: %v", gf, err)
 			}
-			check := func(kind, name, d string) {
-				if strings.TrimSpace(d) == "" {
-					t.Errorf("%s: exported %s %q has no doc comment (shows blank on pkg.go.dev)", pkg.Name, kind, name)
-				}
+			files = append(files, f)
+		}
+		if len(files) == 0 {
+			t.Fatalf("no non-test .go files found in %s", dir)
+		}
+		dp, err := doc.NewFromFiles(fset, files, "x/"+dir)
+		if err != nil {
+			t.Fatalf("doc %s: %v", dir, err)
+		}
+		check := func(kind, name, d string) {
+			if strings.TrimSpace(d) == "" {
+				t.Errorf("%s: exported %s %q has no doc comment (shows blank on pkg.go.dev)", dp.Name, kind, name)
 			}
-			for _, c := range dp.Consts {
+		}
+		for _, c := range dp.Consts {
+			check("const", strings.Join(c.Names, ","), c.Doc)
+		}
+		for _, v := range dp.Vars {
+			check("var", strings.Join(v.Names, ","), v.Doc)
+		}
+		for _, f := range dp.Funcs {
+			check("func", f.Name, f.Doc)
+		}
+		for _, tp := range dp.Types {
+			check("type", tp.Name, tp.Doc)
+			for _, c := range tp.Consts {
 				check("const", strings.Join(c.Names, ","), c.Doc)
 			}
-			for _, v := range dp.Vars {
+			for _, v := range tp.Vars {
 				check("var", strings.Join(v.Names, ","), v.Doc)
 			}
-			for _, f := range dp.Funcs {
+			for _, f := range tp.Funcs {
 				check("func", f.Name, f.Doc)
 			}
-			for _, tp := range dp.Types {
-				check("type", tp.Name, tp.Doc)
-				for _, c := range tp.Consts {
-					check("const", strings.Join(c.Names, ","), c.Doc)
-				}
-				for _, v := range tp.Vars {
-					check("var", strings.Join(v.Names, ","), v.Doc)
-				}
-				for _, f := range tp.Funcs {
-					check("func", f.Name, f.Doc)
-				}
-				for _, m := range tp.Methods {
-					check("method", tp.Name+"."+m.Name, m.Doc)
-				}
+			for _, m := range tp.Methods {
+				check("method", tp.Name+"."+m.Name, m.Doc)
 			}
 		}
 	}
