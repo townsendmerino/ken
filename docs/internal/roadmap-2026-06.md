@@ -2,7 +2,7 @@
 
 Source: full-repo review (code quality, maintainability, docs currency, security, competitive position), 2026-06-09. Companion to [road-to-1.0.md](road-to-1.0.md); this picks up where that tracker ends. Items are ordered by priority within each section. Effort: S (<1 h), M (half-day), L (multi-day).
 
-**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 21/28 resolved (incl. #2, #6–#17, #21, #26, #28; #25 gated out). P2 code-health, P3 security, and the doc-drift/godoc guards (#26/#28) all clear. Remaining: P4 ownership (#18/#19, M/L — org-namespace question), P5 distribution (#20 registry listings), and the strategic items (#22–#24, #27).
+**Status — updated 2026-06-11 for v1.0.1.** The 1.0.1 docs sweep closed #3, #4, #5 (plus ARCHITECTURE.md shipped, which #3/#5 now anchor to). 1.0.1 also added deserializer fuzzing (see P3 note) and the aikit v1.4 SIMD bump (~3× faster hybrid p50, 4.58 ms → 1.56 ms — feeds #21/#24). **#1, the `defPatternCache` race, is now fixed (1381c51)** with an `RWMutex` + a race-proven regression test. Plus aikit bumped to v1.5.0 with the int8 reranker now default (727c145). Scoreboard: 22/28 resolved (incl. #2, #6–#17, #19, #21, #26, #28; #25 gated out; #18 decided — stay personal, (a)/(c) cheap follow-ups remain). P2 code-health, P3 security, the doc-drift/godoc guards, AND the P4 ownership question (#18/#19 → stay personal namespace) all settled. Remaining: P5 distribution (#20 registry listings — prep underway), #18's cheap parts (document gotreesitter fork delta + upstream the overflow fix), and the strategic items (#22–#24, #27).
 
 ---
 
@@ -80,11 +80,15 @@ Added `.github/workflows/govulncheck.yml` (weekly schedule + PR/push to main + m
 
 ## P4 — Supply chain & ownership
 
-### 18. Reduce personal-namespace single points of failure — **M/L**
-`github.com/townsendmerino/aikit` and `github.com/odvcencio/gotreesitter` are personal forks pinned only by go.sum hashes. Options, cheapest first: (a) document the fork rationale + upstream delta for gotreesitter (the overflow-fix memo exists — surface it in DEVELOPERS.md); (b) move aikit and ken under a GitHub org namespace before adoption grows, since a module-path migration gets more painful with every downstream user; (c) offer the gotreesitter fix upstream so the fork can eventually retire.
+### 18. Reduce personal-namespace single points of failure — **S (re-scoped)** — decision 2026-06-11: **STAY PERSONAL**
+`github.com/townsendmerino/aikit` and `github.com/odvcencio/gotreesitter` are personal forks pinned by go.sum hashes. **Decision: keep ken under the `townsendmerino` personal namespace.** Rationale: the namespace is an *asset* for the project's stated consulting-credibility goal — every install snippet, `go install`, pkg.go.dev page, Homebrew tap, and benchmark writeup carries the author's name; attribution accrues to the personal profile graph, which an org transfer would dilute. Personal namespaces carry zero credibility penalty for serious tools (BurntSushi/ripgrep, junegunn/fzf, sharkdp/fd, jesseduffield/lazygit are all personal and enterprise-adopted). The supply-chain concern is real but it's an *adopter's* concern that scales with adoption ken doesn't yet have — and the risk is **bus factor, not namespace** (a one-member org is the same single point of failure with worse branding). What actually reassures adopters is already in place: tagged releases, go.sum pinning, CI, MIT, documented fork rationale.
 
-### 19. Resolve the module-path question before promoting the SDK story — **M**
-`mcp.Run` invites third parties to build binaries on `github.com/townsendmerino/ken`. If an org migration (#18b) is ever going to happen, it must precede SDK adoption.
+- ✅ Keep **(a)** — document the gotreesitter fork rationale + upstream delta in DEVELOPERS.md (the overflow-fix memo exists; surface it).
+- ✅ Keep **(c)** — offer the gotreesitter overflow fix upstream so the fork can eventually retire.
+- ❌ Drop **(b)** (org migration). Replace with: **stay personal; revisit only if `aikit` gains real third-party *library* adoption — and at that point prefer a vanity import path (`go.<domain>/ken`) over an org transfer.** Vanity paths cleanly decouple the module path from GitHub; org transfers are not the escape hatch anyway (Go module paths don't follow GitHub redirects cleanly for new versions). Not painted into a corner by waiting: GitHub repo transfers DO redirect existing clones + `go get`.
+
+### 19. Resolve the module-path question before promoting the SDK story — **M** — ✅ **RESOLVED 2026-06-11 (by #18's decision)**
+`mcp.Run` invites third parties to build binaries on `github.com/townsendmerino/ken`. Resolved: the module path **stays `github.com/townsendmerino/ken`** — no org migration to precede SDK adoption (see #18). The only future move that would matter is a vanity import path, which can be adopted later without breaking existing users (GitHub redirects clones + `go get`), and is only worth the ceremony if aikit's library adoption materializes. The SDK story can be promoted now under the personal path.
 
 ---
 
