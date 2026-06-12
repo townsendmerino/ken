@@ -12,6 +12,7 @@ If you're a casual agent user wanting to install ken-mcp, see
 - [mcp.Run library — embedded corpora](#mcprun-library)
 - [Prebuilt indices (ADR-024)](#prebuilt-indices)
 - [Public API surface](#public-api-surface)
+- [Personally-namespaced dependencies](#personally-namespaced-dependencies)
 - [JSON output mode](#json-output-mode)
 - [Custom chunkers](#custom-chunkers)
 - [Tuning rerank](#tuning-rerank)
@@ -271,6 +272,81 @@ commit + **tag** aikit → `GOWORK=off go get github.com/townsendmerino/aikit@<t
 in ken → re-validate with `GOWORK=off`. Never pin ken's `go.mod` to an
 untagged aikit commit — the workspace is for iteration, the tag is for
 shipping.
+
+## Personally-namespaced dependencies
+
+Two of ken's dependencies live under personal GitHub namespaces rather
+than an org: `github.com/townsendmerino/aikit` (ken's own algorithm
+packages, ADR-034) and `github.com/odvcencio/gotreesitter` (the pure-Go
+tree-sitter that backs the treesitter chunker + Arm B enrichment). This
+is a deliberate, documented choice — not an oversight. If you're
+evaluating ken for adoption, here's the supply-chain picture and the
+exit paths.
+
+### Why these deps, and the namespace stance
+
+- **`gotreesitter` is a hard constraint, not a preference.** ken's whole
+  premise is *pure Go, no cgo, single static cross-compiled binary*
+  (see [CLAUDE.md](../CLAUDE.md) constraints). That rules out the
+  canonical C tree-sitter and its cgo bindings. `odvcencio/gotreesitter`
+  is the viable pure-Go GLR tree-sitter with the grammar coverage ken's
+  thirteen languages need. It's a **third-party** dependency: ken
+  consumes its published tags directly (currently `v0.20.2`) — there is
+  **no `replace` directive and no source fork** in this repo, so there's
+  no parallel codebase for ken to maintain.
+- **The namespace itself carries no supply-chain weight.** A personal
+  namespace and a one-member org are the same single point of failure
+  with different branding; what actually protects an adopter is hash
+  pinning + tags + CI, all of which are in place (`go.sum` pins every
+  dep by content hash; bumps are gated by ken's test suite). The
+  decision to stay under `townsendmerino` rather than migrate to an org
+  is recorded in the 1.0 roadmap (#18); the escape hatch, if `aikit`
+  ever gains third-party *library* adoption, is a vanity import path
+  (`go.<domain>/…`) rather than a GitHub org transfer.
+
+### The gotreesitter delta ken carries
+
+ken carries exactly **one** runtime mitigation against a known
+`gotreesitter` limitation — a guard, not a code patch:
+
+> **`(*Parser).Parse` can fatal-stack-overflow on large source files.**
+> Its result-tree construction (`buildResultFromNodes`) recurses
+> without a bound; on big real-world files (e.g. cobra's 117 KB
+> `completions_test.go`) it overflows the goroutine stack. A Go stack
+> overflow is a **fatal runtime error** — `recover()` can't catch it,
+> it bypasses the library's `(tree, err)` contract, and it takes down
+> the **whole host process**. The library exposes no depth/node/stack
+> cap to bound it defensively, and its timeout knob fires too late
+> (the overflow happens in synchronous recursion).
+
+**Mitigation in ken:** [`internal/structural/extract_file.go`](../internal/structural/extract_file.go)
+skips enrichment-time parsing for any file larger than
+`maxEnrichBytes = 64 << 10` (64 KiB) and treats it as a graceful no-op
+(same path as an unregistered extension). This is a **byte-threshold
+proxy** for a node/recursion cost we can't express through the API — it
+clears every case ken has hit, but a smaller-yet-pathological file
+could in principle still overflow. The full investigation, minimal
+repro, and ruled-out hypotheses (it's size/node-count, *not* nesting
+depth) are in
+[docs/internal/upstream-gotreesitter-overflow.md](internal/upstream-gotreesitter-overflow.md).
+
+**The upstream plan (roadmap #18c).** ken has no patch to "merge
+upstream" — what we have to contribute is (1) the bug report + repro
+above, **filed as [odvcencio/gotreesitter#110](https://github.com/odvcencio/gotreesitter/issues/110)**,
+and optionally (2) a PR making `buildResultFromNodes` iterative or
+adding a configurable depth/node budget so `Parse` degrades through its
+documented error / stop-reason channel instead of `fatal error`. Once
+either lands and `Parse` stops fatally overflowing, **the 64 KiB guard
+can be removed**. Until then the guard stays, and a `gotreesitter` bump
+should re-run the
+treesitter fixture tests + the grammar-subset drift guard
+([`internal/buildchecks/subset_test.go`](../internal/buildchecks/subset_test.go))
+before pinning.
+
+**Stability tier reminder:** the treesitter chunker is **best-effort**,
+not 1.0-committed, *precisely because* it depends on pre-1.0
+`gotreesitter` (see the aikit stability summary above). The default
+`regex` chunker has no such dependency.
 
 ## JSON output mode
 

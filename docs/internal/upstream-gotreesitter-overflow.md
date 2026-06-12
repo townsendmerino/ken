@@ -1,10 +1,13 @@
-# Upstream issue draft — gotreesitter stack overflow on large files
+# Upstream issue — gotreesitter stack overflow on large files
 
-To file against **[odvcencio/gotreesitter](https://github.com/odvcencio/gotreesitter)**.
+**Status: FILED 2026-06-11 as [odvcencio/gotreesitter#110](https://github.com/odvcencio/gotreesitter/issues/110)** (roadmap #18c).
+Filed against **[odvcencio/gotreesitter](https://github.com/odvcencio/gotreesitter)**.
 Captured from the ken crash investigation (2026-06-05); the in-tree
 mitigation is the `maxEnrichBytes` guard in
-`internal/structural/extract_file.go` (commit `ea6a869`). File this so the
-real fix can land upstream and the guard can eventually be removed.
+`internal/structural/extract_file.go` (commit `ea6a869`). When the upstream
+fix lands (`Parse` returns through its `(tree, err)` / stop-reason contract
+instead of `fatal error`), the guard can be removed. The original draft is
+retained below as the filed text.
 
 ---
 
