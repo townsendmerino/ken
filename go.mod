@@ -12,7 +12,7 @@ require (
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/townsendmerino/aikit v1.9.0
 	go.uber.org/goleak v1.3.0
-	golang.org/x/sync v0.21.0
+	golang.org/x/sync v0.22.0
 	modernc.org/sqlite v1.53.0
 )
 
