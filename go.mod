@@ -1,6 +1,6 @@
 module github.com/townsendmerino/ken
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1

@@ -13,6 +13,19 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [Unreleased]
+
+### Security
+
+- **Bumped the toolchain go 1.26.4 → 1.26.5 to fix `GO-2026-5856`** — an
+  Encrypted Client Hello privacy leak in the standard library's `crypto/tls`,
+  fixed in go1.26.5. The `govulncheck` gate (added in 1.1.0) flagged it as
+  **reachable**, with real call paths through the MySQL introspection TLS
+  handshake and the model-fetch HTTPS client. Bumping the single `go`
+  directive in `go.mod` clears it across all CI (every workflow reads
+  `go-version-file: go.mod`); `govulncheck ./...` now reports 0 affecting
+  vulnerabilities. No source changes.
+
 ## [1.1.0] — 2026-06-11 — security hardening + int8 reranker by default
 
 A feature-and-hardening release: the int8 reranker becomes the default (now
