@@ -37,7 +37,7 @@ import (
 const DefaultModel = "minishlab/potion-code-16M"
 
 // DefaultRerankModel is the CodeRankEmbed checkpoint the M4 NeuralReranker
-// expects (~547 MB, see outputs/m1-results.md and m2-results.md). Ships
+// expects (~547 MB; see docs/DEVELOPERS.md "Tuning rerank"). Ships
 // the same 3 files Model2Vec does (model.safetensors / tokenizer.json /
 // config.json) — the trust_remote_code .py files in the snapshot are
 // only needed for the Python reference path, NOT ken's pure-Go loader.

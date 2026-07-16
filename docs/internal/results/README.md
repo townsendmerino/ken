@@ -13,6 +13,15 @@ cite as evidence. Moved here — tracked **deliberately** — from the gitignore
 - **`stage8-*.md`** — Stage 8 gate results: the Arm B CoSQA NDCG gate
   (gate-1), the `callers` call-edge precision sample (gate-2), the parked
   ColBERT/MaxSim probe, and query-graph expansion.
+- **`ken-rerank-plan.md`** + **`m0e-results.md`** — the Stage 6/7 neural-rerank
+  work: the design plan (the `§8`/`§9.3`/`§12` sections code comments cite) and
+  the M0e structural-enrichment bake-off (the negative result that kept Arm B to
+  func/calls/raises only). Cited by `internal/search` and `internal/structural`.
+  The other rerank M-series memos stay in gitignored `outputs/`: their
+  cross-references point at the `coderank` package, which moved to
+  [aikit](https://github.com/townsendmerino/aikit)'s `encoder` (ADR-034), so
+  they don't promote cleanly — the load-bearing numbers already live inline in
+  the code comments that used to cite them.
 
 These are **archival** — they record what was measured at the time and are not
 updated. `outputs/` itself stays gitignored for live scratch work; only these

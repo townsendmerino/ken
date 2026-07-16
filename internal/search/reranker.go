@@ -34,7 +34,8 @@ type telemetryReranker interface {
 // reranking the hybrid head. Stored on Index so the rerank policy
 // survives WatchedIndex snapshot swaps (the reranker itself is shared
 // across snapshots — its LRU cache is content-hashed, so stale entries
-// just never get hit; see plan §8).
+// just never get hit; see the rerank plan,
+// docs/internal/results/ken-rerank-plan.md §8).
 type rerankerConfig struct {
 	rerankN int     // depth of the head to rerank from stage-1
 	beta    float64 // blend weight: final = β·rerankCos + (1−β)·fusedScore
@@ -54,9 +55,10 @@ type rerankerConfig struct {
 	adaptiveMinN      int
 }
 
-// defaultRerankerConfig: M0-amended defaults (outputs/m0-results.md).
+// defaultRerankerConfig: M0-amended defaults (see the rerank plan,
+// docs/internal/results/ken-rerank-plan.md §9.3).
 //
-//   - rerankN=50 is plan §9.3's recommended depth (≥ 5*k for typical k=10).
+//   - rerankN=50 is the plan's §9.3 recommended depth (≥ 5*k for typical k=10).
 //   - beta=0.25 is the only β tested on the full semble bench that produced
 //     a positive lift in every category (architecture +0.007, semantic
 //     +0.010, symbol +0.009). β=0 is pure hybrid (no rerank effect),

@@ -1,7 +1,8 @@
 // rerank_cache.go — M9 persistent on-disk doc cache.
 //
 // The reranker's content-hash → embedding LRU is the "perf keystone"
-// (plan §8): a warm cache turns a 5 s cold rerankN=50 into ~0.6 s by
+// (rerank plan, docs/internal/results/ken-rerank-plan.md, §8): a warm
+// cache turns a 5 s cold rerankN=50 into ~0.6 s by
 // skipping the 50 candidate-forward passes. Pre-M9 the cache was
 // in-process only — every fresh ken-mcp launch (agent restart, host
 // reboot, container redeploy) paid the cold cost again.

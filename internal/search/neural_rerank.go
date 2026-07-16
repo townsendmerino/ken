@@ -43,7 +43,7 @@ const DefaultRerankerCacheSize = 32768
 // runtime.NumCPU() workers via Encoder.EncodeBatch (M3 + M7). For
 // rerankN=50 the M3 measurement is ~15s cold / ~2s warm on an 8-core
 // M1 Pro for f32; ModelQ8 lands ~similar (single-thread) or marginally
-// faster (multi-thread; see outputs/m8b-results.md).
+// faster (multi-thread; per the M8b quant measurement).
 type NeuralReranker struct {
 	model encoder.Encoder
 	cache *embeddingLRU

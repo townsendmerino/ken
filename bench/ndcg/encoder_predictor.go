@@ -9,7 +9,8 @@
 // stage-1 query vector against the centroid matrix, take top-m above
 // a threshold, hand them to the existing Predictor injection point.
 //
-// Locked choices (see outputs/m0c-results.md + the M0d kickoff):
+// Locked choices (from the M0c/M0d predictor experiments; design in
+// the rerank plan, docs/internal/results/ken-rerank-plan.md):
 //
 //   - Representation: potion centroid, NOT CodeRankEmbed centroid.
 //     CodeRankEmbed would need to re-encode every chunk at index

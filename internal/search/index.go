@@ -114,7 +114,7 @@ const (
 	ModeSemantic
 	ModeHybrid
 	// ModeHybridRerank is ModeHybrid + a second-stage neural reranker
-	// (M4; see outputs/m3-results.md and m4-results.md). Requires both
+	// (M4; see the rerank plan, docs/internal/results/ken-rerank-plan.md §9). Requires both
 	// an embedding model (for stage-1 hybrid) AND a reranker injected
 	// via Index.SetReranker; SearchMode downgrades transparently to
 	// ModeHybrid when the reranker is absent, mirroring the existing
@@ -877,7 +877,7 @@ func (ix *Index) SearchMode(query string, k int, mode Mode) ([]Result, Mode) {
 	}
 	// M4: ModeHybridRerank ⇒ ModeHybrid when no reranker is attached,
 	// same "downgrade rather than error" ethos as the no-model case
-	// above. The plan §9.3 calls this out explicitly: "transparently
+	// above. The rerank plan (docs/internal/results/ken-rerank-plan.md) §9.3 calls this out explicitly: "transparently
 	// downgrade … mirroring the existing model-missing downgrade pattern."
 	if mode == ModeHybridRerank && ix.reranker == nil {
 		mode = ModeHybrid
@@ -993,8 +993,7 @@ func (ix *Index) SearchWithQVec(query string, qVec []float32, k int, mode Mode) 
 // consume predicted directly — it re-scores stage-1 candidates from
 // its own forward pass. So transform #2's only mechanism on the
 // default `hybrid+rerank` config is "pull more relevant chunks into
-// the stage-1 shortlist." outputs/m0b-phase-b-results.md has the
-// reasoning; m0c-results.md will have the numbers.
+// the stage-1 shortlist" — the HyDE Phase B analysis established this.
 func (ix *Index) SearchWithQVecPredicted(query string, qVec []float32, predicted []string, k int, mode Mode) ([]Result, Mode) {
 	if mode != ModeBM25 && (ix.flat == nil || ix.model == nil) {
 		mode = ModeBM25

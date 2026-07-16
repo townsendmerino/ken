@@ -191,7 +191,7 @@ func TestRecentlyChanged_PathFilter(t *testing.T) {
 	dir, repo := makeTempRepo(t)
 	base := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 	commitFile(t, dir, repo, "src/api/auth.go", "package auth\n", "add auth", base)
-	commitFile(t, dir, repo, "docs/readme.md", "hello\n", "update docs", base.Add(time.Hour))
+	commitFile(t, dir, repo, "README.md", "hello\n", "update docs", base.Add(time.Hour))
 	commitFile(t, dir, repo, "src/api/login.go", "package auth\n", "add login", base.Add(2*time.Hour))
 
 	res, _, err := handleRecentlyChanged(context.Background(), &Config{}, RecentlyChangedArgs{

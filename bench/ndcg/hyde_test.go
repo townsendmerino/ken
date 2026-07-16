@@ -98,8 +98,8 @@ const (
 
 // rerankNForGate is the stage-1 over-fetch the recall@rerankN gate
 // measures against. Matches the production reranker default
-// (rerankN=50). The Phase A "leak-free" memo (outputs/m0b-results.md)
-// front-loads recall@50 as THE decision variable: it's the fraction
+// (rerankN=50). The Phase A "leak-free" bench front-loads recall@50
+// as THE decision variable: it's the fraction
 // of queries where stage-1 already places the relevant doc inside
 // the shortlist the reranker would see. HyDE can only act through
 // this window — if it's already ~1.0 at w=0, HyDE has no surface.
@@ -839,7 +839,7 @@ func TestHyDE_M0(t *testing.T) {
 	// equal → redundant; subset → covers part of the same recall
 	// surface.
 	if m0cArms != "" && len(allFlips) > 0 {
-		t.Logf("\nHyDE Phase B overlap (vs the 7 qids HyDE rescued in outputs/m0b-phase-b-results.md):")
+		t.Logf("\nHyDE Phase B overlap (vs the 7 qids HyDE rescued in Phase B):")
 		t.Logf("HyDE-gained set: %v", sortedKeysSet(hydePhaseBGained))
 		for _, f := range allFlips {
 			overlap := make([]string, 0)
@@ -889,7 +889,7 @@ func TestHyDE_M0(t *testing.T) {
 }
 
 // hydePhaseBGained pins the 7 queries HyDE Phase B rescued at w=0.3
-// on hybrid+rerank (outputs/m0b-phase-b-results.md). The M0c bench
+// on hybrid+rerank (HyDE Phase B analysis). The M0c bench
 // uses this as the reference for the HyDE-overlap analysis. Hardcoded
 // because Phase B is a fixed historical result; any future re-run
 // updates this set explicitly so the comparison is intentional.

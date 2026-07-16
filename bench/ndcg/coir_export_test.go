@@ -1,7 +1,7 @@
 //go:build bench
 
 // CoIR stage-1 shortlist exporter for the M0 rerank-ceiling experiment
-// (outputs/ken-rerank-plan.md §12). Separate from coir_test.go because
+// (docs/internal/results/ken-rerank-plan.md §12). Separate from coir_test.go because
 // CoIR queries are multi-line Python function sources — they cannot be
 // streamed to `ken bench` one-per-line, so the shortlist must be exported
 // in-process with the exact same query text the published NDCG used.

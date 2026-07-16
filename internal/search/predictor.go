@@ -13,8 +13,8 @@ package search
 // Cost contract: implementations should be near-free at query time.
 // The shipped predictor (when M0c chooses one) will be a
 // discriminative match against vectors precomputed at index time, not
-// a generative model — see outputs/m0b-phase-b-results.md and the
-// M0c memo for the rationale.
+// a generative model — see the HyDE Phase B analysis and the M0c
+// predictor experiments for the rationale.
 //
 // The interface deliberately doesn't expose a configurable K — that
 // is a property of the predictor instance, set at construction. Keeps

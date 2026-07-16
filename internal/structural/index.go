@@ -218,7 +218,7 @@ type Index struct {
 // EXPERIMENTAL — none of the four arms below are on the production ship
 // path. M0e proved that Callers/Imports/Signature/Siblings do NOT improve
 // retrieval (they flood the label and net-regress NDCG; see
-// outputs/m0e-results.md). The shipping Arm B baseline (ADR-035) builds
+// docs/internal/results/m0e-results.md). The shipping Arm B baseline (ADR-035) builds
 // EnrichOptions{} (all false) — func/calls/raises only. These fields are
 // retained solely for the scripts/materialize_heur.go research/drift
 // harness (road-to-1.0 §3 keeps that harness as a known-good reference);
