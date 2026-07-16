@@ -13,7 +13,11 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
-## [Unreleased]
+## [1.1.1] — 2026-07-16 — crypto/tls CVE fix + dependency updates
+
+A patch release: a reachable standard-library TLS CVE closed by a toolchain
+bump, plus routine dependency updates. No public-API, wire-format, or default
+changes from 1.1.0.
 
 ### Security
 
@@ -25,6 +29,18 @@ pre-built binaries.
   directive in `go.mod` clears it across all CI (every workflow reads
   `go-version-file: go.mod`); `govulncheck ./...` now reports 0 affecting
   vulnerabilities. No source changes.
+
+### Changed
+
+- **Dependency updates** (no ken API changes; full suite + `govulncheck`
+  green on the combined tree):
+  - `github.com/townsendmerino/aikit` v1.5.0 → **v1.9.0** — the extracted
+    algorithm packages (BM25 / embed / ann / encoder / chunk / fuse / topk).
+  - `modernc.org/sqlite` v1.52.0 → v1.53.0 — the pure-Go SQLite driver
+    (Tier-2 DB indexing).
+  - `github.com/odvcencio/gotreesitter` v0.20.2 → v0.20.5 — the pure-Go
+    tree-sitter backing the treesitter chunker + Arm B enrichment.
+  - `actions/checkout` v6 → v7 (CI).
 
 ## [1.1.0] — 2026-06-11 — security hardening + int8 reranker by default
 
