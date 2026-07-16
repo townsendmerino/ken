@@ -40,14 +40,12 @@ func TestDefPatternCache_ConcurrentDistinctSymbols_NoRace(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start // release all workers together to maximize overlap
 			for _, s := range symbols {
 				_ = chunkDefinesSymbol(content, s) // → definitionPattern(s)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

@@ -130,7 +130,7 @@ func walkCsharp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, e
 
 func recurseChildrenCsharp(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		walkCsharp(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
@@ -155,7 +155,7 @@ func extractCsharpMethod(src []byte, n *gotreesitter.Node, lang *gotreesitter.La
 func extractCsharpParams(src []byte, params *gotreesitter.Node, lang *gotreesitter.Language) []string {
 	var out []string
 	pc := params.NamedChildCount()
-	for i := 0; i < pc; i++ {
+	for i := range pc {
 		c := params.NamedChild(i)
 		if c == nil {
 			continue
@@ -185,7 +185,7 @@ func extractCsharpClass(src []byte, n *gotreesitter.Node, lang *gotreesitter.Lan
 		return cls
 	}
 	bc := body.NamedChildCount()
-	for i := 0; i < bc; i++ {
+	for i := range bc {
 		c := body.NamedChild(i)
 		if c == nil {
 			continue
@@ -226,7 +226,7 @@ func csharpCalleeName(src []byte, fn *gotreesitter.Node, lang *gotreesitter.Lang
 		}
 		// fallback: first identifier child
 		nc := fn.NamedChildCount()
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			c := fn.NamedChild(i)
 			if c != nil && c.Type(lang) == "identifier" {
 				return nodeText(src, c)
@@ -309,7 +309,7 @@ func csharpUsingBoundName(src []byte, n *gotreesitter.Node, lang *gotreesitter.L
 	// Regular form: walk named children, find the qualified_name or
 	// identifier, return its leaf.
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue

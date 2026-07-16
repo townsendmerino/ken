@@ -109,7 +109,7 @@ func TestDocLinksResolve(t *testing.T) {
 		}
 		dir := filepath.Dir(mf)
 		inCode := false
-		for _, line := range strings.Split(string(data), "\n") {
+		for line := range strings.SplitSeq(string(data), "\n") {
 			if strings.HasPrefix(strings.TrimSpace(line), "```") {
 				inCode = !inCode
 				continue
