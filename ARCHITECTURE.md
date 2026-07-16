@@ -2,7 +2,7 @@
 
 **Current-state map of the system.** This doc answers "what is ken *now* and where does each concern live." For *why* it's built this way, see [docs/DESIGN.md](docs/DESIGN.md) (algorithm spec, precision contracts, written stage-by-stage during the port) and [docs/internal/DECISIONS.md](docs/internal/DECISIONS.md) (ADRs). When this doc and DESIGN.md §1 disagree about layout, this doc wins — DESIGN.md predates the aikit extraction (ADR-034).
 
-Last verified against the code: 2026-06-09 (v1.0.0).
+Last verified against the code: 2026-06-11 (v1.1.0).
 
 ## Bird's eye
 
