@@ -155,6 +155,34 @@ The structural-call-graph Phase 0 substrate (per-call-site
 of those — well inside the plan's ≤2× memory envelope. See
 [structural-call-graph-plan.md](internal/structural-call-graph-plan.md).
 
+**Full-process RSS scales with indexed corpus size** — the in-RAM index
+(chunk text + BM25 postings + per-chunk float32 vectors) plus gotreesitter
+parser arenas. On a small–medium code repo that's tens to low-hundreds of
+MiB. On a **large or artifact-heavy monorepo it can reach multiple GB**: an
+external 2026-07 bench (Denis Trofimov) measured ken-mcp at ~2.1 GB idle /
+~2.9 GB peak on a PHP/Yii ERP monorepo, vs sub-GB for ignore-parity tools.
+The dominant cause was corpus size, not per-file overhead — ken was then
+gitignore-only, so it indexed ~2× the files of the other tools, pulling in
+committed built assets and generated migrations they excluded via their own
+ignore files. Don't read the small-repo numbers above as a flat guarantee;
+RSS tracks file/chunk count.
+
+The levers, cheapest first:
+
+- **`.kenignore`** (ADR-038) — exclude committed-but-unwanted paths. On
+  artifact-heavy repos this is the biggest single reduction, roughly
+  proportional to the files it removes.
+- **`KEN_MAX_FILE_BYTES`** (default 2 MiB) and the **minified-file skip**
+  (`KEN_MAX_AVG_LINE_BYTES`, default 1000) — drop oversized/built files
+  automatically, even without a `.kenignore`.
+- **`GOGC=50`** (the ken-mcp default), **`KEN_MEMLIMIT`**, and the
+  post-build/post-flush `debug.FreeOSMemory()` — trim steady-state/idle RSS
+  for the long-lived server.
+
+Numbers are host- and corpus-dependent; measure yours with
+[`scripts/rss_bench.sh`](../scripts/rss_bench.sh) (mirrors the external
+harness so results are comparable).
+
 **Binary size (slim release builds, ADR-033):**
 
 - `ken-mcp`: **~38 MB** (was ~52 MB pre-slim).
