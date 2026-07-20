@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -270,6 +271,11 @@ func main() {
 	logLevelStr := envEnum("KEN_MCP_LOG_LEVEL", kenmcp.LogLevelNames(), "warn", logger)
 	logger.Level = kenmcp.ParseLogLevel(logLevelStr)
 
+	// M2 (memory campaign): apply the long-lived-server GC policy — a lower
+	// default GOGC and an optional KEN_MEMLIMIT soft cap. Server-only; the
+	// library/CLI layers stay untuned. Both defer to explicit GOGC/GOMEMLIMIT.
+	setupGCHygiene(logger)
+
 	size := envInt("KEN_MCP_CACHE_SIZE", kenmcp.DefaultCacheSize, logger)
 	if size < 0 {
 		logger.Logf(kenmcp.LogWarn, "KEN_MCP_CACHE_SIZE=%d: must be non-negative — using default %d",
@@ -378,6 +384,11 @@ func main() {
 		// MCP JSON-RPC channel).
 		ix.SetOnFlush(func(msg string) {
 			logger.Logf(kenmcp.LogInfo, "%s: %s", dir, msg)
+			// M2: a flush rebuilds the index snapshot, leaving the old
+			// corpus/postings/vectors as garbage. Hand the freed pages
+			// back to the OS so a long-lived idle server doesn't sit on
+			// ~2× the live heap. App-layer only (see gc.go).
+			debug.FreeOSMemory()
 		})
 
 		// Stage 8: eager structural-index build per the planning-
@@ -401,6 +412,11 @@ func main() {
 				dir, stats.IndexedFiles, stats.UniqueSymbols, stats.UniqueCallees)
 		}
 
+		// M2: the initial chunk+embed+structural build is the biggest
+		// transient-memory spike in the process lifetime. Return the freed
+		// pages to the OS now that the snapshot is published, so idle RSS
+		// settles near the live index size instead of the build high-water.
+		debug.FreeOSMemory()
 		return &kenmcp.RepoBundle{Index: ix, Structural: sIdx}, cleanup, nil
 	}
 

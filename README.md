@@ -102,6 +102,7 @@ command = "/absolute/path/to/ken-mcp"
 | `KEN_MCP_CHUNKER` | `regex` | `regex` / `treesitter` / `line` / `markdown`. See [Choosing a chunker](#choosing-a-chunker). |
 | `KEN_MCP_CACHE_SIZE` | `16` | LRU bound on the repo→Index cache. |
 | `KEN_MCP_LOG_LEVEL` | `warn` | `debug` / `info` / `warn` / `error`. All logs go to stderr; **stdout is the JSON-RPC channel** ([details](docs/DESIGN.md#hard-rule--stdoutstderr-contract)). |
+| `KEN_MEMLIMIT` | (unset) | Soft memory limit for the long-lived server (`1GiB`, `512MiB`, or a byte count), applied via `debug.SetMemoryLimit`. Overrides `GOMEMLIMIT` when both are set. ken-mcp also defaults `GOGC=50` (lower steady-state RSS) unless you set `GOGC` yourself. |
 | `KEN_ALLOW_PRIVATE_CLONE_TARGETS` | `0` | Off by default: for `http(s)` `repo` URLs, ken rejects loopback / link-local / RFC1918 addresses (SSRF guard). Set `1` to allow internal git hosts. |
 
 The full env reference — including the `KEN_DB_*` database variables — is in [docs/USERS.md](docs/USERS.md) and [docs/db-indexing.md](docs/db-indexing.md). For agents that should route between ken and grep deliberately (rather than ken's default "prefer ken" instruction), see the routing snippet in [docs/USERS.md](docs/USERS.md).

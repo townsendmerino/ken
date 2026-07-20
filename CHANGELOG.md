@@ -15,6 +15,21 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Changed
+
+- **GC hygiene for the long-lived `ken-mcp` server (memory campaign M2).**
+  `ken-mcp` now (1) defaults `GOGC=50` (unless you set `GOGC`), trimming
+  steady-state heap/RSS for a process that idles between queries; (2) accepts
+  `KEN_MEMLIMIT` (`1GiB` / `512MiB` / byte count) as a soft memory limit via
+  `debug.SetMemoryLimit` (overrides `GOMEMLIMIT`); and (3) calls
+  `debug.FreeOSMemory()` after the initial index build and after each
+  watch-driven flush, returning freed pages to the OS so idle RSS settles
+  near the live index size instead of the build high-water. All server-layer
+  only (`cmd/ken-mcp/gc.go`) — the library (`internal/search`) and CLI stay
+  untuned, so embedders and batch runs are unaffected. New `scripts/rss_bench.sh`
+  samples `/proc/<pid>/status` VmRSS/VmHWM to make the numbers comparable to
+  the external bench that motivated this.
+
 ### Added
 
 - **`.kenignore` / `.sembleignore` ignore-file support (ADR-038).** ken now
