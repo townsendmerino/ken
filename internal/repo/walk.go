@@ -17,13 +17,36 @@ import (
 	"os"
 	gopath "path"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"github.com/townsendmerino/ken/internal/bytesize"
 )
 
-// DefaultMaxFileBytes skips files larger than this (minified bundles,
-// vendored blobs, binaries) — they hurt code-search quality and bloat the
-// index. 2 MiB comfortably holds any hand-written source file.
+// DefaultMaxFileBytes skips files larger than this (vendored blobs, data
+// dumps, binaries) — they hurt code-search quality and bloat the index. 2 MiB
+// comfortably holds any hand-written source file. Override with the
+// KEN_MAX_FILE_BYTES env (byte count or 1MiB/512KiB-style suffix).
 const DefaultMaxFileBytes = 2 << 20
+
+const (
+	// sniffBytes is the head read to classify a file as binary (NUL sniff)
+	// and/or minified (average line length). 8 KiB matches git's binary
+	// heuristic and is ample to judge line structure — a single read serves
+	// both checks.
+	sniffBytes = 8192
+
+	// DefaultMaxAvgLineBytes: a file whose sampled head averages more than
+	// this many bytes per line is treated as minified/generated (built
+	// JS/CSS bundles, single-line JSON) and skipped — pathological for
+	// chunking, BM25 postings, and embedding count. Hand-written source
+	// averages ~30–40. Override/disable with KEN_MAX_AVG_LINE_BYTES (0 off).
+	DefaultMaxAvgLineBytes = 1000
+
+	// minMinifiedSample: don't judge minification on a head smaller than
+	// this — a short single-line config file is legitimate.
+	minMinifiedSample = 2048
+)
 
 // Options configures a walk.
 //
@@ -50,10 +73,8 @@ type Options struct {
 // wraps WalkFS(os.DirFS(opts.Root), opts) for callers still using a
 // concrete path.
 func WalkFS(fsys fs.FS, opts Options) ([]string, error) {
-	maxBytes := opts.MaxFileBytes
-	if maxBytes == 0 {
-		maxBytes = DefaultMaxFileBytes
-	}
+	maxBytes := resolveMaxFileBytes(opts.MaxFileBytes)
+	maxAvgLine := resolveMaxAvgLineBytes()
 
 	// Active scope stack — outer-first, inner-last. Lazily extended
 	// each time fs.WalkDir descends into a new directory; truncated on
@@ -116,7 +137,7 @@ func WalkFS(fsys fs.FS, opts Options) ([]string, error) {
 		if info.Size() > maxBytes {
 			return nil
 		}
-		if isBinaryFS(fsys, path) {
+		if binary, minified := sniffFS(fsys, path, maxAvgLine); binary || minified {
 			return nil
 		}
 		files = append(files, path)
@@ -154,23 +175,21 @@ func Walk(opts Options) ([]string, error) {
 // required. Tracked for a future release; the watch path is not the
 // place to redo a tree walk on every event.
 type Matcher struct {
-	root         string
-	scopes       []scopedGitignore
-	maxFileBytes int64
+	root            string
+	scopes          []scopedGitignore
+	maxFileBytes    int64
+	maxAvgLineBytes int
 }
 
 // NewMatcher walks opts.Root once, collecting every .gitignore into a
 // scope stack, and returns a reusable filter. Same defaults as
 // Walk(opts). See ADR-015 for nested-gitignore semantics.
 func NewMatcher(opts Options) *Matcher {
-	maxBytes := opts.MaxFileBytes
-	if maxBytes == 0 {
-		maxBytes = DefaultMaxFileBytes
-	}
 	return &Matcher{
-		root:         opts.Root,
-		scopes:       collectGitignores(os.DirFS(opts.Root)),
-		maxFileBytes: maxBytes,
+		root:            opts.Root,
+		scopes:          collectGitignores(os.DirFS(opts.Root)),
+		maxFileBytes:    resolveMaxFileBytes(opts.MaxFileBytes),
+		maxAvgLineBytes: resolveMaxAvgLineBytes(),
 	}
 }
 
@@ -222,37 +241,83 @@ func (m *Matcher) ShouldIndex(relPath string) bool {
 	if info.Size() > m.maxFileBytes {
 		return false
 	}
-	if isBinary(abs) {
+	if binary, minified := sniffOS(abs, m.maxAvgLineBytes); binary || minified {
 		return false
 	}
 	return true
 }
 
-// isBinary reports whether the first 8 KiB of the file contains a NUL byte,
-// the same cheap heuristic git uses to classify a blob as binary.
-//
-// Retained for Matcher.ShouldIndex, which is real-FS-only by construction.
-// WalkFS uses isBinaryFS.
-func isBinary(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return true // unreadable ⇒ don't index
+// resolveMaxFileBytes picks the per-file size cap: an explicit
+// opts.MaxFileBytes wins; otherwise KEN_MAX_FILE_BYTES (byte count or a
+// KiB/MiB/GiB suffix) if set and valid; otherwise DefaultMaxFileBytes.
+func resolveMaxFileBytes(optsMax int64) int64 {
+	if optsMax > 0 {
+		return optsMax
 	}
-	defer f.Close()
-	var buf [8192]byte
-	n, _ := f.Read(buf[:])
-	return bytes.IndexByte(buf[:n], 0) >= 0
+	if raw := os.Getenv("KEN_MAX_FILE_BYTES"); raw != "" {
+		if n, ok := bytesize.Parse(raw); ok && n > 0 {
+			return n
+		}
+	}
+	return DefaultMaxFileBytes
 }
 
-// isBinaryFS is the fs.FS variant of isBinary. Same 8 KiB NUL-sniff
-// heuristic, same "unreadable ⇒ don't index" fallback.
-func isBinaryFS(fsys fs.FS, path string) bool {
-	f, err := fsys.Open(path)
+// resolveMaxAvgLineBytes picks the minified-file threshold from
+// KEN_MAX_AVG_LINE_BYTES (a plain byte count; 0 disables the heuristic),
+// falling back to DefaultMaxAvgLineBytes.
+func resolveMaxAvgLineBytes() int {
+	if raw := os.Getenv("KEN_MAX_AVG_LINE_BYTES"); raw != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return DefaultMaxAvgLineBytes
+}
+
+// looksMinified reports whether a sampled file head reads as minified /
+// generated — its average line length exceeds maxAvgLine. maxAvgLine <= 0
+// disables the check; samples below minMinifiedSample are never flagged
+// (too little signal, and short single-line files are legitimate).
+func looksMinified(sample []byte, maxAvgLine int) bool {
+	if maxAvgLine <= 0 || len(sample) < minMinifiedSample {
+		return false
+	}
+	newlines := bytes.Count(sample, []byte{'\n'})
+	avg := len(sample) / (newlines + 1)
+	return avg > maxAvgLine
+}
+
+// sniffOS reads the first sniffBytes of a real file once and classifies it:
+// binary (NUL byte, git's heuristic) and/or minified (looksMinified). An
+// unreadable file is reported binary so it isn't indexed. Real-FS variant
+// for Matcher.ShouldIndex.
+func sniffOS(path string, maxAvgLine int) (binary, minified bool) {
+	f, err := os.Open(path)
 	if err != nil {
-		return true
+		return true, false // unreadable ⇒ don't index
 	}
 	defer f.Close()
-	var buf [8192]byte
+	var buf [sniffBytes]byte
 	n, _ := f.Read(buf[:])
-	return bytes.IndexByte(buf[:n], 0) >= 0
+	b := buf[:n]
+	if bytes.IndexByte(b, 0) >= 0 {
+		return true, false
+	}
+	return false, looksMinified(b, maxAvgLine)
+}
+
+// sniffFS is the fs.FS variant of sniffOS, used by WalkFS.
+func sniffFS(fsys fs.FS, path string, maxAvgLine int) (binary, minified bool) {
+	f, err := fsys.Open(path)
+	if err != nil {
+		return true, false
+	}
+	defer f.Close()
+	var buf [sniffBytes]byte
+	n, _ := f.Read(buf[:])
+	b := buf[:n]
+	if bytes.IndexByte(b, 0) >= 0 {
+		return true, false
+	}
+	return false, looksMinified(b, maxAvgLine)
 }

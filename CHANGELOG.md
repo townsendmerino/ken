@@ -17,6 +17,19 @@ pre-built binaries.
 
 ### Changed
 
+- **Build-path memory + minified-file skip (memory campaign M3).** The
+  per-file size cap (2 MiB) is now tunable via **`KEN_MAX_FILE_BYTES`**
+  (byte count or `512KiB`/`1MiB` suffix) instead of being hard-coded, and
+  ken now **skips minified/generated files** — those whose sampled head
+  averages more than **`KEN_MAX_AVG_LINE_BYTES`** (default 1000) bytes per
+  line (built JS/CSS bundles, single-line JSON), which are pathological for
+  chunking, BM25 postings, and embedding count. Both apply to `ken index`
+  and `ken-mcp`'s walk + watch. The minified check reuses the existing
+  binary-sniff read (no extra I/O), and filtering these files before
+  chunking also bounds worst-case in-flight bytes to
+  `KEN_MAX_FILE_BYTES × workers`. Set `KEN_MAX_AVG_LINE_BYTES=0` to disable
+  the heuristic. (Shared byte-size parsing extracted to `internal/bytesize`.)
+
 - **GC hygiene for the long-lived `ken-mcp` server (memory campaign M2).**
   `ken-mcp` now (1) defaults `GOGC=50` (unless you set `GOGC`), trimming
   steady-state heap/RSS for a process that idles between queries; (2) accepts

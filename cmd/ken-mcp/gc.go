@@ -3,9 +3,8 @@ package main
 import (
 	"os"
 	"runtime/debug"
-	"strconv"
-	"strings"
 
+	"github.com/townsendmerino/ken/internal/bytesize"
 	kenmcp "github.com/townsendmerino/ken/mcp"
 )
 
@@ -39,7 +38,7 @@ func setupGCHygiene(l *kenmcp.Logger) {
 	}
 
 	if raw := os.Getenv("KEN_MEMLIMIT"); raw != "" {
-		n, ok := parseByteSize(raw)
+		n, ok := bytesize.Parse(raw)
 		if !ok || n <= 0 {
 			l.Logf(kenmcp.LogWarn, "KEN_MEMLIMIT=%q: not a positive byte size (e.g. 1GiB, 512MiB, or a plain byte count) — ignoring", raw)
 			return
@@ -51,52 +50,4 @@ func setupGCHygiene(l *kenmcp.Logger) {
 		}
 		l.Logf(kenmcp.LogInfo, "GC: soft memory limit set to %d bytes via KEN_MEMLIMIT=%q%s", n, raw, note)
 	}
-}
-
-// parseByteSize parses a byte count with an optional binary (KiB/MiB/GiB) or
-// decimal (KB/MB/GB) suffix, or a bare integer of bytes. Case-insensitive;
-// whitespace around the number and unit is tolerated. Mirrors the suffixes
-// the Go runtime accepts for GOMEMLIMIT so KEN_MEMLIMIT reads the same way.
-func parseByteSize(s string) (int64, bool) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, false
-	}
-	i := 0
-	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-		i++
-	}
-	numPart := s[:i]
-	unit := strings.ToLower(strings.TrimSpace(s[i:]))
-	if numPart == "" {
-		return 0, false
-	}
-	n, err := strconv.ParseInt(numPart, 10, 64)
-	if err != nil || n < 0 {
-		return 0, false
-	}
-	var mult int64
-	switch unit {
-	case "", "b":
-		mult = 1
-	case "kib":
-		mult = 1 << 10
-	case "mib":
-		mult = 1 << 20
-	case "gib":
-		mult = 1 << 30
-	case "kb":
-		mult = 1_000
-	case "mb":
-		mult = 1_000_000
-	case "gb":
-		mult = 1_000_000_000
-	default:
-		return 0, false
-	}
-	// Guard against int64 overflow on absurd inputs.
-	if mult != 0 && n > (1<<62)/mult {
-		return 0, false
-	}
-	return n * mult, true
 }
