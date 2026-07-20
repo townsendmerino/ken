@@ -13,6 +13,24 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [Unreleased]
+
+### Added
+
+- **`.kenignore` / `.sembleignore` ignore-file support (ADR-038).** ken now
+  honors a `.kenignore` file (gitignore syntax, nested per-directory) to
+  exclude committed-but-not-worth-searching files — built bundles, generated
+  migrations, vendored code — from the index. Applied at index time by both
+  `ken index` and `ken-mcp`'s live watch. Semantics: **union with
+  `.gitignore`** (excluded if either matches), evaluated as independent
+  families so a `!negation` in one can't re-include what the other excluded.
+  `.sembleignore` is honored as a fallback for drop-in migration from semble
+  (`.kenignore` wins if both exist; existence, not rule count, decides).
+  Default-on and inert without the files — existing `.gitignore` behavior is
+  unchanged. On committed-artifact monorepos this is the biggest lever on
+  index size, cold-start time, and memory. (Motivated by an external memory
+  bench where ken indexed ~2× the files of ignore-parity tools.)
+
 ## [1.1.1] — 2026-07-16 — crypto/tls CVE fix + dependency updates
 
 A patch release: a reachable standard-library TLS CVE closed by a toolchain

@@ -20,13 +20,35 @@ type rule struct {
 
 type gitignore struct{ rules []rule }
 
+// ignoreFamily tags which independently-evaluated rule set a scope
+// belongs to. The two families use union semantics: a path is ignored
+// if EITHER family ignores it, and a negation (`!pattern`) in one family
+// can never re-include a path the other family ignored (ADR-038, "no
+// cross-file re-includes"). Within a family, nested scopes still compose
+// last-match-wins exactly like stock gitignore.
+type ignoreFamily uint8
+
+const (
+	familyGit ignoreFamily = iota // .gitignore
+	familyKen                     // .kenignore / .sembleignore (ADR-038)
+)
+
+// kenIgnoreNames are ken's own ignore filenames, in precedence order:
+// .kenignore wins; .sembleignore is a drop-in fallback for users
+// migrating from semble. In any given directory only the FIRST that
+// exists is loaded — an empty `.kenignore` still suppresses
+// `.sembleignore` (existence, not rule count, decides).
+var kenIgnoreNames = []string{".kenignore", ".sembleignore"}
+
 // scopedGitignore is a *gitignore plus the directory (slash-separated,
-// relative to the FS root; "" for the root .gitignore) whose patterns
-// it owns. WalkFS evaluates rules from outer scopes first, inner
-// scopes last, last-match-wins across the union of rules. See ADR-015.
+// relative to the FS root; "" for the root file) whose patterns it owns,
+// and the family it belongs to. WalkFS evaluates rules from outer scopes
+// first, inner scopes last, last-match-wins within each family. See
+// ADR-015 (nesting) and ADR-038 (the .kenignore family).
 type scopedGitignore struct {
-	dir string
-	gi  *gitignore
+	dir    string
+	gi     *gitignore
+	family ignoreFamily
 }
 
 // loadGitignoreFS reads the .gitignore at `name` (FS-relative path,
@@ -39,6 +61,24 @@ func loadGitignoreFS(fsys fs.FS, name string) *gitignore {
 		return &gitignore{}
 	}
 	return parseGitignore(data)
+}
+
+// loadKenIgnoreFS loads the ken-family ignore file for directory `dir`
+// (FS-relative, "" for root): .kenignore if it exists, else
+// .sembleignore. Existence — not rule count — ends the search, so an
+// empty .kenignore deliberately suppresses a sibling .sembleignore
+// (ADR-038). A directory with neither returns an empty *gitignore.
+func loadKenIgnoreFS(fsys fs.FS, dir string) *gitignore {
+	for _, name := range kenIgnoreNames {
+		p := name
+		if dir != "" {
+			p = gopath.Join(dir, name)
+		}
+		if data, err := fs.ReadFile(fsys, p); err == nil {
+			return parseGitignore(data) // exists → use it (even if empty), stop
+		}
+	}
+	return &gitignore{}
 }
 
 // parseGitignore compiles the rules in a .gitignore body.
@@ -71,32 +111,41 @@ func pruneScopes(scopes []scopedGitignore, path string) []scopedGitignore {
 }
 
 // matchScopes evaluates the rules of every scope against `path`,
-// outer-first, inner-last, last-match-wins across the union. Each
-// scope's patterns are evaluated relative to its scope.dir. Returns
-// true when the path should be ignored.
+// outer-first, inner-last. Each scope's patterns are evaluated relative
+// to its scope.dir. Returns true when the path should be ignored.
+//
+// The two ignore families (git, ken) are evaluated INDEPENDENTLY —
+// last-match-wins within each — and then unioned: ignored if either
+// family ignores. This is what enforces ADR-038's "no cross-file
+// re-includes": a `!pattern` in a .kenignore updates only the ken
+// decision, so it can never resurrect a path .gitignore excluded, and
+// vice versa. With no ken-family scopes present, `decided[familyKen]`
+// stays false and the result is identical to the pre-ADR-038 single
+// union — .gitignore behavior is unchanged.
 //
 // We deliberately inline the per-rule loop here rather than calling
 // (*gitignore).match per scope: that helper resets its `ignored` state
-// at every call, so calling it per scope would lose the union
-// semantics — an outer "ignore *.log" would be silently forgotten by
-// an inner scope that has no matching rule.
+// at every call, so calling it per scope would lose the within-family
+// union — an outer "ignore *.log" would be silently forgotten by an
+// inner scope that has no matching rule.
 func matchScopes(scopes []scopedGitignore, path string, isDir bool) bool {
-	ignored := false
+	var decided [2]bool // running decision per ignoreFamily
 	for _, scope := range scopes {
 		rel := relToScope(path, scope.dir)
 		if rel == "" {
 			continue
 		}
+		d := &decided[scope.family]
 		for _, r := range scope.gi.rules {
 			if r.dirOnly && !isDir {
 				continue
 			}
 			if r.re.MatchString(rel) {
-				ignored = !r.negate
+				*d = !r.negate
 			}
 		}
 	}
-	return ignored
+	return decided[familyGit] || decided[familyKen]
 }
 
 // relToScope returns path relative to scopeDir (slash-separated), or
@@ -127,11 +176,29 @@ func relToScope(path, scopeDir string) string {
 func collectGitignores(fsys fs.FS) []scopedGitignore {
 	var collected []scopedGitignore
 	var active []scopedGitignore // pruning state during DFS
-	if gi := loadGitignoreFS(fsys, ".gitignore"); len(gi.rules) > 0 {
-		s := scopedGitignore{dir: "", gi: gi}
-		collected = append(collected, s)
-		active = append(active, s)
+
+	// pushScopes loads both ignore families for directory `dir` and
+	// appends any non-empty scope to both the returned set and the DFS
+	// prune stack. .gitignore first, then the ken family (.kenignore /
+	// .sembleignore, ADR-038) — family, not order, keeps them independent.
+	pushScopes := func(dir string) {
+		gitPath := ".gitignore"
+		if dir != "" {
+			gitPath = gopath.Join(dir, ".gitignore")
+		}
+		if gi := loadGitignoreFS(fsys, gitPath); len(gi.rules) > 0 {
+			s := scopedGitignore{dir: dir, gi: gi, family: familyGit}
+			collected = append(collected, s)
+			active = append(active, s)
+		}
+		if gi := loadKenIgnoreFS(fsys, dir); len(gi.rules) > 0 {
+			s := scopedGitignore{dir: dir, gi: gi, family: familyKen}
+			collected = append(collected, s)
+			active = append(active, s)
+		}
 	}
+
+	pushScopes("")
 	_ = fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Permission denied on a single subtree shouldn't fail the
@@ -150,11 +217,7 @@ func collectGitignores(fsys fs.FS) []scopedGitignore {
 		if name == ".git" || name == ".ken" || matchScopes(active, path, true) {
 			return fs.SkipDir
 		}
-		if gi := loadGitignoreFS(fsys, gopath.Join(path, ".gitignore")); len(gi.rules) > 0 {
-			s := scopedGitignore{dir: path, gi: gi}
-			collected = append(collected, s)
-			active = append(active, s)
-		}
+		pushScopes(path)
 		return nil
 	})
 	return collected

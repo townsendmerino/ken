@@ -43,6 +43,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-035](#adr-035-ship-arm-b-structural-enrichment-in-the-production-indexer-stage-8-close) | Ship Arm B structural enrichment in the production indexer (Stage 8 close) | Accepted |
 | [ADR-036](#adr-036-close-the-startup--query-latency-perf-campaign) | Close the startup + query-latency perf campaign | Accepted |
 | [ADR-037](#adr-037-ken-mcp-auto-fetches-the-embedding-model-on-first-run-background-default-on) | ken-mcp auto-fetches the embedding model on first run (background, default-on) | Accepted |
+| [ADR-038](#adr-038-kenignore--sembleignore-ignore-file-parity) | `.kenignore` / `.sembleignore` ignore-file parity | Accepted |
 
 ---
 
@@ -2588,3 +2589,26 @@ This is the second "perf-campaign close" ADR in ken's history; ADR-029 closed pr
 - Tested via `autoFetchModel` unit tests (injected fetcher: success-flips-and-rebuilds, failure-stays-bm25, DB-flips-but-no-purge) + `Cache.Purge` test. The binary stdout-cleanliness tests are unaffected (they pin `KEN_MCP_MODE=bm25` or an explicit model dir, so they never auto-fetch).
 
 **Rejected alternatives:** synchronous fetch at startup (blocks the MCP client's connect, risks its startup timeout); per-`WatchedIndex` in-place re-embed hot-swap (needs a cache-iteration API + more plumbing for no UX gain over purge+rebuild); opt-in default (defeats the "fresh install lands on hybrid" goal — the whole point is the silent-downgrade surface).
+
+## ADR-038: `.kenignore` / `.sembleignore` ignore-file parity
+
+**Status:** Accepted (shipped). **Date:** 2026-07-19.
+
+**Context.** Denis Trofimov's 2026-07-18 Cursor-MCP memory bench measured ken-mcp at ~2.1 GB idle / ~2.9 GB peak on a PHP/Yii ERP monorepo vs sub-GB for Semble/Sonar/Veles. A root cause: ken is **gitignore-only**, so it indexed ~3.6k extra files / ~340 MiB of committed migrations + built assets that the ignore-parity tools excluded via their own ignore files — nearly doubling the corpus, and with it cold-start time (his biggest UX complaint) and live heap. The other tools honor a tool-specific ignore file; ken had no equivalent. Denis explicitly asked for a ken ignore file and for `.sembleignore` compatibility so a semble→ken switch needs no re-authoring.
+
+**Decision.** Add a **ken ignore family** applied at index time, using gitignore syntax through the existing common-subset rule engine (`internal/repo/ignore.go`):
+- `.kenignore` is the primary file; `.sembleignore` is a drop-in **fallback** consulted only when no `.kenignore` exists in that directory (precedence `.kenignore` > `.sembleignore`, decided by **existence** — an empty `.kenignore` still suppresses a sibling `.sembleignore`). One extra filename probe per directory.
+- Files are **nested and scoped** exactly like `.gitignore` (ADR-015 machinery reused): `subdir/.kenignore` rules evaluate relative to `subdir/`.
+- **Union with `.gitignore`, no cross-file re-includes.** A path is ignored if *either* family ignores it. The two families are evaluated independently (each last-match-wins within itself) and OR'd, so a `!pattern` in `.kenignore` can never re-include a `.gitignore`-excluded path, and vice versa.
+- **Default-on, no env var.** A tree with neither file behaves identically to before (the ken family stays empty), so there's nothing to opt into.
+
+**Mechanism.** `scopedGitignore` gains an `ignoreFamily` tag (`familyGit` / `familyKen`); `matchScopes` keeps a per-family running decision and returns `git || ken`. Both scope-stack builders — `WalkFS` (the initial walk) and `collectGitignores` (the `Matcher` snapshot behind the fsnotify watch path) — push a ken-family scope alongside each `.gitignore` via a shared `pushScopes` closure + a `loadKenIgnoreFS` helper. The watch path inherits the rule for free because it filters events through `Matcher.ShouldIndex`, which shares `matchScopes`.
+
+**Consequences / guardrails.**
+- **No behavior change without the files.** `decided[familyKen]` stays false absent any `.kenignore`/`.sembleignore`, so existing `.gitignore` semantics are byte-identical (regression-verified by the pre-existing walk/matcher tests).
+- **Expected impact** on Denis's corpus: roughly halves indexed files with a proper `.kenignore`, cutting cold start and live heap proportionally — the M1 half of the sub-GB-idle / <60s-cold-start acceptance target (M2 = GC hygiene is the other half).
+- The ignore files themselves are regular text files and are indexed (same as `.gitignore`).
+- **Freshness caveat is inherited:** like `.gitignore`, a `.kenignore` added/edited *after* `NewMatcher` construction isn't reflected until a re-index — the watch path doesn't re-walk on every event (unchanged from ADR-015).
+- Tested by golden `WalkFS` tests (`walk_kenignore_test.go`: precedence, empty-suppresses-fallback, union, both-direction no-cross-file-re-include, within-family negation subset, nesting) + `Matcher.ShouldIndex` tests for the watch path.
+
+**Rejected alternatives:** merging `.kenignore` rules into the *same* scope stack as `.gitignore` (simpler, but last-match-wins across the merged union would let a `.kenignore` negation re-include a git-ignored path — surprising and unwanted, hence the two-family split); a single root-only ignore file (loses the per-package nesting that made `.gitignore` work on real monorepos — ADR-015); an env var to enable the feature (nothing to gate — it's inert without the files, and parity tools ship it on by default).

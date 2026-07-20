@@ -58,10 +58,25 @@ func WalkFS(fsys fs.FS, opts Options) ([]string, error) {
 	// Active scope stack — outer-first, inner-last. Lazily extended
 	// each time fs.WalkDir descends into a new directory; truncated on
 	// the way back out via pruneScopes at each visit.
+	//
+	// pushScopes loads both ignore families for `dir`: .gitignore plus
+	// the ken family (.kenignore / .sembleignore, ADR-038). Families are
+	// evaluated independently by matchScopes, so a .kenignore never
+	// re-includes a git-ignored path.
 	var scopes []scopedGitignore
-	if gi := loadGitignoreFS(fsys, ".gitignore"); len(gi.rules) > 0 {
-		scopes = append(scopes, scopedGitignore{dir: "", gi: gi})
+	pushScopes := func(dir string) {
+		gitPath := ".gitignore"
+		if dir != "" {
+			gitPath = gopath.Join(dir, ".gitignore")
+		}
+		if gi := loadGitignoreFS(fsys, gitPath); len(gi.rules) > 0 {
+			scopes = append(scopes, scopedGitignore{dir: dir, gi: gi, family: familyGit})
+		}
+		if gi := loadKenIgnoreFS(fsys, dir); len(gi.rules) > 0 {
+			scopes = append(scopes, scopedGitignore{dir: dir, gi: gi, family: familyKen})
+		}
 	}
+	pushScopes("")
 
 	var files []string
 	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
@@ -84,13 +99,11 @@ func WalkFS(fsys fs.FS, opts Options) ([]string, error) {
 			if name == ".git" || name == ".ken" || matchScopes(scopes, path, true) {
 				return fs.SkipDir
 			}
-			// Push this directory's .gitignore (if any) so its children
-			// see it. Doing the load AFTER the prune-check above is
-			// intentional: a directory's own .gitignore never applies
+			// Push this directory's ignore files (if any) so its children
+			// see them. Doing the load AFTER the prune-check above is
+			// intentional: a directory's own ignore file never applies
 			// to the directory itself, only to its contents.
-			if gi := loadGitignoreFS(fsys, gopath.Join(path, ".gitignore")); len(gi.rules) > 0 {
-				scopes = append(scopes, scopedGitignore{dir: path, gi: gi})
-			}
+			pushScopes(path)
 			return nil
 		}
 		if !d.Type().IsRegular() || matchScopes(scopes, path, false) {

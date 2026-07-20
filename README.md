@@ -136,10 +136,26 @@ It also indexes **database schemas alongside code** — static `.sql` files (wit
 
 For plain prose with no code or structured docs, BM25 mode (`--mode=bm25`) carries the load; the semantic model is code-trained and unvalidated on literary text.
 
+### Excluding files: `.kenignore`
+
+ken respects your **`.gitignore`** files (nested, per-directory). But many repos commit files you don't want *searched* — generated migrations, built JS/CSS bundles, vendored code, fixtures. Drop a **`.kenignore`** at the repo root (or in any subdirectory) to exclude them from indexing. It uses the same syntax as `.gitignore`, is applied at index time, and is honored by both `ken index` and `ken-mcp`'s live watch:
+
+```gitignore
+# .kenignore — keep built + generated files out of the search index
+web/assets/          # compiled front-end bundles
+vendor/              # Composer / third-party PHP
+runtime/             # Yii runtime cache + logs
+**/migrations/*.php  # generated DB migrations
+*.min.js
+*.min.css
+```
+
+Semantics: **union with `.gitignore`** (a path is excluded if either ignores it), evaluated independently so a `!negation` in one file can't re-include what the other excluded. `.kenignore` is **default-on** — a repo without one behaves exactly as before. For a drop-in migration from semble, ken also honors **`.sembleignore`** as a fallback when no `.kenignore` is present (`.kenignore` wins if both exist). On large committed-artifact monorepos this is the single biggest lever on index size, cold-start time, and memory. See [ADR-038](docs/internal/DECISIONS.md#adr-038-kenignore--sembleignore-ignore-file-parity).
+
 ## How it works
 
 ```
-gitignore-respecting walk
+gitignore + .kenignore respecting walk
     → regex chunker (Python / Go / TS / Java / Rust) with line-chunker fallback
     → BM25 (Lucene variant, k1=1.5, b=0.75)  +  Model2Vec semantic (cosine over a dense matrix)
     → α-weighted RRF fusion (α auto-detected: 0.3 for symbol queries, 0.5 for NL)
