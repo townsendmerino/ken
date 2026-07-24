@@ -7,12 +7,17 @@
 // Scope is intentionally minimal:
 //   - Public models only (no HF auth flow). Gated/private models still
 //     need huggingface-cli.
-//   - No checksum verification at download. The embedding parity test
-//     (internal/embed/parity_test.go) catches a corrupt model at first
-//     inference; rebuilding HF's checksum subsystem here would duplicate
-//     that with weaker guarantees.
 //   - One model per destination dir. No registry, no version pinning
 //     UX, no switching between models.
+//
+// Download integrity (code review #1): `resolve/main` is a mutable ref with
+// no pinning, so each file is verified as it streams — the byte count against
+// Content-Length / X-Linked-Size, and the SHA-256 against HuggingFace's ETag
+// when it carries the git-lfs object id (the large safetensors file always
+// does). A truncated, empty, or swapped-mid-stream file is rejected before it
+// lands, which matters especially for the rerank checkpoint
+// (DefaultRerankModel), whose cosines have no downstream parity test to catch
+// a silently-corrupt model later.
 //
 // The default model + destination match what ken's bench harnesses
 // already expect, so a fresh user running `ken download-model` followed
@@ -21,12 +26,15 @@ package modelfetch
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -192,18 +200,26 @@ func fetchOne(ctx context.Context, opts Options, filename, target string) error 
 		return fmt.Errorf("%s: %s returned %d: %s", filename, url, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
 
-	tmp := target + ".tmp"
-	f, err := os.Create(tmp)
+	// Per-process unique temp file (code review #1): two ken processes
+	// fetching the same model concurrently (e.g. two ken-mcp instances
+	// auto-fetching) must not both write target+".tmp" and interleave into a
+	// corrupt file. os.CreateTemp gives each its own name; both atomically
+	// rename to target (last wins, and each is a fully-verified file).
+	f, err := os.CreateTemp(opts.Dest, filename+"-*.tmp")
 	if err != nil {
-		return fmt.Errorf("%s: creating %s: %w", filename, tmp, err)
+		return fmt.Errorf("%s: creating temp in %s: %w", filename, opts.Dest, err)
 	}
+	tmp := f.Name()
 
-	// Wrap the body in a progress writer so users see throughput on the
-	// 64 MB safetensors download. On a TTY the line refreshes in place;
-	// on non-TTY each update is a discrete line. Either way the writer
-	// terminates the line itself, so no trailing Fprintln here.
+	// Verify integrity as bytes stream past: a SHA-256 (checked against HF's
+	// git-lfs ETag when present) and the byte count (checked against
+	// Content-Length / X-Linked-Size). This is the download-time gate that
+	// catches a truncated / empty / swapped file on the unpinned
+	// resolve/main ref. On a TTY the progress line refreshes in place; the
+	// writer terminates its own line, so no trailing Fprintln here.
+	hash := sha256.New()
 	pw := newProgressWriter(opts.Progress, filename, resp.ContentLength)
-	written, err := io.Copy(f, io.TeeReader(resp.Body, pw))
+	written, err := io.Copy(f, io.TeeReader(resp.Body, io.MultiWriter(pw, hash)))
 	closeErr := f.Close()
 	pw.finish()
 
@@ -224,11 +240,63 @@ func fetchOne(ctx context.Context, opts Options, filename, target string) error 
 		return fmt.Errorf("%s: HF returned 200 with empty body (transient; retry)", filename)
 	}
 
+	// Byte-count verification — catches a chunked/CDN truncation that ends
+	// the stream early with no io.Copy error (written>0 but short). Both
+	// Content-Length and HF's X-Linked-Size (the authoritative LFS object
+	// size) are checked when present.
+	if resp.ContentLength >= 0 && written != resp.ContentLength {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("%s: truncated download: wrote %d bytes, Content-Length was %d (transient; retry)", filename, written, resp.ContentLength)
+	}
+	if xls := resp.Header.Get("X-Linked-Size"); xls != "" {
+		if want, perr := strconv.ParseInt(xls, 10, 64); perr == nil && want > 0 && written != want {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("%s: size mismatch: wrote %d bytes, X-Linked-Size was %d (transient; retry)", filename, written, want)
+		}
+	}
+
+	// Content-hash verification when HF's ETag carries the git-lfs SHA-256
+	// object id (the safetensors file always does; small non-LFS files serve
+	// a 40-hex git-blob sha1 which etagSHA256 ignores, falling back to the
+	// size checks above).
+	if want := etagSHA256(resp.Header.Get("ETag")); want != "" {
+		got := hex.EncodeToString(hash.Sum(nil))
+		if !strings.EqualFold(got, want) {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("%s: checksum mismatch (got %s, want %s) — corrupt or swapped download; retry or --force", filename, got, want)
+		}
+	}
+
+	// Preserve the pre-CreateTemp 0644 perms (CreateTemp makes 0600) so a
+	// model dir stays group/other-readable as before.
+	_ = os.Chmod(tmp, 0o644)
+
 	if err := os.Rename(tmp, target); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("%s: rename %s → %s: %w", filename, tmp, target, err)
 	}
 	return nil
+}
+
+// etagSHA256 extracts a git-lfs SHA-256 object id from an HF ETag header, or
+// "" if the ETag isn't one (weak validator, git-blob sha1, quoted md5, etc.).
+// HF serves the content SHA-256 as the ETag for LFS-backed files, so this is
+// a free content-integrity check with no extra API round-trip. A non-sha256
+// ETag simply falls back to the byte-count checks.
+func etagSHA256(etag string) string {
+	etag = strings.TrimSpace(etag)
+	etag = strings.TrimPrefix(etag, "W/") // weak-validator prefix
+	etag = strings.Trim(etag, `"`)
+	if len(etag) != 64 {
+		return ""
+	}
+	for i := 0; i < len(etag); i++ {
+		c := etag[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return ""
+		}
+	}
+	return etag
 }
 
 // progressWriter writes a "↓ <file> X.Y / Z.Y MB" status (or just
