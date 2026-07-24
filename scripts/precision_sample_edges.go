@@ -81,7 +81,7 @@ func main() {
 		if fs == nil {
 			continue
 		}
-		for _, callee := range fs.Calls {
+		for _, callee := range fs.CalleeNames() {
 			edges = append(edges, edge{File: rel, Callee: callee})
 		}
 	}

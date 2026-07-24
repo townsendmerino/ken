@@ -277,6 +277,8 @@ func modeString(m search.Mode) string {
 		return "semantic"
 	case search.ModeHybrid:
 		return "hybrid"
+	case search.ModeHybridRerank:
+		return "hybrid-rerank"
 	}
 	return "?"
 }

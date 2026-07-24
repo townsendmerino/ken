@@ -919,9 +919,13 @@ func (ix *Index) SearchMode(query string, k int, mode Mode) ([]Result, Mode) {
 		}
 		return out, mode
 	case ModeHybrid:
-		// hybridSearch already over-fetches by k*5 internally for its
-		// rerank pipeline; tombstones are filtered there.
-		ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, k, -1, nil)
+		// Over-fetch by tombstoneCount like the semantic/bm25 branches
+		// (code review §4): hybridSearch does NOT filter Tombstoned, and the
+		// out-loop below trims to exactly k *after* dropping tombstoned hits
+		// — so without the headroom, a tombstoned chunk in the top-k would
+		// leave the result short of k. (Latent while compaction precedes
+		// every publish, but the branch must not assume that.)
+		ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, overFetch, -1, nil)
 		out := make([]Result, 0, k)
 		for _, r := range ranked {
 			c := ix.chunks[r.idx]

@@ -859,6 +859,12 @@ func mysqlAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot,
 				}
 				collected = append(collected, cells)
 			}
+			// Surface a mid-iteration read error (code review §4): the other
+			// mysql row loops check rows.Err(); this sample loop didn't, so a
+			// partial sample was silently accepted.
+			if err := rows.Err(); err != nil {
+				warn(opts, "mysql: sample row iteration for %s ended early: %v", t.name, err)
+			}
 			rows.Close()
 			t.sampleRows = collected
 			return nil

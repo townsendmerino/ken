@@ -156,7 +156,7 @@ func report(ix *structural.Index, lang string, buildTime time.Duration) {
 			}
 		}
 		totalClasses += len(fs.Classes)
-		for _, c := range fs.Calls {
+		for _, c := range fs.CalleeNames() {
 			callFreq[c]++
 		}
 		for _, im := range fs.Imports {

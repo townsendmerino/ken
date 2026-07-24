@@ -207,7 +207,16 @@ func applyRerankerWithTelemetry(r Reranker, query string, ranked []Result, cfg r
 	for i := range head {
 		blended[i] = scored{i, cfg.beta*cosN[i] + (1.0-cfg.beta)*fusedN[i]}
 	}
-	sort.Slice(blended, func(a, b int) bool { return blended[a].final > blended[b].final })
+	// Stage-1-order tie-break on equal blended scores (code review §4):
+	// sort.Slice is unstable, and equal blends are real (duplicate text →
+	// equal cosine, or β=0/1 degenerate blends). Matches the idx tie-break
+	// in rerankTopK and ann.Flat so results are deterministic.
+	sort.Slice(blended, func(a, b int) bool {
+		if blended[a].final != blended[b].final {
+			return blended[a].final > blended[b].final
+		}
+		return blended[a].idx < blended[b].idx
+	})
 
 	out := make([]Result, 0, len(ranked))
 	for _, b := range blended {

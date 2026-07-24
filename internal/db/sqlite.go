@@ -492,6 +492,12 @@ func sqliteAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot
 			}
 			collected = append(collected, cells)
 		}
+		// Surface a mid-iteration read error (code review §4): without this,
+		// rows.Next() stopping early on an error silently accepts a partial
+		// sample. The Postgres path already checks rows.Err().
+		if err := rows.Err(); err != nil {
+			warn(opts, "sqlite: sample row iteration for %s ended early: %v", t.name, err)
+		}
 		rows.Close()
 		t.sampleRows = collected
 	}
