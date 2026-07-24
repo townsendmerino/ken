@@ -231,7 +231,14 @@ func (m *Matcher) ShouldIndex(relPath string) bool {
 		return false
 	}
 	abs := filepath.Join(m.root, filepath.FromSlash(relPath))
-	info, err := os.Stat(abs)
+	// M6 (code review §3): Lstat, not Stat. WalkFS rejects symlinks via the
+	// ReadDir entry's ModeSymlink type; ShouldIndex must match it. os.Stat
+	// follows the link and reports the TARGET's mode, so a symlink → regular
+	// file (e.g. `secret.go -> ../../../etc/passwd` added mid-watch, firing
+	// an fsnotify Create) would pass IsRegular and get its out-of-root target
+	// contents indexed. Lstat reports the link itself (ModeSymlink), so it's
+	// rejected here — before sniffOS (which os.Opens and would follow it).
+	info, err := os.Lstat(abs)
 	if err != nil {
 		return false
 	}

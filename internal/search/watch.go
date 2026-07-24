@@ -544,11 +544,23 @@ func (w *WatchedIndex) SetReranker(r Reranker, opts ...RerankerOption) {
 			o(&w.rerankCfg)
 		}
 	}
-	// Also attach to the currently-published snapshot so the change
-	// takes effect immediately, without waiting for the next flush.
+	// Apply to the currently-published snapshot immediately (without
+	// waiting for the next flush) — but via the atomic swap, NOT by
+	// mutating the live *Index in place (M4, code review §3). Lock-free
+	// Search readers dereference ix.reranker / ix.rerankCfg with no lock,
+	// so writing them on the published value is a data race: a torn 2-word
+	// interface read can pair a new itab with a stale data word and crash
+	// on method dispatch. Index has no lock fields and all its referenced
+	// data (bm/flat/model/chunks/vecs) is immutable after construction, so
+	// a shallow copy safely shares that data; only the fresh pointer carries
+	// the new reranker, and Store makes readers see old-or-new, never a
+	// half-written field. (Cheaper than buildUnionedIndexLocked's full
+	// BuildIndex rebuild for a field-only change.)
 	if cur := w.ix.Load(); cur != nil {
-		cur.reranker = r
-		cur.rerankCfg = w.rerankCfg
+		next := *cur
+		next.reranker = r
+		next.rerankCfg = w.rerankCfg
+		w.ix.Store(&next)
 	}
 }
 
@@ -718,6 +730,12 @@ func (w *WatchedIndex) appendFile(rel string) {
 	if err != nil {
 		return
 	}
+	// M3 (code review §3): apply the SAME Arm B enrichment the initial build
+	// does, gated on the same flag, BEFORE embedding — otherwise every file
+	// edited during a watch session is re-indexed without the func:/calls:/
+	// raises: label, and its BM25 tokens + embedding diverge from a fresh
+	// build, degrading the index as edits accumulate.
+	enrichChunks(rel, data, cs, w.fsOpts.DisableEnrichment)
 	for _, c := range cs {
 		w.chunks = append(w.chunks, c)
 		if w.model != nil {

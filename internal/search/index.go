@@ -323,6 +323,34 @@ func walkAndChunkFS(fsys fs.FS, mode Mode, chunkerName, modelDir string, opts FS
 //   - Collector reassembles by file index.
 //   - Migration folding stays serial.
 //
+// enrichChunks prepends the per-file Arm B structural-enrichment label
+// (func:/calls:/raises: terms from ExtractFile, ADR-035) to every chunk's
+// Text in place — before BM25 tokenization AND embedding, so both the
+// lexical and semantic sides see it. A no-op when disabled or when the
+// file's extension has no extractor (ExtractFile returns nil).
+//
+// Shared by the initial build (walkAndChunkFSWithModel) and the incremental
+// watch re-index (WatchedIndex.appendFile) so the two can't drift (code
+// review M3): before this, appendFile embedded raw text, so every file
+// edited during a session was re-indexed WITHOUT the label — a heterogeneous
+// index whose BM25 tokens and embeddings diverged from the initial build's.
+func enrichChunks(rel string, data []byte, cs []chunk.Chunk, disable bool) {
+	if disable {
+		return
+	}
+	efs := structural.ExtractFile(rel, data)
+	if efs == nil {
+		return
+	}
+	label := structural.EnrichFromFileStruct(efs, structural.EnrichOptions{})
+	if label == "" {
+		return
+	}
+	for i := range cs {
+		cs[i].Text = label + cs[i].Text
+	}
+}
+
 // Concurrency safety prerequisites (verified in parallelism Phase 1):
 //   - embed.StaticModel.Encode is goroutine-safe (TestEncodeConcurrent).
 //   - chunk.ChunkFile / sql.ParseFile are pure functions of their inputs.
@@ -416,16 +444,7 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 				// unchanged, which is the correct no-op behavior
 				// for unsupported languages). DisableEnrichment
 				// opts out entirely.
-				if !opts.DisableEnrichment {
-					if efs := structural.ExtractFile(j.rel, data); efs != nil {
-						label := structural.EnrichFromFileStruct(efs, structural.EnrichOptions{})
-						if label != "" {
-							for i := range cs {
-								cs[i].Text = label + cs[i].Text
-							}
-						}
-					}
-				}
+				enrichChunks(j.rel, data, cs, opts.DisableEnrichment)
 				var localVecs [][]float32
 				if model != nil {
 					localVecs = make([][]float32, len(cs))
