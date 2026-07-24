@@ -474,7 +474,6 @@ func sqliteAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot
 			rows.Close()
 			continue
 		}
-		t.sampleColumns = cols
 		var collected [][]string
 		for rows.Next() {
 			vals := make([]any, len(cols))

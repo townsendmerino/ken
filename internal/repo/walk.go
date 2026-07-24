@@ -46,10 +46,13 @@ const DefaultMaxFileBytes = 2 << 20
 
 const (
 	// sniffBytes is the head read to classify a file as binary (NUL sniff)
-	// and/or minified (average line length). 8 KiB matches git's binary
-	// heuristic and is ample to judge line structure — a single read serves
-	// both checks.
-	sniffBytes = 8192
+	// and/or minified (average line length) in one pass. 32 KiB (vs git's
+	// 8 KiB NUL window) so a bundle that leads with a short-lined license
+	// banner and then a single multi-MB line is still caught (code review
+	// §4) — the giant line lands within this window for any realistic
+	// banner. A file whose one giant line starts past 32 KiB still evades,
+	// but the per-file size cap bounds that blast radius.
+	sniffBytes = 32 << 10
 
 	// DefaultMaxAvgLineBytes: a file whose sampled head averages more than
 	// this many bytes per line is treated as minified/generated (built

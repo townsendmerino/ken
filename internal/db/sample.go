@@ -23,7 +23,7 @@ func init() {
 }
 
 // sampleRowsImpl pulls Options.SampleRows rows from every table in snap
-// and attaches them to tableInfo.sampleRows / sampleColumns. Also
+// and attaches them to tableInfo.sampleRows. Also
 // populates approxRowCount from pg_class.reltuples (free to query, no
 // extra COUNT(*) needed).
 //
@@ -85,12 +85,6 @@ func sampleOne(ctx context.Context, conn *pgx.Conn, t *tableInfo, opts Options) 
 	}
 	defer rows.Close()
 
-	fds := rows.FieldDescriptions()
-	colNames := make([]string, len(fds))
-	for i, fd := range fds {
-		colNames[i] = string(fd.Name)
-	}
-
 	var collected [][]string
 	for rows.Next() {
 		vals, err := rows.Values()
@@ -108,7 +102,6 @@ func sampleOne(ctx context.Context, conn *pgx.Conn, t *tableInfo, opts Options) 
 		warn(opts, "sample read failed for %s: %v", t.schema+"."+t.name, err)
 		return
 	}
-	t.sampleColumns = colNames
 	t.sampleRows = collected
 }
 

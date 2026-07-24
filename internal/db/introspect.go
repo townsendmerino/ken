@@ -33,10 +33,6 @@ type tableInfo struct {
 	// Populated only when Options.SampleRows > 0. Each inner slice is
 	// one row; values are already truncated for display. Nil otherwise.
 	sampleRows [][]string
-	// sampleColumns is the column-name header that aligns with
-	// sampleRows. Same length as each sampleRows row. Nil when no rows
-	// are sampled.
-	sampleColumns []string
 }
 
 type columnInfo struct {

@@ -65,6 +65,11 @@ const defaultInitialBackoff = 100 * time.Millisecond
 // drift to multi-minute reconnect intervals.
 const maxBackoff = 30 * time.Second
 
+// triggerRecheckInterval is how often the listener re-checks for a missing
+// NOTIFY event trigger on its live connection, so an operator who installs
+// it after startup is picked up without a restart (code review §4).
+const triggerRecheckInterval = 30 * time.Second
+
 // Listener manages a dedicated pgx connection that LISTENs for
 // ken_schema_changed notifications and calls onNotify (debounced) for
 // each batch of events.
@@ -160,11 +165,13 @@ func (l *Listener) runOnce(ctx context.Context) (listened bool, err error) {
 	}
 	defer conn.Close(context.Background())
 
-	// Trigger-existence check: if missing, log the fix command once
-	// per (re)connect and idle until ctx done. We do NOT spam stderr —
-	// the next reconnect (which fires when the connection eventually
-	// drops for any reason) will re-check, so operators see the warn
-	// at startup, fix it, and on the next reconnect listening resumes.
+	// Trigger-existence check: if missing, log the fix command once, then
+	// POLL for it on this live connection (code review §4). The prior
+	// version parked on <-ctx.Done() forever with a comment claiming "the
+	// next reconnect re-checks" — but nothing reconnects while the
+	// connection is healthy, so a trigger installed after startup was never
+	// picked up until a restart. Re-checking on a ticker fixes that; the
+	// Refresher's interval polling refreshes the schema in the meantime.
 	exists, err := triggerExists(ctx, conn)
 	if err != nil {
 		return false, fmt.Errorf("checking event trigger: %w", err)
@@ -172,9 +179,20 @@ func (l *Listener) runOnce(ctx context.Context) (listened bool, err error) {
 	if !exists {
 		fmt.Fprintf(l.logger, "ken-mcp listen: LISTEN/NOTIFY enabled but event trigger %q is not installed.\n", triggerName)
 		fmt.Fprintln(l.logger, "ken-mcp listen: run `ken-mcp print-listen-script | psql $KEN_DB_DSN` to install it.")
-		fmt.Fprintln(l.logger, "ken-mcp listen: listener idle until next reconnect (interval polling continues).")
-		<-ctx.Done()
-		return false, ctx.Err()
+		fmt.Fprintf(l.logger, "ken-mcp listen: re-checking every %s; interval polling still refreshes the schema until then.\n", triggerRecheckInterval)
+		ticker := time.NewTicker(triggerRecheckInterval)
+		defer ticker.Stop()
+		for !exists {
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-ticker.C:
+				if exists, err = triggerExists(ctx, conn); err != nil {
+					return false, fmt.Errorf("re-checking event trigger: %w", err)
+				}
+			}
+		}
+		fmt.Fprintln(l.logger, "ken-mcp listen: event trigger now present — activating.")
 	}
 
 	if _, err := conn.Exec(ctx, "LISTEN "+notifyChannel); err != nil {

@@ -39,8 +39,10 @@ import (
 // argument resolution the search and find_related handlers do:
 // args.Repo overrides the configured DefaultRepo; an empty repo
 // with no default falls back to a clear "configure repo" error.
-// Returns the resolved RepoBundle, or an MCP-shaped error result.
-func resolveBundleForTool(ctx context.Context, cfg *Config, repoArg string) (*RepoBundle, *sdk.CallToolResult, error) {
+// Returns the resolved RepoBundle, or a non-nil MCP-shaped error result
+// (the caller returns it directly). No error return — the failure IS the
+// *CallToolResult (code review §5).
+func resolveBundleForTool(ctx context.Context, cfg *Config, repoArg string) (*RepoBundle, *sdk.CallToolResult) {
 	repo := repoArg
 	if repo == "" {
 		repo = cfg.DefaultRepo
@@ -50,16 +52,16 @@ func resolveBundleForTool(ctx context.Context, cfg *Config, repoArg string) (*Re
 			"No repo specified and no default repo configured. " +
 				"Pass `repo` (a git URL or local directory path) or " +
 				"set KEN_MCP_DEFAULT_REPO at server startup.",
-		), nil
+		)
 	}
 	if cfg.Cache == nil {
-		return nil, textResult("server cache unavailable; cannot resolve repo"), nil
+		return nil, textResult("server cache unavailable; cannot resolve repo")
 	}
 	bundle, err := cfg.Cache.GetBundle(ctx, repo)
 	if err != nil {
-		return nil, textResult(fmt.Sprintf("failed to index %s: %v", repo, err)), nil
+		return nil, textResult(fmt.Sprintf("failed to index %s: %v", repo, err))
 	}
-	return bundle, nil, nil
+	return bundle, nil
 }
 
 // handleDefinition implements the `definition` tool: given a
@@ -67,9 +69,9 @@ func resolveBundleForTool(ctx context.Context, cfg *Config, repoArg string) (*Re
 // grade: collisions return all sites (ordered alphabetically by
 // file path); ambiguity is NOT resolved by type.
 func handleDefinition(ctx context.Context, cfg *Config, args DefinitionArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errRes, _ := resolveBundleForTool(ctx, cfg, args.Repo)
-	if errRes != nil {
-		return errRes, nil, nil
+	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo)
+	if errResult != nil {
+		return errResult, nil, nil
 	}
 	if bundle.Structural == nil {
 		return textResult(
@@ -133,9 +135,9 @@ func renderDefinitionMarkdown(r DefinitionResponse) string {
 // file both show up; tooling that needs semantic precision should
 // use an LSP, not ken's structural index.
 func handleReferences(ctx context.Context, cfg *Config, args ReferencesArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errRes, _ := resolveBundleForTool(ctx, cfg, args.Repo)
-	if errRes != nil {
-		return errRes, nil, nil
+	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo)
+	if errResult != nil {
+		return errResult, nil, nil
 	}
 	if bundle.Structural == nil {
 		return textResult(
@@ -210,9 +212,9 @@ func renderReferencesMarkdown(r ReferencesResponse) string {
 // LSP — ken's structural index doesn't track caller-function
 // scopes today.
 func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errRes, _ := resolveBundleForTool(ctx, cfg, args.Repo)
-	if errRes != nil {
-		return errRes, nil, nil
+	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo)
+	if errResult != nil {
+		return errResult, nil, nil
 	}
 	if bundle.Structural == nil {
 		return textResult(
@@ -285,9 +287,9 @@ func agreeVerb(cond bool, a, b string) string {
 // classes, methods). Given a directory path, return the outline of
 // every indexed file under that directory.
 func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errRes, _ := resolveBundleForTool(ctx, cfg, args.Repo)
-	if errRes != nil {
-		return errRes, nil, nil
+	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo)
+	if errResult != nil {
+		return errResult, nil, nil
 	}
 	if bundle.Structural == nil {
 		return textResult(
@@ -373,9 +375,9 @@ func convertOutlineEntries(file string, entries []structural.OutlineEntry) []Out
 // defined under it. Useful as a "what's in this repo?" or "what's
 // in this package?" overview.
 func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errRes, _ := resolveBundleForTool(ctx, cfg, args.Repo)
-	if errRes != nil {
-		return errRes, nil, nil
+	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo)
+	if errResult != nil {
+		return errResult, nil, nil
 	}
 	if bundle.Structural == nil {
 		return textResult(
