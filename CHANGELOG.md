@@ -13,6 +13,19 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [1.2.1] — 2026-07-24 — x/text CVE fix
+
+A security fast-follow to 1.2.0, same day. No feature or behavior changes.
+
+### Security
+
+- **Bumped `golang.org/x/text` v0.37.0 → v0.39.0 to fix `GO-2026-5970`** — an
+  infinite loop on invalid input in `x/text`. The `govulncheck` gate flagged it
+  as **reachable** via the Postgres connect path (pgx → Unicode normalization)
+  and the embedder's normalization. The advisory landed in the vuln database
+  after 1.2.0 was tagged, so 1.2.0's binaries shipped with the vulnerable
+  version; upgrade to 1.2.1. No source changes.
+
 ## [1.2.0] — 2026-07-24 — memory campaign + security/correctness hardening
 
 A large hardening release with **no breaking changes** (new public API and env
