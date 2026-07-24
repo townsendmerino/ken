@@ -180,22 +180,35 @@ func WrapStatic(ix *Index, root string, mode Mode, chunkerName string) *WatchedI
 // Uses the package-level WatchDebounce constant; tests override it
 // via newWatchedIndexForTest below.
 func NewWatchedIndex(root string, mode Mode, chunkerName, modelDir string, watch bool) (*WatchedIndex, error) {
-	return newWatchedIndexWithDebounce(root, mode, chunkerName, modelDir, watch, WatchDebounce, FSOptions{})
+	return newWatchedIndexWithDebounce(context.Background(), root, mode, chunkerName, modelDir, watch, WatchDebounce, FSOptions{})
 }
 
 // NewWatchedIndexWithOptions is NewWatchedIndex plus the FSOptions knob
 // added in v0.7.1 (currently the migration-folding opt-out). The zero
 // value of FSOptions matches NewWatchedIndex exactly.
 func NewWatchedIndexWithOptions(root string, mode Mode, chunkerName, modelDir string, watch bool, opts FSOptions) (*WatchedIndex, error) {
-	return newWatchedIndexWithDebounce(root, mode, chunkerName, modelDir, watch, WatchDebounce, opts)
+	return newWatchedIndexWithDebounce(context.Background(), root, mode, chunkerName, modelDir, watch, WatchDebounce, opts)
+}
+
+// NewWatchedIndexWithContext is NewWatchedIndexWithOptions with a caller
+// context that scopes the INITIAL walk+chunk+embed build only. Cancelling
+// ctx aborts an in-progress build promptly (returning a wrapped ctx.Err()
+// and publishing no partial index); the long-lived file watcher, once the
+// build succeeds, has its own lifecycle and is stopped via Close(), not this
+// ctx. ken-mcp threads its shutdown context here so a SIGINT during a large
+// uncached build doesn't hang shutdown for the whole build.
+func NewWatchedIndexWithContext(ctx context.Context, root string, mode Mode, chunkerName, modelDir string, watch bool, opts FSOptions) (*WatchedIndex, error) {
+	return newWatchedIndexWithDebounce(ctx, root, mode, chunkerName, modelDir, watch, WatchDebounce, opts)
 }
 
 // newWatchedIndexWithDebounce is the test-friendly constructor. The
 // debounce is captured into wi.debounce BEFORE the watcher goroutine
 // starts reading it, eliminating the race we'd have if tests set
-// wi.debounce post-construction.
-func newWatchedIndexWithDebounce(root string, mode Mode, chunkerName, modelDir string, watch bool, debounce time.Duration, opts FSOptions) (*WatchedIndex, error) {
-	chunks, vecs, model, migDirs, err := walkAndChunk(root, mode, chunkerName, modelDir, opts)
+// wi.debounce post-construction. ctx scopes the initial build only (see
+// NewWatchedIndexWithContext); the watcher goroutine created below uses its
+// own context.
+func newWatchedIndexWithDebounce(ctx context.Context, root string, mode Mode, chunkerName, modelDir string, watch bool, debounce time.Duration, opts FSOptions) (*WatchedIndex, error) {
+	chunks, vecs, model, migDirs, err := walkAndChunk(ctx, root, mode, chunkerName, modelDir, opts)
 	if err != nil {
 		return nil, err
 	}

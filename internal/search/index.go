@@ -31,6 +31,7 @@
 package search
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -228,7 +229,9 @@ func defaultFSOptions() FSOptions {
 // matches the FromFS default exactly, so callers that don't care can
 // keep using FromFS.
 func FromFSWithOptions(fsys fs.FS, mode Mode, chunkerName, modelDir string, opts FSOptions) (*Index, error) {
-	chunks, vecs, model, _, err := walkAndChunkFS(fsys, mode, chunkerName, modelDir, opts)
+	// Public 1.0 entry — no ctx in the signature; the build isn't cancellable
+	// here. The ken-mcp server uses the ctx-aware WatchedIndex path instead.
+	chunks, vecs, model, _, err := walkAndChunkFS(context.Background(), fsys, mode, chunkerName, modelDir, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -255,10 +258,10 @@ func FromPath(root string, mode Mode, chunkerName, modelDir string) (*Index, err
 // the set of directories the migration-folding pass treated as a
 // migration chain — WatchedIndex carries this forward so fsnotify-driven
 // flushes know which dirs to re-fold.
-func walkAndChunk(root string, mode Mode, chunkerName, modelDir string, opts FSOptions) (
+func walkAndChunk(ctx context.Context, root string, mode Mode, chunkerName, modelDir string, opts FSOptions) (
 	chunks []chunk.Chunk, vecs [][]float32, model *embed.StaticModel, migDirs map[string]bool, err error,
 ) {
-	return walkAndChunkFS(os.DirFS(root), mode, chunkerName, modelDir, opts)
+	return walkAndChunkFS(ctx, os.DirFS(root), mode, chunkerName, modelDir, opts)
 }
 
 // walkAndChunkFS resolves modelDir to an *embed.StaticModel (when the mode
@@ -266,7 +269,7 @@ func walkAndChunk(root string, mode Mode, chunkerName, modelDir string, opts FSO
 // walkAndChunkFSWithModel. Kept for callers that resolve the model path
 // at index-build time (the in-tree path-based entry points and the
 // watcher).
-func walkAndChunkFS(fsys fs.FS, mode Mode, chunkerName, modelDir string, opts FSOptions) (
+func walkAndChunkFS(ctx context.Context, fsys fs.FS, mode Mode, chunkerName, modelDir string, opts FSOptions) (
 	chunks []chunk.Chunk, vecs [][]float32, model *embed.StaticModel, migDirs map[string]bool, err error,
 ) {
 	if mode.needsModel() {
@@ -279,7 +282,7 @@ func walkAndChunkFS(fsys fs.FS, mode Mode, chunkerName, modelDir string, opts FS
 		}
 		model = m
 	}
-	chunks, vecs, returnedModel, migDirs, err := walkAndChunkFSWithModel(fsys, mode, chunkerName, model, opts)
+	chunks, vecs, returnedModel, migDirs, err := walkAndChunkFSWithModel(ctx, fsys, mode, chunkerName, model, opts)
 	return chunks, vecs, returnedModel, migDirs, err
 }
 
@@ -357,7 +360,7 @@ func enrichChunks(rel string, data []byte, cs []chunk.Chunk, disable bool) {
 //   - The treesitter chunker's ParserPool is sync.Pool-backed by design
 //     (ADR-010); regex + line chunkers are stateless.
 //   - tokenizerPool (v0.8.6 / ADR-028) is sync.Pool, concurrency-safe.
-func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel, opts FSOptions) (
+func walkAndChunkFSWithModel(ctx context.Context, fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel, opts FSOptions) (
 	chunks []chunk.Chunk, vecs [][]float32, returnedModel *embed.StaticModel, migDirs map[string]bool, err error,
 ) {
 	// ModeHybridRerank uses the same build-time pipeline as ModeHybrid
@@ -413,6 +416,14 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 	for range numWorkers {
 		wg.Go(func() {
 			for j := range jobs {
+				// Cancellation checkpoint: on a cancelled build (e.g. SIGINT
+				// during a large uncached index) skip the heavy read/chunk/
+				// embed but keep draining `jobs` so wg.Wait unblocks. The
+				// post-Wait ctx.Err() check turns this into a clean error
+				// return — no partial index is published.
+				if ctx.Err() != nil {
+					continue
+				}
 				data, rerr := fs.ReadFile(fsys, j.rel)
 				if rerr != nil {
 					select {
@@ -457,11 +468,26 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 		})
 	}
 
+feedLoop:
 	for i, rel := range files {
-		jobs <- job{idx: i, rel: rel}
+		select {
+		case <-ctx.Done():
+			// Stop enqueueing; workers drain the buffered jobs (skipping
+			// work) so wg.Wait below still completes promptly.
+			break feedLoop
+		case jobs <- job{idx: i, rel: rel}:
+		}
 	}
 	close(jobs)
 	wg.Wait()
+
+	// Cancelled build → return ctx.Err() and publish NO partial index. This
+	// runs before the flatten/migration passes, so the caller
+	// (newWatchedIndexWithDebounce) never builds an Index from partial
+	// materials; the cache's singleflight discards the error result.
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, nil, nil, nil, fmt.Errorf("search: index build cancelled: %w", cerr)
+	}
 
 	// Surface the first worker error if any. Workers continue draining
 	// jobs after their first error so the wg.Wait above is unblocked;
@@ -494,6 +520,9 @@ func walkAndChunkFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *e
 		}
 		sort.Strings(dirs)
 		for _, d := range dirs {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, nil, nil, nil, fmt.Errorf("search: index build cancelled: %w", cerr)
+			}
 			folded, ferr := sql.FoldMigrations(fsys, d, opts.LogWriter)
 			if ferr != nil {
 				if opts.LogWriter != nil {
@@ -561,7 +590,7 @@ func chunkOneFile(chunkerName, rel string, data []byte, skipSQLStructural bool) 
 // embedded corpora include numbered .sql files in the same directory get
 // folded chunks automatically — no API change required.
 func FromFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel) (*Index, error) {
-	chunks, vecs, m, _, err := walkAndChunkFSWithModel(fsys, mode, chunkerName, model, FSOptions{})
+	chunks, vecs, m, _, err := walkAndChunkFSWithModel(context.Background(), fsys, mode, chunkerName, model, FSOptions{})
 	if err != nil {
 		return nil, err
 	}

@@ -57,6 +57,7 @@ package search
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -197,7 +198,7 @@ func BuildAndSerializeIndex(fsys fs.FS, opts BuildOptions) ([]byte, error) {
 	if opts.Mode.needsModel() && opts.Model == nil {
 		return nil, fmt.Errorf("search: BuildAndSerializeIndex: mode %v requires Options.Model", opts.Mode)
 	}
-	chunks, vecs, _, _, err := walkAndChunkFSWithModel(fsys, opts.Mode, opts.Chunker, opts.Model, FSOptions{})
+	chunks, vecs, _, _, err := walkAndChunkFSWithModel(context.Background(), fsys, opts.Mode, opts.Chunker, opts.Model, FSOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("search: BuildAndSerializeIndex: %w", err)
 	}

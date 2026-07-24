@@ -68,6 +68,12 @@ func init() {
 	log.SetOutput(os.Stderr)
 }
 
+// defaultShutdownGrace bounds how long, after a shutdown signal, main waits
+// for in-flight tool calls to drain before forcing exit. Overridable via
+// KEN_MCP_SHUTDOWN_GRACE (any time.Duration). Keeps a slow/ctx-ignoring
+// in-flight request from hanging shutdown indefinitely.
+const defaultShutdownGrace = 5 * time.Second
+
 // modelAvailable reports whether dir looks like a usable Model2Vec snapshot.
 func modelAvailable(dir string) bool {
 	if dir == "" {
@@ -187,7 +193,7 @@ func localPathHasPrebuilt(dir string) bool {
 //     corpus is still indexable; a slower-but-correct result beats an
 //     outage. (Distinct from mismatch, which is a config error the
 //     operator must fix.)
-func loadOrBuildWatched(dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, logger *kenmcp.Logger) (*search.WatchedIndex, error) {
+func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, logger *kenmcp.Logger) (*search.WatchedIndex, error) {
 	if data, err := os.ReadFile(prebuiltIndexPath(dir)); err == nil {
 		var model *embed.StaticModel
 		if mode != search.ModeBM25 {
@@ -195,7 +201,7 @@ func loadOrBuildWatched(dir string, mode search.Mode, modeStr, chunker, modelDir
 			if mErr != nil {
 				logger.Logf(kenmcp.LogWarn, "pre-built index %s needs a model but loading %q failed (%v); live-indexing instead",
 					prebuiltIndexPath(dir), modelDir, mErr)
-				return liveWatched(dir, mode, chunker, modelDir, fsOpts, logger)
+				return liveWatched(ctx, dir, mode, chunker, modelDir, fsOpts, logger)
 			}
 			model = m
 		}
@@ -217,15 +223,16 @@ func loadOrBuildWatched(dir string, mode search.Mode, modeStr, chunker, modelDir
 			logger.Logf(kenmcp.LogWarn, "pre-built index %s unusable (%v); live-indexing instead", prebuiltIndexPath(dir), lErr)
 		}
 	}
-	return liveWatched(dir, mode, chunker, modelDir, fsOpts, logger)
+	return liveWatched(ctx, dir, mode, chunker, modelDir, fsOpts, logger)
 }
 
 // liveWatched is the original walk+chunk+embed build with the file
 // watcher enabled (v0.3+ behavior). Factored out so loadOrBuildWatched
-// has a single fallback call site.
-func liveWatched(dir string, mode search.Mode, chunker, modelDir string, fsOpts search.FSOptions, logger *kenmcp.Logger) (*search.WatchedIndex, error) {
+// has a single fallback call site. ctx scopes the initial build so a
+// shutdown signal cancels a large in-progress index (Fix 2).
+func liveWatched(ctx context.Context, dir string, mode search.Mode, chunker, modelDir string, fsOpts search.FSOptions, logger *kenmcp.Logger) (*search.WatchedIndex, error) {
 	logger.Logf(kenmcp.LogInfo, "indexing %s (live build, watching)", dir)
-	ix, err := search.NewWatchedIndexWithOptions(dir, mode, chunker, modelDir, true, fsOpts)
+	ix, err := search.NewWatchedIndexWithContext(ctx, dir, mode, chunker, modelDir, true, fsOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -363,7 +370,7 @@ func main() {
 			LogWriter:             os.Stderr,
 		}
 		bMode, bModeStr, bModelDir := bs.snapshot()
-		ix, err := loadOrBuildWatched(dir, bMode, bModeStr, chunker, bModelDir, fsOpts, logger)
+		ix, err := loadOrBuildWatched(ctx, dir, bMode, bModeStr, chunker, bModelDir, fsOpts, logger)
 		if err != nil {
 			if cleanup != nil {
 				cleanup()
@@ -556,15 +563,65 @@ func main() {
 		cache.Close()
 	}
 
-	err := srv.Run(ctx, &sdkmcp.StdioTransport{})
-	cleanup()
-	// io.EOF (client closed stdin) and context.Canceled (SIGINT/SIGTERM) are
-	// both clean shutdowns. errors.Is, not ==, so a wrapped EOF from the SDK
-	// isn't misclassified as fatal (code review §4). Avoid fmt.Print — stderr
-	// only, even on the error path (stdout is the JSON-RPC channel).
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
-		logger.Logf(kenmcp.LogError, "server exit: %v", err)
-		os.Exit(1)
+	// cleanup runs exactly once, from whichever shutdown path reaches it.
+	var cleanupOnce sync.Once
+	doCleanup := func() { cleanupOnce.Do(cleanup) }
+
+	// finish is the normal terminal path (Run returned on its own): clean up,
+	// then exit. io.EOF (client closed stdin) and context.Canceled
+	// (SIGINT/SIGTERM after a completed drain) are both clean shutdowns.
+	// errors.Is, not ==, so a wrapped EOF from the SDK isn't misclassified as
+	// fatal (code review §4). Avoid fmt.Print — stderr only (stdout is the
+	// JSON-RPC channel).
+	finish := func(err error) {
+		doCleanup()
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
+			logger.Logf(kenmcp.LogError, "server exit: %v", err)
+			os.Exit(1)
+		}
+	}
+
+	// Run the server in a goroutine so main can bound the shutdown drain.
+	// srv.Run blocks until the SDK's jsonrpc2 layer is idle — i.e. in-flight
+	// tool calls DO drain (code review Task B). The residual risk it addresses
+	// here: a ctx-ignoring in-flight build could make that drain arbitrarily
+	// long, and a second signal was previously swallowed by NotifyContext.
+	runDone := make(chan error, 1)
+	go func() { runDone <- srv.Run(ctx, &sdkmcp.StdioTransport{}) }()
+
+	select {
+	case err := <-runDone:
+		// Normal termination — most commonly stdin-EOF, where ctx was never
+		// cancelled. Unchanged behavior.
+		finish(err)
+	case <-ctx.Done():
+		// A signal (SIGINT/SIGTERM) arrived; ctx is cancelled and in-flight
+		// handlers are draining inside srv.Run (Fix 2 lets a build honor the
+		// cancellation now). Give the drain a bounded grace window, then force
+		// exit so shutdown can't hang, and register a fresh signal channel so
+		// a SECOND signal always force-quits (NotifyContext no longer delivers
+		// after the first — the first signal already used its channel).
+		grace := envDuration("KEN_MCP_SHUTDOWN_GRACE", defaultShutdownGrace, logger)
+		logger.Logf(kenmcp.LogInfo, "shutdown signal received; draining in-flight requests (grace %s)…", grace)
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(sigCh)
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+
+		select {
+		case err := <-runDone:
+			finish(err) // drain completed within the grace window
+		case <-timer.C:
+			logger.Logf(kenmcp.LogWarn, "shutdown grace (%s) expired; forcing exit (an in-flight request did not finish in time)", grace)
+			doCleanup()
+			os.Exit(0)
+		case <-sigCh:
+			logger.Logf(kenmcp.LogWarn, "second signal received; forcing exit")
+			doCleanup()
+			os.Exit(0)
+		}
 	}
 }
 

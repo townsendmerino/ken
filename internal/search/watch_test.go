@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,7 +44,7 @@ const shortDebounce = 60 * time.Millisecond
 // wi.debounce against the goroutine).
 func withShortDebounce(t *testing.T, root string, watch bool) *WatchedIndex {
 	t.Helper()
-	wi, err := newWatchedIndexWithDebounce(root, ModeBM25, "regex", "", watch, shortDebounce, FSOptions{})
+	wi, err := newWatchedIndexWithDebounce(context.Background(), root, ModeBM25, "regex", "", watch, shortDebounce, FSOptions{})
 	if err != nil {
 		t.Fatalf("NewWatchedIndex: %v", err)
 	}
@@ -419,7 +420,7 @@ func TestWatchedIndex_Close_StopsWatcher(t *testing.T) {
 	root := makeTempRepo(t, map[string]string{"a.py": "def a(): pass\n"})
 
 	before := runtime.NumGoroutine()
-	wi, err := newWatchedIndexWithDebounce(root, ModeBM25, "regex", "", true, shortDebounce, FSOptions{})
+	wi, err := newWatchedIndexWithDebounce(context.Background(), root, ModeBM25, "regex", "", true, shortDebounce, FSOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

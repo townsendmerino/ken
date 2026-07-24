@@ -79,6 +79,7 @@ stdin and stdout **are** the JSON-RPC channel. ANY write to stdout outside of th
 - `KEN_MCP_CACHE_SIZE` — LRU bound (default 16); `0` means caching is disabled (re-index on every request).
 - `KEN_MCP_LOG_LEVEL` — `debug`/`info`/`warn`/`error` (default `warn`); all logs go to stderr.
 - `KEN_MEMLIMIT` — optional soft memory limit for the long-lived server (`1GiB`/`512MiB`/byte count → `debug.SetMemoryLimit`; overrides `GOMEMLIMIT`). M2 GC hygiene: ken-mcp also applies `GOGC=50` by default (unless `GOGC` is set) and calls `debug.FreeOSMemory()` after the initial index build and each watch flush — all binary-layer only (`cmd/ken-mcp/gc.go`), never `internal/search`/aikit.
+- `KEN_MCP_SHUTDOWN_GRACE` — bounded drain window after SIGINT/SIGTERM (Go duration, default `5s`); in-flight tool calls drain within it, then main force-exits. A second signal force-quits immediately. Shutdown threads the signal context into the index build so a large in-flight build honors cancellation (Task B fix; `NewWatchedIndexWithContext`).
 
 All env vars are validated at startup. Invalid values (typoed enums like `KEN_MCP_MODE=hybryd`, non-integer `KEN_MCP_CACHE_SIZE=of`, `KEN_MCP_MODEL_DIR` pointing at a non-existent path) log a stderr warning and fall back to the documented default — the silent-typo failure mode (where `Atoi("of")` returned 0 and disabled the cache) is gone. Enum match is case-sensitive: `Hybrid` warns and falls back to `hybrid`. Helpers live in `cmd/ken-mcp/env.go` (`envInt` / `envEnum` / `envPath` / `envPathOrURL`).
 

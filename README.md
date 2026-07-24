@@ -103,6 +103,7 @@ command = "/absolute/path/to/ken-mcp"
 | `KEN_MCP_CACHE_SIZE` | `16` | LRU bound on the repo→Index cache. |
 | `KEN_MCP_LOG_LEVEL` | `warn` | `debug` / `info` / `warn` / `error`. All logs go to stderr; **stdout is the JSON-RPC channel** ([details](docs/DESIGN.md#hard-rule--stdoutstderr-contract)). |
 | `KEN_MEMLIMIT` | (unset) | Soft memory limit for the long-lived server (`1GiB`, `512MiB`, or a byte count), applied via `debug.SetMemoryLimit`. Overrides `GOMEMLIMIT` when both are set. ken-mcp also defaults `GOGC=50` (lower steady-state RSS) unless you set `GOGC` yourself. |
+| `KEN_MCP_SHUTDOWN_GRACE` | `5s` | After a SIGINT/SIGTERM, how long to let in-flight tool calls drain before forcing exit (any Go duration). A second signal force-quits immediately. |
 | `KEN_MAX_FILE_BYTES` | `2MiB` | Skip files larger than this from indexing (`512KiB` / byte count). Applies to `ken index` and `ken-mcp`. Lower it on artifact-heavy repos to shrink the index + memory. |
 | `KEN_MAX_AVG_LINE_BYTES` | `1000` | Skip **minified/generated** files whose sampled head averages more than this many bytes per line (built JS/CSS bundles, single-line JSON). `0` disables the heuristic. |
 | `KEN_MAX_FILES` | `1000000` | Admission cap on indexable file count — a repo above it is rejected with an error rather than risking OOM. Generous by default (the Linux kernel is ~80k files); lower it to harden a server against hostile repos, `0` = unlimited. |
