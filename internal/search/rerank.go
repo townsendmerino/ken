@@ -249,14 +249,14 @@ func extractSymbolName(query string) string {
 }
 
 func maxScore(m map[int]float64) float64 {
-	max := 0.0
+	hi := 0.0
 	first := true
 	for _, v := range m {
-		if first || v > max {
-			max, first = v, false
+		if first || v > hi {
+			hi, first = v, false
 		}
 	}
-	return max
+	return hi
 }
 
 // sortedKeys returns map keys ascending — determinism where semble relies

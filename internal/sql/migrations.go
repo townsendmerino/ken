@@ -205,13 +205,13 @@ func renameInFirstParens(s, oldName, newName string) string {
 	if open < 0 {
 		return s
 	}
-	close := matchingParen(s, open)
-	if close < 0 {
+	closeIdx := matchingParen(s, open)
+	if closeIdx < 0 {
 		return s
 	}
-	inner := s[open+1 : close]
+	inner := s[open+1 : closeIdx]
 	rewritten := wordBoundaryReplace(inner, oldName, newName)
-	return s[:open+1] + rewritten + s[close:]
+	return s[:open+1] + rewritten + s[closeIdx:]
 }
 
 // matchingParen returns the index of the ')' that matches the '('

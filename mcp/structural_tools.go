@@ -262,17 +262,18 @@ func renderCallersMarkdown(r CallersResponse) string {
 	fmt.Fprintf(&b, "# Callers: `%s`\n\n", r.Symbol)
 	fmt.Fprintf(&b, "_%d file%s contain%s a call to this name. File-level granularity; "+
 		"tree-sitter-grade, name-resolved, NOT type-resolved._\n\n",
-		len(r.Files), pluralS(len(r.Files)), didOrDoes(len(r.Files) == 1, "s", ""))
+		len(r.Files), pluralS(len(r.Files)), agreeVerb(len(r.Files) == 1, "s", ""))
 	for i, f := range r.Files {
 		fmt.Fprintf(&b, "%d. **%s**\n", i+1, f)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// didOrDoes returns a or b depending on cond — tiny helper to keep
+// agreeVerb returns a or b depending on cond — tiny helper to keep
 // English subject-verb agreement readable inline (e.g. "1 file
-// contains" vs "5 files contain").
-func didOrDoes(cond bool, a, b string) string {
+// contains" vs "5 files contain"). Not specific to did/does; the name
+// describes the general subject-verb agreement pick.
+func agreeVerb(cond bool, a, b string) string {
 	if cond {
 		return a
 	}

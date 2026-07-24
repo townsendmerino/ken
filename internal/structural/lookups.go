@@ -311,16 +311,6 @@ func (ix *Index) Outline(filePath string) []OutlineEntry {
 	}
 	var out []OutlineEntry
 
-	// Build a set of method names for fast skip of duplicate
-	// top-level entries (methods also appear in fs.Functions with
-	// IsMethod=true; we render them under their class instead).
-	methodSet := make(map[string]struct{})
-	for _, cls := range fs.Classes {
-		for _, m := range cls.Methods {
-			methodSet[m.EnclosingClass+"."+m.Name] = struct{}{}
-		}
-	}
-
 	// Walk in the order FileStruct stored them. For each top-level
 	// function emit it directly. For a method (IsMethod=true)
 	// skip — it'll be emitted via its containing class.

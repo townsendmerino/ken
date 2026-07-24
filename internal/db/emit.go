@@ -147,11 +147,11 @@ func extractIndexColumns(indexdef string) string {
 	if open < 0 {
 		return ""
 	}
-	close := strings.LastIndex(indexdef, ")")
-	if close < 0 || close <= open {
+	closeIdx := strings.LastIndex(indexdef, ")")
+	if closeIdx < 0 || closeIdx <= open {
 		return ""
 	}
-	return strings.TrimSpace(indexdef[open+1 : close])
+	return strings.TrimSpace(indexdef[open+1 : closeIdx])
 }
 
 // renderViewChunk produces a VIEW chunk with the body truncated at
