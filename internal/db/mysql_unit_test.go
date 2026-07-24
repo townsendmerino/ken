@@ -7,69 +7,61 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-// TestMySQLURLToNative covers the URL-to-native DSN rewrite. The
-// driver only accepts the native form, so this conversion is
-// load-bearing for every operator who pastes the URL shape.
-func TestMySQLURLToNative(t *testing.T) {
+// TestMySQLURLToConfig covers the URL-to-*mysql.Config rewrite. The driver
+// only accepts the native form, so this conversion is load-bearing for every
+// operator who pastes the URL shape. Assertions are on the structured config
+// fields (User/Passwd/Addr/DBName), which is exactly what makes a password
+// with '/'/'@'/'?' safe — it's never spliced through a native string.
+func TestMySQLURLToConfig(t *testing.T) {
 	cases := []struct {
-		name string
-		in   string
-		want string
+		name                       string
+		in                         string
+		user, passwd, addr, dbname string
 	}{
-		{
-			"user+pass+port+db+query",
-			"mysql://alice:s3cret@db.local:3306/mydb?parseTime=true",
-			"alice:s3cret@tcp(db.local:3306)/mydb?parseTime=true",
-		},
-		{
-			"default port when omitted",
-			"mysql://alice:s3cret@db.local/mydb",
-			"alice:s3cret@tcp(db.local:3306)/mydb",
-		},
-		{
-			"no creds",
-			"mysql://db.local:3306/mydb",
-			"tcp(db.local:3306)/mydb",
-		},
-		{
-			"no db",
-			"mysql://alice:s3cret@db.local:3306/",
-			"alice:s3cret@tcp(db.local:3306)/",
-		},
-		{
-			"user only, no password",
-			"mysql://alice@db.local/mydb",
-			"alice@tcp(db.local:3306)/mydb",
-		},
+		{"user+pass+port+db+query", "mysql://alice:s3cret@db.local:3306/mydb?parseTime=true", "alice", "s3cret", "db.local:3306", "mydb"},
+		{"default port when omitted", "mysql://alice:s3cret@db.local/mydb", "alice", "s3cret", "db.local:3306", "mydb"},
+		{"no creds", "mysql://db.local:3306/mydb", "", "", "db.local:3306", "mydb"},
+		{"no db", "mysql://alice:s3cret@db.local:3306/", "alice", "s3cret", "db.local:3306", ""},
+		{"user only, no password", "mysql://alice@db.local/mydb", "alice", "", "db.local:3306", "mydb"},
+		// The bug the string-splice version had: a '/' (or '@'/'?') in the
+		// password. url-encoded in the URL, decoded into cfg.Passwd exactly.
+		{"password with slash/at/question", "mysql://alice:p%2Fa%40ss%3Fx@db.local/mydb", "alice", "p/a@ss?x", "db.local:3306", "mydb"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := mysqlURLToNative(c.in)
+			cfg, err := mysqlURLToConfig(c.in)
 			if err != nil {
-				t.Fatalf("mysqlURLToNative(%q) error: %v", c.in, err)
+				t.Fatalf("mysqlURLToConfig(%q) error: %v", c.in, err)
 			}
-			if got != c.want {
-				t.Errorf("mysqlURLToNative(%q) = %q, want %q", c.in, got, c.want)
+			if cfg.User != c.user || cfg.Passwd != c.passwd || cfg.Addr != c.addr || cfg.DBName != c.dbname {
+				t.Errorf("mysqlURLToConfig(%q) = {User:%q Passwd:%q Addr:%q DBName:%q}, want {User:%q Passwd:%q Addr:%q DBName:%q}",
+					c.in, cfg.User, cfg.Passwd, cfg.Addr, cfg.DBName, c.user, c.passwd, c.addr, c.dbname)
 			}
 		})
 	}
 }
 
-// TestMySQLURLToNative_Errors confirms invalid URL DSNs are rejected
-// rather than producing a garbled native form.
-func TestMySQLURLToNative_Errors(t *testing.T) {
+// TestMySQLURLToConfig_Errors confirms invalid URL DSNs are rejected, and
+// crucially that the error NEVER echoes the password (M5 credential leak).
+func TestMySQLURLToConfig_Errors(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
 	}{
 		{"wrong scheme", "postgres://h/d"},
 		{"missing host", "mysql:///db"},
+		// A bad port makes url.Parse fail with an *url.Error that embeds the
+		// whole input, password included — the exact M5 leak.
+		{"bad port with password", "mysql://alice:hunter2@db.local:notaport/mydb"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := mysqlURLToNative(c.in)
+			_, err := mysqlURLToConfig(c.in)
 			if err == nil {
-				t.Errorf("mysqlURLToNative(%q) returned nil error; want error", c.in)
+				t.Fatalf("mysqlURLToConfig(%q) returned nil error; want error", c.in)
+			}
+			if strings.Contains(err.Error(), "hunter2") || strings.Contains(err.Error(), "alice") {
+				t.Errorf("mysqlURLToConfig error leaked credentials: %v", err)
 			}
 		})
 	}

@@ -138,17 +138,22 @@ func indexSchemaMySQL(ctx context.Context, opts Options) ([]chunk.Chunk, error) 
 // handed to mysql.ParseDSN — the native form is the engine's canonical
 // shape. parseTime=true is always set.
 func parseMySQLDSN(dsn string) (*mysql.Config, error) {
-	native := dsn
+	var cfg *mysql.Config
 	if strings.Contains(dsn, "://") {
-		converted, err := mysqlURLToNative(dsn)
+		c, err := mysqlURLToConfig(dsn)
 		if err != nil {
-			return nil, fmt.Errorf("parse URL DSN: %w", err)
+			return nil, err // already credential-safe (see mysqlURLToConfig)
 		}
-		native = converted
-	}
-	cfg, err := mysql.ParseDSN(native)
-	if err != nil {
-		return nil, fmt.Errorf("mysql.ParseDSN: %w", err)
+		cfg = c
+	} else {
+		c, err := mysql.ParseDSN(dsn)
+		if err != nil {
+			// A native DSN embeds the password; never echo it. ParseDSN's
+			// errors are static sentinels today, but stay conservative
+			// (code review M5).
+			return nil, errors.New("db: mysql: unparseable native DSN")
+		}
+		cfg = c
 	}
 	// Force parseTime=true for time.Time columns. Operators paste DSNs
 	// from .env files that often omit this and end up with []byte
@@ -157,28 +162,28 @@ func parseMySQLDSN(dsn string) (*mysql.Config, error) {
 	return cfg, nil
 }
 
-// mysqlURLToNative converts mysql://user:pass@host:port/db?param=value
-// to the driver's native user:pass@tcp(host:port)/db?param=value. The
-// driver doesn't accept the URL form directly — every wrapper library
-// that documents URL-style DSNs does this conversion internally.
-func mysqlURLToNative(raw string) (string, error) {
+// mysqlURLToConfig converts a mysql://user:pass@host:port/db?params URL into
+// a *mysql.Config the driver understands (it doesn't accept the URL form
+// directly). It parses a CREDENTIAL-LESS native DSN first so mysql.ParseDSN
+// owns addr + every special-param interpretation (tls, parseTime, loc,
+// collation, …), then sets the URL-decoded credentials STRUCTURALLY. Two bugs
+// the old string-splice version had are closed by this shape:
+//   - M5 credential leak: url.Parse's *url.Error echoes the entire input
+//     (password included) in its message; on failure we return a generic
+//     error that omits the raw DSN.
+//   - password corruption: splicing a URL-decoded password back into the
+//     native grammar broke on '/', '@', '?', ':' (the native '/' delimits
+//     the dbname). Setting cfg.Passwd directly can't be mis-parsed.
+func mysqlURLToConfig(raw string) (*mysql.Config, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", err
+		return nil, errors.New("db: mysql: unparseable mysql:// URL DSN")
 	}
 	if !strings.EqualFold(u.Scheme, "mysql") {
-		return "", fmt.Errorf("unsupported scheme %q (want mysql://)", u.Scheme)
+		return nil, fmt.Errorf("unsupported scheme %q (want mysql://)", u.Scheme)
 	}
 	if u.Host == "" {
-		return "", errors.New("URL DSN missing host")
-	}
-	user := ""
-	pass := ""
-	if u.User != nil {
-		user = u.User.Username()
-		if p, ok := u.User.Password(); ok {
-			pass = p
-		}
+		return nil, errors.New("db: mysql: URL DSN missing host")
 	}
 	host := u.Hostname()
 	port := u.Port()
@@ -187,21 +192,25 @@ func mysqlURLToNative(raw string) (string, error) {
 	}
 	db := strings.TrimPrefix(u.Path, "/")
 
-	var b strings.Builder
-	if user != "" {
-		b.WriteString(user)
-		if pass != "" {
-			b.WriteByte(':')
-			b.WriteString(pass)
-		}
-		b.WriteByte('@')
-	}
-	fmt.Fprintf(&b, "tcp(%s:%s)/%s", host, port, db)
+	// Credential-less native DSN → no password in the string, nothing to
+	// mis-splice, and ParseDSN still interprets all special params.
+	native := fmt.Sprintf("tcp(%s:%s)/%s", host, port, db)
 	if u.RawQuery != "" {
-		b.WriteByte('?')
-		b.WriteString(u.RawQuery)
+		native += "?" + u.RawQuery
 	}
-	return b.String(), nil
+	cfg, err := mysql.ParseDSN(native)
+	if err != nil {
+		// `native` carries no credentials, so this is safe to wrap — but
+		// ParseDSN's errors are static sentinels regardless.
+		return nil, fmt.Errorf("db: mysql: invalid URL DSN parameters: %w", err)
+	}
+	if u.User != nil {
+		cfg.User = u.User.Username()
+		if p, ok := u.User.Password(); ok {
+			cfg.Passwd = p // decoded, set structurally — never string-spliced
+		}
+	}
+	return cfg, nil
 }
 
 // mysqlEngineHost renders the "mysql@host" portion of the freshness

@@ -34,6 +34,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -191,7 +192,10 @@ func dsnEngine(dsn string) string {
 func indexSchemaPostgres(ctx context.Context, opts Options) ([]chunk.Chunk, error) {
 	cfg, err := pgx.ParseConfig(opts.DSN)
 	if err != nil {
-		return nil, fmt.Errorf("db: parse DSN: %w", err)
+		// pgconn.ParseConfig url.Parses URL-form DSNs; *url.Error echoes the
+		// whole input (password included). Don't wrap it (code review M5 —
+		// sibling of the mysqlURLToConfig leak).
+		return nil, errors.New("db: unparseable postgres DSN")
 	}
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
