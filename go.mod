@@ -8,7 +8,7 @@ require (
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
-	github.com/odvcencio/gotreesitter v0.20.5
+	github.com/odvcencio/gotreesitter v0.47.0
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/townsendmerino/aikit v1.11.0
 	go.uber.org/goleak v1.3.0
