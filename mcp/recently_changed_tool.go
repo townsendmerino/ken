@@ -37,19 +37,19 @@ const DefaultRecentlyChangedCommits = 10
 func handleRecentlyChanged(ctx context.Context, cfg *Config, args RecentlyChangedArgs) (*sdk.CallToolResult, any, error) {
 	source, err := resolveRepo(cfg, args.Repo)
 	if err != nil {
-		return textResult(err.Error()), nil, nil
+		return errorResult(args.Output, err.Error()), nil, nil
 	}
 	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
-		return textResult(
-			"recently_changed needs a local repo path. URL-form repos are " +
-				"cached into a temp clone for retrieval but ken doesn't expose " +
-				"that path through this tool yet. Clone the repo locally and " +
-				"pass the directory path, or use git log directly via your " +
+		return errorResult(args.Output,
+			"recently_changed needs a local repo path. URL-form repos are "+
+				"cached into a temp clone for retrieval but ken doesn't expose "+
+				"that path through this tool yet. Clone the repo locally and "+
+				"pass the directory path, or use git log directly via your "+
 				"shell.",
 		), nil, nil
 	}
 	if st, err := os.Stat(source); err != nil || !st.IsDir() {
-		return textResult(fmt.Sprintf(
+		return errorResult(args.Output, fmt.Sprintf(
 			"recently_changed: %q is not a directory. Pass a local path containing a git working tree.",
 			source)), nil, nil
 	}
@@ -64,18 +64,18 @@ func handleRecentlyChanged(ctx context.Context, cfg *Config, args RecentlyChange
 
 	repo, err := git.PlainOpen(source)
 	if err != nil {
-		return textResult(fmt.Sprintf(
+		return errorResult(args.Output, fmt.Sprintf(
 			"recently_changed: %q is not a git repository: %v. Pass a directory that "+
 				"contains a .git folder (or a worktree of one).",
 			source, err)), nil, nil
 	}
 	head, err := repo.Head()
 	if err != nil {
-		return textResult(fmt.Sprintf("recently_changed: cannot resolve HEAD: %v", err)), nil, nil
+		return errorResult(args.Output, fmt.Sprintf("recently_changed: cannot resolve HEAD: %v", err)), nil, nil
 	}
 	iter, err := repo.Log(&git.LogOptions{From: head.Hash()})
 	if err != nil {
-		return textResult(fmt.Sprintf("recently_changed: cannot iterate log: %v", err)), nil, nil
+		return errorResult(args.Output, fmt.Sprintf("recently_changed: cannot iterate log: %v", err)), nil, nil
 	}
 	defer iter.Close()
 

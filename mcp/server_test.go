@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -170,6 +171,34 @@ func TestServer_TopKClamped(t *testing.T) {
 		},
 	}); err != nil {
 		t.Fatalf("CallTool(find_related, huge top_k): %v", err)
+	}
+}
+
+// TestServer_ErrorPathHonorsJSON pins code review §4: an error/edge response
+// in output:"json" mode must be valid JSON ({"error": ...}), not plain text,
+// so a json-mode agent that json.Parses every result doesn't break on the
+// error path. Driven via `definition` with an empty symbol (an edge return).
+func TestServer_ErrorPathHonorsJSON(t *testing.T) {
+	ctx, sess, cleanup := newInMemoryServerClient(t)
+	defer cleanup()
+
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name:      "definition",
+		Arguments: map[string]any{"symbol": "", "output": "json"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(definition): %v", err)
+	}
+	txt, ok := res.Content[0].(*sdk.TextContent)
+	if !ok {
+		t.Fatalf("content type = %T, want *TextContent", res.Content[0])
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(txt.Text), &m); err != nil {
+		t.Fatalf("json-mode error response is not valid JSON: %v\n--- got ---\n%s", err, txt.Text)
+	}
+	if _, ok := m["error"]; !ok {
+		t.Errorf("json-mode error response missing 'error' key: %s", txt.Text)
 	}
 }
 

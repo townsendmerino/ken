@@ -42,24 +42,24 @@ import (
 // Returns the resolved RepoBundle, or a non-nil MCP-shaped error result
 // (the caller returns it directly). No error return — the failure IS the
 // *CallToolResult (code review §5).
-func resolveBundleForTool(ctx context.Context, cfg *Config, repoArg string) (*RepoBundle, *sdk.CallToolResult) {
+func resolveBundleForTool(ctx context.Context, cfg *Config, repoArg, outputMode string) (*RepoBundle, *sdk.CallToolResult) {
 	repo := repoArg
 	if repo == "" {
 		repo = cfg.DefaultRepo
 	}
 	if repo == "" {
-		return nil, textResult(
-			"No repo specified and no default repo configured. " +
-				"Pass `repo` (a git URL or local directory path) or " +
+		return nil, errorResult(outputMode,
+			"No repo specified and no default repo configured. "+
+				"Pass `repo` (a git URL or local directory path) or "+
 				"set KEN_MCP_DEFAULT_REPO at server startup.",
 		)
 	}
 	if cfg.Cache == nil {
-		return nil, textResult("server cache unavailable; cannot resolve repo")
+		return nil, errorResult(outputMode, "server cache unavailable; cannot resolve repo")
 	}
 	bundle, err := cfg.Cache.GetBundle(ctx, repo)
 	if err != nil {
-		return nil, textResult(fmt.Sprintf("failed to index %s: %v", repo, err))
+		return nil, errorResult(outputMode, fmt.Sprintf("failed to index %s: %v", repo, err))
 	}
 	return bundle, nil
 }
@@ -69,20 +69,20 @@ func resolveBundleForTool(ctx context.Context, cfg *Config, repoArg string) (*Re
 // grade: collisions return all sites (ordered alphabetically by
 // file path); ambiguity is NOT resolved by type.
 func handleDefinition(ctx context.Context, cfg *Config, args DefinitionArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo)
+	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo, args.Output)
 	if errResult != nil {
 		return errResult, nil, nil
 	}
 	if bundle.Structural == nil {
-		return textResult(
-			"No structural index available for this repo. " +
-				"The structural index has no extractors for this corpus. " +
+		return errorResult(args.Output,
+			"No structural index available for this repo. "+
+				"The structural index has no extractors for this corpus. "+
 				"repos with no .py files have no structural index.",
 		), nil, nil
 	}
 	sym := strings.TrimSpace(args.Symbol)
 	if sym == "" {
-		return textResult("symbol is required"), nil, nil
+		return errorResult(args.Output, "symbol is required"), nil, nil
 	}
 
 	sites := bundle.Structural.Definition(sym)
@@ -135,19 +135,19 @@ func renderDefinitionMarkdown(r DefinitionResponse) string {
 // file both show up; tooling that needs semantic precision should
 // use an LSP, not ken's structural index.
 func handleReferences(ctx context.Context, cfg *Config, args ReferencesArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo)
+	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo, args.Output)
 	if errResult != nil {
 		return errResult, nil, nil
 	}
 	if bundle.Structural == nil {
-		return textResult(
-			"No structural index available for this repo. " +
+		return errorResult(args.Output,
+			"No structural index available for this repo. "+
 				"The structural index has no extractors registered for any file in this corpus.",
 		), nil, nil
 	}
 	sym := strings.TrimSpace(args.Symbol)
 	if sym == "" {
-		return textResult("symbol is required"), nil, nil
+		return errorResult(args.Output, "symbol is required"), nil, nil
 	}
 
 	refs := bundle.Structural.References(sym)
@@ -212,19 +212,19 @@ func renderReferencesMarkdown(r ReferencesResponse) string {
 // LSP — ken's structural index doesn't track caller-function
 // scopes today.
 func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo)
+	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo, args.Output)
 	if errResult != nil {
 		return errResult, nil, nil
 	}
 	if bundle.Structural == nil {
-		return textResult(
-			"No structural index available for this repo. " +
+		return errorResult(args.Output,
+			"No structural index available for this repo. "+
 				"The structural index has no extractors registered for any file in this corpus.",
 		), nil, nil
 	}
 	sym := strings.TrimSpace(args.Symbol)
 	if sym == "" {
-		return textResult("symbol is required"), nil, nil
+		return errorResult(args.Output, "symbol is required"), nil, nil
 	}
 
 	sites := bundle.Structural.Callers(sym)
@@ -287,19 +287,19 @@ func agreeVerb(cond bool, a, b string) string {
 // classes, methods). Given a directory path, return the outline of
 // every indexed file under that directory.
 func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo)
+	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo, args.Output)
 	if errResult != nil {
 		return errResult, nil, nil
 	}
 	if bundle.Structural == nil {
-		return textResult(
-			"No structural index available for this repo. " +
+		return errorResult(args.Output,
+			"No structural index available for this repo. "+
 				"The structural index has no extractors registered for any file in this corpus.",
 		), nil, nil
 	}
 	rawPath := strings.TrimSpace(args.Path)
 	if rawPath == "" {
-		return textResult("path is required (a file path or directory path relative to the repo root)"), nil, nil
+		return errorResult(args.Output, "path is required (a file path or directory path relative to the repo root)"), nil, nil
 	}
 	path := structural.NormalizePath(rawPath)
 
@@ -375,13 +375,13 @@ func convertOutlineEntries(file string, entries []structural.OutlineEntry) []Out
 // defined under it. Useful as a "what's in this repo?" or "what's
 // in this package?" overview.
 func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo)
+	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo, args.Output)
 	if errResult != nil {
 		return errResult, nil, nil
 	}
 	if bundle.Structural == nil {
-		return textResult(
-			"No structural index available for this repo. " +
+		return errorResult(args.Output,
+			"No structural index available for this repo. "+
 				"The structural index has no extractors registered for any file in this corpus.",
 		), nil, nil
 	}

@@ -370,11 +370,11 @@ func textResult(s string) *sdk.CallToolResult {
 func handleSearch(ctx context.Context, cfg *Config, args SearchArgs) (*sdk.CallToolResult, any, error) {
 	source, err := resolveRepo(cfg, args.Repo)
 	if err != nil {
-		return textResult(err.Error()), nil, nil
+		return errorResult(args.Output, err.Error()), nil, nil
 	}
 	wi, err := cfg.Cache.Get(ctx, source)
 	if err != nil {
-		return textResult(fmt.Sprintf("Failed to index %q: %s", source, err.Error())), nil, nil
+		return errorResult(args.Output, fmt.Sprintf("Failed to index %q: %s", source, err.Error())), nil, nil
 	}
 	// sourceRoot for usage stats: only meaningful for local-path
 	// sources where the chunk's relative path can be stat()ed for
@@ -385,15 +385,15 @@ func handleSearch(ctx context.Context, cfg *Config, args SearchArgs) (*sdk.CallT
 
 func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
 	if args.FilePath == "" || args.Line <= 0 {
-		return textResult("file_path is required and line must be ≥ 1."), nil, nil
+		return errorResult(args.Output, "file_path is required and line must be ≥ 1."), nil, nil
 	}
 	source, err := resolveRepo(cfg, args.Repo)
 	if err != nil {
-		return textResult(err.Error()), nil, nil
+		return errorResult(args.Output, err.Error()), nil, nil
 	}
 	wi, err := cfg.Cache.Get(ctx, source)
 	if err != nil {
-		return textResult(fmt.Sprintf("Failed to index %q: %s", source, err.Error())), nil, nil
+		return errorResult(args.Output, fmt.Sprintf("Failed to index %q: %s", source, err.Error())), nil, nil
 	}
 	return runFindRelatedWithUsage(wi.Load(), args, cfg.UsageRecorder, source)
 }
@@ -428,7 +428,7 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 	if args.Mode != "" {
 		parsed, perr := search.ParseMode(args.Mode)
 		if perr != nil {
-			return textResult(perr.Error()), nil, nil
+			return errorResult(args.Output, perr.Error()), nil, nil
 		}
 		requestedMode = parsed
 	}

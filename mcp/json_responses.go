@@ -185,6 +185,16 @@ type RecentlyChangedCommit struct {
 // with a clear error rather than silently treated as markdown — we'd
 // rather an agent that mis-spells "jsom" sees the typo than gets
 // the wrong format.
+// errorResult renders an error / edge-case message honoring the requested
+// output mode, so a json-mode agent that json.Parses every tool result
+// doesn't break on an error path (code review §4). json → {"error": msg};
+// markdown / empty / unknown → the plain message. Reuses dispatchOutput so
+// the mode handling stays in one place.
+func errorResult(outputMode, msg string) *sdk.CallToolResult {
+	res, _, _ := dispatchOutput(outputMode, map[string]string{"error": msg}, msg)
+	return res
+}
+
 func dispatchOutput(outputMode string, resp any, markdown string) (*sdk.CallToolResult, any, error) {
 	switch outputMode {
 	case "", "markdown":
