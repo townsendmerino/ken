@@ -105,6 +105,7 @@ command = "/absolute/path/to/ken-mcp"
 | `KEN_MEMLIMIT` | (unset) | Soft memory limit for the long-lived server (`1GiB`, `512MiB`, or a byte count), applied via `debug.SetMemoryLimit`. Overrides `GOMEMLIMIT` when both are set. ken-mcp also defaults `GOGC=50` (lower steady-state RSS) unless you set `GOGC` yourself. |
 | `KEN_MAX_FILE_BYTES` | `2MiB` | Skip files larger than this from indexing (`512KiB` / byte count). Applies to `ken index` and `ken-mcp`. Lower it on artifact-heavy repos to shrink the index + memory. |
 | `KEN_MAX_AVG_LINE_BYTES` | `1000` | Skip **minified/generated** files whose sampled head averages more than this many bytes per line (built JS/CSS bundles, single-line JSON). `0` disables the heuristic. |
+| `KEN_MAX_FILES` | `1000000` | Admission cap on indexable file count — a repo above it is rejected with an error rather than risking OOM. Generous by default (the Linux kernel is ~80k files); lower it to harden a server against hostile repos, `0` = unlimited. |
 | `KEN_ALLOW_PRIVATE_CLONE_TARGETS` | `0` | Off by default: for `http(s)` `repo` URLs, ken rejects loopback / link-local / RFC1918 addresses (SSRF guard). Set `1` to allow internal git hosts. |
 
 The full env reference — including the `KEN_DB_*` database variables — is in [docs/USERS.md](docs/USERS.md) and [docs/db-indexing.md](docs/db-indexing.md). For agents that should route between ken and grep deliberately (rather than ken's default "prefer ken" instruction), see the routing snippet in [docs/USERS.md](docs/USERS.md).

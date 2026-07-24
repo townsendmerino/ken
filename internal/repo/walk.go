@@ -13,6 +13,7 @@ package repo
 
 import (
 	"bytes"
+	"errors"
 	"io/fs"
 	"os"
 	gopath "path"
@@ -22,6 +23,20 @@ import (
 
 	"github.com/townsendmerino/ken/internal/bytesize"
 )
+
+// DefaultMaxFiles is the admission ceiling on indexable file COUNT — a
+// backstop against a hostile or pathological repo (e.g. millions of tiny
+// files) OOMing the process downstream, where every file becomes chunks +
+// a live FileStruct. The per-file size cap and minified skip bound
+// individual files; this bounds the aggregate. Generous enough never to
+// fire on a real repo (the Linux kernel is ~80k files); hardened
+// deployments lower it via KEN_MAX_FILES (0 = unlimited). WalkFS errors
+// rather than silently truncating (a truncated index reads as complete).
+const DefaultMaxFiles = 1_000_000
+
+// ErrTooManyFiles is returned by WalkFS when the indexable file count
+// exceeds the admission cap (KEN_MAX_FILES). errors.Is-checkable.
+var ErrTooManyFiles = errors.New("repo: indexable file count exceeds the KEN_MAX_FILES admission cap (raise it to index this repo)")
 
 // DefaultMaxFileBytes skips files larger than this (vendored blobs, data
 // dumps, binaries) — they hurt code-search quality and bloat the index. 2 MiB
@@ -75,6 +90,7 @@ type Options struct {
 func WalkFS(fsys fs.FS, opts Options) ([]string, error) {
 	maxBytes := resolveMaxFileBytes(opts.MaxFileBytes)
 	maxAvgLine := resolveMaxAvgLineBytes()
+	maxFiles := resolveMaxFiles()
 
 	// Active scope stack — outer-first, inner-last. Lazily extended
 	// each time fs.WalkDir descends into a new directory; truncated on
@@ -141,6 +157,12 @@ func WalkFS(fsys fs.FS, opts Options) ([]string, error) {
 			return nil
 		}
 		files = append(files, path)
+		// Admission cap (code review §5): reject rather than let an
+		// unbounded file list (and the chunks/FileStructs downstream) OOM
+		// the process. Erroring here bounds memory at maxFiles entries.
+		if maxFiles > 0 && len(files) > maxFiles {
+			return ErrTooManyFiles
+		}
 		return nil
 	})
 	if err != nil {
@@ -279,6 +301,18 @@ func resolveMaxAvgLineBytes() int {
 		}
 	}
 	return DefaultMaxAvgLineBytes
+}
+
+// resolveMaxFiles picks the indexable-file-count admission cap from
+// KEN_MAX_FILES (a plain count; 0 = unlimited), falling back to
+// DefaultMaxFiles.
+func resolveMaxFiles() int {
+	if raw := os.Getenv("KEN_MAX_FILES"); raw != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return DefaultMaxFiles
 }
 
 // looksMinified reports whether a sampled file head reads as minified /
