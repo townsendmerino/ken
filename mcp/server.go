@@ -436,6 +436,9 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 	if topK <= 0 {
 		topK = DefaultTopK
 	}
+	if topK > MaxTopK {
+		topK = MaxTopK // C1: bound before the *10 over-fetch + the make([]Result,0,k) alloc
+	}
 	// 1.0 filters: when any of Languages / PathContains /
 	// ExcludePathContains is set, over-fetch by a factor so the
 	// post-filter top-K still has plausible candidates. The factor
@@ -618,6 +621,9 @@ func runFindRelatedWithUsage(ix *search.Index, args FindRelatedArgs, recorder Us
 	topK := args.TopK
 	if topK <= 0 {
 		topK = DefaultTopK
+	}
+	if topK > MaxTopK {
+		topK = MaxTopK // C1: bound the make([]Result,0,k) allocation
 	}
 	resp := FindRelatedResponse{
 		Anchor: FindRelatedAnchor{File: args.FilePath, Line: args.Line},

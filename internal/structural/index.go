@@ -451,25 +451,20 @@ func Build(corpusDir string) (*Index, error) {
 				if !ok {
 					continue
 				}
-				lc := langCacheFor(gram)
-				if lc == nil {
-					continue
-				}
 				abs := filepath.Join(corpusDir, j.rel)
 				src, err := os.ReadFile(abs)
 				if err != nil {
 					continue
 				}
-				tree, err := lc.pool.Parse(src)
-				if err != nil || tree == nil {
+				// C2/M7: route through the SAME guarded parse ExtractFile
+				// uses — the size ceiling (fatal-stack-overflow defense) and
+				// the ParseStopReason acceptance check. Previously Build
+				// parsed unguarded, so a 64 KiB–2 MiB pathological file
+				// crashed the whole server / emitted nondeterministic trees.
+				fs := extractGuarded(gram, j.rel, src)
+				if fs == nil {
 					continue
 				}
-				root := tree.RootNode()
-				if root == nil {
-					continue
-				}
-				fs := &FileStruct{Path: j.rel}
-				langExtractor[gram](src, root, lc.lang, fs)
 				results[j.idx] = &fileResult{rel: j.rel, fs: fs}
 			}
 		})

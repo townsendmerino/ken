@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -129,6 +130,46 @@ func TestServer_SearchReturnsSemblyFormattedString(t *testing.T) {
 		if !strings.Contains(txt.Text, want) {
 			t.Errorf("output missing %q\n--- got ---\n%s", want, txt.Text)
 		}
+	}
+}
+
+// TestServer_TopKClamped pins C1: a huge client-supplied top_k must be
+// clamped (not reach make([]Result,0,k) unbounded, and not overflow the
+// filter over-fetch *10 into a makeslice panic). Both the search and
+// find_related tools must return a normal response, not crash the server.
+func TestServer_TopKClamped(t *testing.T) {
+	ctx, sess, cleanup := newInMemoryServerClient(t)
+	defer cleanup()
+
+	// search with a near-MaxInt64 top_k AND a filter set → exercises both
+	// the alloc and the topK*10 multiply. Pre-fix this OOMs or panics.
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search",
+		Arguments: map[string]any{
+			"query":     "validate_user",
+			"mode":      "bm25",
+			"top_k":     math.MaxInt64,
+			"languages": []string{"py"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(search, huge top_k): %v", err)
+	}
+	if len(res.Content) == 0 {
+		t.Fatal("search with huge top_k returned empty content (expected a normal clamped response)")
+	}
+
+	// find_related has the same unbounded alloc; a bm25 index surfaces the
+	// mode error as text, but the handler still floors/clamps top_k first.
+	if _, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name: "find_related",
+		Arguments: map[string]any{
+			"file_path": "auth.py",
+			"line":      5,
+			"top_k":     math.MaxInt64,
+		},
+	}); err != nil {
+		t.Fatalf("CallTool(find_related, huge top_k): %v", err)
 	}
 }
 

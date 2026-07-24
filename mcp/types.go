@@ -24,6 +24,15 @@ import (
 // 10" was a reconstruction).
 const DefaultTopK = 5
 
+// MaxTopK is the upper bound on the client-supplied top_k across the
+// search / find_related tools. top_k reaches an allocation
+// (make([]Result, 0, k)) and a filter over-fetch multiply (top_k*10),
+// so an unbounded value from an MCP client — or a prompt-injected agent
+// acting on untrusted repo content — could OOM-crash the long-lived
+// server or overflow the multiply into a makeslice panic. Handlers clamp
+// to this before either use. 1000 is far past any useful result count.
+const MaxTopK = 1000
+
 // SearchArgs is the argument schema for the `search` tool. The Query /
 // Repo / TopK fields and their jsonschema descriptions mirror
 // semble/mcp.py verbatim so the wire schema matches across

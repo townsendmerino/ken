@@ -34,19 +34,35 @@ func ExtractFile(rel string, data []byte) *FileStruct {
 	if !ok {
 		return nil
 	}
-	// gotreesitter's GLR parser recurses on parse-stack depth; for
-	// pathological inputs (huge table-driven test files — e.g. cobra's
-	// 117 KB completions_test.go, 80 KB command_test.go) that recursion
-	// overflows the goroutine stack. A stack overflow is a FATAL runtime
-	// error, not an error return, so the err guard on Parse below cannot
-	// catch it — it crashes the whole process, and the Stage 8 indexer
-	// runs this on every file by default (`ken index` with enrichment on).
-	// Skip enrichment for oversized files: they pass through unenriched,
-	// the same graceful no-op as an unregistered extension. 64 KiB clears
-	// every crasher observed on the semble corpus while preserving normal
-	// source (cobra's 61 KB command.go parses fine). Heuristic, not a
-	// formal depth bound — gotreesitter exposes no node/depth cap (only a
-	// wall-clock timeout, which a synchronous stack overflow outruns).
+	return extractGuarded(gram, rel, data)
+}
+
+// extractGuarded is the single guarded parse+extract both structural parse
+// paths — ExtractFile (per-file enrichment) and Build (the corpus indexer
+// worker) — MUST route through, so the two can't drift on the safety
+// guards. It parses data for grammar gram, applies both mandatory guards,
+// and runs the language extractor into a fresh FileStruct{Path: rel}.
+// Returns nil to skip (oversized, no cache, parse error, non-accept stop
+// reason, or nil root). The parse tree stays alive across the extractor
+// call because `tree` is reachable until this function returns.
+//
+// Guard 1 — size ceiling. gotreesitter's GLR parser recurses on parse-stack
+// depth; for pathological inputs (huge table-driven test files — cobra's
+// 117 KB completions_test.go, 80 KB command_test.go) that recursion
+// overflows the goroutine stack. A stack overflow is a FATAL runtime error,
+// not an error return, so the err guard on Parse below cannot catch it — it
+// crashes the whole process. 64 KiB clears every crasher observed on the
+// semble corpus while preserving normal source (cobra's 61 KB command.go
+// parses fine). Heuristic, not a formal depth bound — gotreesitter exposes
+// no node/depth cap (only a wall-clock timeout, which a synchronous stack
+// overflow outruns).
+//
+// Guard 2 — parse acceptance. gotreesitter returns the partially-built tree
+// on every non-accept stop reason (timeout, cancellation, iteration cap,
+// node cap) with err=nil. Walking that partial tree as if complete flakes
+// the determinism contract; reject any tree whose parse didn't run to clean
+// acceptance.
+func extractGuarded(gram, rel string, data []byte) *FileStruct {
 	if len(data) > maxEnrichBytes {
 		return nil
 	}
@@ -58,12 +74,6 @@ func ExtractFile(rel string, data []byte) *FileStruct {
 	if err != nil || tree == nil {
 		return nil
 	}
-	// Defense in depth (matches the parseTimeoutMicros=0 rationale in
-	// index.go): gotreesitter returns the partially-built tree on every
-	// non-accept stop reason — timeout, cancellation, iteration cap,
-	// node cap, etc. — with err=nil. Walking that partial tree as if
-	// complete is what flakes the determinism contract; reject any
-	// tree whose parse didn't run to clean acceptance.
 	if r := tree.ParseStopReason(); r != gotreesitter.ParseStopAccepted {
 		return nil
 	}
