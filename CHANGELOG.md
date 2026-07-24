@@ -13,35 +13,13 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
-## [Unreleased]
+## [1.2.0] — 2026-07-24 — memory campaign + security/correctness hardening
 
-### Changed
-
-- **Build-path memory + minified-file skip (memory campaign M3).** The
-  per-file size cap (2 MiB) is now tunable via **`KEN_MAX_FILE_BYTES`**
-  (byte count or `512KiB`/`1MiB` suffix) instead of being hard-coded, and
-  ken now **skips minified/generated files** — those whose sampled head
-  averages more than **`KEN_MAX_AVG_LINE_BYTES`** (default 1000) bytes per
-  line (built JS/CSS bundles, single-line JSON), which are pathological for
-  chunking, BM25 postings, and embedding count. Both apply to `ken index`
-  and `ken-mcp`'s walk + watch. The minified check reuses the existing
-  binary-sniff read (no extra I/O), and filtering these files before
-  chunking also bounds worst-case in-flight bytes to
-  `KEN_MAX_FILE_BYTES × workers`. Set `KEN_MAX_AVG_LINE_BYTES=0` to disable
-  the heuristic. (Shared byte-size parsing extracted to `internal/bytesize`.)
-
-- **GC hygiene for the long-lived `ken-mcp` server (memory campaign M2).**
-  `ken-mcp` now (1) defaults `GOGC=50` (unless you set `GOGC`), trimming
-  steady-state heap/RSS for a process that idles between queries; (2) accepts
-  `KEN_MEMLIMIT` (`1GiB` / `512MiB` / byte count) as a soft memory limit via
-  `debug.SetMemoryLimit` (overrides `GOMEMLIMIT`); and (3) calls
-  `debug.FreeOSMemory()` after the initial index build and after each
-  watch-driven flush, returning freed pages to the OS so idle RSS settles
-  near the live index size instead of the build high-water. All server-layer
-  only (`cmd/ken-mcp/gc.go`) — the library (`internal/search`) and CLI stay
-  untuned, so embedders and batch runs are unaffected. New `scripts/rss_bench.sh`
-  samples `/proc/<pid>/status` VmRSS/VmHWM to make the numbers comparable to
-  the external bench that motivated this.
+A large hardening release with **no breaking changes** (new public API and env
+vars are additive; every public 1.0 signature is unchanged). Three strands: a
+memory campaign that fixes the biggest lever on index size / RSS, a full
+security & correctness code review (two process-kill fixes plus seven majors),
+and bounded graceful shutdown. Upgrading is a drop-in.
 
 ### Added
 
@@ -54,10 +32,93 @@ pre-built binaries.
   families so a `!negation` in one can't re-include what the other excluded.
   `.sembleignore` is honored as a fallback for drop-in migration from semble
   (`.kenignore` wins if both exist; existence, not rule count, decides).
-  Default-on and inert without the files — existing `.gitignore` behavior is
-  unchanged. On committed-artifact monorepos this is the biggest lever on
-  index size, cold-start time, and memory. (Motivated by an external memory
-  bench where ken indexed ~2× the files of ignore-parity tools.)
+  Default-on and inert without the files. On committed-artifact monorepos this
+  is the biggest lever on index size, cold-start time, and memory (motivated by
+  an external bench where ken indexed ~2× the files of ignore-parity tools).
+- **`KEN_MAX_FILES`** admission cap (default 1,000,000, `0` = unlimited) — a
+  repo above it is rejected with `ErrTooManyFiles` rather than risking OOM on a
+  hostile "millions of tiny files" input. The Linux kernel is ~80k files;
+  lower it to harden a server against untrusted remote clones.
+- **`output: "json"` now honored on every error/edge response**, not just
+  success paths — a json-mode agent that parses every tool result no longer
+  breaks on "no repo", "symbol required", index-failure, or git-error paths.
+- **`KEN_MCP_SHUTDOWN_GRACE`** (default `5s`) and the new public
+  `search.NewWatchedIndexWithContext` — bounded, cancellable shutdown (see
+  Changed).
+
+### Changed
+
+- **Build-path memory + minified-file skip (memory campaign M3).** The per-file
+  size cap (2 MiB) is now tunable via **`KEN_MAX_FILE_BYTES`** (byte count or
+  `512KiB`/`1MiB` suffix), and ken **skips minified/generated files** — those
+  whose sampled head averages more than **`KEN_MAX_AVG_LINE_BYTES`** (default
+  1000) bytes/line (built JS/CSS bundles, single-line JSON). Both apply to
+  `ken index` and `ken-mcp`'s walk + watch; `KEN_MAX_AVG_LINE_BYTES=0` disables
+  the heuristic. (Shared byte-size parsing extracted to `internal/bytesize`.)
+- **GC hygiene for the long-lived `ken-mcp` server (memory campaign M2).**
+  `ken-mcp` now defaults `GOGC=50` (unless `GOGC` is set), accepts
+  `KEN_MEMLIMIT` (`1GiB`/`512MiB`/byte count → `debug.SetMemoryLimit`,
+  overriding `GOMEMLIMIT`), and calls `debug.FreeOSMemory()` after the initial
+  build and each watch flush so idle RSS settles near the live index size. All
+  binary-layer only — the library and CLI stay untuned. New
+  `scripts/rss_bench.sh` mirrors the external `/proc/<pid>` harness.
+- **Bounded, cancellable graceful shutdown.** In-flight tool calls already
+  drained on shutdown (the SDK's jsonrpc2 layer idle-waits); now the drain is
+  **bounded by `KEN_MCP_SHUTDOWN_GRACE`** so a slow in-flight request can't hang
+  shutdown, a **second signal force-quits**, and a large in-flight index build
+  **honors cancellation** — the shutdown context threads through the build
+  worker loop, which returns promptly and publishes no partial index.
+- **Model download integrity verification.** `ken download-model` /
+  auto-fetch now verify each file as it streams: **SHA-256 against HF's git-lfs
+  ETag** (the safetensors file), and the **byte count against Content-Length /
+  X-Linked-Size** — catching a truncated, empty, or swapped download before it
+  lands (previously only a coarse size floor). Concurrent fetches use a
+  per-process temp file so they can't corrupt each other's download.
+
+### Security
+
+- **Unbounded `top_k` could OOM-crash the whole server (C1).** `search` /
+  `find_related` reached `make([]Result, 0, k)` and a `top_k*10` over-fetch
+  with no upper bound, so one client (or a prompt-injected agent) could OOM the
+  long-lived process or overflow the multiply into a panic. `top_k` is now
+  clamped to `MaxTopK` (1000) before either.
+- **A single pathological source file could fatal-stack-overflow the server
+  (C2/M7).** `structural.Build` parsed every walked file (up to 2 MiB) with none
+  of the guards `ExtractFile` applies — no 64 KiB size ceiling (gotreesitter's
+  GLR parser can *uncatchably* overflow the goroutine stack on such files) and
+  no parse-acceptance check. Both paths now share one guarded parse.
+- **DB DSN parse errors no longer leak the password (M5).** A malformed
+  `mysql://` / `postgres://` URL (bad port, stray `%`) previously echoed the
+  full DSN — password included — up to a "log and continue" caller. Errors are
+  now generic; the MySQL path builds a structured `mysql.Config` (also fixing
+  passwords containing `/`, `@`, `?`).
+- **Symlink escape on the watch path (M6).** The incremental `Matcher`
+  followed symlinks (`os.Stat`) while the batch walk skipped them, so a symlink
+  added mid-watch could index an out-of-root file's contents. Now uses
+  `os.Lstat`, matching the walk.
+
+### Fixed
+
+- **Shutdown cleanup ran only on SIGINT/SIGTERM, skipping the common stdin-EOF
+  disconnect (M1)** — temp clones leaked and the warm-start rerank cache was
+  never saved. Cleanup now runs synchronously on every exit path.
+- **LRU eviction / `Purge` / `Close` ran blocking `Index.Close()` + `rm -rf`
+  under the global cache mutex (M2)** — evicting one large remote clone stalled
+  every concurrent tool call. The blocking reap now happens outside the lock.
+- **The incremental watch re-index dropped Arm B enrichment (M3)** — every file
+  edited during a session was re-indexed without the `func:/calls:/raises:`
+  label, degrading the index as edits accumulated. `appendFile` now applies the
+  same enrichment as the initial build.
+- **`SetReranker` mutated the published index in place, racing lock-free
+  readers (M4).** It now republishes via the same atomic snapshot swap
+  everything else uses.
+- Hybrid mode now over-fetches by the tombstone count like the other modes; the
+  rerank blend sort got a deterministic tie-break; the sqlite/mysql sample-row
+  loops check `rows.Err()`; a Postgres NOTIFY listener re-checks for a
+  late-installed trigger instead of parking forever; and the minified sniff
+  window widened so a banner-then-giant-line bundle is still caught.
+- Builtin-shadow renames, dead-code removal, and two `//go:build ignore`
+  scripts that no longer compiled.
 
 ## [1.1.1] — 2026-07-16 — crypto/tls CVE fix + dependency updates
 
