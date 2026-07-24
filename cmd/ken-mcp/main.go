@@ -526,21 +526,19 @@ func main() {
 		UsageRecorder:       usageRecorder,
 	})
 
-	// Signal-driven cleanup: when the agent disconnects (Ctrl-C or pipe
-	// close), drop temp clone directories so we don't leak disk.
+	// Shutdown cleanup: drop temp clone directories (disk leak) and, M9,
+	// persist the rerank LRU to disk so the next ken-mcp launch starts warm.
+	// Best-effort — a save failure logs warn and cleanup continues.
 	//
-	// M9: also persist the rerank LRU to disk so the next ken-mcp
-	// launch starts warm. Best-effort — a save failure logs warn and
-	// the cleanup continues (the alternative — failing shutdown — would
-	// leak clone dirs and accomplish nothing useful since the user is
-	// already terminating).
-	go func() {
-		<-ctx.Done()
-		// M9 persistent cache save — only when the lazy reranker
-		// actually loaded (otherwise there's nothing in its LRU to
-		// save). Guards against the M2 happy path where ken-mcp
-		// boots with KEN_MCP_RERANK=on but no rerank query ever
-		// landed: skip the save, the disk file stays untouched.
+	// M1 (code review §3): run this SYNCHRONOUSLY after srv.Run returns, on
+	// EVERY exit path. The prior version gated cleanup on <-ctx.Done(), which
+	// fires only on SIGINT/SIGTERM — so the common stdio shutdown (client
+	// closes stdin → srv.Run returns io.EOF, ctx never cancelled) skipped it,
+	// leaking clone dirs and silently defeating the warm-start cache. Running
+	// it inline also removes the goroutine race (main could exit mid-cleanup).
+	cleanup := func() {
+		// M9 persistent cache save — only when the lazy reranker actually
+		// loaded (otherwise there's nothing in its LRU to save).
 		if lazyReranker != nil && lazyReranker.Loaded() && rl != nil && rl.cachePath != "" {
 			if nr, ok := lazyReranker.Inner().(*search.NeuralReranker); ok && nr != nil {
 				if _, _, sz := nr.CacheStats(); sz > 0 {
@@ -556,15 +554,16 @@ func main() {
 			dbCleanup()
 		}
 		cache.Close()
-	}()
+	}
 
-	if err := srv.Run(ctx, &sdkmcp.StdioTransport{}); err != nil {
-		// Avoid using fmt.Print — even on error path, go to stderr only.
+	err := srv.Run(ctx, &sdkmcp.StdioTransport{})
+	cleanup()
+	// io.EOF (client closed stdin) and context.Canceled (SIGINT/SIGTERM) are
+	// both clean shutdowns. errors.Is, not ==, so a wrapped EOF from the SDK
+	// isn't misclassified as fatal (code review §4). Avoid fmt.Print — stderr
+	// only, even on the error path (stdout is the JSON-RPC channel).
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
 		logger.Logf(kenmcp.LogError, "server exit: %v", err)
-		// Help io.EOF look intentional (agent closed stdin), not a fatal error.
-		if err == io.EOF {
-			os.Exit(0)
-		}
 		os.Exit(1)
 	}
 }

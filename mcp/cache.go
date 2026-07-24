@@ -104,6 +104,29 @@ func (c *Cache) Capacity() int {
 	return c.max
 }
 
+// detachAll removes every entry from the map + list under c.mu (the caller
+// must hold it) and returns them for the caller to reap AFTER unlocking.
+// Reaping (Index.Close watcher-drain + cleanup rm -rf) blocks and must never
+// run under c.mu — see M2 in GetBundle.
+func (c *Cache) detachAll() []*cacheEntry {
+	ents := make([]*cacheEntry, 0, len(c.items))
+	for e := c.ll.Front(); e != nil; e = e.Next() {
+		ents = append(ents, e.Value.(*cacheEntry))
+	}
+	c.items = map[string]*list.Element{}
+	c.ll.Init()
+	return ents
+}
+
+func reapEntry(ent *cacheEntry) {
+	if ent.bundle != nil && ent.bundle.Index != nil {
+		_ = ent.bundle.Index.Close()
+	}
+	if ent.cleanup != nil {
+		ent.cleanup()
+	}
+}
+
 // Purge evicts every cached entry — stopping each watcher (wix.Close())
 // and running its cleanup (rm -rf for temp clones) — but, unlike Close,
 // leaves the cache OPEN so subsequent Get() calls rebuild on demand.
@@ -118,19 +141,15 @@ func (c *Cache) Capacity() int {
 // safety profile as LRU eviction.
 func (c *Cache) Purge() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		c.mu.Unlock()
 		return
 	}
-	for e := c.ll.Front(); e != nil; e = e.Next() {
-		ent := e.Value.(*cacheEntry)
-		_ = ent.bundle.Index.Close()
-		if ent.cleanup != nil {
-			ent.cleanup()
-		}
+	ents := c.detachAll()
+	c.mu.Unlock()
+	for _, ent := range ents {
+		reapEntry(ent) // M2: blocking close+cleanup outside the lock
 	}
-	c.items = map[string]*list.Element{}
-	c.ll.Init()
 }
 
 // scpishURL catches `user@host:path` SCP-form git URLs (semble's MCP
@@ -244,31 +263,40 @@ func (c *Cache) GetBundle(ctx context.Context, source string) (*RepoBundle, erro
 		if err != nil {
 			return nil, err
 		}
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		// M8: a Close() that fired while build was in flight has
-		// already drained the map. Don't repopulate it — the just-
-		// built watcher + cleanup get reaped right here so they
-		// don't outlive the cache.
-		if c.closed {
-			_ = bundle.Index.Close()
-			if cleanup != nil {
-				cleanup()
+		// M2 (code review §3): Index.Close() blocks draining the watcher
+		// goroutine and cleanup() may os.RemoveAll 100s of MB. Never run
+		// either under c.mu — every concurrent search/status/GetBundle
+		// waits on the lock for the full duration. So under the lock we only
+		// mutate the map/list and DETACH the entries to reap; the blocking
+		// close+cleanup happens after Unlock via reap().
+		reap := func(idx *search.WatchedIndex, clean func()) {
+			if idx != nil {
+				_ = idx.Close()
 			}
+			if clean != nil {
+				clean()
+			}
+		}
+
+		c.mu.Lock()
+		// M8: a Close() that fired while build was in flight has already
+		// drained the map. Don't repopulate it — reap the just-built
+		// watcher + cleanup so they don't outlive the cache.
+		if c.closed {
+			c.mu.Unlock()
+			reap(bundle.Index, cleanup)
 			return nil, fmt.Errorf("repo: cache is closed")
 		}
-		// Re-check in case another sf turn populated it (cheap; sf
-		// coalesces same-key calls but being defensive is harmless).
-		// If we lost the race, close the just-built watcher AND run
-		// its cleanup — the cache already has a usable entry.
+		// Re-check in case another sf turn populated it. If we lost the
+		// race, the cache already has a usable entry; reap the loser.
 		if e, ok := c.items[key]; ok {
-			_ = bundle.Index.Close()
-			if cleanup != nil {
-				cleanup()
-			}
 			c.ll.MoveToFront(e)
-			return e.Value.(*cacheEntry).bundle, nil
+			b := e.Value.(*cacheEntry).bundle
+			c.mu.Unlock()
+			reap(bundle.Index, cleanup)
+			return b, nil
 		}
+		var evicted []*cacheEntry
 		for len(c.items) >= c.max {
 			tail := c.ll.Back()
 			if tail == nil {
@@ -276,13 +304,14 @@ func (c *Cache) GetBundle(ctx context.Context, source string) (*RepoBundle, erro
 			}
 			ev := c.ll.Remove(tail).(*cacheEntry)
 			delete(c.items, ev.key)
-			_ = ev.bundle.Index.Close()
-			if ev.cleanup != nil {
-				ev.cleanup()
-			}
+			evicted = append(evicted, ev) // detach only; reap after unlock
 		}
 		ent := &cacheEntry{key: key, bundle: bundle, cleanup: cleanup}
 		c.items[key] = c.ll.PushFront(ent)
+		c.mu.Unlock()
+		for _, ev := range evicted {
+			reap(ev.bundle.Index, ev.cleanup)
+		}
 		return bundle, nil
 	})
 	if err != nil {
@@ -303,15 +332,10 @@ func (c *Cache) GetBundle(ctx context.Context, source string) (*RepoBundle, erro
 // Close() and outlives the cache's intent.
 func (c *Cache) Close() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.closed = true
-	for e := c.ll.Front(); e != nil; e = e.Next() {
-		ent := e.Value.(*cacheEntry)
-		_ = ent.bundle.Index.Close()
-		if ent.cleanup != nil {
-			ent.cleanup()
-		}
+	ents := c.detachAll()
+	c.mu.Unlock()
+	for _, ent := range ents {
+		reapEntry(ent) // M2: blocking close+cleanup outside the lock
 	}
-	c.items = map[string]*list.Element{}
-	c.ll.Init()
 }
