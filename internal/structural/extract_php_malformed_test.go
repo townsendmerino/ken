@@ -29,6 +29,16 @@ import (
 // note the verification in the commit message. See docs/internal/cold-start-campaign.md
 // (Task 2 / golden-drift risk).
 func TestBuild_PhpTruncatedController(t *testing.T) {
+	// SHAPE, not timing: guarantee the per-file parse budget
+	// (KEN_ENRICH_FILE_BUDGET_MS, Task 2) is OFF for this test so a
+	// budget-triggered skip can never flake these error-recovery-shape
+	// assertions. The fixture is tiny (parses in <1 ms, far under any real
+	// budget), but a sibling test's 1 µs override could otherwise leak a
+	// cached pool — pin it down explicitly and rebuild pools clean.
+	t.Setenv("KEN_ENRICH_FILE_BUDGET_MS", "")
+	parseBudgetOverrideMicros.Store(0)
+	clearParserPools()
+
 	dir := t.TempDir()
 	// A realistic Yii controller truncated mid-expression in actionLogin:
 	// the `if (...)` condition is cut off and the class body brace never
