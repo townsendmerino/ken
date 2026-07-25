@@ -53,11 +53,12 @@ Profiled `ken perf index` on a yii2 PHP proxy (2,783 files / 12,349 chunks, M1 P
 
 Questions the profile answered:
 
-- [ ] **(a) Index wall at v1.1.1 (gotreesitter 0.20.5) vs HEAD (0.47.0), same corpus,
-      isolated — how much does the dep bump alone recover?** See the M0(a)
-      measurement table below (filled by Task 3 when run). HEAD profiling already
-      shows ~21 % residual GLR-retry CPU, so this before/after decides whether a
-      *further* parser fix is worth chasing or the bump already banked the win.
+- [x] **(a) Index wall at v1.1.1 (gotreesitter 0.20.5) vs HEAD (0.47.0), same corpus,
+      isolated — how much does the dep bump alone recover?** **Measured (M0(a) below):
+      it did NOT recover — the bump REGRESSED the PHP parse ~2.7× (total bm25 index
+      2.16×).** The enrich-off control confirms the delta is 100 % the tree-sitter
+      parse. A further parser fix is now clearly worth chasing — reframed as "0.47.0
+      correctness without its ~2.7× well-formed-PHP parse cost."
 - [x] **(b) Does `structural.Build` re-parse files the chunker already parsed?**
       Within `perf index`: no double-parse (regex chunker doesn't parse; enrichment
       parses once; `structural.Build` isn't on that path). **But ken-mcp parses every
@@ -87,18 +88,43 @@ after.
 
 Estimate: 1–2 days. **Actual: done.**
 
-#### M0(a) — dep-bump before/after (Task 3)
+#### M0(a) — dep-bump before/after (Task 3, measured 2026-07-25)
 
-`ken index <php-corpus>` wall time, median of 3, isolated to the gotreesitter
-version (same corpus, same flags, temp binaries built at each ref):
+Measured 2026-07-25 on M1 Pro / 16 GB. Corpus: yii2 + yii2-app-advanced
+(1,184 `.php`, 12,349 chunks). Method: temp binaries built at each ref
+(`GOWORK=off`, each ref's own go.mod pins), `ken perf index --mode bm25
+--chunker regex`, median of 5. bm25 mode isolates the parser (no embedding);
+`KEN_ENRICH=off` is the control that removes the tree-sitter parse entirely.
 
-| ken ref | gotreesitter | index wall (median) | notes |
+| config | v1.1.1 (gotreesitter 0.20.5) | HEAD (gotreesitter 0.47.0) | ratio |
 |---|---|---|---|
-| v1.1.1 | 0.20.5 | _TBD_ | pre-bump (what the bench ran) |
-| HEAD   | 0.47.0 | _TBD_ | post-bump (PR #62) |
+| enrich **on** (tree-sitter parse exercised) | 1598 ms | 3455 ms | **2.16× slower** |
+| enrich **off** (control — no parse) | 537 ms | 557 ms | ~equal (3.7 %, noise) |
 
-_Filled by the Task 3 measurement; if setup exceeds ~15 min the row stays TBD and
-the M0(a) checkbox open._
+**Result — the bump REGRESSED parse cost; it did not recover it.** The
+enrichment-off control is identical across versions (537 ≈ 557 ms), so the
+*entire* on/off delta is the gotreesitter parse: v1.1.1 spends ~1061 ms in it,
+HEAD ~2898 ms — the 0.47.0 C-faithful engine is **~2.7× slower** on this PHP
+corpus than 0.20.5's (conflict-resolver-disabled) engine, dragging total bm25
+index 2.16× slower. (Absolute ms are load-sensitive on a busy laptop; the
+**ratio** and the flat enrich-off control are the robust findings.)
+
+This **overturns fact (3)'s hypothesis.** The 256.6 s bench ran the *faster*
+parser — 0.20.5's GLR blowup is input-specific (malformed/pathological files)
+and yii2 doesn't trigger it enough to lose the well-formed-code speed, so the
+parser was not the bench's bottleneck in the way we suspected. And the bump we
+shipped for *correctness* (PR #62) carries a real, previously-unmeasured
+**cold-start parse regression** on typical PHP. Consequences:
+
+- Re-weights the campaign toward the caching levers (M1 snapshot, M2 embed/
+  label cache) and the shipped lazy-structural quick win — they now dodge a
+  parse that is *slower*, not faster, than before.
+- Promotes "**upstream the PHP parse cost to gotreesitter**" from a maybe to a
+  real target, reframed: not "fix the 0.20.5 blowup" (done, in 0.47.0) but "get
+  0.47.0's correctness without its ~2.7× well-formed-PHP parse cost."
+- Flags a latent regression the external rebench would otherwise surface: HEAD
+  cold-indexes typical PHP slower than the version the bench measured. M1 must
+  land before that rebench.
 
 ### M1 — Snapshot persistence + reconcile-on-boot (the big lever) — infra landed, wiring pending
 
