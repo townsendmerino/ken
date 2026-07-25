@@ -2,6 +2,7 @@ package structural
 
 import (
 	"path/filepath"
+	"time"
 
 	"github.com/odvcencio/gotreesitter"
 )
@@ -70,11 +71,19 @@ func extractGuarded(gram, rel string, data []byte) *FileStruct {
 	if lc == nil {
 		return nil
 	}
+	start := time.Now()
 	tree, err := lc.pool.Parse(data)
 	if err != nil || tree == nil {
 		return nil
 	}
 	if r := tree.ParseStopReason(); r != gotreesitter.ParseStopAccepted {
+		// A budget exhaustion (KEN_ENRICH_FILE_BUDGET_MS) surfaces as
+		// ParseStopTimeout: count + log it as a distinct, observable skip so a
+		// pathological file (the 159× template cliff) is visible, not silently
+		// unenriched. Other non-accept reasons stay silent (unchanged).
+		if r == gotreesitter.ParseStopTimeout {
+			recordParseBudgetSkip(rel, time.Since(start))
+		}
 		return nil
 	}
 	root := tree.RootNode()

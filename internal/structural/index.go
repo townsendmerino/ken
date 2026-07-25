@@ -41,8 +41,11 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
@@ -338,31 +341,78 @@ var (
 	parserPools sync.Map // map[string]*langCache
 )
 
-// parseTimeoutMicros caps any single file's parse time. 0 disables.
+// Per-file parse budget (cold-start M2 / Task 2). Caps any single file's
+// tree-sitter parse — the Arm B enrichment label AND the structural symbol
+// index share extractGuarded and this pool, so the budget covers both. On
+// exhaustion gotreesitter returns a partial tree with
+// ParseStopReason()==ParseStopTimeout, which extractGuarded already rejects;
+// the file is SKIPPED (no label / no symbol entry), counted, and logged — the
+// build never fails.
 //
-// Originally set to 1s as a defensive bound against pathological
-// grammars (C# / some bash) that could hang forever in a single parse.
-// That budget broke the Arm B enrichment label's determinism contract:
-// under contention (CI -race + low GOMAXPROCS) a healthy parse could
-// brush the 1s budget, gotreesitter would *silently* return the
-// partial tree (pool.Parse returns (tree, nil) regardless of timeout —
-// stop reason is on the Tree), and the extractor would walk it as if
-// complete, producing a label missing a function or call. Two runs of
-// the same corpus then produce different bytes, and
-// TestBuildDeterminism_CrossRun/contention-bm25 flakes.
+// Why it exists: gotreesitter's own perf_ratio_budgets.json logs a single-file
+// cliff (bootstrap-5.blade.php at 159× aggregate vs a 1.55× median) —
+// template-like files can be individually pathological, and the 64 KiB size
+// cap (maxEnrichBytes) doesn't catch a small file that merely parses slowly.
 //
-// Disabled because (a) the cited pathological grammar (Swift) is
-// parked and not in the dispatch table, (b) the supported set
-// (Python, Go, TS/JS, Java, Rust, C/C++, PHP, Ruby, Kotlin, Dart, C#)
-// has no known hang-forever inputs at file scale, and (c) ExtractFile is
-// per-file work — one slow parse blocks one worker, not the whole
-// build. If a real hang ever surfaces, prefer adding a watchdog-style
-// cancellation flag (deterministic skip on cancel) over a time budget.
-//
-// Defense in depth: ExtractFile also checks tree.ParseStopReason() and
-// returns nil for any non-accepted parse — so even if a future tweak
-// re-enables a timeout, the silent partial-tree path is closed.
-const parseTimeoutMicros uint64 = 0
+// DEFAULT 0 (disabled) in the library, deliberately. A finite budget makes a
+// budget-brushing parse's skip TIMING-DEPENDENT (enriched on one run, skipped
+// on the next), which flakes the cross-run determinism contract:
+// TestBuildDeterminism_CrossRun builds the whole ken repo under -race, where a
+// healthy ~67 ms file balloons toward the budget. So the deterministic build
+// path (BuildAndSerializeIndex / golden / parity) leaves it off; ken-mcp — the
+// live server, which needs cliff-resilience, not cross-run byte-identity —
+// defaults it to 500 ms (cmd/ken-mcp/main.go). This history is exactly why the
+// earlier fixed 1 s budget was removed; the difference now is (a) the
+// ParseStopReason guard turns a timeout into a clean skip, not a corrupt
+// partial-tree label, and (b) off-by-default keeps the deterministic path
+// deterministic.
+func envParseBudgetMicros() uint64 {
+	v := strings.TrimSpace(os.Getenv("KEN_ENRICH_FILE_BUDGET_MS"))
+	if v == "" {
+		return 0
+	}
+	ms, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return 0 // invalid → disabled (lenient, matching the other size knobs)
+	}
+	return ms * 1000
+}
+
+// parseBudgetOverrideMicros lets tests force a sub-millisecond budget (the env
+// knob is whole-ms, too coarse to guarantee a timeout on a trivial file).
+// 0 = use the env. Test-only.
+var parseBudgetOverrideMicros atomic.Uint64
+
+func effectiveParseBudgetMicros() uint64 {
+	if v := parseBudgetOverrideMicros.Load(); v != 0 {
+		return v
+	}
+	return envParseBudgetMicros()
+}
+
+// parseBudgetSkips counts files skipped because their parse hit the budget.
+var parseBudgetSkips atomic.Uint64
+
+// ParseBudgetSkips returns how many files have been skipped because their
+// tree-sitter parse exceeded KEN_ENRICH_FILE_BUDGET_MS since process start.
+func ParseBudgetSkips() uint64 { return parseBudgetSkips.Load() }
+
+// parseBudgetLogf, if set, is invoked once per budget-exhausted file with the
+// path and the parse duration. ken-mcp wires it to its stderr logger; nil (the
+// default) counts silently. MUST NOT write to stdout (the JSON-RPC channel).
+var parseBudgetLogf func(path string, d time.Duration)
+
+// SetParseBudgetLogf installs the per-skip logger. Pass nil to silence. Not
+// safe to call concurrently with an in-flight build; wire it once at startup.
+func SetParseBudgetLogf(f func(path string, d time.Duration)) { parseBudgetLogf = f }
+
+// recordParseBudgetSkip is called by extractGuarded when a parse times out.
+func recordParseBudgetSkip(path string, d time.Duration) {
+	parseBudgetSkips.Add(1)
+	if parseBudgetLogf != nil {
+		parseBudgetLogf(path, d)
+	}
+}
 
 // langCacheFor returns the cached pool + language handle for a
 // grammar, or nil if the grammar isn't registered. Lazy-initialized.
@@ -382,7 +432,7 @@ func langCacheFor(grammarName string) *langCache {
 	}
 	c := &langCache{
 		pool: gotreesitter.NewParserPool(lang,
-			gotreesitter.WithParserPoolTimeoutMicros(parseTimeoutMicros),
+			gotreesitter.WithParserPoolTimeoutMicros(effectiveParseBudgetMicros()),
 		),
 		lang: lang,
 	}

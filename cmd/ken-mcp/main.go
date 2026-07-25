@@ -283,6 +283,12 @@ func main() {
 	// library/CLI layers stay untuned. Both defer to explicit GOGC/GOMEMLIMIT.
 	setupGCHygiene(logger)
 
+	// Per-file tree-sitter parse budget (cold-start M2 / Task 2). Server
+	// default 500 ms so one pathological template-like file can't stall the
+	// index build; disabled by default in the library to keep the build/golden
+	// path deterministic. Must run before the first index build.
+	setupEnrichBudget(logger)
+
 	size := envInt("KEN_MCP_CACHE_SIZE", kenmcp.DefaultCacheSize, logger)
 	if size < 0 {
 		logger.Logf(kenmcp.LogWarn, "KEN_MCP_CACHE_SIZE=%d: must be non-negative — using default %d",
