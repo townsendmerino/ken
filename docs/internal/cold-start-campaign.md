@@ -32,11 +32,19 @@ ignore parity + minified-skip shrinks the corpus, but three structural facts rem
    per-language error-recovery path. We **bumped to 0.47.0 on 2026-07-24 (PR #62)**,
    which ships the C-faithful engine, the conflict-resolver fix, ~18 % higher
    recovery throughput, and non-quadratic cap-eviction. **The bench predates the
-   bump**, so the parser itself is a prime suspect for the per-file slowness — and
-   M0(a) below measures exactly how much the dep bump alone recovers. (Note: M0
-   profiling at HEAD/0.47.0 *still* shows ~21 % of CPU in gotreesitter GLR
-   retry/full-DFA recovery on PHP, so the bump likely helped but did not
-   eliminate the retry cost — quantifying the before/after is the open question.)
+   bump.** M0(a) below measured the before/after and found the opposite of the
+   hypothesis: **the bump REGRESSED the PHP parse ~2.7×** (0.20.5 was fast because
+   it skipped the C-faithful work; 0.47.0 is correct but slower). gotreesitter's own
+   `perf_ratio_budgets.json` accepts ~1.9× C tree-sitter for PHP as the current
+   state, and separately logs a single-file cliff (`bootstrap-5.blade.php` at 159×
+   aggregate vs a 1.55× median) — template-like files can be individually
+   pathological. **Conclusion adopted: keep the bump (correctness) and take the
+   parse OFF the cold path** (M2 lazy enrichment + M2-Task-2 per-file budget) rather
+   than try to make it faster. Consequence for projections: HEAD cold-indexes typical
+   PHP ~2.7× slower than the version the 256.6 s bench measured, so any pre-lazy-enrich
+   cold-start projection is **optimistic** — **M1 (skip the build) and M2 (parse off
+   the cold path) should both land before inviting an external rebench**, or the
+   rebench measures the regression, not the fix.
 
 Two distinct user experiences to fix, in priority order:
 
@@ -71,6 +79,13 @@ Questions the profile answered:
 - [x] **(d) Can `structural.Build` go lazy on first structural-tool call
       (ADR-036 precedent), and what does it save?** GO — measured `structural.Build`
       ~1.29 s on the yii2 proxy, removed from every cold start. **Shipped** (below).
+- [ ] **(e) Enrichment cost share on 4-core x86 (the reframed open question).**
+      M0(a)/M0(c) answered *why* the parse is expensive (0.47.0's C-faithful engine,
+      ~2.7× on PHP) — that's settled, no more "why is the parser slow" work. What's
+      still open is the *share* on the bench-host class (i5, 4 cores), which decides
+      M2's background-vs-on-demand shape and whether M3 (embed cache) is worth it on
+      that hardware. Profiled on 10-core M1 so far; a 4-core run should ride along
+      with the M2 implementation, not block it.
 
 **Lazy-structural quick win — ✅ SHIPPED** (commit `ce1581f`). ken-mcp's eager
 `structural.Build` (`main.go:411`) is deferred: the Builder wires
@@ -79,12 +94,16 @@ call (`sync.Once`-guarded, concurrency-safe; `status` peeks via `StructuralIfBui
 without triggering it). Removes ~1.29 s from every cold start for the majority of
 sessions that never call definition/references/callers/outline/symbols.
 
-Go/no-go summary: **M1 → GO** (skips both parses on everyday cold); **M2 → GO but
-extend to cache the enrichment label line by content hash**, not just embeddings
-(the parse is the more expensive thing to memoize); **M3 → GO** (BM25 floor is
-476 ms → sub-second first-servable plausible). New candidate: **upstream any
-residual PHP GLR-retry cost** to gotreesitter (cf. #110), pending the M0(a) before/
-after.
+Go/no-go summary (post-M0(a), renumbered): **M1 → GO** (skips the whole build on
+everyday cold); **M2 (lazy/async enrichment) → GO and PROMOTED ahead of the
+embedding cache** — M0(a) reframed the parse as the dominant, now-*worse* cold
+cost, so taking it off the cold path beats trying to speed it up; **M3 (embed
+cache) → GO but extend to cache the enrichment label by content hash too**, not
+just embeddings (the parse is the more expensive thing to memoize); **M4 (staged
+readiness) → GO** (BM25 floor ~476 ms → sub-second first-servable plausible).
+New candidate, now confirmed by M0(a): **take the PHP parse cost upstream to
+gotreesitter as a ratchet data point** (Task 4 draft, `gotreesitter-php-datapoint.md`)
+— reframed from "fix the retry" to "0.47.0 correctness without its ~2.7× cost".
 
 Estimate: 1–2 days. **Actual: done.**
 
@@ -175,7 +194,57 @@ query; kernel-scale snapshot load measured and published; true cold unchanged.
 
 Estimate: 4–6 days including ADR + fuzz.
 
-### M2 — Content-hash embedding cache
+### M2 — Lazy / async enrichment (promoted ahead of the embedding cache)
+
+**Motivation (M0(a)):** the 0.47.0 parser is ~2.7× slower on PHP than the
+version the external bench measured, and the enrichment tree-sitter parse is
+~48–54 % of cold index time (M0(c)) — the single biggest cold-path cost, now
+*worse* than before the bump. The adopted conclusion is to take the parse
+**off the cold path** rather than try to make it faster. This applies the
+lazy-structural / lazy-rerank precedent (ADR-036) to enrichment itself.
+
+**Enrichment is additive, not load-bearing (verified).** `enrichChunks`
+(`internal/search/index.go`) only prepends the `# func: … | calls: … |
+raises: …` label to each chunk's `Text` before BM25/embed
+(`cs[i].Text = label + cs[i].Text`). Nothing downstream parses the label back
+out — the structural tools use `structural.Build`, not the label. A chunk
+served *without* the label is well-formed source; the label is a pure
+retrieval-signal prefix (ADR-035: +0.02–0.03 NDCG). So serving pre-enrichment
+is correct, just slightly lower-ranked. **The one caveat is quality, not
+correctness:** a *heterogeneous* index (some chunks enriched, some raw) has
+BM25 tokens/embeddings that diverge between the two populations
+(`index.go:337-339`), so ranking is temporarily inconsistent during the
+background pass. Not a blocker — end state is fully enriched. **No place was
+found where enrichment is load-bearing for correctness.**
+
+**Design:**
+
+- Cold index builds + serves the BM25/dense index **without** enrichment
+  (first-servable pays only the ~540 ms floor, not the ~3.5 s enriched parse).
+- A background pass then enriches, re-chunking/re-embedding each file's chunks
+  with the label and republishing via the existing atomic snapshot-publish
+  pattern (`WatchedIndex` swap) — the same mechanism the fsnotify watcher and
+  M1 reconcile already use. **Profile in this task**: whole-corpus background
+  enrich vs on-demand per-file (enrich a file's chunks the first time results
+  from it are served). On 4-core hosts a single background sweep may thrash the
+  query path; on-demand may be gentler. Pick per data.
+- Pair with the M2-Task-2 per-file parse budget so one pathological file can't
+  stall the background pass.
+
+**Interaction with M1:** snapshots store the *enriched* chunk `Text` (the label
+is in `Text`, which is serialized), so a snapshot hit is already fully enriched
+— the lazy path only runs on **true cold / cache miss**. M1 + M2 compose: M1
+skips the whole build when the repo is unchanged; M2 makes the *unavoidable*
+cold build serve fast and enrich behind it.
+
+**Acceptance:** on the PHP corpus, first-servable within ~10 % of the
+enrich-off floor (~540 ms, not ~3.5 s); fully-enriched state reached in the
+background without blocking queries; a `KEN_MCP_STAGED`-style dual-number
+report (first-servable vs fully-enriched) per the M4 honesty rule.
+
+Estimate: 2–3 days incl. the background-vs-on-demand profile.
+
+### M3 — Content-hash embedding cache
 
 Model2Vec embeddings are deterministic; SQLite is already a dependency. Cache
 `chunk content hash → vector` (keyed also by model hash + dim) in `.ken/embed.db`.
@@ -192,7 +261,7 @@ didn't touch the model — only embeds never-seen chunks.
 
 Estimate: 2–3 days.
 
-### M3 — Serve-before-warm (staged readiness)
+### M4 — Serve-before-warm (staged readiness)
 
 Don't gate the first servable query on the semantic arm.
 
@@ -213,7 +282,7 @@ apples-to-apples runs.
 
 Estimate: 3–4 days. Sequenced after M1 because M1 makes true cold rare.
 
-### M4 — mmap-able snapshot layout (stretch; decide after M1)
+### M5 — mmap-able snapshot layout (stretch; decide after M1)
 
 Serialize vectors as one contiguous f32 blob (+ offsets), so snapshot load is
 mmap + fixup instead of parse-and-allocate.
@@ -227,8 +296,15 @@ Decide after M1 ships: if snapshot load at 826k chunks is already < 2 s, skip.
 
 ## Sequencing
 
-M0 → lazy-structural quick win (done) → **M0(a) dep-bump before/after** → M1 →
-release + external rebench window → M3 → M2/M4 per data.
+M0 → lazy-structural quick win (done) → **M0(a) dep-bump before/after (done)** →
+**M1 + M2 both land** → release + external rebench window → M4 → M3/M5 per data.
+
+**M1 and M2 must both land before inviting an external rebench.** M0(a) showed
+HEAD cold-indexes typical PHP ~2.7× slower (parse) than the version the 256.6 s
+bench measured, so any pre-lazy-enrich cold-start projection is now optimistic:
+a rebench today would measure the *regression*, not the fix. M1 (skip the
+rebuild) + M2 (take enrichment off the cold path) are the two levers that turn
+that around; ship both, then rebench.
 
 ## Anti-goals (this campaign)
 
