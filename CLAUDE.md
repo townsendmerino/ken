@@ -76,6 +76,7 @@ stdin and stdout **are** the JSON-RPC channel. ANY write to stdout outside of th
 - `KEN_MCP_MODEL_DIR` — Model2Vec snapshot dir (must contain `model.safetensors`). Defaults to `~/.ken/model` when unset.
 - `KEN_MCP_AUTO_FETCH` — `1`/`0` (default `1`). On first run with no model + a model-needing mode, fetch `potion-code-16M` in the background and upgrade bm25→hybrid (ADR-037). `0` = downgrade-and-warn only.
 - `KEN_MCP_CHUNKER` — `regex`/`treesitter`/`line` (default `regex`).
+- `KEN_MCP_SNAPSHOT` — `1`/`0` (default `1`). Cold-start M1 (ADR-039): persist the built index to `<repo>/.ken/snapshot.{bin,manifest}` and, on restart, load + drift-scan (config-key + per-file mtime/size) instead of rebuilding when the repo is unchanged. Distinct from the ADR-024 operator prebuilt (`.ken/index.bin`, frozen); local-path repos only; any load failure/drift falls back to a live build. `0` disables.
 - `KEN_MCP_CACHE_SIZE` — LRU bound (default 16); `0` means caching is disabled (re-index on every request).
 - `KEN_MCP_LOG_LEVEL` — `debug`/`info`/`warn`/`error` (default `warn`); all logs go to stderr.
 - `KEN_MEMLIMIT` — optional soft memory limit for the long-lived server (`1GiB`/`512MiB`/byte count → `debug.SetMemoryLimit`; overrides `GOMEMLIMIT`). M2 GC hygiene: ken-mcp also applies `GOGC=50` by default (unless `GOGC` is set) and calls `debug.FreeOSMemory()` after the initial index build and each watch flush — all binary-layer only (`cmd/ken-mcp/gc.go`), never `internal/search`/aikit.

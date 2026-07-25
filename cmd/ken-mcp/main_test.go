@@ -529,6 +529,7 @@ func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=error",
+		"KEN_MCP_SNAPSHOT=0", // don't pollute committed testdata/repo/.ken (M1)
 		"KEN_MCP_DEFAULT_REPO=" + fixture,
 	}
 	var stderr safeBuf
@@ -680,6 +681,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithRerank(t *testing.T) {
 		"KEN_MCP_MODE=hybrid-rerank",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info", // so we can verify rerank=on lands on stderr
+		"KEN_MCP_SNAPSHOT=0",     // don't pollute committed testdata/repo/.ken (M1)
 		"KEN_MCP_DEFAULT_REPO=" + fixture,
 		"KEN_MCP_MODEL_DIR=" + hybridModel,
 		"KEN_MCP_RERANK=on",
@@ -769,6 +771,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithDB(t *testing.T) {
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info", // verbose to catch any accidental stdout writes
+		"KEN_MCP_SNAPSHOT=0",     // don't pollute committed testdata/repo/.ken (M1)
 		"KEN_MCP_DEFAULT_REPO=" + fixture,
 		"KEN_DB_DSN=" + dsn,
 		"KEN_DB_SAMPLE_ROWS=3",
@@ -900,6 +903,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithListen(t *testing.T) {
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info",
+		"KEN_MCP_SNAPSHOT=0", // don't pollute committed testdata/repo/.ken (M1)
 		"KEN_MCP_DEFAULT_REPO=" + fixture,
 		"KEN_DB_DSN=" + dsn,
 		"KEN_DB_LISTEN=1",
@@ -998,6 +1002,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithReindexDB(t *testing.T) {
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info",
+		"KEN_MCP_SNAPSHOT=0", // don't pollute committed testdata/repo/.ken (M1)
 		"KEN_MCP_DEFAULT_REPO=" + fixture,
 		"KEN_DB_DSN=" + dsn,
 	}
@@ -1083,6 +1088,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithMySQL(t *testing.T) {
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info",
+		"KEN_MCP_SNAPSHOT=0", // don't pollute committed testdata/repo/.ken (M1)
 		"KEN_MCP_DEFAULT_REPO=" + fixture,
 		"KEN_DB_DSN=" + dsn,
 		"KEN_DB_SAMPLE_ROWS=2",
@@ -1165,6 +1171,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithMariaDB(t *testing.T) {
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info",
+		"KEN_MCP_SNAPSHOT=0", // don't pollute committed testdata/repo/.ken (M1)
 		"KEN_MCP_DEFAULT_REPO=" + fixture,
 		"KEN_DB_DSN=" + dsn,
 		"KEN_DB_SAMPLE_ROWS=2",
@@ -1251,6 +1258,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithSQLite(t *testing.T) {
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info",
+		"KEN_MCP_SNAPSHOT=0", // don't pollute committed testdata/repo/.ken (M1)
 		"KEN_MCP_DEFAULT_REPO=" + fixture,
 		"KEN_DB_DSN=" + sqliteFileDSN(dbPath),
 		"KEN_DB_SAMPLE_ROWS=2",

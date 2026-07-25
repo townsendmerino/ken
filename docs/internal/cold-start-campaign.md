@@ -1,6 +1,6 @@
 # Cold-start campaign — task doc
 
-Status: in progress (M0 done; M1 infra landed, wiring pending)
+Status: in progress (M0 done; M1 Increment 1 wired — load-if-clean-else-rebuild; M1 Increment 2 + M2 pending)
 Scope: `ken-mcp` cold start → first servable query
 Related: ADR-036 (startup campaign: lazy rerank, parallel structural), ADR-038 (`.kenignore`), ADR-039 (snapshot + reconcile), memory campaign (v1.2.0), `docs/PERF-expectations.md`, `internal/search/index_serialize.go`, `docs/internal/cold-start-M0-findings.md`
 
@@ -145,7 +145,24 @@ shipped for *correctness* (PR #62) carries a real, previously-unmeasured
   cold-indexes typical PHP slower than the version the bench measured. M1 must
   land before that rebench.
 
-### M1 — Snapshot persistence + reconcile-on-boot (the big lever) — infra landed, wiring pending
+### M1 — Snapshot persistence + reconcile-on-boot (the big lever) — Increment 1 WIRED
+
+**Increment 1 shipped.** ken-mcp now persists the built index to
+`<repo>/.ken/snapshot.{bin,manifest}` and, on restart, loads it + drift-scans
+(config-key + per-file mtime/size) instead of rebuilding when the repo is
+unchanged — the everyday-cold fast path. `loadOrBuildWatched` →
+`buildOrLoadSnapshot`: try snapshot → live-build on miss/drift → persist;
+re-persist on each watch flush. `KEN_MCP_SNAPSHOT=off` disables; local-path
+repos only; distinct from the ADR-024 operator prebuilt (`.ken/index.bin`,
+frozen), which still wins when present. Any load failure/drift/corruption
+degrades silently to a live build (snapshot is untrusted input). Tested:
+clean-load fast path, drift (edit/new-file), config-mismatch, missing/corrupt
+manifest all fall back correctly; no testdata pollution.
+
+**Increment 2 (still pending):** on drift, reconcile only the changed files via
+the watcher's `tombstoneFile`/`appendFile` primitives instead of a full rebuild
+(Increment 1 full-rebuilds on any drift). Also pending: loader fuzz, the
+everyday-cold `PERF-expectations.md` row, and `ken index --write-snapshot`.
 
 Wire the existing serialize format into the `ken-mcp` lifecycle. Design recorded in
 **ADR-039**. Infra already on this branch (`8f6e7da`, `ab7f3f5`): the drift/config
@@ -176,16 +193,18 @@ Tasks:
 - [x] ADR (ADR-039): snapshot lifecycle, cache key, corruption/downgrade behavior,
       `.ken/` is a cache (safe to delete, `.gitignore`d).
 - [x] Snapshot infra in `internal/search` (manifest, config-key, seeded constructor).
-- [ ] Loader hardening: `LoadSerializedIndex` already has typed corrupt errors and
-      the manifest reader returns `ErrManifestCorrupt` — boot must treat *any* load
-      failure as cache-miss + rebuild, log once, never crash. **Fuzz the loader**
-      (snapshot is untrusted input).
-- [ ] ken-mcp wiring: load-or-build in `loadOrBuildWatched`, write on build + flush,
-      distinct `.ken/snapshot.bin` artifact so the ADR-024 operator prebuilt
-      (`.ken/index.bin`, frozen) is untouched.
-- [ ] Reconcile path (Increment 2): extract watch's single-file update into a batch API.
-- [ ] `KEN_MCP_SNAPSHOT=off` escape hatch; `ken index --write-snapshot` for CI
-      prewarming.
+- [x] ken-mcp wiring (Increment 1): load-or-build in `loadOrBuildWatched` →
+      `buildOrLoadSnapshot`, write on build + flush, distinct `.ken/snapshot.{bin,
+      manifest}` artifact so the ADR-024 operator prebuilt (`.ken/index.bin`,
+      frozen) is untouched. Integration-tested (clean-load/drift/mismatch/corrupt).
+- [x] `KEN_MCP_SNAPSHOT=off` escape hatch (default on, local-path repos only).
+- [ ] Loader hardening: boot treats *any* load failure as cache-miss + rebuild
+      already (verified in tests) — still TODO: a **fuzz gate** on the manifest +
+      KEN1 loaders (snapshot is untrusted input).
+- [ ] Reconcile path (Increment 2): on drift, extract the watch's single-file
+      `tombstoneFile`/`appendFile` into a batch API and re-index only changed files
+      instead of the current full rebuild.
+- [ ] `ken index --write-snapshot` for CI prewarming.
 - [ ] Bench: everyday-cold (snapshot present, ≤ 1 % files changed) added to
       `PERF-expectations.md` as its own row — it's the number users feel.
 

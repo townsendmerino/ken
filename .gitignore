@@ -65,6 +65,10 @@ bench_out/
 # The measured numbers are published in docs/PERF-expectations.md.
 kernel_bench_out/
 
+# ken-mcp index snapshot cache (cold-start M1, ADR-039): written when a dev
+# runs ken-mcp against this repo. A regenerable cache, never committed.
+.ken/
+
 # Investigation scratchpad — planning Claude's per-phase briefings and
 # campaign plans drafted alongside the perf-investigation work. Not
 # part of the published repo.

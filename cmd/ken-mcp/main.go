@@ -193,7 +193,7 @@ func localPathHasPrebuilt(dir string) bool {
 //     corpus is still indexable; a slower-but-correct result beats an
 //     outage. (Distinct from mismatch, which is a config error the
 //     operator must fix.)
-func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, logger *kenmcp.Logger) (*search.WatchedIndex, error) {
+func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, persistSnapshot bool, logger *kenmcp.Logger) (*search.WatchedIndex, error) {
 	if data, err := os.ReadFile(prebuiltIndexPath(dir)); err == nil {
 		var model *embed.StaticModel
 		if mode != search.ModeBM25 {
@@ -201,7 +201,7 @@ func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeS
 			if mErr != nil {
 				logger.Logf(kenmcp.LogWarn, "pre-built index %s needs a model but loading %q failed (%v); live-indexing instead",
 					prebuiltIndexPath(dir), modelDir, mErr)
-				return liveWatched(ctx, dir, mode, chunker, modelDir, fsOpts, logger)
+				return buildOrLoadSnapshot(ctx, dir, mode, modeStr, chunker, modelDir, fsOpts, persistSnapshot, logger)
 			}
 			model = m
 		}
@@ -223,7 +223,30 @@ func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeS
 			logger.Logf(kenmcp.LogWarn, "pre-built index %s unusable (%v); live-indexing instead", prebuiltIndexPath(dir), lErr)
 		}
 	}
-	return liveWatched(ctx, dir, mode, chunker, modelDir, fsOpts, logger)
+	return buildOrLoadSnapshot(ctx, dir, mode, modeStr, chunker, modelDir, fsOpts, persistSnapshot, logger)
+}
+
+// buildOrLoadSnapshot is the cold-start M1 (ADR-039) fall-through, taken when
+// there is no ADR-024 operator prebuilt to serve frozen. When persistSnapshot
+// is set (a local repo with KEN_MCP_SNAPSHOT on) it first tries the persisted
+// <repo>/.ken/snapshot.{manifest,bin} fast path — load + drift-scan, skipping
+// the walk/chunk/enrich/embed rebuild when the repo is unchanged — then, on a
+// miss or drift, live-builds and writes a fresh snapshot for next time. Any
+// snapshot failure degrades silently to the live build.
+func buildOrLoadSnapshot(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, persistSnapshot bool, logger *kenmcp.Logger) (*search.WatchedIndex, error) {
+	if persistSnapshot {
+		if wi := tryLoadSnapshot(dir, mode, modeStr, chunker, modelDir, fsOpts, logger); wi != nil {
+			return wi, nil
+		}
+	}
+	wi, err := liveWatched(ctx, dir, mode, chunker, modelDir, fsOpts, logger)
+	if err != nil {
+		return nil, err
+	}
+	if persistSnapshot {
+		writeSnapshot(dir, wi, mode, chunker, modelDir, fsOpts, logger)
+	}
+	return wi, nil
 }
 
 // liveWatched is the original walk+chunk+embed build with the file
@@ -317,6 +340,11 @@ func main() {
 	// folding (sql.FoldMigrations). Default is "folding enabled".
 	noAutoMigrations := envBool("KEN_SQL_NO_AUTO_MIGRATIONS", false, logger)
 
+	// Cold-start M1 (ADR-039): persist the built index to <repo>/.ken/ and
+	// load-with-drift-scan on boot instead of rebuilding. Default on; only
+	// applies to local-path repos (http sources are throwaway temp clones).
+	snapshotEnabled := envBool("KEN_MCP_SNAPSHOT", true, logger)
+
 	// M5: neural reranker — opt-in (default off), loaded lazily on the
 	// first hybrid+rerank query so the ~491 ms encoder.Load stays off the
 	// cold-start path. The model is shared across every WatchedIndex (via
@@ -375,8 +403,12 @@ func main() {
 			DisableFoldMigrations: noAutoMigrations,
 			LogWriter:             os.Stderr,
 		}
+		// M1 snapshot persistence applies only to local-path repos: an http
+		// source is a throwaway temp clone (cleanup != nil) that's rm-rf'd on
+		// eviction, so persisting into it is wasted work.
+		persistSnapshot := snapshotEnabled && cleanup == nil
 		bMode, bModeStr, bModelDir := bs.snapshot()
-		ix, err := loadOrBuildWatched(ctx, dir, bMode, bModeStr, chunker, bModelDir, fsOpts, logger)
+		ix, err := loadOrBuildWatched(ctx, dir, bMode, bModeStr, chunker, bModelDir, fsOpts, persistSnapshot, logger)
 		if err != nil {
 			if cleanup != nil {
 				cleanup()
@@ -397,6 +429,13 @@ func main() {
 		// MCP JSON-RPC channel).
 		ix.SetOnFlush(func(msg string) {
 			logger.Logf(kenmcp.LogInfo, "%s: %s", dir, msg)
+			// M1 (ADR-039): a flush changed the corpus — re-persist the
+			// snapshot so a restart after edits loads the latest, not a
+			// stale one. Best-effort (writeSnapshot never fails the server);
+			// runs in the watcher goroutine, off the query path.
+			if persistSnapshot {
+				writeSnapshot(dir, ix, bMode, chunker, bModelDir, fsOpts, logger)
+			}
 			// M2: a flush rebuilds the index snapshot, leaving the old
 			// corpus/postings/vectors as garbage. Hand the freed pages
 			// back to the OS so a long-lived idle server doesn't sit on
