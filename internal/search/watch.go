@@ -212,7 +212,7 @@ func newWatchedIndexWithDebounce(ctx context.Context, root string, mode Mode, ch
 	if err != nil {
 		return nil, err
 	}
-	return assembleWatched(root, mode, chunkerName, modelDir, model, chunks, vecs, migDirs, watch, debounce, opts)
+	return assembleWatched(root, mode, chunkerName, modelDir, model, chunks, vecs, migDirs, watch, debounce, opts, nil)
 }
 
 // NewWatchedIndexFromSnapshot seeds a *watching* index from a corpus already
@@ -230,7 +230,33 @@ func newWatchedIndexWithDebounce(ctx context.Context, root string, mode Mode, ch
 // rebuild; a snapshot-seeded index doesn't recompute it (a minor, documented
 // fidelity gap, ADR-039).
 func NewWatchedIndexFromSnapshot(root string, mode Mode, chunkerName, modelDir string, model *embed.StaticModel, chunks []chunk.Chunk, vecs [][]float32, watch bool, opts FSOptions) (*WatchedIndex, error) {
-	return assembleWatched(root, mode, chunkerName, modelDir, model, chunks, vecs, nil, watch, WatchDebounce, opts)
+	return assembleWatched(root, mode, chunkerName, modelDir, model, chunks, vecs, nil, watch, WatchDebounce, opts, nil)
+}
+
+// NewWatchedIndexReconciled seeds a watching index from a snapshot corpus and
+// applies a drift batch (changed = added/modified files to re-index, deleted =
+// files to drop) BEFORE the initial publish, so the first — and only — BM25/ANN
+// build reflects the reconciled state (cold-start M1 Increment 2, single-publish
+// path). Equivalent result to NewWatchedIndexFromSnapshot followed by
+// ReconcileFiles, but without that pair's throwaway first publish.
+//
+// Empty changed+deleted degenerates to a plain snapshot seed. migrationDirs is
+// nil, same fidelity gap as NewWatchedIndexFromSnapshot.
+func NewWatchedIndexReconciled(root string, mode Mode, chunkerName, modelDir string, model *embed.StaticModel, chunks []chunk.Chunk, vecs [][]float32, changed, deleted []string, watch bool, opts FSOptions) (*WatchedIndex, error) {
+	var reconcile func(*WatchedIndex)
+	if len(changed)+len(deleted) > 0 {
+		reconcile = func(w *WatchedIndex) {
+			batch := make(map[string]fsnotify.Op, len(changed)+len(deleted))
+			for _, f := range changed {
+				batch[f] = fsnotify.Write
+			}
+			for _, f := range deleted {
+				batch[f] = fsnotify.Remove
+			}
+			w.reconcileCorpusLocked(batch)
+		}
+	}
+	return assembleWatched(root, mode, chunkerName, modelDir, model, chunks, vecs, nil, watch, WatchDebounce, opts, reconcile)
 }
 
 // assembleWatched builds a WatchedIndex from an in-hand corpus (chunks +
@@ -238,7 +264,7 @@ func NewWatchedIndexFromSnapshot(root string, mode Mode, chunkerName, modelDir s
 // starts the fsnotify watcher goroutine. Shared by the walk-based
 // constructor and the snapshot-seeded one so both take the identical
 // publish + watcher-start path.
-func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model *embed.StaticModel, chunks []chunk.Chunk, vecs [][]float32, migDirs map[string]bool, watch bool, debounce time.Duration, opts FSOptions) (*WatchedIndex, error) {
+func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model *embed.StaticModel, chunks []chunk.Chunk, vecs [][]float32, migDirs map[string]bool, watch bool, debounce time.Duration, opts FSOptions, reconcile func(*WatchedIndex)) (*WatchedIndex, error) {
 	wi := &WatchedIndex{
 		root:          root,
 		mode:          mode,
@@ -252,6 +278,14 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 		debounce:      debounce,
 		fsOpts:        opts,
 		migrationDirs: migDirs,
+	}
+	// Optional pre-publish reconcile (snapshot-seeded drift): mutate the
+	// corpus BEFORE the initial build so the first published Index already
+	// reflects the changes — one build, not seed-then-reconcile's two. Runs
+	// single-threaded here (the watcher hasn't started), same as the
+	// buildUnionedIndexLocked call below.
+	if reconcile != nil {
+		reconcile(wi)
 	}
 	wi.ix.Store(wi.buildUnionedIndexLocked())
 
@@ -489,6 +523,21 @@ func (w *WatchedIndex) flush(batch map[string]fsnotify.Op) {
 	w.corpusMu.Lock()
 	defer w.corpusMu.Unlock()
 
+	compacted := w.reconcileCorpusLocked(batch)
+	newIx := w.buildUnionedIndexLocked()
+	w.ix.Store(newIx)
+	w.notifySwap()
+	w.notifyFlush(len(w.chunks)+len(w.extraChunks), len(batch), compacted, time.Since(start))
+}
+
+// reconcileCorpusLocked applies a batch of file events to the mutable corpus
+// (tombstone/append per file + migration refold + compact) and returns the
+// number of tombstones compacted away. It does NOT rebuild or publish the
+// Index — the caller runs buildUnionedIndexLocked + publish. Shared by flush
+// (which publishes after) and the snapshot-seeded reconcile constructor (which
+// runs it BEFORE the single initial publish, avoiding a seed-then-reconcile
+// double build). Caller holds corpusMu (or is single-threaded construction).
+func (w *WatchedIndex) reconcileCorpusLocked(batch map[string]fsnotify.Op) int {
 	// Migration dirs touched by this batch; we'll re-fold them in one
 	// pass after per-file tombstone/append, so an ALTER added in one
 	// migration file shows up in the folded chunk for the whole dir.
@@ -517,11 +566,7 @@ func (w *WatchedIndex) flush(batch map[string]fsnotify.Op) {
 		w.refoldMigrationDir(d)
 	}
 
-	compacted := w.compactCorpus()
-	newIx := w.buildUnionedIndexLocked()
-	w.ix.Store(newIx)
-	w.notifySwap()
-	w.notifyFlush(len(w.chunks)+len(w.extraChunks), len(batch), compacted, time.Since(start))
+	return w.compactCorpus()
 }
 
 // tombstoneFoldedChunksForDir marks every chunk whose File lives inside

@@ -295,3 +295,50 @@ func TestLoadSerializedCorpus_ParityWithLoadSerializedIndex(t *testing.T) {
 		t.Error("expected ErrChunkerMismatch from LoadSerializedCorpus on mismatch")
 	}
 }
+
+// TestNewWatchedIndexReconciled_SinglePublish verifies the single-publish
+// reconcile constructor produces the same corpus as seed-then-ReconcileFiles:
+// unchanged files kept, edited re-indexed, deleted dropped, added included.
+func TestNewWatchedIndexReconciled_SinglePublish(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.go", "package p\nfunc Alpha() {}\n")
+	write("b.go", "package p\nfunc Beta() {}\n")
+	write("c.go", "package p\nfunc Gamma() {}\n")
+
+	built, err := FromPath(dir, ModeBM25, "line", "")
+	if err != nil {
+		t.Fatalf("FromPath: %v", err)
+	}
+	// Mutate on disk before constructing: edit a, delete b, add d; c untouched.
+	write("a.go", "package p\nfunc AlphaEdited() {}\n")
+	if err := os.Remove(filepath.Join(dir, "b.go")); err != nil {
+		t.Fatal(err)
+	}
+	write("d.go", "package p\nfunc Delta() {}\n")
+
+	wi, err := NewWatchedIndexReconciled(dir, ModeBM25, "line", "", nil,
+		built.Chunks(), built.Vecs(), []string{"a.go", "d.go"}, []string{"b.go"}, true, FSOptions{})
+	if err != nil {
+		t.Fatalf("NewWatchedIndexReconciled: %v", err)
+	}
+	t.Cleanup(func() { _ = wi.Close() })
+
+	has := func(q string) bool { return len(wi.Search(q, 10)) > 0 }
+	if !has("AlphaEdited") {
+		t.Error("edited a.go should be re-indexed")
+	}
+	if has("Beta") {
+		t.Error("deleted b.go should be gone")
+	}
+	if !has("Delta") {
+		t.Error("added d.go should be indexed")
+	}
+	if !has("Gamma") {
+		t.Error("unchanged c.go should be kept from the snapshot")
+	}
+}

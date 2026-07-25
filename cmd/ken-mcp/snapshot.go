@@ -115,7 +115,10 @@ func tryLoadSnapshot(dir string, mode search.Mode, modeStr, chunker, modelDir st
 		logger.Logf(kenmcp.LogWarn, "snapshot %s unusable (%v); rebuilding", snapshotBinPath(dir), err)
 		return nil
 	}
-	wi, err := search.NewWatchedIndexFromSnapshot(dir, mode, chunker, modelDir, model, chunks, vecs, true, fsOpts)
+	// Single-publish: seed + reconcile the drift BEFORE the initial build, so
+	// only one BM25/ANN build runs (not seed-then-reconcile's two). When drift
+	// is empty this is a plain snapshot seed (the clean-load fast path).
+	wi, err := search.NewWatchedIndexReconciled(dir, mode, chunker, modelDir, model, chunks, vecs, changed, deleted, true, fsOpts)
 	if err != nil {
 		logger.Logf(kenmcp.LogWarn, "seeding index from snapshot %s failed (%v); rebuilding", dir, err)
 		return nil
@@ -125,11 +128,8 @@ func tryLoadSnapshot(dir string, mode search.Mode, modeStr, chunker, modelDir st
 		logger.Logf(kenmcp.LogInfo, "loaded snapshot for %s (%d chunks, no drift) — skipped rebuild, watching", dir, len(chunks))
 		return wi
 	}
-	// Incremental reconcile: re-index only the changed/added/deleted files,
-	// keeping every unchanged file's chunks + vectors from the snapshot. Then
-	// re-persist so the on-disk snapshot matches the reconciled state (next
-	// boot is a clean load). writeSnapshot is best-effort.
-	wi.ReconcileFiles(changed, deleted)
+	// Re-persist so the on-disk snapshot matches the reconciled state (next
+	// boot is a clean load). Best-effort.
 	logger.Logf(kenmcp.LogInfo, "reconciled snapshot for %s: %d changed/added, %d deleted (of %d snapshot files) — skipped full rebuild, watching",
 		dir, len(changed), len(deleted), len(stored.Files))
 	writeSnapshot(dir, wi, mode, chunker, modelDir, fsOpts, logger)

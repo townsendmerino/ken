@@ -177,17 +177,16 @@ chunks/vecs). Measured on yii2 (12 k chunks), median of 3:
 - **Everyday-cold clean-load** (repo unchanged — the common path): **bm25 3.2×**
   (1.72 s → 532 ms), **hybrid 4.2×** (2.40 s → 575 ms). Was 2.3× before the
   corpus-only loader.
-- **Edit-1-file reconcile** vs full rebuild: bm25 1.3×, hybrid 1.7× — still
-  modest because ADR-024 doesn't serialize BM25 postings (re-tokenized on load
-  regardless) *and* the seed-then-reconcile still publishes twice. The embedding
-  skip (re-embed 1 file, not 12 k) works and its payoff **grows with corpus
-  size** (kernel-scale hybrid would skip ~826 k embeddings).
+- **Edit-1-file reconcile** vs full rebuild: **bm25 3.1×** (2.12 s → 686 ms),
+  **hybrid 3.3×** (2.50 s → 752 ms). Was 1.3×/1.7× before the **single-publish
+  reconcile** shipped (`NewWatchedIndexReconciled` mutates the corpus BEFORE the
+  initial build, so drift costs one BM25/ANN build, not seed-then-reconcile's
+  two). The embedding skip (re-embed 1 file, not 12 k) means the win **grows
+  with corpus size** — kernel-scale hybrid would skip ~826 k embeddings.
 
-Remaining perf follow-up: a **single-publish reconcile** (seed without
-publishing, reconcile, publish once) to remove the reconcile's double build.
-
+Both perf follow-ups (corpus-only loader, single-publish reconcile) are shipped.
 Still pending: loader **fuzz** gate, the everyday-cold `PERF-expectations.md`
-row, `ken index --write-snapshot`, and the single-publish-reconcile follow-up.
+row, `ken index --write-snapshot`.
 
 Wire the existing serialize format into the `ken-mcp` lifecycle. Design recorded in
 **ADR-039**. Infra already on this branch (`8f6e7da`, `ab7f3f5`): the drift/config
