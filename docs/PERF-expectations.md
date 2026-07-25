@@ -65,6 +65,19 @@ startup), `search.FromFS` (linear in chunks), and
 ADR-036 M4). Per ADR-036's cumulative numbers: tiny dropped 79 %,
 medium 60 %, large 55 % from pre-campaign baselines.
 
+> **Everyday cold (ken-mcp restart, repo unchanged) — M1 snapshots (ADR-039).**
+> The cold-start column above is the **first** index of a repo. As of the
+> cold-start M1 work, ken-mcp persists the built index to `<repo>/.ken/` and, on
+> restart, **loads it + drift-scans** (config-key + per-file mtime/size) instead
+> of rebuilding — so an IDE restart on an unchanged repo costs a fraction of that
+> first-cold number. Measured on a yii2 PHP corpus (~12 k chunks, M1 Pro, median
+> of 3): clean-load **bm25 532 ms vs 1.72 s cold build (3.2×)**, **hybrid 575 ms
+> vs 2.40 s (4.2×)**. Editing a handful of files then restarting reconciles only
+> those (edit-1-file: bm25 **3.1×**, hybrid **3.3×**); the incremental win grows
+> with corpus size (the embedding skip). Only the first index of a repo — or one
+> after a mode/chunker/model/enrich change — pays the full cold build.
+> `KEN_MCP_SNAPSHOT=0` disables. Local-path repos only.
+
 **Warm search is sub-millisecond by design.** If you see >5 ms p50
 on a medium corpus, something is wrong — that's the regression
 threshold below.
