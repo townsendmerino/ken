@@ -44,6 +44,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-036](#adr-036-close-the-startup--query-latency-perf-campaign) | Close the startup + query-latency perf campaign | Accepted |
 | [ADR-037](#adr-037-ken-mcp-auto-fetches-the-embedding-model-on-first-run-background-default-on) | ken-mcp auto-fetches the embedding model on first run (background, default-on) | Accepted |
 | [ADR-038](#adr-038-kenignore--sembleignore-ignore-file-parity) | `.kenignore` / `.sembleignore` ignore-file parity | Accepted |
+| [ADR-039](#adr-039-persistent-index-snapshot--reconcile-on-boot-cold-start-m1) | Persistent index snapshot + reconcile-on-boot (cold-start M1) | Accepted (in progress) |
 
 ---
 
