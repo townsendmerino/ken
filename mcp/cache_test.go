@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/townsendmerino/ken/internal/search"
+	"github.com/townsendmerino/ken/internal/structural"
 )
 
 // makeFakeBuilder returns a Builder that produces a unique WatchedIndex
@@ -266,4 +267,102 @@ func TestNormalizeKey(t *testing.T) {
 			t.Errorf("URL with non-http(s) scheme should be rejected: %q", badURL)
 		}
 	}
+}
+
+// TestRepoBundle_LazyStructural verifies the cold-start-M0 lazy structural
+// build: the symbol index is NOT built at bundle creation, is built exactly
+// once on first StructuralIndex() call (even under concurrency), is cached
+// thereafter, and StructuralIfBuilt() never triggers a build.
+func TestRepoBundle_LazyStructural(t *testing.T) {
+	// A real structural index over testdata/repo (has auth.py the
+	// extractors recognize), returned by the builder.
+	sx, err := structural.Build("../testdata/repo")
+	if err != nil {
+		t.Fatalf("structural.Build: %v", err)
+	}
+
+	t.Run("build once, cached, peek does not trigger", func(t *testing.T) {
+		var calls atomic.Int64
+		b := &RepoBundle{StructuralBuilder: func() (*structural.Index, error) {
+			calls.Add(1)
+			return sx, nil
+		}}
+
+		// Not built yet: peek returns nil, builder untouched.
+		if got := b.StructuralIfBuilt(); got != nil {
+			t.Fatalf("StructuralIfBuilt before first use = %p, want nil", got)
+		}
+		if n := calls.Load(); n != 0 {
+			t.Fatalf("builder invoked %d times before StructuralIndex, want 0", n)
+		}
+
+		// First use builds it.
+		if got := b.StructuralIndex(); got != sx {
+			t.Fatalf("StructuralIndex() = %p, want %p", got, sx)
+		}
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("builder invoked %d times, want 1", n)
+		}
+
+		// Second use returns the cache; builder not re-invoked.
+		if got := b.StructuralIndex(); got != sx {
+			t.Fatalf("StructuralIndex() second call = %p, want %p", got, sx)
+		}
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("builder invoked %d times after 2 calls, want 1 (should cache)", n)
+		}
+		// Peek now sees the built index.
+		if got := b.StructuralIfBuilt(); got != sx {
+			t.Fatalf("StructuralIfBuilt after build = %p, want %p", got, sx)
+		}
+	})
+
+	t.Run("concurrent first use builds exactly once", func(t *testing.T) {
+		var calls atomic.Int64
+		b := &RepoBundle{StructuralBuilder: func() (*structural.Index, error) {
+			calls.Add(1)
+			return sx, nil
+		}}
+		var wg sync.WaitGroup
+		for range 20 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if got := b.StructuralIndex(); got != sx {
+					t.Errorf("StructuralIndex() = %p, want %p", got, sx)
+				}
+			}()
+		}
+		wg.Wait()
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("builder invoked %d times under 20 concurrent callers, want 1", n)
+		}
+	})
+
+	t.Run("nil builder degrades to nil, no panic", func(t *testing.T) {
+		b := &RepoBundle{} // no StructuralBuilder
+		if got := b.StructuralIndex(); got != nil {
+			t.Fatalf("StructuralIndex() with nil builder = %p, want nil", got)
+		}
+		if got := b.StructuralIfBuilt(); got != nil {
+			t.Fatalf("StructuralIfBuilt() with nil builder = %p, want nil", got)
+		}
+	})
+
+	t.Run("build failure is cached, not retried", func(t *testing.T) {
+		var calls atomic.Int64
+		b := &RepoBundle{StructuralBuilder: func() (*structural.Index, error) {
+			calls.Add(1)
+			return nil, context.DeadlineExceeded // simulate a failed build
+		}}
+		if got := b.StructuralIndex(); got != nil {
+			t.Fatalf("StructuralIndex() on failed build = %p, want nil", got)
+		}
+		if got := b.StructuralIndex(); got != nil {
+			t.Fatalf("StructuralIndex() second call = %p, want nil", got)
+		}
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("failed builder invoked %d times, want 1 (failure cached, not retried)", n)
+		}
+	})
 }

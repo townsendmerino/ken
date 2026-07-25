@@ -398,33 +398,37 @@ func main() {
 			debug.FreeOSMemory()
 		})
 
-		// Stage 8: eager structural-index build per the planning-
-		// instance's (a) steer. The build wall is in the noise vs
-		// the embedding pass loadOrBuildWatched already paid for;
-		// the eager-build property lets Track 2 tool handlers
-		// resolve ix.Structural() with no lazy-build coordination.
-		// On failure (unsupported language, parse errors), we log
-		// a stderr warning and leave Bundle.Structural=nil — the
-		// Track 2 tools handle nil gracefully (degrade to a clear
-		// "no structural index available" message).
-		var sIdx *structural.Index
-		if six, sErr := structural.Build(dir); sErr != nil {
-			logger.Logf(kenmcp.LogWarn, "structural index build failed for %s: %v "+
-				"(track 2 tools will report no structure available)", dir, sErr)
-		} else {
-			sIdx = six
+		// Stage 8: LAZY structural-index build (cold-start M0). The
+		// structural symbol index tree-sitter-parses every file — the
+		// same per-file parse the enrichment pass already paid for, so
+		// building it eagerly here doubled the cold-start parse cost
+		// (measured ~50% of index time on PHP corpora, M0 findings) for
+		// a symbol index most sessions never query. Wire a builder
+		// instead and let RepoBundle.StructuralIndex() build it on the
+		// first definition/references/callers/outline/symbols call. On
+		// failure (unsupported language, parse errors) it returns nil
+		// and the Track 2 tools degrade to a clear "no structural index
+		// available" message.
+		structuralBuilder := func() (*structural.Index, error) {
+			six, sErr := structural.Build(dir)
+			if sErr != nil {
+				logger.Logf(kenmcp.LogWarn, "structural index build failed for %s: %v "+
+					"(track 2 tools will report no structure available)", dir, sErr)
+				return nil, sErr
+			}
 			stats := six.Stats()
 			logger.Logf(kenmcp.LogInfo,
-				"structural index built for %s: %d files, %d symbols, %d unique callees",
+				"structural index built (lazy, first use) for %s: %d files, %d symbols, %d unique callees",
 				dir, stats.IndexedFiles, stats.UniqueSymbols, stats.UniqueCallees)
+			return six, nil
 		}
 
-		// M2: the initial chunk+embed+structural build is the biggest
-		// transient-memory spike in the process lifetime. Return the freed
-		// pages to the OS now that the snapshot is published, so idle RSS
-		// settles near the live index size instead of the build high-water.
+		// M2: the initial chunk+embed build is the biggest transient-memory
+		// spike in the process lifetime. Return the freed pages to the OS
+		// now that the snapshot is published, so idle RSS settles near the
+		// live index size instead of the build high-water.
 		debug.FreeOSMemory()
-		return &kenmcp.RepoBundle{Index: ix, Structural: sIdx}, cleanup, nil
+		return &kenmcp.RepoBundle{Index: ix, StructuralBuilder: structuralBuilder}, cleanup, nil
 	}
 
 	cache := kenmcp.NewCache(size, builder)

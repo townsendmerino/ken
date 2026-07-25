@@ -43,8 +43,12 @@ func handleStatus(ctx context.Context, cfg *Config, args StatusArgs) (*sdk.CallT
 						opts.LiveIndex = liveIndexInfo(source, ix)
 					}
 				}
-				if bundle.Structural != nil {
-					opts.LiveStructural = buildStructuralInfo(bundle.Structural)
+				// Peek only — never trigger the lazy structural build just
+				// to report status (cold-start M0). If no structural tool
+				// has been called yet, the index isn't built and status
+				// omits it, same as a repo with no structural support.
+				if s := bundle.StructuralIfBuilt(); s != nil {
+					opts.LiveStructural = buildStructuralInfo(s)
 				}
 			}
 		}

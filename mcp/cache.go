@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sync/singleflight"
 
@@ -21,18 +22,68 @@ const DefaultCacheSize = 16
 
 // RepoBundle is the per-repo data the cache holds: the retrieval-side
 // WatchedIndex (BM25 + dense + reranker) plus the Stage-8 structural
-// index over the same corpus. Structural may be nil when the
-// structural build was skipped or failed — tool handlers must
-// defend against nil so a structural-tool call on a corpus the
-// extractor doesn't support (or that failed to parse) degrades to
-// a clean error rather than panicking.
+// symbol index over the same corpus.
+//
+// The structural index is built LAZILY on first use (the
+// definition/references/callers/outline/symbols tools), not at bundle
+// creation. Cold-start M0 (docs/internal/cold-start-M0-findings.md)
+// measured that the per-file tree-sitter parse the structural build
+// performs is ~50% of index time on PHP corpora — paying it eagerly at
+// startup, on top of the enrichment pass that already parses every file,
+// doubled the cold-start parse cost for a symbol index most sessions
+// never query. Deferring it follows the ADR-036 lazy-rerank precedent.
+// StructuralIndex() returns nil (not panic) when there is no builder or
+// the build failed/was unsupported — every tool handler defends against
+// nil and degrades to a clean error.
 //
 // Lifecycle: the cache owns both indices. Index.Close() is called
-// on eviction to stop the watcher goroutine; Structural needs no
-// teardown (it's plain maps that GC).
+// on eviction to stop the watcher goroutine; the structural index needs
+// no teardown (it's plain maps that GC).
 type RepoBundle struct {
-	Index      *search.WatchedIndex
-	Structural *structural.Index
+	Index *search.WatchedIndex
+
+	// StructuralBuilder constructs the structural symbol index over the
+	// repo's corpus. nil ⇒ the bundle has no structural support (it stays
+	// unset for repos/tests that don't wire one). Invoked at most once, by
+	// the first StructuralIndex() call.
+	StructuralBuilder func() (*structural.Index, error)
+
+	structuralOnce  sync.Once
+	structuralBuilt atomic.Bool
+	structuralIdx   *structural.Index
+}
+
+// StructuralIndex returns the structural symbol index, building it on the
+// first call and caching the result for every subsequent call. A nil result
+// (no builder wired, or a build that failed / found no supported files) is
+// cached too — the build is attempted at most once. Safe for concurrent
+// tool handlers: sync.Once serializes the build so N simultaneous
+// structural-tool calls trigger exactly one parse.
+func (b *RepoBundle) StructuralIndex() *structural.Index {
+	if b.StructuralBuilder == nil {
+		return nil
+	}
+	b.structuralOnce.Do(func() {
+		if idx, err := b.StructuralBuilder(); err == nil {
+			b.structuralIdx = idx
+		}
+		// Publish "built" last: StructuralIfBuilt reads structuralIdx only
+		// after observing this store, so the write above happens-before
+		// that read without a lock.
+		b.structuralBuilt.Store(true)
+	})
+	return b.structuralIdx
+}
+
+// StructuralIfBuilt returns the structural index only if a prior
+// StructuralIndex() call already built it; it never triggers a build. The
+// status tool uses this so a `status` query doesn't force the lazy (and, on
+// large corpora, expensive) structural parse just to report on it.
+func (b *RepoBundle) StructuralIfBuilt() *structural.Index {
+	if b.structuralBuilt.Load() {
+		return b.structuralIdx
+	}
+	return nil
 }
 
 // Builder constructs the per-repo state for an already-normalized
@@ -48,13 +99,12 @@ type RepoBundle struct {
 // outlives the cache entry and the temp clone dir gets rm-rf'd while
 // the watcher holds inotify fds pointing into it.
 //
-// As of Stage 8 the Builder also returns a *structural.Index built
-// eagerly over the same corpus directory. Eager-build was the
-// planning-instance steer: the structural build's wall is in the
-// noise next to the embedding pass the WatchedIndex already pays
-// for, and the resulting "ix.Structural() returns immediately"
-// property avoids lazy-build/singleflight synchronization for the
-// Track 2 tools.
+// As of Stage 8 the bundle also carries a structural symbol index over
+// the same corpus. It was originally built eagerly here; cold-start M0
+// (docs/internal/cold-start-M0-findings.md) showed that doubled the
+// per-file tree-sitter parse cost at startup (the enrichment pass already
+// parses every file), so the Builder now wires RepoBundle.StructuralBuilder
+// and the index is built lazily on first structural-tool use instead.
 type Builder func(ctx context.Context, source string) (*RepoBundle, func(), error)
 
 type cacheEntry struct {
@@ -229,14 +279,15 @@ func (c *Cache) Get(ctx context.Context, source string) (*search.WatchedIndex, e
 	return b.Index, nil
 }
 
-// GetBundle returns the cached RepoBundle (WatchedIndex + structural
-// index) for source, building both eagerly on first access. Used by
+// GetBundle returns the cached RepoBundle (WatchedIndex + lazy structural
+// index) for source, building the retrieval index on first access. Used by
 // Track 2 tool handlers that need the structural index alongside the
-// retrieval one.
+// retrieval one; they call bundle.StructuralIndex(), which builds the
+// symbol index lazily on first use.
 //
 // Cache + lifecycle semantics are identical to Get — singleflight on
 // first build, LRU eviction, c.closed observed during in-flight
-// builds. Bundle.Structural may be nil if the structural build
+// builds. bundle.StructuralIndex() may return nil if the structural build
 // produced no entries (unsupported corpus language); handlers must
 // defend against that.
 func (c *Cache) GetBundle(ctx context.Context, source string) (*RepoBundle, error) {

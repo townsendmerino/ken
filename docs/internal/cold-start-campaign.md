@@ -53,7 +53,15 @@ Questions the profile answered:
       ken-mcp's eager `structural.Build` removes a whole redundant parse pass. Its
       "build wall is in the noise" comment is empirically false on PHP.
 
-Go/no-go summary: **lazy-structural quick win → GO** (own PR, ahead of M1);
+**Lazy-structural quick win — ✅ SHIPPED.** ken-mcp's eager `structural.Build`
+(`main.go:411`) is now deferred: the Builder wires `RepoBundle.StructuralBuilder`
+and the symbol index builds on first structural-tool call (`sync.Once`-guarded,
+concurrency-safe; `status` peeks via `StructuralIfBuilt()` without triggering it).
+Measured deferred cost on the yii2 proxy: **`structural.Build` ~1.29 s** removed
+from every cold start (the full hybrid build was ~2.3 s) — unpaid entirely by
+sessions that never call definition/references/callers/outline/symbols.
+
+Go/no-go summary: **lazy-structural quick win → GO** (own PR, ahead of M1 — done);
 **M1 → GO** (skips both parses on everyday cold); **M2 → GO but extend to cache the
 enrichment label line by content hash**, not just embeddings (the parse is the more
 expensive thing to memoize); **M3 → GO** (BM25 floor is 476 ms → sub-second

@@ -16,8 +16,9 @@ package mcp
 // AddTool description for the honest framing the agent reads.
 //
 // Lifecycle: each handler resolves the cached RepoBundle via
-// Cache.GetBundle (eager structural build per Stage 8 design).
-// Bundle.Structural may be nil for repos whose corpus has no files
+// Cache.GetBundle, then calls bundle.StructuralIndex(), which builds
+// the structural symbol index lazily on first use (cold-start M0).
+// It may return nil for repos whose corpus has no files
 // matching a registered extractor — the structural index covers
 // ten languages (Python, Go, TypeScript, JavaScript, Java, Rust, C,
 // C++, PHP, Ruby); files outside this set are silently skipped at
@@ -73,7 +74,10 @@ func handleDefinition(ctx context.Context, cfg *Config, args DefinitionArgs) (*s
 	if errResult != nil {
 		return errResult, nil, nil
 	}
-	if bundle.Structural == nil {
+	// Builds the structural symbol index on first use (lazy — cold-start M0);
+	// nil on unsupported corpus or build failure, handled just below.
+	sidx := bundle.StructuralIndex()
+	if sidx == nil {
 		return errorResult(args.Output,
 			"No structural index available for this repo. "+
 				"The structural index has no extractors for this corpus. "+
@@ -85,7 +89,7 @@ func handleDefinition(ctx context.Context, cfg *Config, args DefinitionArgs) (*s
 		return errorResult(args.Output, "symbol is required"), nil, nil
 	}
 
-	sites := bundle.Structural.Definition(sym)
+	sites := sidx.Definition(sym)
 	if len(sites) == 0 {
 		resp := DefinitionResponse{Symbol: sym, Definitions: []DefinitionRowOut{}}
 		return dispatchOutput(args.Output, resp, fmt.Sprintf("No definition found for %q.", sym))
@@ -139,7 +143,10 @@ func handleReferences(ctx context.Context, cfg *Config, args ReferencesArgs) (*s
 	if errResult != nil {
 		return errResult, nil, nil
 	}
-	if bundle.Structural == nil {
+	// Builds the structural symbol index on first use (lazy — cold-start M0);
+	// nil on unsupported corpus or build failure, handled just below.
+	sidx := bundle.StructuralIndex()
+	if sidx == nil {
 		return errorResult(args.Output,
 			"No structural index available for this repo. "+
 				"The structural index has no extractors registered for any file in this corpus.",
@@ -150,7 +157,7 @@ func handleReferences(ctx context.Context, cfg *Config, args ReferencesArgs) (*s
 		return errorResult(args.Output, "symbol is required"), nil, nil
 	}
 
-	refs := bundle.Structural.References(sym)
+	refs := sidx.References(sym)
 	if len(refs) == 0 {
 		resp := ReferencesResponse{
 			Symbol:     sym,
@@ -216,7 +223,10 @@ func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.Cal
 	if errResult != nil {
 		return errResult, nil, nil
 	}
-	if bundle.Structural == nil {
+	// Builds the structural symbol index on first use (lazy — cold-start M0);
+	// nil on unsupported corpus or build failure, handled just below.
+	sidx := bundle.StructuralIndex()
+	if sidx == nil {
 		return errorResult(args.Output,
 			"No structural index available for this repo. "+
 				"The structural index has no extractors registered for any file in this corpus.",
@@ -227,7 +237,7 @@ func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.Cal
 		return errorResult(args.Output, "symbol is required"), nil, nil
 	}
 
-	sites := bundle.Structural.Callers(sym)
+	sites := sidx.Callers(sym)
 	if len(sites) == 0 {
 		// Empty: same shape in JSON (files: []) so agents don't
 		// have to special-case missing data; markdown gets the
@@ -291,7 +301,10 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	if errResult != nil {
 		return errResult, nil, nil
 	}
-	if bundle.Structural == nil {
+	// Builds the structural symbol index on first use (lazy — cold-start M0);
+	// nil on unsupported corpus or build failure, handled just below.
+	sidx := bundle.StructuralIndex()
+	if sidx == nil {
 		return errorResult(args.Output,
 			"No structural index available for this repo. "+
 				"The structural index has no extractors registered for any file in this corpus.",
@@ -305,8 +318,8 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 
 	// First, try as a single file: if the index has an entry for
 	// this exact path, render its outline directly.
-	if fs := bundle.Structural.File(path); fs != nil {
-		entries := bundle.Structural.Outline(path)
+	if fs := sidx.File(path); fs != nil {
+		entries := sidx.Outline(path)
 		resp := OutlineResponse{
 			Path:    path,
 			Entries: convertOutlineEntries(path, entries),
@@ -317,7 +330,7 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	// Otherwise treat as a directory prefix and walk every
 	// indexed file under it. Returns empty if the prefix matches
 	// nothing.
-	files := bundle.Structural.FilesUnderPath(path)
+	files := sidx.FilesUnderPath(path)
 	if len(files) == 0 {
 		resp := OutlineResponse{Path: path, Entries: []OutlineEntryOut{}}
 		md := fmt.Sprintf("No indexed files found at or under %q. "+
@@ -328,7 +341,7 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 
 	resp := OutlineResponse{Path: path}
 	for _, f := range files {
-		entries := bundle.Structural.Outline(f)
+		entries := sidx.Outline(f)
 		if len(entries) == 0 {
 			continue
 		}
@@ -347,7 +360,7 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 		// Re-render from the raw entries so the markdown layer
 		// stays identical to today (params on funcs, container.
 		// prefix on methods, class label on classes).
-		b.WriteString(formatOutlineEntries(bundle.Structural.Outline(fe.File)))
+		b.WriteString(formatOutlineEntries(sidx.Outline(fe.File)))
 		b.WriteString("\n")
 	}
 	return dispatchOutput(args.Output, resp, strings.TrimRight(b.String(), "\n"))
@@ -379,7 +392,10 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 	if errResult != nil {
 		return errResult, nil, nil
 	}
-	if bundle.Structural == nil {
+	// Builds the structural symbol index on first use (lazy — cold-start M0);
+	// nil on unsupported corpus or build failure, handled just below.
+	sidx := bundle.StructuralIndex()
+	if sidx == nil {
 		return errorResult(args.Output,
 			"No structural index available for this repo. "+
 				"The structural index has no extractors registered for any file in this corpus.",
@@ -388,9 +404,9 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 	path := strings.TrimSpace(args.Path)
 	var names []string
 	if path == "" || path == "." {
-		names = bundle.Structural.Symbols()
+		names = sidx.Symbols()
 	} else {
-		names = bundle.Structural.SymbolsInPath(structural.NormalizePath(path))
+		names = sidx.SymbolsInPath(structural.NormalizePath(path))
 	}
 	if names == nil {
 		names = []string{}
