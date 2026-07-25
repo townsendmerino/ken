@@ -292,28 +292,11 @@ func (w *WatchedIndex) SnapshotBytes() ([]byte, error) {
 	return serializeIndex(ix.Chunks(), ix.Vecs(), w.mode, w.chunkerName)
 }
 
-// SnapshotManifest builds the drift manifest for the current published
-// corpus: config-key (from the supplied fingerprint/knobs) plus an mtime+size
-// stamp for every distinct file in the index, statting under the index root.
-// Pairs with SnapshotBytes to form the two-artifact snapshot.
-func (w *WatchedIndex) SnapshotManifest(configKey string) SnapshotManifest {
-	ix := w.Load()
-	seen := make(map[string]struct{})
-	var files []string
-	if ix != nil {
-		for _, c := range ix.Chunks() {
-			if _, ok := seen[c.File]; ok {
-				continue
-			}
-			seen[c.File] = struct{}{}
-			files = append(files, c.File)
-		}
-	}
-	return SnapshotManifest{
-		ConfigKey: configKey,
-		Files:     BuildFileStamps(os.DirFS(w.root), files),
-	}
-}
+// EmbedModel returns the Model2Vec model this index queries with (nil for
+// BM25 mode). ken-mcp uses it to compute the snapshot config-key's model
+// fingerprint without reloading the model from disk. The returned model is
+// read-only; callers must not mutate it.
+func (w *WatchedIndex) EmbedModel() *embed.StaticModel { return w.model }
 
 // Load returns the current Index snapshot. Goroutine-safe; one atomic
 // load. Never returns nil after NewWatchedIndex succeeds.

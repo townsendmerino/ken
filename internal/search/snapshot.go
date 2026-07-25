@@ -73,13 +73,19 @@ type SnapshotManifest struct {
 // SnapshotConfigKey builds the invalidation key stamped into the manifest.
 // A snapshot is only trusted when the current key matches the stored one.
 //
-// It deliberately covers only the knobs that DON'T surface as file changes:
-// mode, chunker, model fingerprint, enrichment on/off, and the size-cap env
-// knobs. Ignore-rule changes need no term here — a changed .gitignore /
-// .kenignore is itself an indexed file, so editing it shows up as manifest
-// drift (a modified file, plus added/removed files as the rule set shifts)
-// and forces a rebuild that re-walks with the new rules.
-func SnapshotConfigKey(mode Mode, chunker, modelFingerprint string, enrich bool, maxFileBytes, maxAvgLineBytes int64) string {
+// It covers exactly the knobs that change the indexed BYTES without changing
+// the file SET or any file's mtime/size — because anything that shifts the
+// file set is already caught by the manifest drift check (FilesEqual):
+//   - mode / chunker / model: change the vectors or chunk boundaries while
+//     the source files are untouched ⇒ NOT visible as drift ⇒ keyed here.
+//   - enrichment on/off: rewrites each chunk's Text (the `# func:` label)
+//     without touching the files ⇒ NOT visible as drift ⇒ keyed here.
+//   - size caps (KEN_MAX_FILE_BYTES / KEN_MAX_AVG_LINE_BYTES) and ignore
+//     rules (.gitignore / .kenignore): flipping them adds or removes files
+//     from the walk (and a changed ignore file is itself an indexed file),
+//     so the manifest file set differs ⇒ ALREADY caught by drift ⇒ NOT
+//     keyed here (including them would only add false-invalidation risk).
+func SnapshotConfigKey(mode Mode, chunker, modelFingerprint string, enrich bool) string {
 	enrichTag := "on"
 	if !enrich {
 		enrichTag = "off"
@@ -92,8 +98,6 @@ func SnapshotConfigKey(mode Mode, chunker, modelFingerprint string, enrich bool,
 		"chunker=" + chunker,
 		"model=" + modelFingerprint,
 		"enrich=" + enrichTag,
-		"maxfile=" + strconv.FormatInt(maxFileBytes, 10),
-		"maxavgline=" + strconv.FormatInt(maxAvgLineBytes, 10),
 	}, "|")
 }
 

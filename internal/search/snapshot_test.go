@@ -7,19 +7,17 @@ import (
 )
 
 func TestSnapshotConfigKey_StableAndSensitive(t *testing.T) {
-	base := SnapshotConfigKey(ModeHybrid, "regex", "dim=256,vocab=30000,bytes=999", true, 2<<20, 4096)
+	base := SnapshotConfigKey(ModeHybrid, "regex", "dim=256,vocab=30000,bytes=999", true)
 	// Same inputs → identical key.
-	if again := SnapshotConfigKey(ModeHybrid, "regex", "dim=256,vocab=30000,bytes=999", true, 2<<20, 4096); again != base {
+	if again := SnapshotConfigKey(ModeHybrid, "regex", "dim=256,vocab=30000,bytes=999", true); again != base {
 		t.Fatalf("config key not stable:\n %q\n %q", base, again)
 	}
 	// Each knob must change the key.
 	cases := map[string]string{
-		"mode":       SnapshotConfigKey(ModeBM25, "regex", "dim=256,vocab=30000,bytes=999", true, 2<<20, 4096),
-		"chunker":    SnapshotConfigKey(ModeHybrid, "treesitter", "dim=256,vocab=30000,bytes=999", true, 2<<20, 4096),
-		"model":      SnapshotConfigKey(ModeHybrid, "regex", "dim=512,vocab=30000,bytes=999", true, 2<<20, 4096),
-		"enrich":     SnapshotConfigKey(ModeHybrid, "regex", "dim=256,vocab=30000,bytes=999", false, 2<<20, 4096),
-		"maxfile":    SnapshotConfigKey(ModeHybrid, "regex", "dim=256,vocab=30000,bytes=999", true, 1<<20, 4096),
-		"maxavgline": SnapshotConfigKey(ModeHybrid, "regex", "dim=256,vocab=30000,bytes=999", true, 2<<20, 2048),
+		"mode":    SnapshotConfigKey(ModeBM25, "regex", "dim=256,vocab=30000,bytes=999", true),
+		"chunker": SnapshotConfigKey(ModeHybrid, "treesitter", "dim=256,vocab=30000,bytes=999", true),
+		"model":   SnapshotConfigKey(ModeHybrid, "regex", "dim=512,vocab=30000,bytes=999", true),
+		"enrich":  SnapshotConfigKey(ModeHybrid, "regex", "dim=256,vocab=30000,bytes=999", false),
 	}
 	for knob, key := range cases {
 		if key == base {
