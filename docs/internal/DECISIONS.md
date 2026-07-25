@@ -2612,3 +2612,32 @@ This is the second "perf-campaign close" ADR in ken's history; ADR-029 closed pr
 - Tested by golden `WalkFS` tests (`walk_kenignore_test.go`: precedence, empty-suppresses-fallback, union, both-direction no-cross-file-re-include, within-family negation subset, nesting) + `Matcher.ShouldIndex` tests for the watch path.
 
 **Rejected alternatives:** merging `.kenignore` rules into the *same* scope stack as `.gitignore` (simpler, but last-match-wins across the merged union would let a `.kenignore` negation re-include a git-ignored path — surprising and unwanted, hence the two-family split); a single root-only ignore file (loses the per-package nesting that made `.gitignore` work on real monorepos — ADR-015); an env var to enable the feature (nothing to gate — it's inert without the files, and parity tools ship it on by default).
+
+## ADR-039: Persistent index snapshot + reconcile-on-boot (cold-start M1)
+
+**Status:** Accepted (in progress). **Date:** 2026-07-25.
+
+**Context.** Cold-start M0 (`docs/internal/cold-start-M0-findings.md`) measured ken-mcp's cold start: on a PHP corpus the per-file tree-sitter enrichment parse is ~50% of index time and embedding ~31% — and *every* ken-mcp launch rebuilds the index from scratch through `NewWatchedIndexWithContext` → `walkAndChunk`. Cold start is a policy, not physics: the serialize format (`index_serialize.go`, KEN1, ADR-024) already round-trips chunks+vectors, but the server never persists what it builds, so every IDE restart re-pays the full walk+chunk+enrich+embed. This is the campaign's biggest lever.
+
+**Decision.** Persist the built index to disk and, on boot, load it + reconcile against the current tree instead of rebuilding when nothing (or little) changed.
+
+- **Two on-disk artifacts under `<repo>/.ken/`** (a cache, `.gitignore`d):
+  - `index.bin` — the existing KEN1 chunks+vectors snapshot, **format unchanged** (written from the live corpus via the in-package `serializeIndex`, read via `LoadSerializedIndex`). Keeping KEN1 byte-identical protects the SDK `ken build-index` / `mcp.Run` prebuilt-embed path (ADR-024) from any regression.
+  - `manifest.bin` — a **new sidecar** carrying the drift/invalidation metadata the KEN1 format deliberately omits: a **config-key** (see below) + a **per-file manifest** (path → mtime-nanos + size), sorted by path, magic+version+CRC32-framed like the rerank cache (ADR-025). A missing, corrupt, or mismatched sidecar is simply a **cache-miss → rebuild** — never a hard error.
+- **Config-key (invalidation).** A stable string over: format tag ⊕ mode ⊕ chunker ⊕ model fingerprint (dim + vocab + `model.safetensors` size — the model has no hash API) ⊕ enrichment on/off ⊕ the size-cap env knobs (`KEN_MAX_FILE_BYTES`, `KEN_MAX_AVG_LINE_BYTES`) ⊕ ignore-rules signal. Any mismatch ⇒ full rebuild — the snapshot is only trusted when it was built under the same config. (Mirrors the rerank cache's `scopeKey` gate.)
+- **Boot decision** in `loadOrBuildWatched` (the existing seam):
+  1. Snapshot disabled (`KEN_MCP_SNAPSHOT=off`) or artifacts absent ⇒ build fresh (today's path), then write the snapshot.
+  2. Sidecar present but config-key ≠ current, or any load error ⇒ rebuild + rewrite (log once).
+  3. Config-key matches: walk the tree, build the current manifest, diff against the stored one.
+     - **No drift** ⇒ `LoadSerializedIndex` and **seed a *watching* index from the loaded chunks/vectors** — no walk-chunk-enrich-embed at all. This is the everyday-cold win (IDE restart, repo unchanged).
+     - **Drift** ⇒ **Increment 1 ships full rebuild here**; **Increment 2** replaces it with incremental reconcile (re-index only changed/new files, drop deleted, reusing the watcher's existing per-file `tombstoneFile`/`appendFile` primitives — which already re-embed only the touched file).
+- **Write triggers.** After the initial build and after each debounced watch flush (the corpus is already in hand — serialize `w.chunks`/`w.vecs` directly, no re-walk). Atomic tmp-write + rename for both files.
+- **New seam in `internal/search`.** Refactor `newWatchedIndexWithDebounce` to split "assemble WatchedIndex from a corpus + start watcher" from "walk to produce the corpus", so a snapshot-seeded **watching** index is a first-class constructor (today's `WrapStatic` is frozen/empty-corpus and can't watch). The seeded index carries `migrationDirs=nil` until its next full rebuild — a minor Tier-1-folding fidelity gap, documented.
+
+**Consequences / guardrails.**
+- **Correctness is the top risk (stale index).** Drift uses **both** mtime-nanos and size; on any doubt (stat error, clock skew) the file counts as changed → conservative rebuild of that file. The live fsnotify watcher keeps reconciling after boot, so boot drift only needs to be approximately right, not perfect.
+- **Snapshot is untrusted input.** The KEN1 loader already CRC-checks and has typed corrupt/format errors; the sidecar reader is CRC-framed and fuzzed. Any failure ⇒ cache-miss, never a crash.
+- **`.ken/` is a cache:** safe to delete, `.gitignore`d, `KEN_MCP_SNAPSHOT=off` disables read+write.
+- **No change to the SDK prebuilt path** — KEN1 format and `ken build-index` are untouched; the sidecar is additive and ken-mcp-only.
+
+**Rejected alternatives:** bumping KEN1 to format v2 with the manifest inline (one atomic file, but changes the format SDK-embedded prebuilt indices depend on and forces a compat branch in the loader — the sidecar isolates the risk); storing content hashes instead of mtime+size (robust to mtime lies but costs a full re-read of every file on every boot, defeating the point — mtime+size is the same signal the fsnotify path trusts); a background daemon that never exits (out of scope — persistence must work within Cursor's MCP process lifecycle, campaign anti-goal).

@@ -212,6 +212,33 @@ func newWatchedIndexWithDebounce(ctx context.Context, root string, mode Mode, ch
 	if err != nil {
 		return nil, err
 	}
+	return assembleWatched(root, mode, chunkerName, modelDir, model, chunks, vecs, migDirs, watch, debounce, opts)
+}
+
+// NewWatchedIndexFromSnapshot seeds a *watching* index from a corpus already
+// materialized off disk (cold-start M1 / ADR-039) — the chunks and their
+// embedding vectors loaded from a persisted snapshot — instead of walking +
+// chunking + enriching + embedding the tree. This is the everyday-cold fast
+// path: the caller has verified (via the sidecar manifest) that the tree has
+// not drifted, so the snapshot's corpus is current and only the cheap
+// BM25/ANN rebuild in buildUnionedIndexLocked runs before the first query.
+//
+// Unlike WrapStatic (which is frozen and carries no live corpus), the
+// returned index owns chunks/vecs and starts the fsnotify watcher when
+// watch=true, so post-restart edits are picked up normally. migrationDirs is
+// left nil — Tier-1 migration folding re-establishes on the next full
+// rebuild; a snapshot-seeded index doesn't recompute it (a minor, documented
+// fidelity gap, ADR-039).
+func NewWatchedIndexFromSnapshot(root string, mode Mode, chunkerName, modelDir string, model *embed.StaticModel, chunks []chunk.Chunk, vecs [][]float32, watch bool, opts FSOptions) (*WatchedIndex, error) {
+	return assembleWatched(root, mode, chunkerName, modelDir, model, chunks, vecs, nil, watch, WatchDebounce, opts)
+}
+
+// assembleWatched builds a WatchedIndex from an in-hand corpus (chunks +
+// vecs + model), publishes the initial snapshot, and — when watch=true —
+// starts the fsnotify watcher goroutine. Shared by the walk-based
+// constructor and the snapshot-seeded one so both take the identical
+// publish + watcher-start path.
+func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model *embed.StaticModel, chunks []chunk.Chunk, vecs [][]float32, migDirs map[string]bool, watch bool, debounce time.Duration, opts FSOptions) (*WatchedIndex, error) {
 	wi := &WatchedIndex{
 		root:          root,
 		mode:          mode,
@@ -250,6 +277,42 @@ func newWatchedIndexWithDebounce(ctx context.Context, root string, mode Mode, ch
 
 	go wi.loop()
 	return wi, nil
+}
+
+// SnapshotBytes serializes the current published corpus (chunks + vectors)
+// to the KEN1 on-disk format (index_serialize.go) so ken-mcp can persist it
+// under <repo>/.ken/index.bin (ADR-039). It reads the published *Index —
+// whose chunks are already compacted (no tombstones) — so it needs no lock
+// and captures a consistent snapshot even if a flush is mid-flight.
+func (w *WatchedIndex) SnapshotBytes() ([]byte, error) {
+	ix := w.Load()
+	if ix == nil {
+		return nil, fmt.Errorf("search: SnapshotBytes: no index published")
+	}
+	return serializeIndex(ix.Chunks(), ix.Vecs(), w.mode, w.chunkerName)
+}
+
+// SnapshotManifest builds the drift manifest for the current published
+// corpus: config-key (from the supplied fingerprint/knobs) plus an mtime+size
+// stamp for every distinct file in the index, statting under the index root.
+// Pairs with SnapshotBytes to form the two-artifact snapshot.
+func (w *WatchedIndex) SnapshotManifest(configKey string) SnapshotManifest {
+	ix := w.Load()
+	seen := make(map[string]struct{})
+	var files []string
+	if ix != nil {
+		for _, c := range ix.Chunks() {
+			if _, ok := seen[c.File]; ok {
+				continue
+			}
+			seen[c.File] = struct{}{}
+			files = append(files, c.File)
+		}
+	}
+	return SnapshotManifest{
+		ConfigKey: configKey,
+		Files:     BuildFileStamps(os.DirFS(w.root), files),
+	}
 }
 
 // Load returns the current Index snapshot. Goroutine-safe; one atomic
