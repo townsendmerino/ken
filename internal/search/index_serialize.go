@@ -307,10 +307,15 @@ func serializeIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, chunkerNa
 // deserializeIndex is the inverse of serializeIndex. CRC is verified
 // before any structural parsing — that way a mid-file corruption isn't
 // misreported as a "field decode" failure deep into the read.
-func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
+// deserializeCorpus parses + validates a serialized index and returns its raw
+// chunks/vectors (plus the mode and the query-time model) WITHOUT building the
+// runtime *Index. deserializeIndex and LoadSerializedCorpus both wrap it, so
+// the CRC/format/config validation has a single source of truth; only the
+// final BuildIndex differs.
+func deserializeCorpus(data []byte, opts LoadOptions) ([]chunk.Chunk, [][]float32, Mode, *embed.StaticModel, error) {
 	// Minimum viable size: magic (4) + formatVer (4) + crc trailer (4).
 	if len(data) < 12 {
-		return nil, fmt.Errorf("%w: file too short (%d bytes)", ErrCorrupt, len(data))
+		return nil, nil, 0, nil, fmt.Errorf("%w: file too short (%d bytes)", ErrCorrupt, len(data))
 	}
 
 	// --- CRC trailer ---
@@ -326,7 +331,7 @@ func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
 	gotCRC := binary.LittleEndian.Uint32(data[bodyEnd:])
 	wantCRC := crc32.ChecksumIEEE(data[:bodyEnd])
 	if gotCRC != wantCRC {
-		return nil, fmt.Errorf("%w: crc32 mismatch (got %08x want %08x)", ErrCorrupt, gotCRC, wantCRC)
+		return nil, nil, 0, nil, fmt.Errorf("%w: crc32 mismatch (got %08x want %08x)", ErrCorrupt, gotCRC, wantCRC)
 	}
 
 	r := bytes.NewReader(data[:bodyEnd])
@@ -334,80 +339,80 @@ func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
 	// --- Magic ---
 	var magic [4]byte
 	if _, err := io.ReadFull(r, magic[:]); err != nil {
-		return nil, fmt.Errorf("%w: read magic: %v", ErrCorrupt, err)
+		return nil, nil, 0, nil, fmt.Errorf("%w: read magic: %v", ErrCorrupt, err)
 	}
 	if string(magic[:]) != serializeMagic {
-		return nil, fmt.Errorf("%w: magic mismatch (got %q want %q)", ErrCorrupt, magic[:], serializeMagic)
+		return nil, nil, 0, nil, fmt.Errorf("%w: magic mismatch (got %q want %q)", ErrCorrupt, magic[:], serializeMagic)
 	}
 
 	// --- Format version ---
 	formatVer, err := readU32(r)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read format version: %v", ErrCorrupt, err)
+		return nil, nil, 0, nil, fmt.Errorf("%w: read format version: %v", ErrCorrupt, err)
 	}
 	if formatVer != serializeFormatVersion {
-		return nil, fmt.Errorf("%w: file format version %d (this ken supports %d)",
+		return nil, nil, 0, nil, fmt.Errorf("%w: file format version %d (this ken supports %d)",
 			ErrFormatVersion, formatVer, serializeFormatVersion)
 	}
 
 	// --- Ken version (informational) ---
 	if _, err := readLPString(r); err != nil {
-		return nil, fmt.Errorf("%w: read ken version: %v", ErrCorrupt, err)
+		return nil, nil, 0, nil, fmt.Errorf("%w: read ken version: %v", ErrCorrupt, err)
 	}
 
 	// --- Mode ---
 	modeByte, err := r.ReadByte()
 	if err != nil {
-		return nil, fmt.Errorf("%w: read mode: %v", ErrCorrupt, err)
+		return nil, nil, 0, nil, fmt.Errorf("%w: read mode: %v", ErrCorrupt, err)
 	}
 	mode := Mode(modeByte)
 	if mode != ModeBM25 && mode != ModeSemantic && mode != ModeHybrid && mode != ModeHybridRerank {
-		return nil, fmt.Errorf("%w: invalid mode byte %d", ErrCorrupt, modeByte)
+		return nil, nil, 0, nil, fmt.Errorf("%w: invalid mode byte %d", ErrCorrupt, modeByte)
 	}
 
 	// --- Chunker ---
 	chunkerName, err := readLPString(r)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read chunker name: %v", ErrCorrupt, err)
+		return nil, nil, 0, nil, fmt.Errorf("%w: read chunker name: %v", ErrCorrupt, err)
 	}
 
 	// --- NumChunks + EmbedDim ---
 	numChunks, err := readU32(r)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read numChunks: %v", ErrCorrupt, err)
+		return nil, nil, 0, nil, fmt.Errorf("%w: read numChunks: %v", ErrCorrupt, err)
 	}
 	embedDim, err := readU32(r)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read embedDim: %v", ErrCorrupt, err)
+		return nil, nil, 0, nil, fmt.Errorf("%w: read embedDim: %v", ErrCorrupt, err)
 	}
 
 	// --- Expected-field validation (after the header is fully read,
 	// so a mismatch error names the actual on-disk values). ---
 	if opts.ExpectedChunker != "" && chunkerName != opts.ExpectedChunker {
-		return nil, fmt.Errorf("%w: file built with chunker=%q, expected %q",
+		return nil, nil, 0, nil, fmt.Errorf("%w: file built with chunker=%q, expected %q",
 			ErrChunkerMismatch, chunkerName, opts.ExpectedChunker)
 	}
 	if opts.ExpectedMode != "" {
 		expMode, perr := ParseMode(opts.ExpectedMode)
 		if perr != nil {
-			return nil, fmt.Errorf("search: LoadOptions.ExpectedMode invalid: %w", perr)
+			return nil, nil, 0, nil, fmt.Errorf("search: LoadOptions.ExpectedMode invalid: %w", perr)
 		}
 		if mode != expMode {
-			return nil, fmt.Errorf("%w: file built with mode=%v, expected %v",
+			return nil, nil, 0, nil, fmt.Errorf("%w: file built with mode=%v, expected %v",
 				ErrModeMismatch, mode, expMode)
 		}
 	}
 	if mode.needsModel() && opts.Model == nil {
-		return nil, fmt.Errorf("%w (file mode=%v)", ErrModelRequired, mode)
+		return nil, nil, 0, nil, fmt.Errorf("%w (file mode=%v)", ErrModelRequired, mode)
 	}
 
 	// --- Chunks section ---
 	chunksLen, err := readU32(r)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read chunks section length: %v", ErrCorrupt, err)
+		return nil, nil, 0, nil, fmt.Errorf("%w: read chunks section length: %v", ErrCorrupt, err)
 	}
 	if chunksLen > uint32(r.Len()) {
-		return nil, fmt.Errorf("%w: chunks section length %d > remaining %d", ErrCorrupt, chunksLen, r.Len())
+		return nil, nil, 0, nil, fmt.Errorf("%w: chunks section length %d > remaining %d", ErrCorrupt, chunksLen, r.Len())
 	}
 	// numChunks sanity bound. Header-supplied numChunks is otherwise
 	// fed directly to make([]chunk.Chunk, 0, numChunks) in
@@ -418,30 +423,30 @@ func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
 	// is structurally impossible regardless of attacker intent.
 	// uint64 math avoids overflow on hostile uint32 inputs.
 	if uint64(numChunks)*uint64(minSerializedChunkBytes) > uint64(chunksLen) {
-		return nil, fmt.Errorf("%w: numChunks=%d exceeds chunks section capacity (%d bytes; min %d bytes/chunk)",
+		return nil, nil, 0, nil, fmt.Errorf("%w: numChunks=%d exceeds chunks section capacity (%d bytes; min %d bytes/chunk)",
 			ErrCorrupt, numChunks, chunksLen, minSerializedChunkBytes)
 	}
 	chunkBytes := make([]byte, chunksLen)
 	if _, err := io.ReadFull(r, chunkBytes); err != nil {
-		return nil, fmt.Errorf("%w: read chunks section: %v", ErrCorrupt, err)
+		return nil, nil, 0, nil, fmt.Errorf("%w: read chunks section: %v", ErrCorrupt, err)
 	}
 	chunks, err := deserializeChunks(chunkBytes, int(numChunks))
 	if err != nil {
-		return nil, err
+		return nil, nil, 0, nil, err
 	}
 
 	// --- Vecs section ---
 	vecsLen, err := readU32(r)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read vecs section length: %v", ErrCorrupt, err)
+		return nil, nil, 0, nil, fmt.Errorf("%w: read vecs section length: %v", ErrCorrupt, err)
 	}
 	if vecsLen > uint32(r.Len()) {
-		return nil, fmt.Errorf("%w: vecs section length %d > remaining %d", ErrCorrupt, vecsLen, r.Len())
+		return nil, nil, 0, nil, fmt.Errorf("%w: vecs section length %d > remaining %d", ErrCorrupt, vecsLen, r.Len())
 	}
 	var vecs [][]float32
 	if vecsLen > 0 {
 		if mode == ModeBM25 {
-			return nil, fmt.Errorf("%w: vecs section non-empty under BM25 mode", ErrCorrupt)
+			return nil, nil, 0, nil, fmt.Errorf("%w: vecs section non-empty under BM25 mode", ErrCorrupt)
 		}
 		// H3 guard: uint32 multiplication silently wraps. A hostile
 		// blob with e.g. numChunks=2, embedDim=2^29+1 wraps the
@@ -451,12 +456,12 @@ func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
 		// the true product so the mismatch is caught here.
 		expected := uint64(numChunks) * uint64(embedDim) * 4
 		if uint64(vecsLen) != expected {
-			return nil, fmt.Errorf("%w: vecs section length %d != numChunks*embedDim*4 (%d)",
+			return nil, nil, 0, nil, fmt.Errorf("%w: vecs section length %d != numChunks*embedDim*4 (%d)",
 				ErrCorrupt, vecsLen, expected)
 		}
 		vecBytes := make([]byte, vecsLen)
 		if _, err := io.ReadFull(r, vecBytes); err != nil {
-			return nil, fmt.Errorf("%w: read vecs section: %v", ErrCorrupt, err)
+			return nil, nil, 0, nil, fmt.Errorf("%w: read vecs section: %v", ErrCorrupt, err)
 		}
 		vecs = deserializeVecs(vecBytes, int(numChunks), int(embedDim))
 	} else if mode != ModeBM25 && numChunks > 0 {
@@ -464,14 +469,14 @@ func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
 		// produces vecsLen=0 under semantic/hybrid mode too — that's
 		// a valid round-trip, not ErrCorrupt. Only error when chunks
 		// exist but their vecs are missing.
-		return nil, fmt.Errorf("%w: vecs section empty under non-BM25 mode %v (numChunks=%d)", ErrCorrupt, mode, numChunks)
+		return nil, nil, 0, nil, fmt.Errorf("%w: vecs section empty under non-BM25 mode %v (numChunks=%d)", ErrCorrupt, mode, numChunks)
 	}
 
 	// Anything left over after the vecs section but before the CRC
 	// trailer is a structural error — a section we don't know about
 	// or a length-prefix lie.
 	if r.Len() != 0 {
-		return nil, fmt.Errorf("%w: %d trailing bytes after vecs section", ErrCorrupt, r.Len())
+		return nil, nil, 0, nil, fmt.Errorf("%w: %d trailing bytes after vecs section", ErrCorrupt, r.Len())
 	}
 
 	// Build the runtime *Index. BuildIndex re-tokenizes chunks and
@@ -482,7 +487,30 @@ func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
 	if mode != ModeBM25 {
 		model = opts.Model
 	}
+	return chunks, vecs, mode, model, nil
+}
+
+// deserializeIndex parses a serialized index and builds the runtime *Index
+// (BM25 re-tokenize + ann.Flat build). LoadSerializedIndex's implementation.
+func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
+	chunks, vecs, mode, model, err := deserializeCorpus(data, opts)
+	if err != nil {
+		return nil, err
+	}
 	return BuildIndex(chunks, vecs, mode, model), nil
+}
+
+// LoadSerializedCorpus returns the raw chunks + vectors from a serialized index
+// WITHOUT building the queryable Index (no BM25 re-tokenize / ann.Flat build).
+// Callers that will seed a WatchedIndex — which builds the index itself in
+// buildUnionedIndexLocked — use this to skip the throwaway BuildIndex that
+// LoadSerializedIndex would pay (cold-start M1: the everyday-cold clean-load and
+// the drift reconcile both go through here). Runs the identical CRC / format /
+// config validation as LoadSerializedIndex; the model is validated (required
+// for non-BM25) but returned to the caller via LoadOptions, not here.
+func LoadSerializedCorpus(data []byte, opts LoadOptions) ([]chunk.Chunk, [][]float32, error) {
+	chunks, vecs, _, _, err := deserializeCorpus(data, opts)
+	return chunks, vecs, err
 }
 
 // deserializeChunks reads the chunks section. expectedN guards against

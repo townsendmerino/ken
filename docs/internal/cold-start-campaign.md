@@ -170,21 +170,24 @@ falls back to full rebuild when the change set exceeds 50 % of the corpus
 Tested: unchanged files kept, edited re-indexed, deleted dropped, added
 included; heavy-drift → threshold → full rebuild.
 
-**Perf reality + the remaining optimization.** Measured on yii2 (12 k chunks),
-edit-1-file reconcile vs full rebuild: bm25 1.3×, hybrid 1.7× — modest, because
-(a) ADR-024 doesn't serialize BM25 postings so they're re-tokenized on load
-regardless, and (b) the current load does a **throwaway `BuildIndex`** (KEN1
-loader builds an Index just for its chunks/vecs) *and* the seed-then-reconcile
-publishes twice. The embedding skip (re-embed 1 file, not 12 k) already works;
-its payoff **grows with corpus size** (kernel-scale hybrid would skip ~826 k
-embeddings). Two clean follow-ups to bank the win: a **corpus-only loader**
-(`LoadSerializedCorpus`, skip the throwaway `BuildIndex` — also speeds the
-common everyday-cold clean-load) and a **single-publish reconcile** (seed
-without publishing, reconcile, publish once). Both deferred to keep the delicate
-serialize-format function unrushed.
+**Perf.** The **corpus-only loader** follow-up shipped (`LoadSerializedCorpus`
+skips the throwaway `BuildIndex` the KEN1 loader would build just for its
+chunks/vecs). Measured on yii2 (12 k chunks), median of 3:
+
+- **Everyday-cold clean-load** (repo unchanged — the common path): **bm25 3.2×**
+  (1.72 s → 532 ms), **hybrid 4.2×** (2.40 s → 575 ms). Was 2.3× before the
+  corpus-only loader.
+- **Edit-1-file reconcile** vs full rebuild: bm25 1.3×, hybrid 1.7× — still
+  modest because ADR-024 doesn't serialize BM25 postings (re-tokenized on load
+  regardless) *and* the seed-then-reconcile still publishes twice. The embedding
+  skip (re-embed 1 file, not 12 k) works and its payoff **grows with corpus
+  size** (kernel-scale hybrid would skip ~826 k embeddings).
+
+Remaining perf follow-up: a **single-publish reconcile** (seed without
+publishing, reconcile, publish once) to remove the reconcile's double build.
 
 Still pending: loader **fuzz** gate, the everyday-cold `PERF-expectations.md`
-row, `ken index --write-snapshot`, and the two perf follow-ups above.
+row, `ken index --write-snapshot`, and the single-publish-reconcile follow-up.
 
 Wire the existing serialize format into the `ken-mcp` lifecycle. Design recorded in
 **ADR-039**. Infra already on this branch (`8f6e7da`, `ab7f3f5`): the drift/config

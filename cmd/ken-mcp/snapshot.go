@@ -103,7 +103,10 @@ func tryLoadSnapshot(dir string, mode search.Mode, modeStr, chunker, modelDir st
 		logger.Logf(kenmcp.LogWarn, "snapshot manifest present but %s missing (%v); rebuilding", snapshotBinPath(dir), err)
 		return nil
 	}
-	ix, err := search.LoadSerializedIndex(binData, search.LoadOptions{
+	// Corpus-only load: return the raw chunks/vecs and let
+	// NewWatchedIndexFromSnapshot do the single BM25/ANN build, instead of
+	// LoadSerializedIndex building a throwaway Index we'd discard (M1 perf).
+	chunks, vecs, err := search.LoadSerializedCorpus(binData, search.LoadOptions{
 		ExpectedMode:    modeStr,
 		ExpectedChunker: chunker,
 		Model:           model,
@@ -112,14 +115,14 @@ func tryLoadSnapshot(dir string, mode search.Mode, modeStr, chunker, modelDir st
 		logger.Logf(kenmcp.LogWarn, "snapshot %s unusable (%v); rebuilding", snapshotBinPath(dir), err)
 		return nil
 	}
-	wi, err := search.NewWatchedIndexFromSnapshot(dir, mode, chunker, modelDir, model, ix.Chunks(), ix.Vecs(), true, fsOpts)
+	wi, err := search.NewWatchedIndexFromSnapshot(dir, mode, chunker, modelDir, model, chunks, vecs, true, fsOpts)
 	if err != nil {
 		logger.Logf(kenmcp.LogWarn, "seeding index from snapshot %s failed (%v); rebuilding", dir, err)
 		return nil
 	}
 
 	if drift == 0 {
-		logger.Logf(kenmcp.LogInfo, "loaded snapshot for %s (%d chunks, no drift) — skipped rebuild, watching", dir, ix.Len())
+		logger.Logf(kenmcp.LogInfo, "loaded snapshot for %s (%d chunks, no drift) — skipped rebuild, watching", dir, len(chunks))
 		return wi
 	}
 	// Incremental reconcile: re-index only the changed/added/deleted files,

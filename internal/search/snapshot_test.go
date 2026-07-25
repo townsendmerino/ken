@@ -256,3 +256,42 @@ func TestWatchedIndex_ReconcileFiles(t *testing.T) {
 		t.Error("unchanged c.go should be kept from the snapshot (Gamma not found)")
 	}
 }
+
+// TestLoadSerializedCorpus_ParityWithLoadSerializedIndex: the corpus-only
+// loader returns the exact chunks/vecs the full loader's Index carries — same
+// validation, minus the throwaway BuildIndex.
+func TestLoadSerializedCorpus_ParityWithLoadSerializedIndex(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"),
+		[]byte("package p\nfunc Alpha() {}\nfunc Beta() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	data, err := BuildAndSerializeIndex(os.DirFS(dir), BuildOptions{Mode: ModeBM25, Chunker: "line"})
+	if err != nil {
+		t.Fatalf("BuildAndSerializeIndex: %v", err)
+	}
+
+	ix, err := LoadSerializedIndex(data, LoadOptions{})
+	if err != nil {
+		t.Fatalf("LoadSerializedIndex: %v", err)
+	}
+	chunks, vecs, err := LoadSerializedCorpus(data, LoadOptions{})
+	if err != nil {
+		t.Fatalf("LoadSerializedCorpus: %v", err)
+	}
+	if len(chunks) != len(ix.Chunks()) {
+		t.Fatalf("chunk count: corpus=%d index=%d", len(chunks), len(ix.Chunks()))
+	}
+	for i := range chunks {
+		if chunks[i] != ix.Chunks()[i] {
+			t.Errorf("chunk %d differs: %+v vs %+v", i, chunks[i], ix.Chunks()[i])
+		}
+	}
+	if len(vecs) != len(ix.Vecs()) {
+		t.Errorf("vec count: corpus=%d index=%d", len(vecs), len(ix.Vecs()))
+	}
+	// Validation parity: a chunker mismatch must error the same way.
+	if _, _, err := LoadSerializedCorpus(data, LoadOptions{ExpectedChunker: "regex"}); err == nil {
+		t.Error("expected ErrChunkerMismatch from LoadSerializedCorpus on mismatch")
+	}
+}
