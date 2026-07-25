@@ -167,3 +167,92 @@ func TestNewWatchedIndexFromSnapshot_SeedsWatchingIndex(t *testing.T) {
 		t.Error("expected a hit for 'Login' in the seeded index")
 	}
 }
+
+func TestSnapshotManifest_Diff(t *testing.T) {
+	stored := SnapshotManifest{Files: []FileStamp{
+		{File: "a.go", MTimeNano: 1, Size: 10},
+		{File: "b.go", MTimeNano: 2, Size: 20},
+		{File: "c.go", MTimeNano: 3, Size: 30},
+	}}
+	current := SnapshotManifest{Files: []FileStamp{
+		{File: "a.go", MTimeNano: 1, Size: 10}, // unchanged
+		{File: "b.go", MTimeNano: 9, Size: 20}, // modified (mtime)
+		{File: "d.go", MTimeNano: 4, Size: 40}, // added
+		// c.go deleted
+	}}
+	changed, deleted := stored.Diff(current)
+	if got, want := changed, []string{"b.go", "d.go"}; !equalStrs(got, want) {
+		t.Errorf("changed = %v, want %v", got, want)
+	}
+	if got, want := deleted, []string{"c.go"}; !equalStrs(got, want) {
+		t.Errorf("deleted = %v, want %v", got, want)
+	}
+	// No drift → both empty.
+	ch, del := stored.Diff(stored)
+	if len(ch) != 0 || len(del) != 0 {
+		t.Errorf("identical manifests should diff to nothing, got changed=%v deleted=%v", ch, del)
+	}
+}
+
+func equalStrs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestWatchedIndex_ReconcileFiles is the M1 Increment 2 core: a snapshot-seeded
+// index reconciled against on-disk changes re-indexes only the changed files
+// and KEEPS the unchanged ones' chunks — an edit doesn't rebuild the tree.
+func TestWatchedIndex_ReconcileFiles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.go", "package p\nfunc Alpha() {}\n")
+	write("b.go", "package p\nfunc Beta() {}\n")
+	write("c.go", "package p\nfunc Gamma() {}\n")
+
+	built, err := FromPath(dir, ModeBM25, "line", "")
+	if err != nil {
+		t.Fatalf("FromPath: %v", err)
+	}
+	wi, err := NewWatchedIndexFromSnapshot(dir, ModeBM25, "line", "", nil, built.Chunks(), built.Vecs(), true, FSOptions{})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	t.Cleanup(func() { _ = wi.Close() })
+
+	// Mutate the tree on disk: edit a.go, delete b.go, add d.go. c.go untouched.
+	write("a.go", "package p\nfunc AlphaEdited() {}\n")
+	if err := os.Remove(filepath.Join(dir, "b.go")); err != nil {
+		t.Fatal(err)
+	}
+	write("d.go", "package p\nfunc Delta() {}\n")
+
+	wi.ReconcileFiles([]string{"a.go", "d.go"}, []string{"b.go"})
+
+	has := func(q string) bool { return len(wi.Search(q, 10)) > 0 }
+	if !has("AlphaEdited") {
+		t.Error("edited a.go should be re-indexed (AlphaEdited not found)")
+	}
+	if has("Alpha") && !has("AlphaEdited") {
+		t.Error("stale Alpha chunk should be gone")
+	}
+	if has("Beta") {
+		t.Error("deleted b.go should be gone (Beta still found)")
+	}
+	if !has("Delta") {
+		t.Error("added d.go should be indexed (Delta not found)")
+	}
+	if !has("Gamma") {
+		t.Error("unchanged c.go should be kept from the snapshot (Gamma not found)")
+	}
+}

@@ -86,9 +86,15 @@ func tryLoadSnapshot(dir string, mode search.Mode, modeStr, chunker, modelDir st
 		logger.Logf(kenmcp.LogInfo, "snapshot config changed for %s (mode/chunker/model/enrich); rebuilding", dir)
 		return nil
 	}
-	if cur := currentManifest(dir, wantKey); !stored.FilesEqual(cur) {
-		logger.Logf(kenmcp.LogInfo, "%s drifted since snapshot (%d→%d files or mtime/size change); rebuilding",
-			dir, len(stored.Files), len(cur.Files))
+	// Compute the drift set. Increment 2: on drift, reconcile only the
+	// changed files instead of a full rebuild — UNLESS the change set is a
+	// large fraction of the corpus, where tombstone (O(K·N) over chunks) +
+	// partial re-embed approaches or exceeds a clean rebuild's cost.
+	changed, deleted := stored.Diff(currentManifest(dir, wantKey))
+	drift := len(changed) + len(deleted)
+	if drift > 0 && (len(stored.Files) == 0 || drift*2 > len(stored.Files)) {
+		logger.Logf(kenmcp.LogInfo, "%s drifted heavily since snapshot (%d/%d files changed); full rebuild",
+			dir, drift, len(stored.Files))
 		return nil
 	}
 
@@ -111,7 +117,19 @@ func tryLoadSnapshot(dir string, mode search.Mode, modeStr, chunker, modelDir st
 		logger.Logf(kenmcp.LogWarn, "seeding index from snapshot %s failed (%v); rebuilding", dir, err)
 		return nil
 	}
-	logger.Logf(kenmcp.LogInfo, "loaded snapshot for %s (%d chunks, no drift) — skipped rebuild, watching", dir, ix.Len())
+
+	if drift == 0 {
+		logger.Logf(kenmcp.LogInfo, "loaded snapshot for %s (%d chunks, no drift) — skipped rebuild, watching", dir, ix.Len())
+		return wi
+	}
+	// Incremental reconcile: re-index only the changed/added/deleted files,
+	// keeping every unchanged file's chunks + vectors from the snapshot. Then
+	// re-persist so the on-disk snapshot matches the reconciled state (next
+	// boot is a clean load). writeSnapshot is best-effort.
+	wi.ReconcileFiles(changed, deleted)
+	logger.Logf(kenmcp.LogInfo, "reconciled snapshot for %s: %d changed/added, %d deleted (of %d snapshot files) — skipped full rebuild, watching",
+		dir, len(changed), len(deleted), len(stored.Files))
+	writeSnapshot(dir, wi, mode, chunker, modelDir, fsOpts, logger)
 	return wi
 }
 

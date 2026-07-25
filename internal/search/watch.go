@@ -298,6 +298,32 @@ func (w *WatchedIndex) SnapshotBytes() ([]byte, error) {
 // read-only; callers must not mutate it.
 func (w *WatchedIndex) EmbedModel() *embed.StaticModel { return w.model }
 
+// ReconcileFiles applies a boot-time drift batch to a snapshot-seeded index
+// (cold-start M1 Increment 2): `changed` files (added or modified since the
+// snapshot) are re-chunked / enriched / embedded and their old chunks
+// replaced; `deleted` files have their chunks dropped. Only these files are
+// touched — unchanged files keep the chunks + vectors loaded from the
+// snapshot, so a small edit doesn't re-index the whole tree.
+//
+// It reuses the fsnotify flush path verbatim (tombstone → append → compact →
+// rebuild → publish) by synthesizing the equivalent event batch, so a
+// boot reconcile and a live edit take the identical, already-tested code.
+// Safe to call after the watcher has started (flush holds corpusMu). No-op
+// when there's nothing to reconcile.
+func (w *WatchedIndex) ReconcileFiles(changed, deleted []string) {
+	if len(changed)+len(deleted) == 0 {
+		return
+	}
+	batch := make(map[string]fsnotify.Op, len(changed)+len(deleted))
+	for _, f := range changed {
+		batch[f] = fsnotify.Write // tombstone existing (if any) + re-append
+	}
+	for _, f := range deleted {
+		batch[f] = fsnotify.Remove // tombstone only
+	}
+	w.flush(batch)
+}
+
 // Load returns the current Index snapshot. Goroutine-safe; one atomic
 // load. Never returns nil after NewWatchedIndex succeeds.
 func (w *WatchedIndex) Load() *Index { return w.ix.Load() }

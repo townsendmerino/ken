@@ -159,6 +159,41 @@ func (m SnapshotManifest) FilesEqual(other SnapshotManifest) bool {
 	return true
 }
 
+// Diff compares the receiver (the stored/snapshot manifest) against current
+// (a fresh walk) and returns the per-file work for an incremental reconcile:
+//   - changed: files added or modified (mtime/size differs) — re-chunk /
+//     enrich / embed, replacing any old chunks.
+//   - deleted: files present in the snapshot but gone from the tree — drop
+//     their chunks.
+//
+// Files unchanged in both are absent from both slices (the whole point — no
+// re-index). Both manifests' Files must be sorted by File (BuildFileStamps /
+// DecodeManifest guarantee this). Results are sorted for deterministic replay.
+func (m SnapshotManifest) Diff(current SnapshotManifest) (changed, deleted []string) {
+	cur := make(map[string]FileStamp, len(current.Files))
+	for _, f := range current.Files {
+		cur[f.File] = f
+	}
+	stored := make(map[string]FileStamp, len(m.Files))
+	for _, f := range m.Files {
+		stored[f.File] = f
+		c, ok := cur[f.File]
+		if !ok {
+			deleted = append(deleted, f.File)
+		} else if c != f {
+			changed = append(changed, f.File)
+		}
+	}
+	for _, f := range current.Files {
+		if _, ok := stored[f.File]; !ok {
+			changed = append(changed, f.File)
+		}
+	}
+	sort.Strings(changed)
+	sort.Strings(deleted)
+	return changed, deleted
+}
+
 // Encode serializes the manifest to the on-disk format documented above.
 func (m SnapshotManifest) Encode() []byte {
 	body := make([]byte, 0, 4+4+4+len(m.ConfigKey)+4+len(m.Files)*(4+24))

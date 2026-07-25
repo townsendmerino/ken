@@ -1,6 +1,6 @@
 # Cold-start campaign — task doc
 
-Status: in progress (M0 done; M1 Increment 1 wired — load-if-clean-else-rebuild; M1 Increment 2 + M2 pending)
+Status: in progress (M0 done; M1 Increments 1+2 wired — clean-load + incremental reconcile; perf follow-ups + M2 pending)
 Scope: `ken-mcp` cold start → first servable query
 Related: ADR-036 (startup campaign: lazy rerank, parallel structural), ADR-038 (`.kenignore`), ADR-039 (snapshot + reconcile), memory campaign (v1.2.0), `docs/PERF-expectations.md`, `internal/search/index_serialize.go`, `docs/internal/cold-start-M0-findings.md`
 
@@ -159,10 +159,32 @@ degrades silently to a live build (snapshot is untrusted input). Tested:
 clean-load fast path, drift (edit/new-file), config-mismatch, missing/corrupt
 manifest all fall back correctly; no testdata pollution.
 
-**Increment 2 (still pending):** on drift, reconcile only the changed files via
-the watcher's `tombstoneFile`/`appendFile` primitives instead of a full rebuild
-(Increment 1 full-rebuilds on any drift). Also pending: loader fuzz, the
-everyday-cold `PERF-expectations.md` row, and `ken index --write-snapshot`.
+**Increment 2 WIRED — reconcile on drift.** On drift, ken-mcp now re-indexes
+*only* the changed files instead of a full rebuild: `SnapshotManifest.Diff`
+computes added/modified/deleted, and `WatchedIndex.ReconcileFiles` replays them
+through the fsnotify `flush` path (tombstone deleted+modified, re-chunk/enrich/
+embed changed+added), keeping every unchanged file's chunks + vectors from the
+snapshot; then re-persists so the next boot is a clean load. A **threshold**
+falls back to full rebuild when the change set exceeds 50 % of the corpus
+(tombstone is O(K·N) over chunks, so heavy drift is cheaper to rebuild).
+Tested: unchanged files kept, edited re-indexed, deleted dropped, added
+included; heavy-drift → threshold → full rebuild.
+
+**Perf reality + the remaining optimization.** Measured on yii2 (12 k chunks),
+edit-1-file reconcile vs full rebuild: bm25 1.3×, hybrid 1.7× — modest, because
+(a) ADR-024 doesn't serialize BM25 postings so they're re-tokenized on load
+regardless, and (b) the current load does a **throwaway `BuildIndex`** (KEN1
+loader builds an Index just for its chunks/vecs) *and* the seed-then-reconcile
+publishes twice. The embedding skip (re-embed 1 file, not 12 k) already works;
+its payoff **grows with corpus size** (kernel-scale hybrid would skip ~826 k
+embeddings). Two clean follow-ups to bank the win: a **corpus-only loader**
+(`LoadSerializedCorpus`, skip the throwaway `BuildIndex` — also speeds the
+common everyday-cold clean-load) and a **single-publish reconcile** (seed
+without publishing, reconcile, publish once). Both deferred to keep the delicate
+serialize-format function unrushed.
+
+Still pending: loader **fuzz** gate, the everyday-cold `PERF-expectations.md`
+row, `ken index --write-snapshot`, and the two perf follow-ups above.
 
 Wire the existing serialize format into the `ken-mcp` lifecycle. Design recorded in
 **ADR-039**. Infra already on this branch (`8f6e7da`, `ab7f3f5`): the drift/config
@@ -201,9 +223,9 @@ Tasks:
 - [ ] Loader hardening: boot treats *any* load failure as cache-miss + rebuild
       already (verified in tests) — still TODO: a **fuzz gate** on the manifest +
       KEN1 loaders (snapshot is untrusted input).
-- [ ] Reconcile path (Increment 2): on drift, extract the watch's single-file
-      `tombstoneFile`/`appendFile` into a batch API and re-index only changed files
-      instead of the current full rebuild.
+- [x] Reconcile path (Increment 2): on drift, re-index only changed files via
+      `WatchedIndex.ReconcileFiles` (batch replay through `flush`), with a
+      >50%-drift → full-rebuild threshold. (Perf follow-ups noted below.)
 - [ ] `ken index --write-snapshot` for CI prewarming.
 - [ ] Bench: everyday-cold (snapshot present, ≤ 1 % files changed) added to
       `PERF-expectations.md` as its own row — it's the number users feel.

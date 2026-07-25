@@ -49,8 +49,9 @@ func TestSnapshot_WriteThenCleanLoad(t *testing.T) {
 	}
 }
 
-// TestSnapshot_DriftTriggersRebuild: editing a file (size changes) makes the
-// drift scan reject the snapshot → nil (caller rebuilds).
+// TestSnapshot_DriftTriggersRebuild: editing the sole file is 100% drift, over
+// the reconcile threshold → full rebuild (nil). (Small drift reconciles
+// instead — see TestSnapshot_SmallDriftReconciles.)
 func TestSnapshot_DriftTriggersRebuild(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "auth.go")
@@ -69,7 +70,8 @@ func TestSnapshot_DriftTriggersRebuild(t *testing.T) {
 	}
 }
 
-// TestSnapshot_NewFileTriggersRebuild: adding a file is drift too.
+// TestSnapshot_NewFileTriggersRebuild: adding a file to a 1-file repo is >50%
+// drift → over the reconcile threshold → full rebuild (nil).
 func TestSnapshot_NewFileTriggersRebuild(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package p\nfunc A() {}\n"), 0o644); err != nil {
@@ -136,4 +138,44 @@ func TestSnapshot_MissingAndCorruptDegradeToRebuild(t *testing.T) {
 		_ = got.Close()
 		t.Fatal("expected nil when snapshot.bin is missing")
 	}
+}
+
+// TestSnapshot_SmallDriftReconciles is the M1 Increment 2 path: on a repo where
+// the change set is a minority, tryLoadSnapshot reconciles only the changed
+// files (returns a usable index) instead of returning nil for a full rebuild,
+// and re-persists so the next boot is a clean load.
+func TestSnapshot_SmallDriftReconciles(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"a", "b", "c", "d", "e", "f"} {
+		if err := os.WriteFile(filepath.Join(dir, n+".go"),
+			[]byte("package p\nfunc "+n+"Sym() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	buildAndPersist(t, dir, "line")
+
+	// Edit ONE of six files → 1/6 drift, well under the 50% reconcile threshold.
+	if err := os.WriteFile(filepath.Join(dir, "a.go"),
+		[]byte("package p\nfunc aSymRenamed() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := tryLoadSnapshot(dir, search.ModeBM25, "bm25", "line", "", search.FSOptions{}, quietLogger())
+	if got == nil {
+		t.Fatal("expected an incremental reconcile (non-nil), got nil (full rebuild)")
+	}
+	t.Cleanup(func() { _ = got.Close() })
+	if len(got.Search("aSymRenamed", 10)) == 0 {
+		t.Error("reconciled index should reflect the edit (aSymRenamed not found)")
+	}
+	if len(got.Search("fSym", 10)) == 0 {
+		t.Error("unchanged files should be kept from the snapshot (fSym not found)")
+	}
+
+	// The reconcile re-persisted the snapshot: a fresh load now sees no drift.
+	got2 := tryLoadSnapshot(dir, search.ModeBM25, "bm25", "line", "", search.FSOptions{}, quietLogger())
+	if got2 == nil {
+		t.Fatal("after reconcile the on-disk snapshot should be current (clean load), got nil")
+	}
+	_ = got2.Close()
 }
