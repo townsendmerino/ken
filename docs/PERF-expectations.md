@@ -83,7 +83,7 @@ What `ken index <corpus>` should feel like, by mode.
 | Corpus | bm25 only | hybrid (M2V semantic) | hybrid+treesitter chunker |
 |---|---:|---:|---:|
 | medium (~378k chunks) | ~25 s | **~45 s** (post-ADR-030 parallel) | ~37 min — see caveat |
-| large (Linux kernel, ~80k files) | not measured; extrapolated ~minutes | not measured; extrapolated ~10–30 min for full hybrid | not recommended at this scale (see caveat) |
+| large (Linux kernel v6.10, 84,892 files / 826k chunks) | **~7.9 min** (6.1 GB peak RSS) | **~8.4 min** (7.0 GB peak RSS) | not recommended at this scale (see caveat) |
 
 **Caveat on the treesitter chunker at scale.** Per ADR-029's
 investigation, the gotreesitter arena cost is super-linear — 6.4×
@@ -92,13 +92,29 @@ huge corpora it's tractable but expensive. The regex chunker
 remains the default; treesitter is opt-in
 (`--chunker=treesitter` / `KEN_MCP_CHUNKER=treesitter`).
 
-**Caveat on the Linux-kernel extrapolation.** ken hasn't actually
-been measured against the Linux kernel yet — it's the "Large"
-workload TBD in [PERF.md](internal/PERF.md). The "~10–30 min" estimate is
-linear extrapolation from medium (378k chunks → 45 s hybrid) to
-the kernel's expected ~5 M chunks. Real numbers will land when the
-PERF.md "Large" pass runs; treat the extrapolation as a check
-against intuition, not a published headline.
+**Measured Linux-kernel numbers (2026-07, was extrapolated).** The row
+above is now a real measurement, not a guess — the earlier "~5 M
+chunks / ~10–30 min" extrapolation was well off (the regex chunker
+yields **826k** chunks over the whole tree, not 5 M). Full-tree pass,
+`linux v6.10`, on the reference box:
+
+| mode | index | search p50 | search p95 | peak RSS |
+|---|---:|---:|---:|---:|
+| bm25 | 471.9 s | 5.84 ms | 9.25 ms | 6.14 GB |
+| hybrid | 501.9 s | 65.7 ms | 134.2 ms | 7.00 GB |
+
+Two headline findings: (1) **whole-kernel hybrid fits in 7 GB** — only
+0.86 GB of vectors over bm25 (~1 KB/chunk), so the embedded in-process
+demo does *not* balloon on a 16 GB machine; (2) hybrid search p50 is
+**linear in chunk count** (~0.08 ms per 1k chunks, holding across
+12k→826k chunks) — the O(N) `aikit.ann.Flat` brute-force cosine scan,
+still interactive at 66 ms/query but now the measured empirical case
+for the HNSW work on the risk register. bm25 stays sub-10 ms.
+
+Provenance: M1 Pro / 16 GB, `go1.26.5`, aikit v1.11.0,
+`CGO_ENABLED=0 -trimpath -ldflags='-s -w'`, `--chunker regex`,
+reproduced via [`scripts/kernel_demo_bench.sh`](../scripts/kernel_demo_bench.sh)
+(see [`docs/internal/kernel-run-plan.md`](internal/kernel-run-plan.md)).
 
 **Per-file rule of thumb** for cold `structural.Build` (Go on
 M-series):
@@ -282,9 +298,10 @@ right tool.
 
 ## What's NOT in this doc
 
-- **A published Linux kernel measurement.** The "Large" workload
-  in PERF.md is pinned at v6.10 but has not yet been measured; the
-  extrapolation in this doc is rule-of-thumb only.
+- ~~A published Linux kernel measurement.~~ **Done (2026-07)** — the
+  "Large" workload (v6.10) is measured; see the Indexing-throughput
+  section above. This box was M1 Pro / 16 GB; an x86_64 confirmation
+  is still open (next bullet).
 - **A published x86_64 second-machine number.** Per ADR-029, the
   rolling debt from ADR-026/027/028 was retired by stopping; a
   fresh cross-architecture pass would need to land first before
