@@ -134,6 +134,12 @@ type OutlineResponse struct {
 	Path    string             `json:"path"`
 	Entries []OutlineEntryOut  `json:"entries"`
 	ByFile  []OutlineFileEntry `json:"by_file,omitempty"`
+	// Paging metadata for directory outlines (audit §6). TotalFiles is
+	// the count under the path before the offset/limit window; Truncated
+	// is true when the window didn't reach the end.
+	TotalFiles int  `json:"total_files,omitempty"`
+	Offset     int  `json:"offset,omitempty"`
+	Truncated  bool `json:"truncated,omitempty"`
 }
 
 // OutlineEntryOut is one item in a file's outline.
@@ -158,6 +164,12 @@ type OutlineFileEntry struct {
 type SymbolsResponse struct {
 	PathPrefix string   `json:"path_prefix,omitempty"`
 	Symbols    []string `json:"symbols"`
+	// Paging metadata (audit §6). TotalSymbols is the match count before
+	// the offset/limit window; Truncated is true when it didn't reach the
+	// end.
+	TotalSymbols int  `json:"total_symbols,omitempty"`
+	Offset       int  `json:"offset,omitempty"`
+	Truncated    bool `json:"truncated,omitempty"`
 }
 
 // RecentlyChangedResponse is the `recently_changed` tool's JSON shape.

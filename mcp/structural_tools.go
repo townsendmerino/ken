@@ -339,7 +339,13 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 		return dispatchOutput(args.Output, resp, md)
 	}
 
-	resp := OutlineResponse{Path: path}
+	// Bound the whole-repo dump (audit §6): a path-less outline on a big
+	// monorepo would otherwise emit every symbol of every file.
+	totalFiles := len(files)
+	lo, hi, truncated := pageWindow(totalFiles, args.Offset, args.Limit, MaxOutlineFiles)
+	files = files[lo:hi]
+
+	resp := OutlineResponse{Path: path, TotalFiles: totalFiles, Offset: lo, Truncated: truncated}
 	for _, f := range files {
 		entries := sidx.Outline(f)
 		if len(entries) == 0 {
@@ -351,8 +357,8 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Outline: `%s` (%d file%s)\n\n",
-		path, len(files), pluralS(len(files)))
+	fmt.Fprintf(&b, "# Outline: `%s` (%d of %d file%s)\n\n",
+		path, len(files), totalFiles, pluralS(totalFiles))
 	for _, fe := range resp.ByFile {
 		b.WriteString("## ")
 		b.WriteString(fe.File)
@@ -362,6 +368,10 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 		// prefix on methods, class label on classes).
 		b.WriteString(formatOutlineEntries(sidx.Outline(fe.File)))
 		b.WriteString("\n")
+	}
+	if truncated {
+		fmt.Fprintf(&b, "\n_… truncated: showing files %d–%d of %d. Narrow with `path`, or page with `offset: %d`._\n",
+			lo+1, hi, totalFiles, hi)
 	}
 	return dispatchOutput(args.Output, resp, strings.TrimRight(b.String(), "\n"))
 }
@@ -411,8 +421,18 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 	if names == nil {
 		names = []string{}
 	}
-	resp := SymbolsResponse{PathPrefix: path, Symbols: names}
-	if len(names) == 0 {
+	// Bound the whole-repo dump (audit §6).
+	totalSymbols := len(names)
+	lo, hi, truncated := pageWindow(totalSymbols, args.Offset, args.Limit, MaxSymbols)
+	names = names[lo:hi]
+	resp := SymbolsResponse{
+		PathPrefix:   path,
+		Symbols:      names,
+		TotalSymbols: totalSymbols,
+		Offset:       lo,
+		Truncated:    truncated,
+	}
+	if totalSymbols == 0 {
 		md := ""
 		if path == "" {
 			md = "No symbols indexed. " +
@@ -427,15 +447,43 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 
 func renderSymbolsMarkdown(r SymbolsResponse) string {
 	var b strings.Builder
+	shown := len(r.Symbols)
 	if r.PathPrefix == "" {
-		fmt.Fprintf(&b, "# Symbols (%d total)\n\n", len(r.Symbols))
+		fmt.Fprintf(&b, "# Symbols (%d of %d total)\n\n", shown, r.TotalSymbols)
 	} else {
-		fmt.Fprintf(&b, "# Symbols under `%s` (%d total)\n\n", r.PathPrefix, len(r.Symbols))
+		fmt.Fprintf(&b, "# Symbols under `%s` (%d of %d total)\n\n", r.PathPrefix, shown, r.TotalSymbols)
 	}
 	for _, n := range r.Symbols {
 		fmt.Fprintf(&b, "- `%s`\n", n)
 	}
+	if r.Truncated {
+		fmt.Fprintf(&b, "\n_… truncated: showing symbols %d–%d of %d. Narrow with `path`, or page with `offset: %d`._\n",
+			r.Offset+1, r.Offset+shown, r.TotalSymbols, r.Offset+shown)
+	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// pageWindow clamps an offset/limit request against a total, returning
+// the half-open [lo, hi) bounds to slice and whether the window stops
+// short of the total (i.e. the caller should page or narrow). A
+// zero-or-negative limit means "use the cap"; limit is itself capped at
+// max so a client can't ask past the hard bound (audit §6).
+func pageWindow(total, offset, limit, max int) (lo, hi int, truncated bool) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+	if limit <= 0 || limit > max {
+		limit = max
+	}
+	lo = offset
+	hi = offset + limit
+	if hi > total {
+		hi = total
+	}
+	return lo, hi, hi < total
 }
 
 // === formatting helpers ===

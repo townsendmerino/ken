@@ -33,6 +33,19 @@ const DefaultTopK = 5
 // to this before either use. 1000 is far past any useful result count.
 const MaxTopK = 1000
 
+// MaxOutlineFiles / MaxSymbols bound the argument-free whole-repo dumps
+// from `outline` and `symbols` (audit §6). Both tools invite a single
+// path-less call ("what's in this repo?"), and on a large monorepo the
+// untruncated result is multiple MB of markdown — it destroys the
+// agent's context window or OOMs the client deserializing it. Handlers
+// clamp to these and append an explicit truncation notice so the agent
+// refines with `path`/`offset` rather than assuming it saw everything.
+// Same defensive posture as MaxTopK.
+const (
+	MaxOutlineFiles = 500
+	MaxSymbols      = 2000
+)
+
 // SearchArgs is the argument schema for the `search` tool. The Query /
 // Repo / TopK fields and their jsonschema descriptions mirror
 // semble/mcp.py verbatim so the wire schema matches across
@@ -129,6 +142,8 @@ type OutlineArgs struct {
 	Path   string `json:"path" jsonschema:"File path (relative to repo root) or directory path. A file returns just that file's outline; a directory returns outlines for every indexed file under it."`
 	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with path/entries — see OutlineResponse)."`
+	Offset int    `json:"offset,omitempty" jsonschema:"Directory paths only: skip this many files before listing (for paging past a truncated result). Default 0."`
+	Limit  int    `json:"limit,omitempty" jsonschema:"Directory paths only: max files to outline in one call (default and hard cap 500). Narrow with 'path' or page with 'offset' when truncated."`
 }
 
 // SymbolsArgs is the argument schema for the `symbols` tool.
@@ -138,6 +153,8 @@ type SymbolsArgs struct {
 	Path   string `json:"path,omitempty" jsonschema:"Optional path prefix (relative to repo root) to filter the symbol list. Empty/omitted returns every top-level symbol in the repo."`
 	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with path_prefix/symbols — see SymbolsResponse)."`
+	Offset int    `json:"offset,omitempty" jsonschema:"Skip this many symbols before listing (for paging past a truncated result). Default 0."`
+	Limit  int    `json:"limit,omitempty" jsonschema:"Max symbols to return in one call (default and hard cap 2000). Narrow with 'path' or page with 'offset' when truncated."`
 }
 
 // RecentlyChangedArgs is the argument schema for the

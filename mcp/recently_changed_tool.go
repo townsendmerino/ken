@@ -95,12 +95,18 @@ func handleRecentlyChanged(ctx context.Context, cfg *Config, args RecentlyChange
 	now := time.Now()
 	considered := 0
 	for considered < n {
+		if ctx.Err() != nil {
+			// Client cancelled / timed out — stop walking history and
+			// return what we have. Tree-diffing more commits would just
+			// burn CPU on an abandoned request (audit §5).
+			break
+		}
 		c, err := iter.Next()
 		if err != nil {
 			break
 		}
 		considered++
-		files, ferr := commitChangedFiles(c)
+		files, ferr := commitChangedFiles(ctx, c)
 		if ferr != nil {
 			continue
 		}
@@ -169,7 +175,6 @@ func handleRecentlyChanged(ctx context.Context, cfg *Config, args RecentlyChange
 		}
 		fmt.Fprintln(&b)
 	}
-	_ = ctx
 	return dispatchOutput(args.Output, resp, strings.TrimRight(b.String(), "\n"))
 }
 
@@ -182,7 +187,14 @@ func handleRecentlyChanged(ctx context.Context, cfg *Config, args RecentlyChange
 // Renames are reported under the new name only; deletes are
 // reported under the now-gone name. Both shapes are useful for
 // "what changed" — we keep them, dedupe, and sort.
-func commitChangedFiles(c *object.Commit) ([]string, error) {
+//
+// The non-root path uses a tree-level diff (object.DiffTreeWithOptions)
+// rather than Commit.Stats()/parent.Patch(c): we only need the changed
+// NAMES, and Stats()/Patch materialize + diff every blob's text — tens
+// of seconds and hundreds of MB on a commit that bumps a lockfile or
+// vendored tree (audit §5). The tree diff compares object hashes and
+// honors ctx cancellation.
+func commitChangedFiles(ctx context.Context, c *object.Commit) ([]string, error) {
 	parent, err := c.Parent(0)
 	if err != nil {
 		// Root commit — list every file in the tree.
@@ -198,33 +210,28 @@ func commitChangedFiles(c *object.Commit) ([]string, error) {
 		sort.Strings(paths)
 		return paths, nil
 	}
-	stats, err := c.Stats()
+	parentTree, err := parent.Tree()
 	if err != nil {
-		// Stats() can be expensive on big commits; if it fails,
-		// fall back to a tree-diff which is structurally cheaper.
-		patch, perr := parent.Patch(c)
-		if perr != nil {
-			return nil, perr
-		}
-		seen := map[string]struct{}{}
-		for _, fp := range patch.FilePatches() {
-			fromF, toF := fp.Files()
-			if toF != nil {
-				seen[toF.Path()] = struct{}{}
-			} else if fromF != nil {
-				seen[fromF.Path()] = struct{}{}
-			}
-		}
-		paths := make([]string, 0, len(seen))
-		for p := range seen {
-			paths = append(paths, p)
-		}
-		sort.Strings(paths)
-		return paths, nil
+		return nil, err
+	}
+	commitTree, err := c.Tree()
+	if err != nil {
+		return nil, err
+	}
+	changes, err := object.DiffTreeWithOptions(ctx, parentTree, commitTree, object.DefaultDiffTreeOptions)
+	if err != nil {
+		return nil, err
 	}
 	seen := map[string]struct{}{}
-	for _, s := range stats {
-		seen[s.Name] = struct{}{}
+	for _, ch := range changes {
+		// To.Name is the post-change path (add/modify/rename target);
+		// From.Name covers deletes where To is empty. Empty for the
+		// absent side of an add/delete.
+		if ch.To.Name != "" {
+			seen[ch.To.Name] = struct{}{}
+		} else if ch.From.Name != "" {
+			seen[ch.From.Name] = struct{}{}
+		}
 	}
 	paths := make([]string, 0, len(seen))
 	for p := range seen {
