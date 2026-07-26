@@ -867,3 +867,64 @@ func TestWatchedIndex_OversizedSinceEvent_Skipped(t *testing.T) {
 		t.Errorf("oversized huge.py was indexed on the watch path; §15 size guard not enforced")
 	}
 }
+
+// TestWatchedIndex_SlowFlush_EventsDrainAndConverge is the composition test
+// the 2026-07-26 re-audit called the single highest-value fixture: a flush
+// whose OnFlush blocks far longer than the debounce ceiling, with events
+// (including a directory-shaped Remove) arriving DURING it. It exercises
+// R1 (no busy-spin / no hang once past the ceiling with pending events),
+// R8 (the event loop keeps draining while the flush goroutine is busy —
+// isTrackedRel + the resync scan are lock-free, and flush unlocks before
+// OnFlush), and the async handoff. Asserts the corpus converges to ground
+// truth within a bounded wall-clock.
+func TestWatchedIndex_SlowFlush_EventsDrainAndConverge(t *testing.T) {
+	root := makeTempRepo(t, map[string]string{
+		"base.py": "def base():\n    return 0\n",
+	})
+	wi := withShortDebounce(t, root, true)
+
+	var flushes atomic.Int64
+	wi.SetOnFlush(func(string) {
+		// Block the FIRST flush well past the maxDebounce ceiling
+		// (5×debounce) so a pending event would trip R1's old spin.
+		if flushes.Add(1) == 1 {
+			time.Sleep(8 * shortDebounce)
+		}
+	})
+
+	swaps := make(chan struct{}, 32)
+	wi.SetOnSwap(swaps)
+	drainSwaps(swaps)
+
+	// Trigger flush 1 (its OnFlush will block).
+	if err := os.WriteFile(filepath.Join(root, "f1.py"), []byte("def f1():\n    return 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForSwap(t, swaps, 5*time.Second) {
+		t.Fatal("flush 1 never published")
+	}
+
+	// While flush 1's OnFlush is still sleeping, mutate the tree: a new file
+	// AND a remove (the Remove exercises the lock-free isTrackedRel path —
+	// under R8 it would have blocked on corpusMu held by the flush).
+	if err := os.WriteFile(filepath.Join(root, "f2.py"), []byte("def f2():\n    return 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "base.py")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Converge: f1 + f2 present, base.py gone — within a bounded time. A
+	// busy-spin wouldn't hang but a deadlock (blocked loop) would time out.
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		got := wi.Load()
+		if containsFile(got, "f1.py") && containsFile(got, "f2.py") && !containsFile(got, "base.py") {
+			return // converged
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	got := wi.Load()
+	t.Errorf("did not converge: f1=%v f2=%v base-gone=%v; chunks: %s",
+		containsFile(got, "f1.py"), containsFile(got, "f2.py"), !containsFile(got, "base.py"), chunkFiles(got))
+}

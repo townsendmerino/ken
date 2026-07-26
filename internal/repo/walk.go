@@ -228,6 +228,38 @@ func (m *Matcher) MaxFileBytes() int64 {
 	return m.maxFileBytes
 }
 
+// ShouldDescend reports whether the walker would descend INTO the directory
+// relDir (slash-separated, relative to the matcher's root) — i.e. it isn't
+// .git/.ken and isn't excluded by a directory-scoped ignore rule (or nested
+// under one). The watcher uses this to skip watching + walking a newly
+// created/moved-in directory that gitignore excludes (audit R9): without it,
+// `npm install` creating ~30k node_modules/ subdirs each triggers a full
+// recursive watch + WalkDir inline on the event loop, exhausting the inotify
+// watch table. Empty / "." (the root) always descends.
+func (m *Matcher) ShouldDescend(relDir string) bool {
+	if m == nil {
+		return false
+	}
+	if relDir == "" || relDir == "." {
+		return true
+	}
+	if relDir == ".git" || strings.HasPrefix(relDir, ".git/") ||
+		relDir == ".ken" || strings.HasPrefix(relDir, ".ken/") {
+		return false
+	}
+	// The dir itself, plus every ancestor, checked as a directory: a
+	// dir-scoped rule like `node_modules/` excludes the dir and its subtree.
+	if matchScopes(m.scopes, relDir, true) {
+		return false
+	}
+	for i := strings.LastIndex(relDir, "/"); i > 0; i = strings.LastIndex(relDir[:i], "/") {
+		if matchScopes(m.scopes, relDir[:i], true) {
+			return false
+		}
+	}
+	return true
+}
+
 // ShouldIndex reports whether Walk would have included relPath
 // (slash-separated, relative to the matcher's root). Mirrors Walk's
 // rules: not under .git/, not matched by any applicable .gitignore

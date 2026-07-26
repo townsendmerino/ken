@@ -104,3 +104,32 @@ func TestMatcher_RootGitignore_DirOnlyAppliesToContents(t *testing.T) {
 		t.Errorf("ShouldIndex(main.go) = %v, want true", got)
 	}
 }
+
+// TestMatcher_ShouldDescend is the audit R9 gate: the watcher must skip
+// descending into a gitignored (or .git/.ken) directory rather than
+// recursively watching + walking it inline on the event loop.
+func TestMatcher_ShouldDescend(t *testing.T) {
+	tmp := t.TempDir()
+	write(t, tmp, ".gitignore", []byte("node_modules/\nbuild/\n"))
+	write(t, tmp, "src/app.ts", []byte("export {}\n"))
+	write(t, tmp, "node_modules/lodash/index.js", []byte("x\n"))
+
+	m := NewMatcher(Options{Root: tmp})
+	cases := map[string]bool{
+		"":                    true,  // root
+		".":                   true,  // root
+		"src":                 true,  // legit source dir
+		"src/components":      true,  // nested legit dir
+		"node_modules":        false, // gitignored
+		"node_modules/lodash": false, // nested under gitignored
+		"build":               false, // gitignored
+		".git":                false, // always pruned
+		".ken":                false, // always pruned
+		".git/objects":        false,
+	}
+	for dir, want := range cases {
+		if got := m.ShouldDescend(dir); got != want {
+			t.Errorf("ShouldDescend(%q) = %v, want %v", dir, got, want)
+		}
+	}
+}

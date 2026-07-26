@@ -573,9 +573,13 @@ func (w *WatchedIndex) Close() error {
 }
 
 // loop is the watcher goroutine. Receives fsnotify events, filters
-// them, accumulates a dirty set, and flushes after the debounce window.
-// Owns wi.chunks and wi.vecs; the corpusMu lock is defensive (only this
-// goroutine writes).
+// them, accumulates a dirty set, and dispatches a flush after the debounce
+// window. corpusMu is a REAL lock, not defensive (audit R8 note): since the
+// async flush landed, w.chunks/w.vecs are written by the flush goroutine,
+// warmCorpusInBackground, and SetExtraChunks — not only this goroutine. The
+// loop itself never takes corpusMu (isTrackedRel / enqueueFullResync read
+// the published snapshot lock-free) so it can keep draining events while a
+// flush holds the lock.
 func (w *WatchedIndex) loop() {
 	defer close(w.done)
 
@@ -674,6 +678,15 @@ func (w *WatchedIndex) loop() {
 			// matcher gate (which rejects the dir).
 			if ev.Op&fsnotify.Create != 0 {
 				if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() {
+					// Gitignore-gate the new directory (audit R9): without this,
+					// `npm install` creating 30k node_modules/ subdirs each
+					// triggers a full recursive watch + WalkDir inline here,
+					// exhausting the inotify watch table and stalling the loop.
+					// ShouldDescend rejects gitignored (and .git/.ken) trees
+					// cheaply before any walk.
+					if !w.matcher.ShouldDescend(rel) {
+						continue
+					}
 					_ = addRecursive(w.fs, ev.Name, w.fsOpts.LogWriter)
 					w.enqueueDirFiles(ev.Name, dirty)
 					resetTimer()
@@ -759,13 +772,20 @@ func (w *WatchedIndex) loop() {
 func (w *WatchedIndex) flush(batch map[string]fsnotify.Op) {
 	start := time.Now()
 	w.corpusMu.Lock()
-	defer w.corpusMu.Unlock()
-
 	compacted := w.reconcileCorpusLocked(batch)
 	newIx := w.buildUnionedIndexLocked()
 	w.ix.Store(newIx)
+	total := len(w.chunks) + len(w.extraChunks)
+	// Unlock BEFORE the notify callbacks (audit R8): notifyFlush is
+	// ken-mcp's OnFlush = writeSnapshot — a whole-repo WalkFS + Stat, a full
+	// serialize, two disk writes, and a stop-the-world FreeOSMemory. Holding
+	// corpusMu across it blocks every corpusMu reader (SetExtraChunks, and
+	// the loop's own isTrackedRel before its R8 lock-free fix) for the entire
+	// persist. The published snapshot is already Stored, so the callbacks
+	// need no lock.
+	w.corpusMu.Unlock()
 	w.notifySwap()
-	w.notifyFlush(len(w.chunks)+len(w.extraChunks), len(batch), compacted, time.Since(start))
+	w.notifyFlush(total, len(batch), compacted, time.Since(start))
 }
 
 // reconcileCorpusLocked applies a batch of file events to the mutable corpus
@@ -1235,17 +1255,27 @@ func (w *WatchedIndex) relPath(absPath string) string {
 // the given relPath. Used to accept REMOVE/RENAME events even when the
 // file is already gone (and thus stat-unavailable) — if we previously
 // indexed it, we want to tombstone its chunks now.
+//
+// Reads the PUBLISHED index snapshot (w.ix.Load()) lock-free rather than
+// taking corpusMu over w.chunks (audit R8): it runs inline on the event
+// loop, and the flush goroutine holds corpusMu for its whole (multi-second)
+// duration — so locking here re-blocks the very loop the async flush was
+// meant to keep draining. The published Index's chunk array is immutable
+// after Store (§1 copy-on-write), so a lock-free scan is safe; a snapshot
+// one flush stale is fine for a "was this ever indexed" test.
 func (w *WatchedIndex) isTrackedRel(rel string) bool {
-	w.corpusMu.Lock()
-	defer w.corpusMu.Unlock()
+	ix := w.ix.Load()
+	if ix == nil {
+		return false
+	}
 	// Exact file, OR a directory whose subtree we've indexed (audit §14: a
 	// dir Remove/Rename must be accepted so its subtree gets tombstoned).
 	prefix := rel + "/"
-	for i := range w.chunks {
-		if w.chunks[i].Tombstoned {
+	for i := range ix.chunks {
+		if ix.chunks[i].Tombstoned {
 			continue
 		}
-		if w.chunks[i].File == rel || strings.HasPrefix(w.chunks[i].File, prefix) {
+		if ix.chunks[i].File == rel || strings.HasPrefix(ix.chunks[i].File, prefix) {
 			return true
 		}
 	}
@@ -1265,6 +1295,12 @@ func (w *WatchedIndex) enqueueDirFiles(absDir string, dirty map[string]fsnotify.
 		}
 		if d.IsDir() {
 			if name := d.Name(); name == ".git" || name == ".ken" {
+				return fs.SkipDir
+			}
+			// Prune gitignored subtrees so a legit new dir containing an
+			// ignored subdir (e.g. its own node_modules) doesn't walk it
+			// (audit R9). SkipDir on the dir's own path is a no-op.
+			if reld := w.relPath(p); reld != "" && !w.matcher.ShouldDescend(reld) {
 				return fs.SkipDir
 			}
 			return nil
@@ -1315,19 +1351,22 @@ func (w *WatchedIndex) enqueueFullResync(dirty map[string]fsnotify.Op) {
 		return nil
 	})
 	// Tombstone indexed FS files that vanished while events were dropped.
-	w.corpusMu.Lock()
+	// Read the published snapshot lock-free (audit R8): this runs inline on
+	// the event loop, so taking corpusMu would block it behind an in-flight
+	// flush. The published chunk array is immutable after Store (§1 COW).
 	seen := make(map[string]bool)
-	for i := range w.chunks {
-		f := w.chunks[i].File
-		if w.chunks[i].Tombstoned || seen[f] {
-			continue
-		}
-		seen[f] = true
-		if !present[f] {
-			dirty[f] = mergeOp(dirty[f], fsnotify.Remove)
+	if ix := w.ix.Load(); ix != nil {
+		for i := range ix.chunks {
+			f := ix.chunks[i].File
+			if ix.chunks[i].Tombstoned || seen[f] {
+				continue
+			}
+			seen[f] = true
+			if !present[f] {
+				dirty[f] = mergeOp(dirty[f], fsnotify.Remove)
+			}
 		}
 	}
-	w.corpusMu.Unlock()
 }
 
 // mergeOp combines two op bitmasks for the same path during a debounce
