@@ -6,7 +6,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/townsendmerino/aikit/chunk"
 )
@@ -150,24 +149,6 @@ func splitIdentifier(token string) []string {
 
 // ---- definition detection ----------------------------------------------
 
-type defPattern struct{ general, sql *regexp.Regexp }
-
-// defPatternCache memoizes compiled definition regexes per symbol. The MCP
-// SDK dispatches tool calls on separate goroutines, so concurrent Search
-// calls hit this map; the RWMutex makes the read (hit) and store (miss)
-// paths race-free. Regex compilation happens outside the lock — a racing
-// miss on the same symbol may compile twice, but both results are
-// equivalent and last-writer-wins is harmless.
-//
-// concurrency: MUTATED AT RUNTIME — guarded by defPatternMu. This is the
-// canonical lazy-memoization-at-package-scope pattern; any new package-level
-// cache reachable from the search path needs the same guard from day one
-// (see CONTRIBUTING.md → Concurrency).
-var (
-	defPatternMu    sync.RWMutex
-	defPatternCache = map[string]defPattern{}
-)
-
 func quoteAlt(words []string) string {
 	q := make([]string, len(words))
 	for i, w := range words {
@@ -176,33 +157,63 @@ func quoteAlt(words []string) string {
 	return strings.Join(q, "|")
 }
 
-// definitionPattern builds semble's _definition_pattern for a symbol. RE2
-// has no look-behind, so `(?:^|(?<=\s))` becomes `(?:^|\s)` under (?m):
-// equivalent for a boolean "does this chunk define the symbol" search.
-func definitionPattern(symbol string) defPattern {
-	defPatternMu.RLock()
-	p, ok := defPatternCache[symbol]
-	defPatternMu.RUnlock()
-	if ok {
-		return p
-	}
-	esc := regexp.QuoteMeta(symbol)
-	nsPrefix := `(?:[A-Za-z_][A-Za-z0-9_]*(?:\.|::))*`
-	suffix := `)\s+` + nsPrefix + esc + `(?:\s|[<({:\[;]|$)`
-	prefix := `(?m)(?:^|\s)(?:`
-	p = defPattern{
-		general: regexp.MustCompile(prefix + quoteAlt(definitionKeywords) + suffix),
-		sql:     regexp.MustCompile(`(?i)` + prefix + quoteAlt(sqlDefinitionKeywords) + suffix),
-	}
-	defPatternMu.Lock()
-	defPatternCache[symbol] = p
-	defPatternMu.Unlock()
-	return p
+// The definition-detection patterns are compiled ONCE at package init
+// (audit §6). The old code memoized a per-SYMBOL compiled regex in an
+// unbounded, process-lifetime map keyed by raw query text — a few thousand
+// distinct queries on a long-lived ken-mcp meant hundreds of MB of RE2
+// programs no GOGC/GOMEMLIMIT tuning could reclaim, plus a two-regex
+// compile of a ~600-char alternation on every new query's first hit.
+//
+// Instead: compile the keyword alternation once with a CAPTURE group for
+// the (optionally namespace-qualified) defined NAME, scan the chunk once,
+// and compare the captured name's last identifier component against the
+// target symbol as a plain string. Equivalent to semble's _definition_
+// pattern: the capture `(id(.|::))*id` matches exactly what the old
+// per-symbol `nsPrefix + esc` did, so "last component == symbol" reproduces
+// the old boolean. RE2 has no look-behind, so `(?:^|(?<=\s))` is `(?:^|\s)`
+// under (?m) — a boolean "does this chunk define the symbol" is unaffected.
+// *regexp.Regexp is safe for concurrent use, so no lock is needed.
+var (
+	defGeneralPattern = regexp.MustCompile(definitionCaptureSrc(`(?m)`, quoteAlt(definitionKeywords)))
+	defSQLPattern     = regexp.MustCompile(definitionCaptureSrc(`(?im)`, quoteAlt(sqlDefinitionKeywords)))
+)
+
+func definitionCaptureSrc(flags, altKeywords string) string {
+	name := `((?:[A-Za-z_][A-Za-z0-9_]*(?:\.|::))*[A-Za-z_][A-Za-z0-9_]*)`
+	return flags + `(?:^|\s)(?:` + altKeywords + `)\s+` + name + `(?:\s|[<({:\[;]|$)`
 }
 
+// lastIdentComponent returns the trailing identifier of a possibly
+// namespace-qualified name: "Foo.Bar.baz" → "baz", "A::b" → "b", "x" → "x".
+// The definition capture matches (id(.|::))*id, so the last component is the
+// trailing run of identifier characters.
+func lastIdentComponent(name string) string {
+	for i := len(name) - 1; i >= 0; i-- {
+		c := name[i]
+		if !(c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			return name[i+1:]
+		}
+	}
+	return name
+}
+
+// chunkDefinesSymbol reports whether content contains a definition of
+// symbol. The general keyword set matches case-sensitively (as semble's
+// non-(?i) pattern did); the SQL DDL set matches case-insensitively — so
+// the captured-name comparison mirrors that: exact for general, EqualFold
+// for SQL.
 func chunkDefinesSymbol(content, symbol string) bool {
-	p := definitionPattern(symbol)
-	return p.general.MatchString(content) || p.sql.MatchString(content)
+	for _, m := range defGeneralPattern.FindAllStringSubmatch(content, -1) {
+		if lastIdentComponent(m[1]) == symbol {
+			return true
+		}
+	}
+	for _, m := range defSQLPattern.FindAllStringSubmatch(content, -1) {
+		if strings.EqualFold(lastIdentComponent(m[1]), symbol) {
+			return true
+		}
+	}
+	return false
 }
 
 // stemMatches is semble boosting._stem_matches (name is already lowered).

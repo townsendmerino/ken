@@ -154,13 +154,22 @@ func rerankTopK(scores map[int]float64, chunks []chunk.Chunk, topK int, penalise
 		}
 		selected = append(selected, sel{eff, idx})
 		fileSelected[fp] = already + 1
-		if len(selected) >= topK {
+		// Maintain minSelected = min over selected[].score in O(1) (audit
+		// §7). selected is append-only, so once we have the first topK
+		// entries the running min can only decrease: min(prev, eff). The
+		// full scan runs exactly once, when len first reaches topK, to seed
+		// it. Equivalent to the old O(M)-per-append rescan, but the hot
+		// loop no longer rescans everything selected so far on every step.
+		switch {
+		case len(selected) == topK:
 			minSelected = math.Inf(1)
 			for _, s := range selected {
 				if s.score < minSelected {
 					minSelected = s.score
 				}
 			}
+		case len(selected) > topK:
+			minSelected = math.Min(minSelected, eff)
 		}
 	}
 
