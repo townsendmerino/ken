@@ -345,28 +345,37 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	lo, hi, truncated := pageWindow(totalFiles, args.Offset, args.Limit, MaxOutlineFiles)
 	files = files[lo:hi]
 
+	// Outline each file ONCE (audit §16): keep the raw entries for the
+	// markdown render instead of calling sidx.Outline again, and only build
+	// the JSON structs when json output was actually requested.
+	jsonMode := args.Output == "json"
 	resp := OutlineResponse{Path: path, TotalFiles: totalFiles, Offset: lo, Truncated: truncated}
+	type fileOutline struct {
+		file    string
+		entries []structural.OutlineEntry
+	}
+	rendered := make([]fileOutline, 0, len(files))
 	for _, f := range files {
 		entries := sidx.Outline(f)
 		if len(entries) == 0 {
 			continue
 		}
-		converted := convertOutlineEntries(f, entries)
-		resp.Entries = append(resp.Entries, converted...)
-		resp.ByFile = append(resp.ByFile, OutlineFileEntry{File: f, Entries: converted})
+		rendered = append(rendered, fileOutline{file: f, entries: entries})
+		if jsonMode {
+			converted := convertOutlineEntries(f, entries)
+			resp.Entries = append(resp.Entries, converted...)
+			resp.ByFile = append(resp.ByFile, OutlineFileEntry{File: f, Entries: converted})
+		}
 	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Outline: `%s` (%d of %d file%s)\n\n",
 		path, len(files), totalFiles, pluralS(totalFiles))
-	for _, fe := range resp.ByFile {
+	for _, fo := range rendered {
 		b.WriteString("## ")
-		b.WriteString(fe.File)
+		b.WriteString(fo.file)
 		b.WriteString("\n\n")
-		// Re-render from the raw entries so the markdown layer
-		// stays identical to today (params on funcs, container.
-		// prefix on methods, class label on classes).
-		b.WriteString(formatOutlineEntries(sidx.Outline(fe.File)))
+		b.WriteString(formatOutlineEntries(fo.entries))
 		b.WriteString("\n")
 	}
 	if truncated {

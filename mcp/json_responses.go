@@ -209,8 +209,22 @@ type RecentlyChangedCommit struct {
 // markdown / empty / unknown → the plain message. Reuses dispatchOutput so
 // the mode handling stays in one place.
 func errorResult(outputMode, msg string) *sdk.CallToolResult {
-	res, _, _ := dispatchOutput(outputMode, map[string]string{"error": msg}, msg)
-	return res
+	switch outputMode {
+	case "", "markdown", "json":
+		res, _, _ := dispatchOutput(outputMode, map[string]string{"error": msg}, msg)
+		return res
+	default:
+		// Unknown output mode on an ERROR path: surface BOTH the real error
+		// and the mode complaint (audit §23) instead of dropping the real
+		// one — otherwise an agent that both typos `output` and hits a real
+		// error (bad repo, missing symbol) only learns about the typo, fixes
+		// it, retries, and only THEN discovers the more important problem.
+		// Render as markdown so the combined message is readable.
+		res, _, _ := dispatchOutput("markdown", nil,
+			msg+"\n\n(also: unknown output mode "+outputMode+
+				" — supported: 'markdown' (default) or 'json'; showing markdown)")
+		return res
+	}
 }
 
 func dispatchOutput(outputMode string, resp any, markdown string) (*sdk.CallToolResult, any, error) {
