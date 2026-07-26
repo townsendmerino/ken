@@ -126,7 +126,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `ken — code search
 
 usage:
-  ken index           <path>           [--watch|--no-watch] [--chunker regex|treesitter|line] [--mode bm25|semantic|hybrid|hybrid-rerank] [--model DIR]
+  ken index           <path>           [--watch|--no-watch] [--write-snapshot] [--chunker regex|treesitter|line] [--mode bm25|semantic|hybrid|hybrid-rerank] [--model DIR]
   ken search          <path> <query>...  [-k N] [--json] [--verbose] [--stream] [--no-stats] [--chunker ...] [--mode ...] [--model DIR]
                                          [--rerank-model DIR] [--rerank-top-n N] [--rerank-beta β] [--rerank-quant f32|int8] [--rerank-adaptive THRESHOLD:MINN]
   ken bench           <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR]
@@ -440,6 +440,7 @@ func cmdIndex(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
+	args, writeSnap := stripBoolFlag(args, "write-snapshot")
 	rest, chunker, modeStr, model, err := commonFlags(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
@@ -454,6 +455,28 @@ func cmdIndex(args []string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
+	}
+
+	if writeSnap {
+		// CI prewarming (cold-start M1 / ADR-039): build once, write the
+		// snapshot to <path>/.ken/snapshot.{bin,manifest}, and exit — so a
+		// later ken-mcp boot on the same repo loads it instead of rebuilding.
+		// Build-once takes precedence over --watch.
+		wix, err := search.NewWatchedIndex(rest[0], mode, chunker, model, false)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+			return 1
+		}
+		defer wix.Close()
+		// enrich=true: NewWatchedIndex builds with enrichment on (FSOptions{}),
+		// matching ken-mcp's config-key so the snapshot loads without a rebuild.
+		key := search.SnapshotConfigKey(mode, chunker, search.ModelFingerprint(wix.EmbedModel(), model), true)
+		if err := search.WriteSnapshot(rest[0], wix, key); err != nil {
+			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+			return 1
+		}
+		fmt.Printf("wrote snapshot to %s/.ken/ (%d chunks, chunker=%s mode=%s)\n", rest[0], wix.Len(), chunker, modeStr)
+		return 0
 	}
 
 	if !watch {

@@ -32,10 +32,10 @@ func TestSnapshot_WriteThenCleanLoad(t *testing.T) {
 	}
 	buildAndPersist(t, dir, "line")
 
-	if _, err := os.Stat(snapshotBinPath(dir)); err != nil {
+	if _, err := os.Stat(search.SnapshotBinPath(dir)); err != nil {
 		t.Fatalf("snapshot.bin not written: %v", err)
 	}
-	if _, err := os.Stat(snapshotManifestPath(dir)); err != nil {
+	if _, err := os.Stat(search.SnapshotManifestPath(dir)); err != nil {
 		t.Fatalf("snapshot.manifest not written: %v", err)
 	}
 
@@ -121,7 +121,7 @@ func TestSnapshot_MissingAndCorruptDegradeToRebuild(t *testing.T) {
 	buildAndPersist(t, dir, "line")
 
 	// Corrupt the manifest → DecodeManifest fails → nil.
-	if err := os.WriteFile(snapshotManifestPath(dir), []byte("not a real KMAN blob"), 0o644); err != nil {
+	if err := os.WriteFile(search.SnapshotManifestPath(dir), []byte("not a real KMAN blob"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if got := tryLoadSnapshot(dir, search.ModeBM25, "bm25", "line", "", search.FSOptions{}, quietLogger()); got != nil {
@@ -131,7 +131,7 @@ func TestSnapshot_MissingAndCorruptDegradeToRebuild(t *testing.T) {
 
 	// Manifest present but bin missing → nil.
 	buildAndPersist(t, dir, "line")
-	if err := os.Remove(snapshotBinPath(dir)); err != nil {
+	if err := os.Remove(search.SnapshotBinPath(dir)); err != nil {
 		t.Fatal(err)
 	}
 	if got := tryLoadSnapshot(dir, search.ModeBM25, "bm25", "line", "", search.FSOptions{}, quietLogger()); got != nil {

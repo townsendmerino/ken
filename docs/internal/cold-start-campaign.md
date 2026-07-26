@@ -184,9 +184,12 @@ chunks/vecs). Measured on yii2 (12 k chunks), median of 3:
   two). The embedding skip (re-embed 1 file, not 12 k) means the win **grows
   with corpus size** — kernel-scale hybrid would skip ~826 k embeddings.
 
-Both perf follow-ups (corpus-only loader, single-publish reconcile) are shipped.
-Still pending: loader **fuzz** gate, the everyday-cold `PERF-expectations.md`
-row, `ken index --write-snapshot`.
+All M1 follow-ups shipped: both perf optimizations (corpus-only loader,
+single-publish reconcile), the loader **fuzz** gate (`FuzzDecodeManifest` +
+`FuzzLoadSerializedCorpus`, 550k–750k execs clean), the everyday-cold
+`docs/PERF-expectations.md` row, and **`ken index --write-snapshot`** (CI
+prewarming — build once + persist, shares `search.WriteSnapshot` with ken-mcp).
+**M1 is complete.** Next: M2 (lazy/async enrichment).
 
 Wire the existing serialize format into the `ken-mcp` lifecycle. Design recorded in
 **ADR-039**. Infra already on this branch (`8f6e7da`, `ab7f3f5`): the drift/config

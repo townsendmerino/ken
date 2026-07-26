@@ -38,6 +38,7 @@ import (
 	"strings"
 
 	"github.com/townsendmerino/aikit/embed"
+	"github.com/townsendmerino/ken/internal/repo"
 )
 
 const (
@@ -157,6 +158,67 @@ func (m SnapshotManifest) FilesEqual(other SnapshotManifest) bool {
 		}
 	}
 	return true
+}
+
+// SnapshotBinPath / SnapshotManifestPath are the M1 snapshot artifact
+// locations under a repo's .ken/ cache dir (ADR-039). Distinct from the
+// ADR-024 operator prebuilt (.ken/index.bin), which is loaded frozen.
+func SnapshotBinPath(dir string) string      { return filepath.Join(dir, ".ken", "snapshot.bin") }
+func SnapshotManifestPath(dir string) string { return filepath.Join(dir, ".ken", "snapshot.manifest") }
+
+// CurrentManifest walks dir the SAME way the index build does
+// (repo.WalkFS with the default options — .ken/ is pruned, so the snapshot's
+// own files never appear) and stamps each file, pairing them with configKey.
+// Callers use it both to write a snapshot's manifest and to drift-check on
+// load; sharing one walk keeps store and check symmetric.
+func CurrentManifest(dir, configKey string) (SnapshotManifest, error) {
+	files, err := repo.WalkFS(os.DirFS(dir), repo.Options{})
+	if err != nil {
+		return SnapshotManifest{ConfigKey: configKey}, err
+	}
+	return SnapshotManifest{ConfigKey: configKey, Files: BuildFileStamps(os.DirFS(dir), files)}, nil
+}
+
+// WriteSnapshot persists a watching index's published corpus + a fresh drift
+// manifest to <dir>/.ken/snapshot.{bin,manifest} (cold-start M1 / ADR-039).
+// configKey is the caller-computed invalidation key (see SnapshotConfigKey +
+// ModelFingerprint). Atomic tmp+rename; the .bin is written BEFORE the manifest
+// so a crash between the two leaves no manifest — which boot reads as a clean
+// cache-miss, never a half-loaded index. Shared by ken-mcp (build/flush) and
+// `ken index --write-snapshot` (CI prewarming).
+func WriteSnapshot(dir string, wi *WatchedIndex, configKey string) error {
+	data, err := wi.SnapshotBytes()
+	if err != nil {
+		return fmt.Errorf("search: snapshot serialize: %w", err)
+	}
+	manifest, err := CurrentManifest(dir, configKey)
+	if err != nil {
+		return fmt.Errorf("search: snapshot manifest walk: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".ken"), 0o755); err != nil {
+		return fmt.Errorf("search: snapshot mkdir: %w", err)
+	}
+	if err := atomicWriteFile(SnapshotBinPath(dir), data); err != nil {
+		return fmt.Errorf("search: write snapshot.bin: %w", err)
+	}
+	if err := atomicWriteFile(SnapshotManifestPath(dir), manifest.Encode()); err != nil {
+		return fmt.Errorf("search: write snapshot.manifest: %w", err)
+	}
+	return nil
+}
+
+// atomicWriteFile stages to <path>.tmp then renames — a partial write can
+// never be observed as the real file.
+func atomicWriteFile(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // Diff compares the receiver (the stored/snapshot manifest) against current

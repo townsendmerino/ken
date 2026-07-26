@@ -30,7 +30,7 @@ go vet ./...                                      # must be clean
 gofmt -l cmd internal                             # must print nothing (whole tree gofmt-clean)
 go fix ./...                                      # Go 1.26 modernizers (SplitSeq, min, range-int)
 
-go run ./cmd/ken index  <path>  [--watch|--no-watch] [--chunker=regex|treesitter|line] [--mode=bm25|semantic|hybrid] [--model=DIR]
+go run ./cmd/ken index  <path>  [--watch|--no-watch] [--write-snapshot] [--chunker=regex|treesitter|line] [--mode=bm25|semantic|hybrid] [--model=DIR]
 go run ./cmd/ken search <path> <query>...  [-k N] [--chunker=...] [--mode=...] [--model=...]
 go run ./cmd/ken-mcp                               # stdio MCP server (env-configured; see MCP section)
 ```

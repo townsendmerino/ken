@@ -18,21 +18,11 @@ package main
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/townsendmerino/aikit/embed"
-	"github.com/townsendmerino/ken/internal/repo"
 	"github.com/townsendmerino/ken/internal/search"
 	kenmcp "github.com/townsendmerino/ken/mcp"
 )
-
-const (
-	snapshotBinName      = "snapshot.bin"
-	snapshotManifestName = "snapshot.manifest"
-)
-
-func snapshotBinPath(dir string) string      { return filepath.Join(dir, ".ken", snapshotBinName) }
-func snapshotManifestPath(dir string) string { return filepath.Join(dir, ".ken", snapshotManifestName) }
 
 // snapshotConfigKey builds the invalidation key for dir's current server
 // config. See search.SnapshotConfigKey for what's keyed (and, importantly,
@@ -41,17 +31,14 @@ func snapshotConfigKey(mode search.Mode, chunker string, model *embed.StaticMode
 	return search.SnapshotConfigKey(mode, chunker, search.ModelFingerprint(model, modelDir), !fsOpts.DisableEnrichment)
 }
 
-// currentManifest walks dir the SAME way the index build does
-// (repo.WalkFS with the default options) and stamps each file, so the drift
-// check compares like with like. The walker prunes .ken/, so the snapshot's
-// own files never appear here (no self-drift). A walk error yields an empty
-// manifest, which won't match a non-empty stored one → conservative rebuild.
+// currentManifest walks dir and stamps each file (via search.CurrentManifest),
+// swallowing a walk error into an empty manifest — which won't match a
+// non-empty stored one → conservative rebuild. ken-mcp's drift check wants
+// that lenient behavior; the write paths use search.WriteSnapshot, which
+// surfaces the error instead.
 func currentManifest(dir, configKey string) search.SnapshotManifest {
-	files, err := repo.WalkFS(os.DirFS(dir), repo.Options{})
-	if err != nil {
-		return search.SnapshotManifest{ConfigKey: configKey}
-	}
-	return search.SnapshotManifest{ConfigKey: configKey, Files: search.BuildFileStamps(os.DirFS(dir), files)}
+	m, _ := search.CurrentManifest(dir, configKey)
+	return m
 }
 
 // tryLoadSnapshot is the M1 fast path: if <dir>/.ken/snapshot.{manifest,bin}
@@ -59,13 +46,13 @@ func currentManifest(dir, configKey string) search.SnapshotManifest {
 // serialized corpus and seed a *watching* index from it — no
 // walk/chunk/enrich/embed. Returns nil on ANY miss (caller then live-builds).
 func tryLoadSnapshot(dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, logger *kenmcp.Logger) *search.WatchedIndex {
-	manData, err := os.ReadFile(snapshotManifestPath(dir))
+	manData, err := os.ReadFile(search.SnapshotManifestPath(dir))
 	if err != nil {
 		return nil // no sidecar → first run, or not an M1-managed repo
 	}
 	stored, err := search.DecodeManifest(manData)
 	if err != nil {
-		logger.Logf(kenmcp.LogWarn, "snapshot manifest %s unreadable (%v); rebuilding", snapshotManifestPath(dir), err)
+		logger.Logf(kenmcp.LogWarn, "snapshot manifest %s unreadable (%v); rebuilding", search.SnapshotManifestPath(dir), err)
 		return nil
 	}
 
@@ -98,9 +85,9 @@ func tryLoadSnapshot(dir string, mode search.Mode, modeStr, chunker, modelDir st
 		return nil
 	}
 
-	binData, err := os.ReadFile(snapshotBinPath(dir))
+	binData, err := os.ReadFile(search.SnapshotBinPath(dir))
 	if err != nil {
-		logger.Logf(kenmcp.LogWarn, "snapshot manifest present but %s missing (%v); rebuilding", snapshotBinPath(dir), err)
+		logger.Logf(kenmcp.LogWarn, "snapshot manifest present but %s missing (%v); rebuilding", search.SnapshotBinPath(dir), err)
 		return nil
 	}
 	// Corpus-only load: return the raw chunks/vecs and let
@@ -112,7 +99,7 @@ func tryLoadSnapshot(dir string, mode search.Mode, modeStr, chunker, modelDir st
 		Model:           model,
 	})
 	if err != nil {
-		logger.Logf(kenmcp.LogWarn, "snapshot %s unusable (%v); rebuilding", snapshotBinPath(dir), err)
+		logger.Logf(kenmcp.LogWarn, "snapshot %s unusable (%v); rebuilding", search.SnapshotBinPath(dir), err)
 		return nil
 	}
 	// Single-publish: seed + reconcile the drift BEFORE the initial build, so
@@ -136,45 +123,15 @@ func tryLoadSnapshot(dir string, mode search.Mode, modeStr, chunker, modelDir st
 	return wi
 }
 
-// writeSnapshot persists wi's current published corpus + a fresh drift
-// manifest to <dir>/.ken/. Best-effort: any failure logs a warning and
-// returns — the server keeps running with its in-memory index. Writes the
-// .bin BEFORE the manifest so a crash between the two leaves no manifest,
-// which boot reads as a clean cache-miss (never a half-loaded index).
+// writeSnapshot persists wi's published corpus + drift manifest to
+// <dir>/.ken/ via search.WriteSnapshot (the shared writer). Best-effort: a
+// failure logs a warning and returns — the server keeps running with its
+// in-memory index.
 func writeSnapshot(dir string, wi *search.WatchedIndex, mode search.Mode, chunker, modelDir string, fsOpts search.FSOptions, logger *kenmcp.Logger) {
-	data, err := wi.SnapshotBytes()
-	if err != nil {
-		logger.Logf(kenmcp.LogWarn, "snapshot: serialize %s failed (%v); not persisting", dir, err)
-		return
-	}
 	key := snapshotConfigKey(mode, chunker, wi.EmbedModel(), modelDir, fsOpts)
-	manifest := currentManifest(dir, key)
-
-	if err := os.MkdirAll(filepath.Join(dir, ".ken"), 0o755); err != nil {
-		logger.Logf(kenmcp.LogWarn, "snapshot: mkdir %s/.ken failed (%v); not persisting", dir, err)
+	if err := search.WriteSnapshot(dir, wi, key); err != nil {
+		logger.Logf(kenmcp.LogWarn, "snapshot: persisting %s failed (%v); server continues with in-memory index", dir, err)
 		return
 	}
-	if err := atomicWriteFile(snapshotBinPath(dir), data); err != nil {
-		logger.Logf(kenmcp.LogWarn, "snapshot: write %s failed (%v); not persisting", snapshotBinPath(dir), err)
-		return
-	}
-	if err := atomicWriteFile(snapshotManifestPath(dir), manifest.Encode()); err != nil {
-		logger.Logf(kenmcp.LogWarn, "snapshot: write %s failed (%v); manifest absent → next boot rebuilds", snapshotManifestPath(dir), err)
-		return
-	}
-	logger.Logf(kenmcp.LogInfo, "wrote snapshot for %s (%d files, %d bytes)", dir, len(manifest.Files), len(data))
-}
-
-// atomicWriteFile stages to <path>.tmp then renames — a partial write can
-// never be observed as the real file.
-func atomicWriteFile(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	logger.Logf(kenmcp.LogInfo, "wrote snapshot for %s", dir)
 }
