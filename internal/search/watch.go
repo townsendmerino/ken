@@ -395,7 +395,7 @@ func (w *WatchedIndex) enrichCorpusInBackground(ctx context.Context) {
 		for _, i := range idxs {
 			newChunks[i].Text = label + newChunks[i].Text // reassigns the copy, not w.chunks[i]
 			if w.model != nil && i < len(newVecs) {
-				newVecs[i] = w.model.Encode(newChunks[i].Text) // fresh vec, not shared array
+				newVecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, newChunks[i].Text) // fresh vec, not shared array
 			}
 		}
 		enriched++
@@ -699,7 +699,7 @@ func (w *WatchedIndex) refoldMigrationDir(dir string) {
 	for _, c := range folded {
 		w.chunks = append(w.chunks, c)
 		if w.model != nil {
-			w.vecs = append(w.vecs, w.model.Encode(c.Text))
+			w.vecs = append(w.vecs, encodeCached(w.fsOpts.EmbedCache, w.model, c.Text))
 		}
 	}
 }
@@ -815,7 +815,7 @@ func (w *WatchedIndex) SetExtraChunks(chunks []chunk.Chunk) {
 	if w.model != nil && len(chunks) > 0 {
 		vecs := make([][]float32, len(chunks))
 		for i, c := range chunks {
-			vecs[i] = w.model.Encode(c.Text)
+			vecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, c.Text)
 		}
 		w.extraVecs = vecs
 	} else {
@@ -958,7 +958,7 @@ func (w *WatchedIndex) appendFile(rel string) {
 	for _, c := range cs {
 		w.chunks = append(w.chunks, c)
 		if w.model != nil {
-			w.vecs = append(w.vecs, w.model.Encode(c.Text))
+			w.vecs = append(w.vecs, encodeCached(w.fsOpts.EmbedCache, w.model, c.Text))
 		}
 	}
 }

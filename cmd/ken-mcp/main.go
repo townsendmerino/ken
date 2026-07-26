@@ -54,6 +54,7 @@ import (
 	// the embed layer so per-language gating doesn't shrink it.
 	_ "github.com/townsendmerino/aikit/chunk/markdown"
 	_ "github.com/townsendmerino/aikit/chunk/treesitter"
+	"github.com/townsendmerino/ken/internal/embedcache"
 	"github.com/townsendmerino/ken/internal/modelfetch"
 	"github.com/townsendmerino/ken/internal/search"
 	"github.com/townsendmerino/ken/internal/structural"
@@ -362,6 +363,14 @@ func main() {
 		logger.Logf(kenmcp.LogInfo, "lazy enrichment on (KEN_MCP_LAZY_ENRICH): cold builds serve pre-enrichment, enrich in background")
 	}
 
+	// Cold-start M3 (opt-in, default off): persistent content-hash embedding
+	// cache at <repo>/.ken/embed.db, so a full rebuild re-embeds only never-seen
+	// chunk text. Second line of defense behind M1 (a snapshot load skips
+	// embedding); helps recurring full rebuilds. First build is slightly slower
+	// (warming the cache), hence opt-in.
+	embedCacheEnabled := envBool("KEN_MCP_EMBED_CACHE", false, logger)
+	embedCacheMax := envInt("KEN_MCP_EMBED_CACHE_MAX", embedcache.DefaultMaxEntries, logger)
+
 	// M5: neural reranker — opt-in (default off), loaded lazily on the
 	// first hybrid+rerank query so the ~491 ms encoder.Load stays off the
 	// cold-start path. The model is shared across every WatchedIndex (via
@@ -416,16 +425,47 @@ func main() {
 		} else {
 			dir = source
 		}
+		// Local-path repos only: an http source is a throwaway temp clone
+		// (cleanup != nil) that's rm-rf'd on eviction, so .ken/ persistence
+		// (snapshot, embed cache) there is wasted work.
+		isLocal := cleanup == nil
+		bMode, bModeStr, bModelDir := bs.snapshot()
+
+		// M3 embed cache (opt-in): only useful when embedding is used
+		// (semantic/hybrid) on a local repo.
+		var embedCache *embedcache.Cache
+		if embedCacheEnabled && isLocal && bMode != search.ModeBM25 {
+			_ = os.MkdirAll(filepath.Join(dir, ".ken"), 0o755)
+			fp := search.ModelFingerprintFromDir(bModelDir)
+			if c, cErr := embedcache.Open(filepath.Join(dir, ".ken", "embed.db"), fp, 0, embedCacheMax); cErr != nil {
+				logger.Logf(kenmcp.LogWarn, "embed cache disabled for %s (%v)", dir, cErr)
+			} else {
+				embedCache = c
+				logger.Logf(kenmcp.LogInfo, "embed cache on for %s (.ken/embed.db)", dir)
+			}
+		}
+		// Fold the cache close into the eviction cleanup.
+		origCleanup := cleanup
+		cleanup = func() {
+			if embedCache != nil {
+				_ = embedCache.Close()
+			}
+			if origCleanup != nil {
+				origCleanup()
+			}
+		}
+
 		fsOpts := search.FSOptions{
 			DisableFoldMigrations: noAutoMigrations,
 			LogWriter:             os.Stderr,
 			LazyEnrichment:        lazyEnrich,
 		}
-		// M1 snapshot persistence applies only to local-path repos: an http
-		// source is a throwaway temp clone (cleanup != nil) that's rm-rf'd on
-		// eviction, so persisting into it is wasted work.
-		persistSnapshot := snapshotEnabled && cleanup == nil
-		bMode, bModeStr, bModelDir := bs.snapshot()
+		// Assign the interface only when non-nil so a nil *Cache doesn't become
+		// a non-nil VecCache holding a nil pointer.
+		if embedCache != nil {
+			fsOpts.EmbedCache = embedCache
+		}
+		persistSnapshot := snapshotEnabled && isLocal
 		ix, err := loadOrBuildWatched(ctx, dir, bMode, bModeStr, chunker, bModelDir, fsOpts, persistSnapshot, logger)
 		if err != nil {
 			if cleanup != nil {

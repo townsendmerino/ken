@@ -312,22 +312,33 @@ report (first-servable vs fully-enriched) per the M4 honesty rule.
 
 Estimate: 2–3 days incl. the background-vs-on-demand profile.
 
-### M3 — Content-hash embedding cache
+### M3 — Content-hash embedding cache — SHIPPED (opt-in)
 
-Model2Vec embeddings are deterministic; SQLite is already a dependency. Cache
-`chunk content hash → vector` (keyed also by model hash + dim) in `.ken/embed.db`.
-Then even a *full* rebuild — including one forced by a snapshot invalidation that
-didn't touch the model — only embeds never-seen chunks.
+**Shipped v1, opt-in (`KEN_MCP_EMBED_CACHE=1`, default off).** Persistent
+`sha256(chunk text) → vector` cache at `<repo>/.ken/embed.db` so a full rebuild
+re-embeds only never-seen text. Deterministic (Model2Vec is pure), scoped to the
+model (a meta row = model fingerprint + dim; a model/dim change truncates it).
+The second line of defense behind an M1 snapshot load (which skips embedding
+entirely) — it helps the rebuilds M1 can't: heavy drift, a mode change, or a
+deleted snapshot with an intact cache.
 
-- [ ] Schema + eviction policy (LRU by last-used, size-capped; `.ken/embed.db`).
-- [ ] Measure: on the bench-host class this matters more than on M-series
-      (embedding is ~6 % on M1 kernel but ~31 % on M1 PHP; likely a larger share on
-      4 old cores). **Gate priority on M0(a)/M0(c)**: only build if the embedding
-      share on 4-core x86 is material — don't build it on M-series numbers alone.
-- [ ] Interaction with M1 documented: snapshot hit skips this entirely; this is the
-      second line of defense. Invalidation key shared with M1 as a constant.
+Architecture: the SQLite impl lives in **`internal/embedcache`** (imported only
+by `cmd/ken-mcp`); `internal/search` sees only a `VecCache` interface, so the
+`mcp` package stays DB-driver-free — the v0.6.0 binary-size contract (ADR-020),
+which its `binary_contract_test.go` enforces (and caught this during dev).
 
-Estimate: 2–3 days.
+**Writes are batched** (buffer → one transaction per 512) — a per-chunk INSERT
+made a cold build ~13× slower (31 s vs 2.4 s); batching brings it back on par.
+Measured on yii2 (~12 k chunks, M1 Pro, hybrid): no-cache 2.63 s, **cache-cold
+2.35 s** (~on par — warms the cache), **cache-warm 1.76 s = 1.5×** (all hits,
+embedding skipped). `KEN_MCP_EMBED_CACHE_MAX` bounds it (default 1M entries,
+batch-granularity oldest-first eviction).
+
+Honest scope: the win is narrow given M1 (rebuilds are rare) and that embedding
+is the smaller cold cost (~31 % vs ~50 % parse). Default OFF pending 4-core-x86
+data — enable where full rebuilds of the same content recur. Tests: vec
+serialization, put/get, model/dim scope invalidation, size-bound eviction
+(-race).
 
 ### M4 — Serve-before-warm (staged readiness)
 

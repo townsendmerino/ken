@@ -106,6 +106,14 @@ type FSOptions struct {
 	// shortcut.
 	DisableEnrichment bool
 
+	// EmbedCache, when non-nil, is a persistent content-hash → vector cache
+	// (cold-start M3) consulted for every model.Encode on the build / watch /
+	// lazy-enrich paths: a cache hit skips the encode. Deterministic (Model2Vec
+	// is a pure function of text+model), so it only speeds up rebuilds of
+	// already-seen chunk text — the second line of defense behind an M1 snapshot
+	// load (which skips embedding entirely). nil = no cache (encode directly).
+	EmbedCache VecCache
+
 	// LazyEnrichment defers Arm B enrichment off the cold-build critical path
 	// (cold-start M2). When true, the initial build embeds RAW chunks (no
 	// `# func:` label) so first-servable pays only the walk/chunk/embed floor,
@@ -484,7 +492,7 @@ func walkAndChunkFSWithModel(ctx context.Context, fsys fs.FS, mode Mode, chunker
 				if model != nil {
 					localVecs = make([][]float32, len(cs))
 					for i, c := range cs {
-						localVecs[i] = model.Encode(c.Text)
+						localVecs[i] = encodeCached(opts.EmbedCache, model, c.Text)
 					}
 				}
 				results[j.idx] = fileResult{chunks: cs, vecs: localVecs}

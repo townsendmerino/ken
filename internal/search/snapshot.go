@@ -121,6 +121,22 @@ func ModelFingerprint(m *embed.StaticModel, modelDir string) string {
 	return fmt.Sprintf("dim=%d,vocab=%d,bytes=%d", m.Dim(), m.VocabSize(), sz)
 }
 
+// ModelFingerprintFromDir is a model fingerprint computed from the model
+// directory WITHOUT loading the model — the safetensors size + mtime. Used to
+// scope the M3 embed cache in the ken-mcp builder, which doesn't have the
+// loaded *StaticModel in hand at cache-open time. A model swap changes the file
+// (hence the scope), invalidating the cache. "bm25" when no model dir.
+func ModelFingerprintFromDir(modelDir string) string {
+	if modelDir == "" {
+		return "bm25"
+	}
+	fi, err := os.Stat(filepath.Join(modelDir, "model.safetensors"))
+	if err != nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("bytes=%d,mtime=%d", fi.Size(), fi.ModTime().UnixNano())
+}
+
 // BuildFileStamps stats each file (relative to fsys) and returns the stamps
 // sorted ascending by path. Files that fail to stat are skipped with the
 // error swallowed — on boot a missing/unstattable file is best treated as
