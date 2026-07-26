@@ -395,6 +395,13 @@ func enrichLabelFor(rel string, data []byte) string {
 	return structural.EnrichFromFileStruct(efs, structural.EnrichOptions{})
 }
 
+// stripEnrichLabel removes a leading Arm B enrichment label line if present.
+// Package-local alias so watch.go's idempotent warm pass (audit R2) doesn't
+// need its own structural import; the real logic lives in structural.StripLabel.
+func stripEnrichLabel(text string) string {
+	return structural.StripLabel(text)
+}
+
 // Concurrency safety prerequisites (verified in parallelism Phase 1):
 //   - embed.StaticModel.Encode is goroutine-safe (TestEncodeConcurrent).
 //   - chunk.ChunkFile / sql.ParseFile are pure functions of their inputs.

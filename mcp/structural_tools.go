@@ -65,6 +65,22 @@ func resolveBundleForTool(ctx context.Context, cfg *Config, repoArg, outputMode 
 	return bundle, nil
 }
 
+// structuralUnavailableResult is the error a structural handler returns when
+// StructuralIndex yielded nil. It distinguishes "still building" from
+// "genuinely no structural index" (audit R3) so an agent on a large repo
+// retries instead of concluding the repo has no symbols.
+func structuralUnavailableResult(bundle *RepoBundle, outputMode string) *sdk.CallToolResult {
+	if bundle.StructuralPending() {
+		return errorResult(outputMode,
+			"The structural index is still building for this repo (large corpus). "+
+				"Retry in a few seconds.")
+	}
+	return errorResult(outputMode,
+		"No structural index available for this repo. "+
+			"The structural index has no extractors registered for any file in this corpus "+
+			"(a repo with no supported source files has no structural index).")
+}
+
 // handleDefinition implements the `definition` tool: given a
 // symbol name, return the file(s) where it's defined. Tree-sitter-
 // grade: collisions return all sites (ordered alphabetically by
@@ -78,11 +94,7 @@ func handleDefinition(ctx context.Context, cfg *Config, args DefinitionArgs) (*s
 	// nil on unsupported corpus or build failure, handled just below.
 	sidx := bundle.StructuralIndex(ctx)
 	if sidx == nil {
-		return errorResult(args.Output,
-			"No structural index available for this repo. "+
-				"The structural index has no extractors for this corpus. "+
-				"repos with no .py files have no structural index.",
-		), nil, nil
+		return structuralUnavailableResult(bundle, args.Output), nil, nil
 	}
 	sym := strings.TrimSpace(args.Symbol)
 	if sym == "" {
@@ -147,10 +159,7 @@ func handleReferences(ctx context.Context, cfg *Config, args ReferencesArgs) (*s
 	// nil on unsupported corpus or build failure, handled just below.
 	sidx := bundle.StructuralIndex(ctx)
 	if sidx == nil {
-		return errorResult(args.Output,
-			"No structural index available for this repo. "+
-				"The structural index has no extractors registered for any file in this corpus.",
-		), nil, nil
+		return structuralUnavailableResult(bundle, args.Output), nil, nil
 	}
 	sym := strings.TrimSpace(args.Symbol)
 	if sym == "" {
@@ -227,10 +236,7 @@ func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.Cal
 	// nil on unsupported corpus or build failure, handled just below.
 	sidx := bundle.StructuralIndex(ctx)
 	if sidx == nil {
-		return errorResult(args.Output,
-			"No structural index available for this repo. "+
-				"The structural index has no extractors registered for any file in this corpus.",
-		), nil, nil
+		return structuralUnavailableResult(bundle, args.Output), nil, nil
 	}
 	sym := strings.TrimSpace(args.Symbol)
 	if sym == "" {
@@ -305,10 +311,7 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	// nil on unsupported corpus or build failure, handled just below.
 	sidx := bundle.StructuralIndex(ctx)
 	if sidx == nil {
-		return errorResult(args.Output,
-			"No structural index available for this repo. "+
-				"The structural index has no extractors registered for any file in this corpus.",
-		), nil, nil
+		return structuralUnavailableResult(bundle, args.Output), nil, nil
 	}
 	rawPath := strings.TrimSpace(args.Path)
 	if rawPath == "" {
@@ -415,10 +418,7 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 	// nil on unsupported corpus or build failure, handled just below.
 	sidx := bundle.StructuralIndex(ctx)
 	if sidx == nil {
-		return errorResult(args.Output,
-			"No structural index available for this repo. "+
-				"The structural index has no extractors registered for any file in this corpus.",
-		), nil, nil
+		return structuralUnavailableResult(bundle, args.Output), nil, nil
 	}
 	path := strings.TrimSpace(args.Path)
 	var names []string

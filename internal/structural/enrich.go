@@ -1,9 +1,29 @@
 package structural
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 )
+
+// labelLineRE matches a single Arm B enrichment label line — enrichCore's
+// output: "# " + one-or-more "arm: value" segments joined by " | " + "\n".
+// The alternation is the set of arms enrichCore can emit FIRST (primaryFunc
+// may be "", so the leading arm is any of these; "returns" only ever
+// follows "params"). Anchored at start and bounded to one line, so at most
+// the leading label is stripped.
+var labelLineRE = regexp.MustCompile(`^# (?:func|calls|raises|called by|imports|params|siblings): [^\n]*\n`)
+
+// StripLabel removes a single leading Arm B enrichment label line from text
+// (no-op when text isn't enriched). The one strip helper for BOTH the
+// indexer's idempotent warm pass — so re-running enrichment on an
+// already-labelled corpus can't double the label (audit R2) — and the MCP
+// result boundary — so the synthetic line never reaches the agent, for
+// EVERY arm combination, not just "func:" (audit R5). Sharing it keeps the
+// producer (enrichCore) and consumer from drifting a third time.
+func StripLabel(text string) string {
+	return labelLineRE.ReplaceAllLiteralString(text, "")
+}
 
 // Maxima for the variable-length sections of the label line. Keep
 // the prefix bounded even on chunks with hundreds of calls or

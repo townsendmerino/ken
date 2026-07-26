@@ -433,7 +433,13 @@ func (w *WatchedIndex) warmCorpusInBackground(ctx context.Context) {
 		}
 		for _, i := range idxs {
 			if label != "" {
-				newChunks[i].Text = label + newChunks[i].Text // reassigns the copy, not w.chunks[i]
+				// Idempotent (audit R2): strip any label already present before
+				// prepending. A snapshot-seeded corpus (M1) can arrive already
+				// enriched, and this warm pass runs on every boot — without the
+				// strip the label compounds one line per restart, re-breaking
+				// the byte-fidelity invariant §10 restored. reassigns the copy,
+				// not w.chunks[i].
+				newChunks[i].Text = label + stripEnrichLabel(newChunks[i].Text)
 			}
 			if needEmbed {
 				newVecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, newChunks[i].Text)
@@ -705,9 +711,14 @@ func (w *WatchedIndex) loop() {
 			w.logf("fsnotify error: %v", err)
 		case <-timerC():
 			if flushing {
-				// A flush is still running — keep accumulating into dirty
-				// and re-arm; we'll flush the batch once flushDone fires.
-				resetTimer()
+				// A flush is still running — keep accumulating into dirty and
+				// just disarm. The `case <-flushDone` arm re-arms the timer if
+				// dirty is non-empty when the flush finishes, so no batch is
+				// lost. Re-arming HERE instead (audit R1) busy-spins: once the
+				// §13 ceiling drives delay to 0, timer.Reset(0) fires
+				// immediately, re-hits this branch, re-arms at 0, and pegs a
+				// core for the rest of the flush. Do NOT resetTimer() here.
+				timer = nil
 				continue
 			}
 			if len(dirty) == 0 {

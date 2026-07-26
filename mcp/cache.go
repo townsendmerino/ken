@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 
@@ -50,23 +51,50 @@ type RepoBundle struct {
 	// lets a client cancellation / timeout abort the whole-corpus parse.
 	StructuralBuilder func(context.Context) (*structural.Index, error)
 
-	structuralMu    sync.Mutex  // serializes concurrent builds
-	structuralBuilt atomic.Bool // set once a build succeeds
-	structuralIdx   *structural.Index
+	structuralMu       sync.Mutex  // guards the build-state fields below
+	structuralBuilt    atomic.Bool // set once a build succeeds
+	structuralIdx      *structural.Index
+	structuralBuilding bool          // a background build is in flight
+	structuralDone     chan struct{} // closed when the in-flight build finishes
+	structuralFailedAt time.Time     // last failure; gates the retry cooldown
 }
 
-// StructuralIndex returns the structural symbol index, building it on the
-// first call and caching a SUCCESSFUL result for every subsequent call.
-// Unlike the old sync.Once, a failed or cancelled build is NOT cached
-// (audit db/mcp §8): a transient failure — a client timeout that cancels
-// ctx, a temporarily-unreadable file — would otherwise disable all five
-// structural tools for this repo until the process restarts. The next call
-// retries. Concurrent callers serialize on structuralMu so N simultaneous
-// tool calls still trigger at most one in-flight parse; a build that
-// already succeeded returns immediately without taking the lock.
+// Structural-build timing knobs (audit R3).
+const (
+	// structuralBuildBudget bounds a single background build. Detached from
+	// any caller's context so one client's short tool-call timeout can't
+	// kill (and endlessly re-trigger) a large whole-corpus parse.
+	structuralBuildBudget = 10 * time.Minute
+	// structuralFirstWait is how long a caller BLOCKS for an in-flight build
+	// before degrading to "still building". Small repos finish well inside
+	// it (first-call result preserved); large repos hand the caller back
+	// promptly and finish in the background for the next call.
+	structuralFirstWait = 10 * time.Second
+)
+
+// structuralFailCooldown throttles retries after a failed build so an agent
+// calling structural tools in a loop can't drive a fresh whole-corpus parse
+// on every call. A var (not const) only so tests can shorten it; production
+// never reassigns it.
+var structuralFailCooldown = 60 * time.Second
+
+// StructuralIndex returns the structural symbol index, or nil if it isn't
+// ready yet. A SUCCESSFUL build is cached for the process lifetime; a
+// failed/cancelled one is not (audit db/mcp §8) but is rate-limited by a
+// cooldown so retries can't hammer the parse (audit R3).
 //
-// Returns nil (never panics) when no builder is wired or the build failed
-// / found no supported files — every tool handler defends against nil.
+// The build runs in a BACKGROUND goroutine under an independent budget
+// (structuralBuildBudget), NOT the caller's context (audit R3): otherwise a
+// build that outlives one client's tool-call timeout is cancelled, cached
+// as nothing, and retried forever — the index never converges on a large
+// repo. The caller blocks up to structuralFirstWait (or its own deadline)
+// so a fast build still answers on the first call; a slower one returns nil
+// ("still building") while the background build finishes for the next call.
+// Concurrent callers join the same in-flight build.
+//
+// Returns nil (never panics) when no builder is wired, the build is still
+// running, it failed, or it found no supported files — handlers defend
+// against nil and can call StructuralPending to distinguish "building".
 func (b *RepoBundle) StructuralIndex(ctx context.Context) *structural.Index {
 	if b.StructuralBuilder == nil {
 		return nil
@@ -74,24 +102,81 @@ func (b *RepoBundle) StructuralIndex(ctx context.Context) *structural.Index {
 	if b.structuralBuilt.Load() {
 		return b.structuralIdx
 	}
+
 	b.structuralMu.Lock()
-	defer b.structuralMu.Unlock()
-	// Re-check under the lock: another goroutine may have built it while
-	// we waited.
 	if b.structuralBuilt.Load() {
+		b.structuralMu.Unlock()
 		return b.structuralIdx
 	}
-	idx, err := b.StructuralBuilder(ctx)
-	if err != nil {
-		// Not cached — the next call retries. Don't set structuralBuilt.
-		return nil
+	if !b.structuralBuilding {
+		if !b.structuralFailedAt.IsZero() && time.Since(b.structuralFailedAt) < structuralFailCooldown {
+			b.structuralMu.Unlock()
+			return nil // recent failure — don't re-trigger the parse yet
+		}
+		b.structuralBuilding = true
+		b.structuralDone = make(chan struct{})
+		go b.runStructuralBuild(b.structuralDone)
 	}
-	b.structuralIdx = idx
-	// Publish "built" last: StructuralIfBuilt reads structuralIdx only
-	// after observing this store, so the write above happens-before that
-	// read without holding structuralMu.
-	b.structuralBuilt.Store(true)
-	return b.structuralIdx
+	done := b.structuralDone
+	b.structuralMu.Unlock()
+
+	wait := structuralFirstWait
+	if dl, ok := ctx.Deadline(); ok {
+		if d := time.Until(dl) - 100*time.Millisecond; d < wait {
+			wait = d
+		}
+	}
+	if wait < 0 {
+		wait = 0
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return b.structuralIdx // nil if the build failed
+	case <-timer.C:
+		return nil // still building — caller should retry shortly
+	case <-ctx.Done():
+		return nil // caller gave up; the background build continues
+	}
+}
+
+// runStructuralBuild executes one build under an independent budget, caches
+// success, records failure time, and wakes waiters. Runs in its own
+// goroutine (audit R3).
+func (b *RepoBundle) runStructuralBuild(done chan struct{}) {
+	ctx, cancel := context.WithTimeout(context.Background(), structuralBuildBudget)
+	defer cancel()
+	idx, err := b.StructuralBuilder(ctx)
+
+	b.structuralMu.Lock()
+	if err != nil {
+		b.structuralFailedAt = time.Now()
+	} else {
+		b.structuralIdx = idx
+		b.structuralBuilt.Store(true) // publish last; happens-before close(done)
+	}
+	b.structuralBuilding = false
+	b.structuralMu.Unlock()
+	close(done)
+}
+
+// StructuralPending reports whether a structural build is currently running
+// (or a fresh call would start one because there's no cached result and no
+// active cooldown). Handlers use it to tell an agent "still building, retry
+// shortly" apart from "this corpus has no structural index" (audit R3).
+func (b *RepoBundle) StructuralPending() bool {
+	if b.StructuralBuilder == nil || b.structuralBuilt.Load() {
+		return false
+	}
+	b.structuralMu.Lock()
+	defer b.structuralMu.Unlock()
+	if b.structuralBuilding {
+		return true
+	}
+	// No build running: pending iff we're not inside a failure cooldown (a
+	// call now would start one).
+	return b.structuralFailedAt.IsZero() || time.Since(b.structuralFailedAt) >= structuralFailCooldown
 }
 
 // StructuralIfBuilt returns the structural index only if a prior

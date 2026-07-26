@@ -348,10 +348,15 @@ func TestRepoBundle_LazyStructural(t *testing.T) {
 		}
 	})
 
-	t.Run("build failure is retried, not cached", func(t *testing.T) {
-		// audit db/mcp §8: a transient failure (e.g. a client timeout that
-		// cancels ctx) must NOT permanently disable the structural tools.
-		// The builder fails twice, then succeeds; each call retries.
+	t.Run("build failure is retried after cooldown, not cached", func(t *testing.T) {
+		// audit db/mcp §8 + R3: a transient failure must NOT permanently
+		// disable the structural tools (retried), but retries are rate-limited
+		// by a cooldown so an agent looping can't re-trigger the parse every
+		// call. Shrink the cooldown to 0 so the retry is observable in-test.
+		orig := structuralFailCooldown
+		structuralFailCooldown = 0
+		defer func() { structuralFailCooldown = orig }()
+
 		var calls atomic.Int64
 		b := &RepoBundle{StructuralBuilder: func(context.Context) (*structural.Index, error) {
 			if calls.Add(1) < 3 {
@@ -359,24 +364,49 @@ func TestRepoBundle_LazyStructural(t *testing.T) {
 			}
 			return sx, nil
 		}}
+		// Each call blocks on the background build; with cooldown 0 the next
+		// call starts a fresh build. 1st + 2nd fail → nil; 3rd succeeds.
 		if got := b.StructuralIndex(context.Background()); got != nil {
-			t.Fatalf("StructuralIndex() on 1st (failed) build = %p, want nil", got)
+			t.Fatalf("1st (failed) build = %p, want nil", got)
 		}
 		if got := b.StructuralIfBuilt(); got != nil {
-			t.Fatalf("StructuralIfBuilt() after a failed build = %p, want nil (failure not cached)", got)
+			t.Fatalf("StructuralIfBuilt after a failed build = %p, want nil (failure not cached)", got)
 		}
 		if got := b.StructuralIndex(context.Background()); got != nil {
-			t.Fatalf("StructuralIndex() on 2nd (failed) build = %p, want nil", got)
-		}
-		// Third call succeeds and is cached from then on.
-		if got := b.StructuralIndex(context.Background()); got != sx {
-			t.Fatalf("StructuralIndex() on 3rd (successful) build = %p, want %p", got, sx)
+			t.Fatalf("2nd (failed) build = %p, want nil", got)
 		}
 		if got := b.StructuralIndex(context.Background()); got != sx {
-			t.Fatalf("StructuralIndex() after success not cached = %p, want %p", got, sx)
+			t.Fatalf("3rd (successful) build = %p, want %p", got, sx)
+		}
+		if got := b.StructuralIndex(context.Background()); got != sx {
+			t.Fatalf("after success not cached = %p, want %p", got, sx)
 		}
 		if n := calls.Load(); n != 3 {
 			t.Fatalf("builder invoked %d times, want 3 (2 retried failures + 1 cached success)", n)
+		}
+	})
+
+	t.Run("failure cooldown blocks immediate retry", func(t *testing.T) {
+		// With the default cooldown in force, a failed build is NOT retried on
+		// the very next call — the parse is rate-limited (audit R3).
+		var calls atomic.Int64
+		b := &RepoBundle{StructuralBuilder: func(context.Context) (*structural.Index, error) {
+			calls.Add(1)
+			return nil, context.DeadlineExceeded
+		}}
+		if got := b.StructuralIndex(context.Background()); got != nil {
+			t.Fatalf("failed build = %p, want nil", got)
+		}
+		// Immediately after a failure, StructuralPending is false (cooldown) and
+		// a second call does NOT invoke the builder again.
+		if b.StructuralPending() {
+			t.Error("StructuralPending should be false during the cooldown")
+		}
+		if got := b.StructuralIndex(context.Background()); got != nil {
+			t.Fatalf("during cooldown = %p, want nil", got)
+		}
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("builder invoked %d times during cooldown, want 1", n)
 		}
 	})
 }

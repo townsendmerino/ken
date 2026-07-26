@@ -469,23 +469,28 @@ ORDER BY name;`
 // ORDER BY 1) and same cell-truncation policy via the shared
 // truncateCell/formatCell helpers.
 //
-// Approx row counts: SQLite has no pg_class.reltuples equivalent. Rather
-// than a full-table-scan COUNT(*) (audit §28 — O(n) B-tree scan, brutal on
-// a multi-GB analytics .db, for a value rendered as the approximate "~N"),
-// use MAX(rowid): an O(log n) index lookup on the common rowid table. It
-// overestimates after deletes (rowids aren't reused), which is fine for an
-// explicitly-approximate display. WITHOUT ROWID tables have no rowid, so
-// MAX(rowid) errors — we leave approxRowCount 0 and emit.go omits "of ~N".
+// Approx row counts: SQLite has no pg_class.reltuples equivalent. A BOUNDED
+// COUNT(*) over a capped subquery (audit R4): MAX(rowid) is the largest
+// primary key, NOT a count — an INTEGER PRIMARY KEY *is* the rowid, so a
+// 2-row table with epoch/snowflake ids rendered as "~1.7 trillion rows",
+// confidently wrong data handed to the model. Capping the inner scan at
+// sqliteRowCountCap+1 keeps it O(cap) not O(n) (the §28 perf worry that
+// motivated the MAX(rowid) change) while staying ACCURATE up to the cap;
+// above the cap we omit the count rather than present an understated one.
+// COUNT(*) also works on WITHOUT ROWID tables, which MAX(rowid) errored on.
 func sqliteAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot, opts Options) {
+	const sqliteRowCountCap = 1_000_000
 	for i := range snap.tables {
 		t := &snap.tables[i]
 		// Per-table recover (audit §26): one exotic driver conversion panic
 		// skips the table instead of crashing the process, matching Postgres.
 		withSampleRecover(opts, t.name, func() {
-			// Cheap approximate row count via MAX(rowid).
-			var n sql.NullInt64
-			if err := conn.QueryRowContext(ctx, fmt.Sprintf("SELECT MAX(rowid) FROM %s", sqliteQuoteIdent(t.name))).Scan(&n); err == nil && n.Valid {
-				t.approxRowCount = float64(n.Int64)
+			// Bounded approximate row count.
+			var n int64
+			countQ := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 FROM %s LIMIT %d)",
+				sqliteQuoteIdent(t.name), sqliteRowCountCap+1)
+			if err := conn.QueryRowContext(ctx, countQ).Scan(&n); err == nil && n <= sqliteRowCountCap {
+				t.approxRowCount = float64(n)
 			}
 
 			orderClause := "ORDER BY 1"

@@ -13,6 +13,7 @@ import (
 
 	"github.com/townsendmerino/aikit/chunk"
 	"github.com/townsendmerino/ken/internal/search"
+	"github.com/townsendmerino/ken/internal/structural"
 )
 
 // DBIntegration is the seam between mcp.Run / mcp.NewServer and a
@@ -455,22 +456,14 @@ func runSearch(ix *search.Index, args SearchArgs) (*sdk.CallToolResult, any, err
 	return runSearchWithTelemetry(ix, args, nil, false, nil, "", false)
 }
 
-// enrichLabelPrefix is the start of the synthetic Arm B enrichment line the
-// indexer prepends to Chunk.Text ("# func: NAME | calls: … | raises: …").
-const enrichLabelPrefix = "# func:"
-
-// stripEnrichmentLabel removes a leading enrichment label line from a
-// chunk's text so it never reaches the agent (audit §10). It's index-only
-// signal; source files don't contain it. No-op when the chunk isn't
-// enriched (enrichment off, or a non-extractor file).
+// stripEnrichmentLabel removes a leading Arm B enrichment label line from a
+// chunk's text so it never reaches the agent (audit §10). Delegates to
+// structural.StripLabel, which matches EVERY arm the emitter can produce
+// FIRST — not just "func:" (audit R5): a file with no top-level function
+// (a top-level script, a raise-only module) gets a "# calls: …" / "# raises:
+// …" label, which the old hardcoded "# func:" prefix missed and leaked.
 func stripEnrichmentLabel(text string) string {
-	if !strings.HasPrefix(text, enrichLabelPrefix) {
-		return text
-	}
-	if nl := strings.IndexByte(text, '\n'); nl >= 0 {
-		return text[nl+1:]
-	}
-	return "" // label-only chunk (no body) — shouldn't happen, but be safe
+	return structural.StripLabel(text)
 }
 
 // runSearchWithTelemetry is the runSearch variant that optionally
