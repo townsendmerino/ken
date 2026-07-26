@@ -504,14 +504,12 @@ func (c *Cache) getBundleOnce(ctx context.Context, key string) (*RepoBundle, err
 		// either under c.mu — every concurrent search/status/GetBundle
 		// waits on the lock for the full duration. So under the lock we only
 		// mutate the map/list and DETACH the entries to reap; the blocking
-		// close+cleanup happens after Unlock via reap().
-		reap := func(idx *search.WatchedIndex, clean func()) {
-			if idx != nil {
-				_ = idx.Close()
-			}
-			if clean != nil {
-				clean()
-			}
+		// close+cleanup+stopStructuralBuild happens after Unlock via reapEntry
+		// (audit R4-4: one reaper for every teardown path — this one used to
+		// have its own closure that skipped stopStructuralBuild, so an eviction
+		// mid-structural-build left the parse goroutine walking a deleted tree).
+		reapBundle := func(b *RepoBundle, clean func()) {
+			reapEntry(&cacheEntry{bundle: b, cleanup: clean})
 		}
 
 		c.mu.Lock()
@@ -521,12 +519,12 @@ func (c *Cache) getBundleOnce(ctx context.Context, key string) (*RepoBundle, err
 		// or resurrect a pre-purge bundle (Purge).
 		if c.closed {
 			c.mu.Unlock()
-			reap(bundle.Index, cleanup)
+			reapBundle(bundle, cleanup)
 			return nil, fmt.Errorf("repo: cache is closed")
 		}
 		if c.gen != startGen {
 			c.mu.Unlock()
-			reap(bundle.Index, cleanup)
+			reapBundle(bundle, cleanup)
 			return nil, errPurgedDuringBuild
 		}
 		// Re-check in case another sf turn populated it. If we lost the
@@ -535,7 +533,7 @@ func (c *Cache) getBundleOnce(ctx context.Context, key string) (*RepoBundle, err
 			c.ll.MoveToFront(e)
 			b := e.Value.(*cacheEntry).bundle
 			c.mu.Unlock()
-			reap(bundle.Index, cleanup)
+			reapBundle(bundle, cleanup)
 			return b, nil
 		}
 		var evicted []*cacheEntry
@@ -552,7 +550,7 @@ func (c *Cache) getBundleOnce(ctx context.Context, key string) (*RepoBundle, err
 		c.items[key] = c.ll.PushFront(ent)
 		c.mu.Unlock()
 		for _, ev := range evicted {
-			reap(ev.bundle.Index, ev.cleanup)
+			reapEntry(ev)
 		}
 		return bundle, nil
 	})

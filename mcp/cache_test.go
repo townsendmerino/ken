@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -228,6 +229,63 @@ func TestCache_LRUEvictionRunsCleanup(t *testing.T) {
 	}
 	if got := cleanups.Load(); got != 1 {
 		t.Errorf("cleanups=%d, want 1 (a evicted)", got)
+	}
+}
+
+// TestCache_LRUEviction_CancelsInFlightStructuralBuild is the audit R4-4
+// regression: LRU eviction must route through reapEntry so an in-flight
+// structural build on the evicted bundle is cancelled BEFORE cleanup() rm-rf's
+// the dir it is parsing. The pre-fix getBundleOnce reaped via a local closure
+// that closed the Index but skipped stopStructuralBuild, so the parse goroutine
+// outlived the cache entry. This drives the actual eviction path (not the method
+// directly, which is how the gap survived round 3).
+func TestCache_LRUEviction_CancelsInFlightStructuralBuild(t *testing.T) {
+	const aMarker = "repo-A"
+	started := make(chan struct{}, 1)
+	cancelled := make(chan struct{}, 1)
+	build := func(_ context.Context, key string) (*RepoBundle, func(), error) {
+		dir := t.TempDir()
+		ix, err := search.NewWatchedIndex(dir, search.ModeBM25, "line", "", true)
+		if err != nil {
+			return nil, nil, err
+		}
+		bundle := &RepoBundle{Index: ix}
+		if strings.Contains(key, aMarker) {
+			bundle.StructuralBuilder = func(ctx context.Context) (*structural.Index, error) {
+				started <- struct{}{}
+				<-ctx.Done() // in-flight until cancelled
+				cancelled <- struct{}{}
+				return nil, ctx.Err()
+			}
+		}
+		return bundle, func() {}, nil
+	}
+	c := NewCache(1, build) // bound = 1: the second Get evicts the first
+	t.Cleanup(c.Close)
+
+	// Build repo A and kick off its background structural build; a short caller
+	// deadline hands StructuralIndex back promptly while the build runs.
+	aDir := filepath.Join(t.TempDir(), aMarker)
+	if err := os.MkdirAll(aDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ba, err := c.GetBundle(context.Background(), aDir)
+	if err != nil {
+		t.Fatalf("GetBundle A: %v", err)
+	}
+	cctx, ccancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer ccancel()
+	_ = ba.StructuralIndex(cctx)
+	<-started // A's structural build is now running, blocked on ctx.Done()
+
+	// Get repo B → over the bound → evicts A. Eviction must cancel A's build.
+	if _, err := c.Get(context.Background(), t.TempDir()); err != nil {
+		t.Fatalf("Get B: %v", err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("LRU eviction did not cancel A's in-flight structural build (R4-4)")
 	}
 }
 
