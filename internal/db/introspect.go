@@ -124,10 +124,10 @@ func introspect(ctx context.Context, conn *pgx.Conn, opts Options) (*schemaSnaps
 		functions: functions,
 	}
 
-	// Row sampling (opt-in; SampleRows > 0).
-	if opts.SampleRows > 0 {
-		sampleRowsImpl(ctx, conn, snap, opts)
-	}
+	// Row sampling (opt-in; SampleRows > 0) is done by the caller
+	// (indexSchemaPostgres) AFTER introspection, over a pgxpool so the
+	// per-table sample queries fan out (audit §11) — a *pgx.Conn is not
+	// safe for concurrent use, so it can't parallelize here.
 
 	return snap, nil
 }

@@ -221,6 +221,18 @@ func indexSchemaPostgres(ctx context.Context, opts Options) ([]chunk.Chunk, erro
 	if err != nil {
 		return nil, fmt.Errorf("db: introspect: %w", err)
 	}
+	// Close the introspection conn before sampling — the sampler opens its
+	// own pool.
+	_ = conn.Close(ctx)
+
+	// Row sampling (opt-in) over a pool so per-table queries fan out across
+	// sampleWorkers() (audit §11). Best-effort: a sampling failure logs and
+	// leaves the schema chunks intact.
+	if opts.SampleRows > 0 {
+		if err := samplePostgresParallel(ctx, opts, schema); err != nil {
+			warn(opts, "postgres row sampling: %v", err)
+		}
+	}
 
 	header := freshnessHeader(engineHostFromConfig(cfg), time.Now().UTC())
 	pathPrefix := dbPathPrefix(cfg)

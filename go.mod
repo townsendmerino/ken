@@ -16,6 +16,8 @@ require (
 	modernc.org/sqlite v1.54.0
 )
 
+require github.com/jackc/puddle/v2 v2.2.2 // indirect
+
 require (
 	dario.cat/mergo v1.0.0 // indirect
 	filippo.io/edwards25519 v1.2.0 // indirect

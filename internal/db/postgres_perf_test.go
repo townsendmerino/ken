@@ -176,7 +176,17 @@ func pgPerfRunSampleLoop(ctx context.Context, conn *pgx.Conn) time.Duration {
 	}
 	opts := Options{SampleRows: pgPerfSampleN, IncludeSchemas: []string{pgPerfSchema}}
 	start := time.Now()
-	sampleRowsImpl(ctx, conn, snap, opts)
+	// Serial baseline (the parallel path is samplePostgresParallel, audit
+	// §11): run the same building blocks the pooled sampler uses, on one
+	// conn, so this harness still measures the pre-parallel cost.
+	approx, _ := queryApproxRowCounts(ctx, conn)
+	for i := range snap.tables {
+		tbl := &snap.tables[i]
+		if c, ok := approx[tbl.schema+"."+tbl.name]; ok {
+			tbl.approxRowCount = c
+		}
+		sampleOne(ctx, conn, tbl, opts)
+	}
 	return time.Since(start)
 }
 

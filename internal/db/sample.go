@@ -2,10 +2,13 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/errgroup"
 )
 
 // maxSampleCellChars caps the displayed width of any single cell in a
@@ -30,47 +33,65 @@ func withSampleRecover(opts Options, label string, fn func()) {
 	fn()
 }
 
-// sampleRowsImpl pulls Options.SampleRows rows from every table in snap
-// and attaches them to tableInfo.sampleRows. Also
-// populates approxRowCount from pg_class.reltuples (free to query, no
-// extra COUNT(*) needed).
-//
-// Failure handling: per-table errors are swallowed with a warn message
-// to opts.LogWriter. The reasoning: a corpus may contain one weird
-// table (PostGIS geometry, custom domain, vendor-extension type) that
-// won't decode cleanly via pgx.Rows.Values; the rest of the schema
-// should still benefit from row sampling. A connection-level error
-// would have already failed earlier in introspection.
-//
-// Determinism: rows are ordered by the table's first primary-key column
-// when one exists, else by ORDER BY 1. Across two reindexes of an
-// unchanged table the same rows come out in the same order (modulo
-// concurrent writes to the underlying table).
-func sampleRowsImpl(ctx context.Context, conn *pgx.Conn, snap *schemaSnapshot, opts Options) {
-	if opts.SampleRows <= 0 {
-		return
-	}
+// pgxQuerier is the subset of the pgx API the sampler needs. Both
+// *pgx.Conn and *pgxpool.Pool satisfy it; the pool hands each concurrent
+// Query its own connection, which is what makes the fan-out safe.
+type pgxQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
 
-	// Fetch all reltuples in one query, then sample per table.
-	approx, err := queryApproxRowCounts(ctx, conn)
+// samplePostgresParallel opens a bounded pgxpool and fans the per-table
+// sample queries out across sampleWorkers() goroutines (audit §11 — the
+// serial N+1 loop was the flagship engine's un-parallelized headline cost;
+// MySQL/SQLite already fan out). sampleOne writes only to &snap.tables[i],
+// so no locking is needed. Best-effort per table via the recover +
+// error-swallow inside sampleOne.
+func samplePostgresParallel(ctx context.Context, opts Options, snap *schemaSnapshot) error {
+	if opts.SampleRows <= 0 || len(snap.tables) == 0 {
+		return nil
+	}
+	poolCfg, err := pgxpool.ParseConfig(opts.DSN)
 	if err != nil {
-		warn(opts, "row-count query failed: %v", err)
-		// Continue without approx counts; the sample text just omits "of ~N".
+		// opts.DSN already parsed OK in indexSchemaPostgres; stay generic
+		// anyway so a *url.Error can never echo the password (M5).
+		return errors.New("db: unparseable postgres DSN for sample pool")
+	}
+	poolCfg.MaxConns = int32(sampleWorkers())
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		return fmt.Errorf("sample pool: %w", err)
+	}
+	defer pool.Close()
+
+	// reltuples for every table in one query.
+	if approx, aerr := queryApproxRowCounts(ctx, pool); aerr != nil {
+		warn(opts, "row-count query failed: %v", aerr)
+	} else {
+		for i := range snap.tables {
+			t := &snap.tables[i]
+			if c, ok := approx[t.schema+"."+t.name]; ok {
+				t.approxRowCount = c
+			}
+		}
 	}
 
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(sampleWorkers())
 	for i := range snap.tables {
 		t := &snap.tables[i]
-		if c, ok := approx[t.schema+"."+t.name]; ok {
-			t.approxRowCount = c
-		}
-		sampleOne(ctx, conn, t, opts)
+		g.Go(func() error {
+			sampleOne(gctx, pool, t, opts)
+			return nil
+		})
 	}
+	return g.Wait()
 }
 
 // sampleOne samples one table. Wraps everything in a recovered panic
 // (defense against pgx returning weird types) and a per-table error
-// swallow.
-func sampleOne(ctx context.Context, conn *pgx.Conn, t *tableInfo, opts Options) {
+// swallow. The querier is a *pgxpool.Pool under the parallel sampler, so
+// each call runs on its own pooled connection.
+func sampleOne(ctx context.Context, conn pgxQuerier, t *tableInfo, opts Options) {
 	defer func() {
 		if r := recover(); r != nil {
 			warn(opts, "panic sampling %s: %v", t.schema+"."+t.name, r)
@@ -131,7 +152,7 @@ func orderByClauseFor(t *tableInfo) string {
 // large tables. The value is approximate (refreshed by ANALYZE / autovac)
 // — we render it as "~N" in the chunk so agents know not to take it
 // as exact.
-func queryApproxRowCounts(ctx context.Context, conn *pgx.Conn) (map[string]float64, error) {
+func queryApproxRowCounts(ctx context.Context, conn pgxQuerier) (map[string]float64, error) {
 	const q = `
 SELECT
     n.nspname AS schema,
