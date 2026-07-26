@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -357,48 +356,31 @@ func NewServer(cfg Config) *sdk.Server {
 //   - Err != nil → "Reindex failed: <err>"
 //   - success → "Reindexed in 123ms."
 //
-// dbTopologyToken matches credential/topology tokens in a DB error:
-// pgconn's `host=…/user=…/…` k=v form AND MySQL's `for user 'x'@'host'`
-// phrasing (audit db/mcp #4 leftover — the latter slipped through the
-// k=v-only regex, leaking the service account + client IP).
-var dbTopologyToken = regexp.MustCompile(`(?i)\b(host|user|database|dbname|password|port|passfile)=\S+`)
-
-// dbUserAtHost matches MySQL's `for user 'ken_ro'@'10.1.2.3'` clause.
-var dbUserAtHost = regexp.MustCompile(`(?i)for user '[^']*'@'[^']*'`)
-
-// dbConnErrorPrefixes are the wrapper prefixes ken itself puts on
-// connection-class DB errors (audit db/mcp #4 leftover). Keying on THESE
-// rather than the driver's free text ("connect") catches every engine: a
-// MySQL "Access denied for user 'ken_ro'@'10.1.2.3'" wrapped as
-// "db: mysql ping: …" names the service account + client IP but contains no
-// "connect", and a SQLite error wrapped as "db: sqlite file /abs/path: …"
-// leaks the on-disk path.
-var dbConnErrorPrefixes = []string{
-	"db: connect:", "db: mysql ping:", "db: mysql open:", "db: mysql:",
-	"db: sqlite file", "db: sqlite ping:", "db: sqlite open:",
+// dbConnErrorFragments are wrapper fragments ken itself puts on
+// CONNECTION-class DB errors. Precise (ken's own text, not the driver's), so
+// unlike a bare Contains(s,"connect") they don't misfire on a table named
+// "connections" (audit db/mcp #4 leftover).
+var dbConnErrorFragments = []string{
+	"db: connect:", "db: mysql ping:", "db: mysql open:",
+	"db: sqlite file", "db: sqlite ping:", "db: sqlite open:", "db: dial",
 }
 
-// safeDBErrorMessage renders a DB refresh error for the MODEL's context without
-// leaking credentials or internal topology (audit db/mcp #4; internal/db/db.go's
-// stated policy that host/user/password never reach agent output). A
-// connection-class error — whose text names the internal host, service account,
-// database, on-disk path, and often a private IP:port — collapses to a fixed
-// message; any other error (a query/permission failure that carries schema
-// names but no DSN) passes through with credential/topology tokens redacted as
-// a backstop.
+// safeDBErrorMessage renders a DB error for the MODEL's context. It is an
+// ALLOWLIST (audit db/mcp #4 leftover — three rounds of denylist regexes kept
+// missing phrasings like MySQL's "denied to user 'x'@'ip'" and the introspect
+// wrappers): the driver's free text is NEVER forwarded, because introspection,
+// permission, AND connection errors all can carry the service account, host,
+// private IP, or on-disk path. We emit a fixed message per class and leave the
+// full detail in the server logs (internal/db's stated policy that
+// host/user/password never reach agent output).
 func safeDBErrorMessage(err error) string {
 	s := err.Error()
-	if strings.Contains(s, "connect") {
-		return "could not connect to the configured database (check the ken-mcp server logs for details)"
-	}
-	for _, p := range dbConnErrorPrefixes {
+	for _, p := range dbConnErrorFragments {
 		if strings.Contains(s, p) {
 			return "could not connect to the configured database (check the ken-mcp server logs for details)"
 		}
 	}
-	s = dbTopologyToken.ReplaceAllString(s, "$1=<redacted>")
-	s = dbUserAtHost.ReplaceAllString(s, "for user <redacted>")
-	return s
+	return "the database operation failed (check the ken-mcp server logs for details)"
 }
 
 func handleReindexDB(ctx context.Context, cfg *Config) (*sdk.CallToolResult, any, error) {

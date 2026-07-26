@@ -510,50 +510,61 @@ func TestServer_NoRepoNoDefault_ReturnsValidationText(t *testing.T) {
 // TestSafeDBErrorMessage: the reindex_db error path must never leak DB
 // credentials or internal topology into the model's context (audit db/mcp #4).
 func TestSafeDBErrorMessage(t *testing.T) {
-	// Connection-class error (pgconn names host/user/database + a private IP).
-	connErr := errors.New("db: Refresh: db: connect: failed to connect to `host=prod-pg.internal user=ken_ro database=billing`: dial tcp 10.0.0.5:5432: connect: connection refused")
-	got := safeDBErrorMessage(connErr)
-	for _, leak := range []string{"prod-pg.internal", "ken_ro", "billing", "10.0.0.5", "host=prod", "user=ken"} {
-		if strings.Contains(got, leak) {
-			t.Errorf("connect-class error leaked %q: %q", leak, got)
+	// audit db#4 leftover — allowlist: driver text is NEVER forwarded, so an
+	// introspect/permission error can't leak schema OR credential detail. Only
+	// the fixed messages ("could not connect" / "the database operation
+	// failed") reach the agent; the full error is in the server logs.
+	leakCases := []struct {
+		name   string
+		err    error
+		leaks  []string
+		expect string
+	}{
+		{
+			"pgconn connect (host/user/db/IP)",
+			errors.New("db: Refresh: db: connect: failed to connect to `host=prod-pg.internal user=ken_ro database=billing`: dial tcp 10.0.0.5:5432: connect: connection refused"),
+			[]string{"prod-pg.internal", "ken_ro", "billing", "10.0.0.5"},
+			"could not connect",
+		},
+		{
+			`mysql "denied for user 'x'@'ip'" via ping`,
+			errors.New("db: Refresh: db: mysql ping: Error 1045 (28000): Access denied for user 'ken_ro'@'10.1.2.3' (using password: YES)"),
+			[]string{"ken_ro", "10.1.2.3"},
+			"could not connect",
+		},
+		{
+			"sqlite on-disk path via file wrapper",
+			errors.New("db: Refresh: db: sqlite file /home/ken/secret/app.db: unable to open database file"),
+			[]string{"/home/ken/secret/app.db"},
+			"could not connect",
+		},
+		{
+			// The exact leftover the re-audit named: mysql "denied TO user"
+			// (not "for user") in an INTROSPECT wrapper — the old denylist
+			// missed both. Allowlist collapses it to the generic op message.
+			`mysql "denied to user" via introspect`,
+			errors.New("db: Refresh: db: mysql introspect: list routines: Error 1142 (42000): SELECT command denied to user 'ken_ro'@'10.1.2.3'"),
+			[]string{"ken_ro", "10.1.2.3"},
+			"the database operation failed",
+		},
+		{
+			// A table literally named "connections" must NOT be misclassified
+			// as a connection failure by a bare Contains(s,"connect").
+			"query error naming a connections table",
+			errors.New("db: Refresh: db: introspect: permission denied for table connections"),
+			[]string{"connections"},
+			"the database operation failed",
+		},
+	}
+	for _, tc := range leakCases {
+		got := safeDBErrorMessage(tc.err)
+		if !strings.Contains(got, tc.expect) {
+			t.Errorf("%s: message = %q, want it to contain %q", tc.name, got, tc.expect)
 		}
-	}
-	if !strings.Contains(got, "could not connect") {
-		t.Errorf("connect-class error should collapse to a generic message; got %q", got)
-	}
-
-	// Query-class error: schema detail is fine, but any stray topology token
-	// is still redacted as a backstop.
-	qErr := errors.New("db: Refresh: ERROR: permission denied for table secrets (host=leaky user=admin)")
-	got = safeDBErrorMessage(qErr)
-	if !strings.Contains(got, "permission denied for table secrets") {
-		t.Errorf("query-class error should keep its detail; got %q", got)
-	}
-	for _, leak := range []string{"host=leaky", "user=admin"} {
-		if strings.Contains(got, leak) {
-			t.Errorf("query-class error leaked %q: %q", leak, got)
+		for _, leak := range tc.leaks {
+			if strings.Contains(got, leak) {
+				t.Errorf("%s: leaked %q: %q", tc.name, leak, got)
+			}
 		}
-	}
-
-	// audit #4 leftover: MySQL "Access denied for user 'ken_ro'@'10.1.2.3'"
-	// wrapped as "db: mysql ping: …" has no "connect" substring and no k=v
-	// tokens, but must NOT leak the service account or client IP.
-	myErr := errors.New("db: Refresh: db: mysql ping: Error 1045 (28000): Access denied for user 'ken_ro'@'10.1.2.3' (using password: YES)")
-	got = safeDBErrorMessage(myErr)
-	for _, leak := range []string{"ken_ro", "10.1.2.3"} {
-		if strings.Contains(got, leak) {
-			t.Errorf("mysql auth error leaked %q: %q", leak, got)
-		}
-	}
-	if !strings.Contains(got, "could not connect") {
-		t.Errorf("mysql connection-class error should collapse to generic; got %q", got)
-	}
-
-	// audit #4 leftover: SQLite errors wrapped as "db: sqlite file /abs/path:"
-	// must not leak the on-disk path.
-	sqErr := errors.New("db: Refresh: db: sqlite file /home/ken/secret/app.db: unable to open database file")
-	got = safeDBErrorMessage(sqErr)
-	if strings.Contains(got, "/home/ken/secret/app.db") {
-		t.Errorf("sqlite error leaked the on-disk path: %q", got)
 	}
 }

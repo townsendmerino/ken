@@ -195,6 +195,13 @@ func SaveCacheToFile(r *NeuralReranker, path, scopeKey string, embedDim int) err
 		_ = os.Remove(tmp)
 		return fmt.Errorf("search: SaveCacheToFile write tmp: %w", err)
 	}
+	// fsync before rename so a crash can't leave a truncated cache file that
+	// then fails to load on next boot (audit §27).
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("search: SaveCacheToFile sync tmp: %w", err)
+	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("search: SaveCacheToFile close tmp: %w", err)

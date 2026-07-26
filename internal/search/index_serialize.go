@@ -294,18 +294,24 @@ func serializeIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, chunkerNa
 	writeU32(&buf, 0) // length placeholder
 	vecsStart := buf.Len()
 	if mode != ModeBM25 {
-		// Pack all floats into one scratch slice with binary.PutUint32 (no
-		// per-float Buffer.Write — 16.4M calls on a 64k×256 index) and do a
-		// single bulk Write into the pre-grown buf.
-		vecBytes := make([]byte, 0, len(chunks)*int(embedDim)*4)
-		var word [4]byte
-		for _, v := range vecs {
-			for _, f := range v {
-				binary.LittleEndian.PutUint32(word[:], math.Float32bits(f))
-				vecBytes = append(vecBytes, word[:]...)
+		// Write one row at a time through a ~1 KB reusable scratch (audit §21):
+		// the prior code accumulated the ENTIRE vecs section into a second
+		// full-size []byte before buf.Write, so both it and the pre-grown buf
+		// were live at once (~2× the vecs size — ~64 MB extra on a 64k×256
+		// index). buf was already grown to estimatedSize, so each row Write
+		// appends without reallocating; peak is now buf + one row scratch.
+		if len(vecs) > 0 {
+			row := make([]byte, len(vecs[0])*4)
+			for _, v := range vecs {
+				if len(v)*4 != len(row) { // ragged (shouldn't happen); resize
+					row = make([]byte, len(v)*4)
+				}
+				for i, f := range v {
+					binary.LittleEndian.PutUint32(row[i*4:], math.Float32bits(f))
+				}
+				buf.Write(row)
 			}
 		}
-		buf.Write(vecBytes)
 	}
 	binary.LittleEndian.PutUint32(buf.Bytes()[vecsLenOff:], uint32(buf.Len()-vecsStart))
 

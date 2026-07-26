@@ -236,13 +236,40 @@ func WriteSnapshot(dir string, wi *WatchedIndex, configKey string) error {
 // atomicWriteFile stages to <path>.tmp then renames — a partial write can
 // never be observed as the real file.
 func atomicWriteFile(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	dir := filepath.Dir(path)
+	// Unique temp name (not a fixed "<path>.tmp") so concurrent writers don't
+	// clobber each other's temp file (audit §27 collision half).
+	f, err := os.CreateTemp(dir, filepath.Base(path)+"-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	// fsync the data BEFORE the rename (audit §27 durability half): without it
+	// the rename metadata can reach disk before the bytes, so a crash between
+	// the two leaves a valid-looking file — for WriteSnapshot, a manifest
+	// pointing at a truncated .bin, voiding its "bin-before-manifest" ordering.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return err
+	}
+	// fsync the parent dir so the rename itself survives a crash.
+	if d, derr := os.Open(dir); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	return nil
 }

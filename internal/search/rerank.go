@@ -167,11 +167,16 @@ func quoteAlt(words []string) string {
 // Instead: compile the keyword alternation once with a CAPTURE group for
 // the (optionally namespace-qualified) defined NAME, scan the chunk once,
 // and compare the captured name's last identifier component against the
-// target symbol as a plain string. Equivalent to semble's _definition_
-// pattern: the capture `(id(.|::))*id` matches exactly what the old
-// per-symbol `nsPrefix + esc` did, so "last component == symbol" reproduces
-// the old boolean. RE2 has no look-behind, so `(?:^|(?<=\s))` is `(?:^|\s)`
-// under (?m) — a boolean "does this chunk define the symbol" is unaffected.
+// target symbol as a plain string.
+//
+// DELIBERATE behavior change from the pre-§6 per-symbol regex (audit R14 —
+// NOT an equivalence): that pattern's terminator class `[<({:\[;]` included
+// `:`, so `class A::B::C {` with symbol="B" matched (nsPrefix absorbed `A::`,
+// `B` matched, the leading `:` of `::C` satisfied the terminator). The greedy
+// capture here yields "A::B::C", whose last component is "C", so "B" no
+// longer matches. This is the correct read — in `A::B::C`, B is a namespace,
+// not the defined symbol — and TestChunkDefinedNameSets_LastComponent pins
+// it. RE2 has no look-behind, so `(?:^|(?<=\s))` is `(?:^|\s)` under (?m).
 // *regexp.Regexp is safe for concurrent use, so no lock is needed.
 var (
 	defGeneralPattern = regexp.MustCompile(definitionCaptureSrc(`(?m)`, quoteAlt(definitionKeywords)))
