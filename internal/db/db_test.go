@@ -3,6 +3,7 @@ package db
 import (
 	"bytes"
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -220,7 +221,7 @@ func TestRenderTableChunk(t *testing.T) {
 		},
 	}
 	header := "-- indexed at 2026-08-15T14:23Z from postgres@dev-pg.local"
-	c := renderTableChunk(tab, &schemaSnapshot{}, header, "db://postgres@dev-pg.local")
+	c := renderTableChunk(tab, header, "db://postgres@dev-pg.local")
 
 	for _, want := range []string{
 		header,                    // freshness first
@@ -271,6 +272,36 @@ func TestRenderFunctionChunk(t *testing.T) {
 	if !strings.Contains(c.Text, want) {
 		t.Errorf("function chunk missing %q:\n%s", want, c.Text)
 	}
+	// Path carries the arg signature so overloads get distinct paths (§12).
+	if c.File != "db://h/public.greet(name text)" {
+		t.Errorf("function chunk path = %q, want the arg-signature-qualified form", c.File)
+	}
+}
+
+// TestDBChunkPath covers the SQLite-empty-schema dot omission (§25) and the
+// non-empty-schema stability.
+func TestDBChunkPath(t *testing.T) {
+	cases := []struct{ schema, name, want string }{
+		{"", "users", "db://p/users"},              // SQLite: no stray dot (§25)
+		{"public", "users", "db://p/public.users"}, // Postgres: unchanged
+		{"audit", "log", "db://p/audit.log"},
+	}
+	for _, tc := range cases {
+		if got := dbChunkPath("db://p", tc.schema, tc.name); got != tc.want {
+			t.Errorf("dbChunkPath(_, %q, %q) = %q, want %q", tc.schema, tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestRenderFunctionChunk_OverloadsDistinctPaths pins §12: two overloads
+// with the same schema+name but different arg signatures must not collide
+// on Chunk.File.
+func TestRenderFunctionChunk_OverloadsDistinctPaths(t *testing.T) {
+	a := renderFunctionChunk(functionInfo{schema: "public", name: "upsert_user", argSig: "(integer)"}, "-- h", "db://h")
+	b := renderFunctionChunk(functionInfo{schema: "public", name: "upsert_user", argSig: "(text)"}, "-- h", "db://h")
+	if a.File == b.File {
+		t.Errorf("overloaded functions collided on File = %q", a.File)
+	}
 }
 
 func TestExtractIndexColumns(t *testing.T) {
@@ -313,12 +344,12 @@ func TestSortTables(t *testing.T) {
 		{schema: "public", name: "sessions"},
 		{schema: "audit", name: "archive"},
 	}
-	sortTables(ts)
+	slices.SortFunc(ts, compareTable)
 	wantOrder := []string{"audit.archive", "audit.events", "public.sessions", "public.users"}
 	for i, w := range wantOrder {
 		got := ts[i].schema + "." + ts[i].name
 		if got != w {
-			t.Errorf("sortTables[%d] = %q, want %q (full: %v)", i, got, w, ts)
+			t.Errorf("compareTable sort[%d] = %q, want %q (full: %v)", i, got, w, ts)
 		}
 	}
 }

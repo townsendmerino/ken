@@ -1,8 +1,10 @@
 package db
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -105,7 +107,7 @@ func introspect(ctx context.Context, conn *pgx.Conn, opts Options) (*schemaSnaps
 	for _, t := range tables {
 		tableList = append(tableList, *t)
 	}
-	sortTables(tableList)
+	slices.SortFunc(tableList, compareTable)
 
 	views, err := queryViews(ctx, conn, opts)
 	if err != nil {
@@ -124,7 +126,7 @@ func introspect(ctx context.Context, conn *pgx.Conn, opts Options) (*schemaSnaps
 
 	// Row sampling (opt-in; SampleRows > 0).
 	if opts.SampleRows > 0 {
-		appendRowSamples(ctx, conn, snap, opts)
+		sampleRowsImpl(ctx, conn, snap, opts)
 	}
 
 	return snap, nil
@@ -447,7 +449,10 @@ WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
   AND n.nspname NOT LIKE 'pg_%'
   -- Exclude functions implementing operators / aggregates / window funcs:
   AND p.prokind = 'f'
-ORDER BY n.nspname, p.proname;
+-- identity_arguments tiebreaks overloads (same schema+name, different args)
+-- so two reindexes of an unchanged DB emit chunks in the same order
+-- (audit §12) rather than whatever order the executor returns.
+ORDER BY n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid);
 `
 	rows, err := conn.Query(ctx, q)
 	if err != nil {
@@ -497,40 +502,13 @@ func normalizeType(t string) string {
 	return t
 }
 
-// sortTables orders tables by (schema, name) so chunk emission is
-// deterministic across runs.
-func sortTables(ts []tableInfo) {
-	for i := 1; i < len(ts); i++ {
-		for j := i; j > 0; j-- {
-			if compareTable(ts[j], ts[j-1]) < 0 {
-				ts[j], ts[j-1] = ts[j-1], ts[j]
-			} else {
-				break
-			}
-		}
-	}
-}
-
+// compareTable orders tables by (schema, name) so chunk emission is
+// deterministic across runs. Fed to slices.SortFunc by the three engines
+// (audit §15 — was a hand-rolled O(n²) insertion sort over map-iteration
+// order, ~seconds + ~GB of struct memmove on a 4k-table server).
 func compareTable(a, b tableInfo) int {
-	if a.schema != b.schema {
-		if a.schema < b.schema {
-			return -1
-		}
-		return 1
+	if c := cmp.Compare(a.schema, b.schema); c != 0 {
+		return c
 	}
-	if a.name < b.name {
-		return -1
-	}
-	if a.name > b.name {
-		return 1
-	}
-	return 0
-}
-
-// appendRowSamples is a forward declaration — implementation lives in
-// sample.go. Stubbed here so introspect.go compiles ahead of sample.go.
-// The real version pulls SampleRows rows per table and attaches them.
-var appendRowSamples = func(ctx context.Context, conn *pgx.Conn, snap *schemaSnapshot, opts Options) {
-	// no-op by default; sample.go's init() overwrites this with the
-	// real sampler.
+	return cmp.Compare(a.name, b.name)
 }

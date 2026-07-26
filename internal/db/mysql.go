@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -122,7 +123,7 @@ func indexSchemaMySQL(ctx context.Context, opts Options) ([]chunk.Chunk, error) 
 
 	var chunks []chunk.Chunk
 	for _, t := range snap.tables {
-		chunks = append(chunks, renderTableChunk(t, snap, header, pathPrefix))
+		chunks = append(chunks, renderTableChunk(t, header, pathPrefix))
 	}
 	for _, v := range snap.views {
 		chunks = append(chunks, renderViewChunk(v, header, pathPrefix))
@@ -308,7 +309,7 @@ func introspectMySQL(ctx context.Context, conn *sql.DB, opts Options) (*schemaSn
 		return nil, fmt.Errorf("annotateFKReferences: %w", err)
 	}
 
-	sortTables(tables)
+	slices.SortFunc(tables, compareTable)
 
 	views, err := mysqlListViews(ctx, conn, opts)
 	if err != nil {

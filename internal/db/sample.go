@@ -14,14 +14,6 @@ import (
 // underlying data is not modified — only the displayed slice.
 const maxSampleCellChars = 80
 
-func init() {
-	// Replace the no-op stub in introspect.go with the real sampler.
-	// Package-init wiring (rather than direct assignment in IndexSchema)
-	// keeps sample.go optional: build a binary without it and you get
-	// schema-only by default at no code cost.
-	appendRowSamples = sampleRowsImpl
-}
-
 // sampleRowsImpl pulls Options.SampleRows rows from every table in snap
 // and attaches them to tableInfo.sampleRows. Also
 // populates approxRowCount from pg_class.reltuples (free to query, no

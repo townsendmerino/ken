@@ -227,7 +227,7 @@ func indexSchemaPostgres(ctx context.Context, opts Options) ([]chunk.Chunk, erro
 
 	var chunks []chunk.Chunk
 	for _, t := range schema.tables {
-		chunks = append(chunks, renderTableChunk(t, schema, header, pathPrefix))
+		chunks = append(chunks, renderTableChunk(t, header, pathPrefix))
 	}
 	for _, v := range schema.views {
 		chunks = append(chunks, renderViewChunk(v, header, pathPrefix))

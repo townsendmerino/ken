@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -91,7 +92,7 @@ func indexSchemaSQLite(ctx context.Context, opts Options, defaultRepo string) ([
 
 	var chunks []chunk.Chunk
 	for _, t := range snap.tables {
-		chunks = append(chunks, renderTableChunk(t, snap, header, pathPrefix))
+		chunks = append(chunks, renderTableChunk(t, header, pathPrefix))
 	}
 	for _, v := range snap.views {
 		chunks = append(chunks, renderViewChunk(v, header, pathPrefix))
@@ -201,7 +202,7 @@ func introspectSQLite(ctx context.Context, conn *sql.DB, opts Options) (*schemaS
 	}
 
 	// Stable order.
-	sortTables(tables)
+	slices.SortFunc(tables, compareTable)
 
 	snap := &schemaSnapshot{tables: tables, views: views}
 

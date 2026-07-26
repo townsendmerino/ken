@@ -11,6 +11,19 @@ import (
 // huge analytics CTE doesn't dominate the index as one chunk.
 const maxViewBodyLines = 50
 
+// dbChunkPath builds a DB chunk's synthetic File path. When schema is empty
+// (SQLite is single-schema — sqlite.go leaves it unset) the dot is omitted
+// so the path is `<prefix>/users`, not `<prefix>/.users` (audit §25) —
+// matching qualifiedName's rule for the chunk BODY. Non-empty schemas
+// (Postgres/MySQL, including "public") keep `<prefix>/<schema>.<name>`
+// unchanged so existing paths are stable.
+func dbChunkPath(pathPrefix, schema, name string) string {
+	if schema == "" {
+		return pathPrefix + "/" + name
+	}
+	return pathPrefix + "/" + schema + "." + name
+}
+
 // renderTableChunk produces the denormalized "TABLE / columns / indexes
 // / FK-referenced-by" chunk for one table. Header is the freshness line
 // (always first). Path is `db://<engine-host>/<schema>.<table>`.
@@ -19,8 +32,7 @@ const maxViewBodyLines = 50
 // PK / NOT NULL / UNIQUE / DEFAULT / FK keywords composed in a stable
 // order so successive reindexes produce byte-identical output for the
 // same schema (modulo freshness header).
-func renderTableChunk(t tableInfo, snap *schemaSnapshot, header, pathPrefix string) chunk.Chunk {
-	_ = snap // reserved for cross-table lookups (composite FK rendering, etc.)
+func renderTableChunk(t tableInfo, header, pathPrefix string) chunk.Chunk {
 	var b strings.Builder
 	b.WriteString(header)
 	b.WriteByte('\n')
@@ -77,7 +89,7 @@ func renderTableChunk(t tableInfo, snap *schemaSnapshot, header, pathPrefix stri
 		}
 	}
 	return chunk.Chunk{
-		File: fmt.Sprintf("%s/%s.%s", pathPrefix, t.schema, t.name),
+		File: dbChunkPath(pathPrefix, t.schema, t.name),
 		// StartLine/EndLine are 1 — DB chunks have no source byte range.
 		// We use 1/N where N is the rendered line count so any
 		// downstream UI that expects monotonic positive lines doesn't
@@ -175,7 +187,7 @@ func renderViewChunk(v viewInfo, header, pathPrefix string) chunk.Chunk {
 		fmt.Fprintf(&b, "  -- ... (view body truncated at %d lines)\n", maxViewBodyLines)
 	}
 	return chunk.Chunk{
-		File:      fmt.Sprintf("%s/%s.%s", pathPrefix, v.schema, v.name),
+		File:      dbChunkPath(pathPrefix, v.schema, v.name),
 		StartLine: 1,
 		EndLine:   strings.Count(b.String(), "\n"),
 		Text:      b.String(),
@@ -197,7 +209,12 @@ func renderFunctionChunk(f functionInfo, header, pathPrefix string) chunk.Chunk 
 			qualifiedName(f.schema, f.name), f.argSig)
 	}
 	return chunk.Chunk{
-		File:      fmt.Sprintf("%s/%s.%s", pathPrefix, f.schema, f.name),
+		// Append the argument signature so overloaded functions
+		// (public.upsert_user(int) vs (text)) get DISTINCT paths (audit
+		// §12): otherwise both collapse to one Chunk.File, making
+		// find_related ambiguous and letting file-saturation decay
+		// suppress all but one overload from results.
+		File:      dbChunkPath(pathPrefix, f.schema, f.name) + f.argSig,
 		StartLine: 1,
 		EndLine:   strings.Count(b.String(), "\n"),
 		Text:      b.String(),
