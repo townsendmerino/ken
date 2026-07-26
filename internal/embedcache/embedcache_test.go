@@ -26,7 +26,7 @@ func TestPutGetRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	key := []byte("chunk-hash-1")
 	if _, ok := c.Get(key); ok {
@@ -59,26 +59,26 @@ func TestScopeInvalidation(t *testing.T) {
 	if _, ok := c1.Get(key); !ok {
 		t.Fatal("entry should be present in c1")
 	}
-	c1.Close()
+	_ = c1.Close()
 
 	c2, _ := Open(path, "modelA", 256, 0) // same → survives
 	if _, ok := c2.Get(key); !ok {
 		t.Error("entry should survive a same-model reopen")
 	}
-	c2.Close()
+	_ = c2.Close()
 
 	c3, _ := Open(path, "modelB", 256, 0) // different model → cleared
 	if _, ok := c3.Get(key); ok {
 		t.Error("entry should be gone after a model-fingerprint change")
 	}
 	c3.Put(key, []float32{3})
-	c3.Close()
+	_ = c3.Close()
 
 	c4, _ := Open(path, "modelB", 512, 0) // different dim → cleared
 	if _, ok := c4.Get(key); ok {
 		t.Error("entry should be gone after a dim change")
 	}
-	c4.Close()
+	_ = c4.Close()
 }
 
 func TestEviction(t *testing.T) {
@@ -86,7 +86,7 @@ func TestEviction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	for i := 0; i < 6; i++ {
 		c.Put([]byte{byte('a' + i)}, []float32{float32(i)})
 	}

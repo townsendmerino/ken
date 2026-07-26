@@ -467,7 +467,7 @@ func cmdIndex(args []string) int {
 			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 			return 1
 		}
-		defer wix.Close()
+		defer func() { _ = wix.Close() }()
 		// enrich=true: NewWatchedIndex builds with enrichment on (FSOptions{}),
 		// matching ken-mcp's config-key so the snapshot loads without a rebuild.
 		key := search.SnapshotConfigKey(mode, chunker, search.ModelFingerprint(wix.EmbedModel(), model), true)

@@ -458,14 +458,16 @@ func main() {
 				logger.Logf(kenmcp.LogInfo, "embed cache on for %s (.ken/embed.db)", dir)
 			}
 		}
-		// Fold the cache close into the eviction cleanup.
-		origCleanup := cleanup
-		cleanup = func() {
-			if embedCache != nil {
+		// Fold the cache close into the eviction cleanup — only when there's a
+		// cache, so cleanup stays nil for a plain local repo (keeps the
+		// downstream `cleanup != nil` checks meaningful).
+		if embedCache != nil {
+			origCleanup := cleanup
+			cleanup = func() {
 				_ = embedCache.Close()
-			}
-			if origCleanup != nil {
-				origCleanup()
+				if origCleanup != nil {
+					origCleanup()
+				}
 			}
 		}
 

@@ -30,7 +30,7 @@ func TestStagedEmbedding_SyncUpgradesToHybrid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("staged build: %v", err)
 	}
-	defer wi.Close()
+	defer func() { _ = wi.Close() }()
 
 	ix := wi.Load()
 	if ix.Mode() != ModeHybrid {
@@ -58,7 +58,7 @@ func TestStagedEmbedding_Watch_BM25FirstThenHybrid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("staged watch build: %v", err)
 	}
-	defer wi.Close()
+	defer func() { _ = wi.Close() }()
 
 	// Lexical search works immediately, whatever the current mode.
 	if len(wi.Search("Handle", 5)) == 0 {

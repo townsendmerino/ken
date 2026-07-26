@@ -32,13 +32,13 @@ func TestLazyEnrichment_EventuallyMatchesInline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inline build: %v", err)
 	}
-	defer inline.Close()
+	defer func() { _ = inline.Close() }()
 
 	lazy, err := NewWatchedIndexWithOptions(dir, ModeBM25, "line", "", false, FSOptions{LazyEnrichment: true})
 	if err != nil {
 		t.Fatalf("lazy build: %v", err)
 	}
-	defer lazy.Close()
+	defer func() { _ = lazy.Close() }()
 
 	if !hasEnrichLabel(inline) {
 		t.Fatal("inline build should carry the # func: label")
@@ -71,7 +71,7 @@ func TestLazyEnrichment_RawFirstThenEnriched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lazy watch build: %v", err)
 	}
-	defer wi.Close()
+	defer func() { _ = wi.Close() }()
 
 	// The corpus is still queryable on the raw content immediately.
 	if len(wi.Search("Handle", 5)) == 0 {
