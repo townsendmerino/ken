@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 // makeTempRepo materializes a tiny Python-only repo under t.TempDir()
@@ -718,5 +720,56 @@ func TestWatchedIndex_DirectoryRename_RepathsSubtree(t *testing.T) {
 	}
 	if !containsFile(got, "authz/session.py") {
 		t.Errorf("new path authz/session.py not indexed after dir rename; chunks: %s", chunkFiles(got))
+	}
+}
+
+// TestWatchedIndex_FullResync_RecoversFromDroppedEvents is the audit §3
+// regression: after an fsnotify overflow drops events, enqueueFullResync
+// re-derives the dirty set from disk ground truth — new/modified files get
+// Write, vanished files get Remove — so a flush restores a correct index.
+func TestWatchedIndex_FullResync_RecoversFromDroppedEvents(t *testing.T) {
+	root := makeTempRepo(t, map[string]string{
+		"a.py": "def alpha():\n    return 1\n",
+		"b.py": "def beta():\n    return 2\n",
+	})
+	wi := withShortDebounce(t, root, false) // no watcher; drive resync+flush directly
+	if !containsFile(wi.Load(), "a.py") || !containsFile(wi.Load(), "b.py") {
+		t.Fatal("precondition: a.py and b.py should be indexed")
+	}
+
+	// Simulate the changes whose events the overflow dropped: delete b.py,
+	// add c.py, modify a.py.
+	if err := os.Remove(filepath.Join(root, "b.py")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "c.py"), []byte("def gamma():\n    return 3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a.py"), []byte("def alpha_v2():\n    return 11\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirty := map[string]fsnotify.Op{}
+	wi.enqueueFullResync(dirty)
+	if dirty["a.py"]&fsnotify.Write == 0 {
+		t.Errorf("a.py (modified) should be enqueued Write; got %v", dirty["a.py"])
+	}
+	if dirty["c.py"]&fsnotify.Write == 0 {
+		t.Errorf("c.py (new) should be enqueued Write; got %v", dirty["c.py"])
+	}
+	if dirty["b.py"]&fsnotify.Remove == 0 {
+		t.Errorf("b.py (deleted) should be enqueued Remove; got %v", dirty["b.py"])
+	}
+
+	wi.flush(dirty)
+	got := wi.Load()
+	if containsFile(got, "b.py") {
+		t.Errorf("b.py still indexed after resync; chunks: %s", chunkFiles(got))
+	}
+	if !containsFile(got, "c.py") {
+		t.Errorf("c.py not indexed after resync; chunks: %s", chunkFiles(got))
+	}
+	if len(wi.Search("alpha_v2", 5)) == 0 {
+		t.Error("modified a.py content (alpha_v2) not searchable after resync")
 	}
 }

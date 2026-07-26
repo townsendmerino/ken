@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -343,7 +344,7 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 	wi.fs = w
 	wi.ctx, wi.cancel = context.WithCancel(context.Background())
 
-	if err := addRecursive(w, root); err != nil {
+	if err := addRecursive(w, root, wi.fsOpts.LogWriter); err != nil {
 		_ = w.Close()
 		wi.cancel()
 		close(wi.done)
@@ -635,7 +636,7 @@ func (w *WatchedIndex) loop() {
 			// matcher gate (which rejects the dir).
 			if ev.Op&fsnotify.Create != 0 {
 				if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() {
-					_ = addRecursive(w.fs, ev.Name)
+					_ = addRecursive(w.fs, ev.Name, w.fsOpts.LogWriter)
 					w.enqueueDirFiles(ev.Name, dirty)
 					resetTimer()
 					continue
@@ -652,11 +653,24 @@ func (w *WatchedIndex) loop() {
 			if !ok {
 				return
 			}
-			// fsnotify errors are transient (event-buffer overflow
-			// on macOS, EBADF on close); log via... we don't have a
-			// logger here. Silently continue — the watcher remains
-			// armed and the next event lands fine.
-			_ = err
+			// Overflow is NOT transient (audit search §3): the kernel
+			// permanently drops the queued events (IN_Q_OVERFLOW on Linux,
+			// the macOS FSEvents equivalent), so any files touched during
+			// the overflow keep serving pre-change chunks forever with no
+			// signal. Recover by re-walking the tree and enqueueing every
+			// indexable file (mods + adds) plus tombstones for vanished
+			// files, then flushing on the next tick. Costly (a full
+			// re-chunk/re-embed) but rare and correct; §5's token cache and
+			// the optional embed cache blunt it.
+			if errors.Is(err, fsnotify.ErrEventOverflow) {
+				w.logf("fsnotify event-queue overflow — dropped events; triggering a full resync")
+				w.enqueueFullResync(dirty)
+				resetTimer()
+				continue
+			}
+			// Non-overflow errors (EBADF on close, transient inotify hiccups)
+			// are logged but not acted on — the watcher stays armed.
+			w.logf("fsnotify error: %v", err)
 		case <-timerC():
 			batch := dirty
 			dirty = make(map[string]fsnotify.Op)
@@ -1135,6 +1149,59 @@ func (w *WatchedIndex) enqueueDirFiles(absDir string, dirty map[string]fsnotify.
 	})
 }
 
+// logf writes a diagnostic to the FSOptions.LogWriter (nil discards).
+// Used by the watcher loop, which has no other logger — every message
+// goes to stderr in the ken-mcp server, never stdout (the JSON-RPC
+// channel). Prefixed so operators can grep the watcher's output.
+func (w *WatchedIndex) logf(format string, args ...any) {
+	if w.fsOpts.LogWriter == nil {
+		return
+	}
+	fmt.Fprintf(w.fsOpts.LogWriter, "search: watch: "+format+"\n", args...)
+}
+
+// enqueueFullResync re-walks the repo and marks every indexable file dirty
+// (Write) plus every currently-indexed FS file that no longer exists on
+// disk (Remove), so the next flush rebuilds the corpus from ground truth.
+// Called after an fsnotify overflow, when queued events were dropped and
+// the incremental view can no longer be trusted (audit search §3). Extra
+// (Tier-2 DB) chunks live in w.extraChunks, not w.chunks, so they are not
+// scanned here and never get spuriously tombstoned.
+func (w *WatchedIndex) enqueueFullResync(dirty map[string]fsnotify.Op) {
+	present := make(map[string]bool)
+	_ = filepath.WalkDir(w.root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if name := d.Name(); name == ".git" || name == ".ken" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		rel := w.relPath(p)
+		if rel != "" && w.matcher.ShouldIndex(rel) {
+			dirty[rel] = mergeOp(dirty[rel], fsnotify.Write)
+			present[rel] = true
+		}
+		return nil
+	})
+	// Tombstone indexed FS files that vanished while events were dropped.
+	w.corpusMu.Lock()
+	seen := make(map[string]bool)
+	for i := range w.chunks {
+		f := w.chunks[i].File
+		if w.chunks[i].Tombstoned || seen[f] {
+			continue
+		}
+		seen[f] = true
+		if !present[f] {
+			dirty[f] = mergeOp(dirty[f], fsnotify.Remove)
+		}
+	}
+	w.corpusMu.Unlock()
+}
+
 // mergeOp combines two op bitmasks for the same path during a debounce
 // window. The "latest op wins for REMOVE" rule means a write followed
 // by remove keeps the remove; a remove followed by write keeps the
@@ -1157,7 +1224,7 @@ func mergeOp(a, b fsnotify.Op) fsnotify.Op {
 // doesn't pay kernel-event cost for index.bin writes). Errors on
 // individual dirs are logged silently — a permission-denied subdir
 // shouldn't fail the whole watcher.
-func addRecursive(w *fsnotify.Watcher, root string) error {
+func addRecursive(w *fsnotify.Watcher, root string, logw io.Writer) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Permission denied on a single dir is non-fatal; skip it.
@@ -1173,7 +1240,18 @@ func addRecursive(w *fsnotify.Watcher, root string) error {
 		if name == ".git" || name == ".ken" {
 			return fs.SkipDir
 		}
-		return w.Add(path)
+		if aerr := w.Add(path); aerr != nil {
+			// Watch registration failing must NOT fail the whole index build
+			// (audit search §4): the corpus is already walked/chunked/embedded,
+			// and this only costs live updates for one subtree. ENOSPC
+			// (inotify max_user_watches exhausted on a node_modules-heavy
+			// monorepo) and EACCES are the common causes. Log once per dir and
+			// continue — matching addRecursive's own doc-comment promise.
+			if logw != nil {
+				fmt.Fprintf(logw, "search: watch registration failed for %q: %v (live updates disabled for this subtree)\n", path, aerr)
+			}
+		}
+		return nil
 	})
 }
 
