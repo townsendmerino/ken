@@ -945,25 +945,36 @@ func TestWatchedIndex_SlowFlush_EventsDrainAndConverge(t *testing.T) {
 // TestWatchedIndex_DirRenameDuringFlush_Tombstoned is the audit N2 regression,
 // rewritten in round 4 to actually bite (the original passed with N2 reverted —
 // it indexed pkg/ at construction, so the rename always found it in the
-// PUBLISHED snapshot and the old gate accepted it regardless). The real bug
-// needs the dir's chunks to be present in w.chunks but NOT yet published — the
-// in-flight window between a flush appending them and Store. We hit that window
-// deterministically with a reconcile hook, rename the dir inside it, and
-// synchronize on loopRemoveDelivered so the gate decision is pinned to happen
-// BEFORE the flush publishes. Verified to go RED with N2 reverted (restore the
-// `knownIndexedFile(rel) || isTrackedRel(rel)` gate around the Remove/Rename
-// accept): the rename is then dropped while pkg/ is unpublished and pkg/mod.py
-// survives.
+// PUBLISHED snapshot and the old gate accepted it regardless). Two things make
+// this version faithful:
+//
+//   - The dir's chunks are present in w.chunks but NOT yet published — the
+//     in-flight window between a flush appending them and Store. We hit it
+//     deterministically with a reconcile hook, rename the dir inside it, and
+//     synchronize on loopRemoveDelivered (incremented at delivery, before the
+//     accept gate) so the gate's verdict is pinned BEFORE this flush publishes.
+//   - The indexed file has an UNRECOGNIZED extension (.xyz, line-chunked). The
+//     old gate was `knownIndexedFile(rel) || isTrackedRel(rel)`, and
+//     knownIndexedFile == chunk.Language(rel) != "" accepts any recognized
+//     source path (a .py) on extension alone, regardless of publish state — so
+//     a .py rename would NOT bite. Only a path where knownIndexedFile is false
+//     (a directory, or an unrecognized extension) exercises the isTrackedRel
+//     branch that N2 removed. .xyz is false on every platform, whether fsnotify
+//     delivers the rename as the dir "pkg" or as the file "pkg/data.xyz".
+//
+// Verified RED with the `knownIndexedFile(rel) || isTrackedRel(rel)` gate
+// restored around the Remove/Rename accept: the rename is dropped while pkg/ is
+// unpublished and pkg/data.xyz is orphaned.
 func TestWatchedIndex_DirRenameDuringFlush_Tombstoned(t *testing.T) {
 	root := makeTempRepo(t, map[string]string{"keep.py": "def keep():\n    return 0\n"})
 	wi := withShortDebounce(t, root, true)
 	// pkg/ is deliberately NOT present at construction.
-	if containsFile(wi.Load(), "pkg/mod.py") {
-		t.Fatal("precondition: pkg/mod.py must NOT be indexed yet")
+	if containsFile(wi.Load(), "pkg/data.xyz") {
+		t.Fatal("precondition: pkg/data.xyz must NOT be indexed yet")
 	}
 
-	// The hook fires inside the flush that first appends pkg/mod.py — pkg/ is in
-	// w.chunks but not published. Rename the dir there and wait until the loop
+	// The hook fires inside the flush that first appends pkg/data.xyz — pkg/ is
+	// in w.chunks but not published. Rename the dir there and wait until the loop
 	// has DELIVERED the rename (before the accept gate), so the gate's verdict is
 	// fixed before this flush publishes.
 	var hookErr error
@@ -985,11 +996,11 @@ func TestWatchedIndex_DirRenameDuringFlush_Tombstoned(t *testing.T) {
 		close(hookDone)
 	})
 
-	// Create pkg/mod.py → triggers the flush whose reconcile fires the hook.
+	// Create pkg/data.xyz → triggers the flush whose reconcile fires the hook.
 	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "pkg", "mod.py"), []byte("def modfn():\n    return 1\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "pkg", "data.xyz"), []byte("alpha beta gamma delta\nepsilon zeta\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1006,10 +1017,10 @@ func TestWatchedIndex_DirRenameDuringFlush_Tombstoned(t *testing.T) {
 	// new path picked up.
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
-		if !containsFile(wi.Load(), "pkg/mod.py") {
+		if !containsFile(wi.Load(), "pkg/data.xyz") {
 			return // old path gone — N2 holds
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Errorf("pkg/mod.py still indexed after the dir was renamed during its in-flight flush (N2); chunks: %s", chunkFiles(wi.Load()))
+	t.Errorf("pkg/data.xyz still indexed after the dir was renamed during its in-flight flush (N2); chunks: %s", chunkFiles(wi.Load()))
 }
