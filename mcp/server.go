@@ -455,6 +455,24 @@ func runSearch(ix *search.Index, args SearchArgs) (*sdk.CallToolResult, any, err
 	return runSearchWithTelemetry(ix, args, nil, false, nil, "", false)
 }
 
+// enrichLabelPrefix is the start of the synthetic Arm B enrichment line the
+// indexer prepends to Chunk.Text ("# func: NAME | calls: … | raises: …").
+const enrichLabelPrefix = "# func:"
+
+// stripEnrichmentLabel removes a leading enrichment label line from a
+// chunk's text so it never reaches the agent (audit §10). It's index-only
+// signal; source files don't contain it. No-op when the chunk isn't
+// enriched (enrichment off, or a non-extractor file).
+func stripEnrichmentLabel(text string) string {
+	if !strings.HasPrefix(text, enrichLabelPrefix) {
+		return text
+	}
+	if nl := strings.IndexByte(text, '\n'); nl >= 0 {
+		return text[nl+1:]
+	}
+	return "" // label-only chunk (no body) — shouldn't happen, but be safe
+}
+
 // runSearchWithTelemetry is the runSearch variant that optionally
 // collects + surfaces per-query telemetry and records usage stats.
 // Called by handleSearch with the Config knobs; the pure runSearch
@@ -515,6 +533,14 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 	}
 	if len(results) > topK {
 		results = results[:topK]
+	}
+	// Strip the synthetic Arm B enrichment label before it reaches the agent
+	// (audit §10): it's index-only signal (a `# func: … | calls: …` line the
+	// source file doesn't contain), so surfacing it wastes tokens, breaks the
+	// "Chunk.Text reproduces source" invariant, and misleads a Read-at-line.
+	// results[i].Chunk is a value copy, so this doesn't touch the index.
+	for i := range results {
+		results[i].Chunk.Text = stripEnrichmentLabel(results[i].Chunk.Text)
 	}
 	resp := SearchResponse{
 		Query: args.Query,
@@ -686,6 +712,9 @@ func runFindRelatedWithUsage(ix *search.Index, args FindRelatedArgs, recorder Us
 		// as text so the agent can adapt rather than fail.
 		resp.Results = []SearchResultRow{}
 		return dispatchOutput(args.Output, resp, err.Error())
+	}
+	for i := range results {
+		results[i].Chunk.Text = stripEnrichmentLabel(results[i].Chunk.Text) // audit §10 (see runSearch)
 	}
 	if results == nil {
 		resp.Results = []SearchResultRow{}
