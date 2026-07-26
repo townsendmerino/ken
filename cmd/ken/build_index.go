@@ -118,18 +118,44 @@ func cmdBuildIndex(args []string) int {
 		}
 	}
 
-	// Atomic write: stage to <output>.tmp + Rename. Avoids a
-	// half-written index file if the process is interrupted (e.g.
-	// Ctrl-C during `go generate`).
-	tmpPath := output + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	// Atomic write: stage to a unique tmp, fsync the data, rename, then fsync
+	// the parent dir (audit §27/R4-6). Avoids a half-written index file if the
+	// process is interrupted (e.g. Ctrl-C during `go generate`), and — the part
+	// the plain WriteFile+Rename missed — a crash that reaches the rename before
+	// the bytes, which would publish a torn index.bin that passes its magic/CRC
+	// check on next load only to fail deep in deserialization.
+	outDir := filepath.Dir(output)
+	f, err := os.CreateTemp(outDir, filepath.Base(output)+"-*.tmp")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: create tmp: "+err.Error())
+		return 1
+	}
+	tmpPath := f.Name()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		fmt.Fprintln(os.Stderr, "ken: write tmp: "+err.Error())
+		return 1
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		fmt.Fprintln(os.Stderr, "ken: sync tmp: "+err.Error())
+		return 1
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		fmt.Fprintln(os.Stderr, "ken: close tmp: "+err.Error())
 		return 1
 	}
 	if err := os.Rename(tmpPath, output); err != nil {
 		_ = os.Remove(tmpPath)
 		fmt.Fprintln(os.Stderr, "ken: rename to "+output+": "+err.Error())
 		return 1
+	}
+	if d, derr := os.Open(outDir); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 
 	fmt.Fprintf(os.Stderr, "ken: wrote %d bytes (mode=%s chunker=%s) to %s\n",

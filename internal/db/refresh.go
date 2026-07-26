@@ -69,9 +69,9 @@ func (r *Refresher) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := r.Refresh(ctx); err != nil {
-				warn(r.opts, "periodic refresh failed: %v", err)
-			}
+			// doRefresh already logs the failure detail at its source (audit
+			// R4-5); the tick loop just swallows the error and keeps ticking.
+			_ = r.Refresh(ctx)
 		}
 	}
 }
@@ -131,6 +131,14 @@ func (r *Refresher) TryRefresh(ctx context.Context) error {
 func (r *Refresher) doRefresh(ctx context.Context) error {
 	chunks, err := IndexSchema(ctx, r.opts)
 	if err != nil {
+		// Log the full error at its source (audit R4-5). The agent-callable
+		// reindex_db path (TryRefresh → handleReindexDB) returns only a
+		// credential-sanitized string that promises "check the server logs" —
+		// so the detail (schema-filter typo, missing SELECT grant, unstarted
+		// refresher) must actually reach the logs here, not just on the periodic
+		// tick. Covers every entry point (TryRefresh, blocking Refresh) with one
+		// call; Run no longer logs separately to avoid double-logging.
+		warn(r.opts, "reindex failed: %v", err)
 		return fmt.Errorf("Refresh: %w", err)
 	}
 	// Always call swap, even with nil chunks — that's the

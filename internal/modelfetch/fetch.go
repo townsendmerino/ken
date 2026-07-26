@@ -220,12 +220,25 @@ func fetchOne(ctx context.Context, opts Options, filename, target string) error 
 	hash := sha256.New()
 	pw := newProgressWriter(opts.Progress, filename, resp.ContentLength)
 	written, err := io.Copy(f, io.TeeReader(resp.Body, io.MultiWriter(pw, hash)))
+	// fsync the payload before the close+rename below (audit §27/R4-6): a crash
+	// that reaches the rename before the bytes would publish a truncated
+	// model.safetensors that passed its in-memory size/checksum checks (those
+	// ran against the still-buffered stream) yet fails to mmap/parse on load.
+	// Only meaningful on the success path; a copy error removes tmp regardless.
+	var syncErr error
+	if err == nil {
+		syncErr = f.Sync()
+	}
 	closeErr := f.Close()
 	pw.finish()
 
 	if err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("%s: writing %s: %w", filename, tmp, err)
+	}
+	if syncErr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("%s: syncing %s: %w", filename, tmp, syncErr)
 	}
 	if closeErr != nil {
 		_ = os.Remove(tmp)
@@ -274,6 +287,13 @@ func fetchOne(ctx context.Context, opts Options, filename, target string) error 
 	if err := os.Rename(tmp, target); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("%s: rename %s → %s: %w", filename, tmp, target, err)
+	}
+	// fsync the parent dir so the rename entry itself survives a crash (audit
+	// §27/R4-6): without it the renamed name can be lost even though the data
+	// bytes were synced, leaving the model absent after a power loss.
+	if d, derr := os.Open(opts.Dest); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	return nil
 }
