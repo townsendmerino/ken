@@ -54,9 +54,10 @@ type RepoBundle struct {
 	structuralMu       sync.Mutex  // guards the build-state fields below
 	structuralBuilt    atomic.Bool // set once a build succeeds
 	structuralIdx      *structural.Index
-	structuralBuilding bool          // a background build is in flight
-	structuralDone     chan struct{} // closed when the in-flight build finishes
-	structuralFailedAt time.Time     // last failure; gates the retry cooldown
+	structuralBuilding bool               // a background build is in flight
+	structuralDone     chan struct{}      // closed when the in-flight build finishes
+	structuralCancel   context.CancelFunc // cancels the in-flight build (audit N7)
+	structuralFailedAt time.Time          // last failure; gates the retry cooldown
 }
 
 // Structural-build timing knobs (audit R3).
@@ -115,7 +116,12 @@ func (b *RepoBundle) StructuralIndex(ctx context.Context) *structural.Index {
 		}
 		b.structuralBuilding = true
 		b.structuralDone = make(chan struct{})
-		go b.runStructuralBuild(b.structuralDone)
+		// Own the build's lifecycle (audit N7): a cancelable, background-rooted
+		// ctx (NOT the caller's — R3) so reapEntry/Close can stop it before
+		// cleanup() rm-rf's the corpus it's parsing.
+		bctx, cancel := context.WithTimeout(context.Background(), structuralBuildBudget)
+		b.structuralCancel = cancel
+		go b.runStructuralBuild(bctx, b.structuralDone)
 	}
 	done := b.structuralDone
 	b.structuralMu.Unlock()
@@ -144,9 +150,7 @@ func (b *RepoBundle) StructuralIndex(ctx context.Context) *structural.Index {
 // runStructuralBuild executes one build under an independent budget, caches
 // success, records failure time, and wakes waiters. Runs in its own
 // goroutine (audit R3).
-func (b *RepoBundle) runStructuralBuild(done chan struct{}) {
-	ctx, cancel := context.WithTimeout(context.Background(), structuralBuildBudget)
-	defer cancel()
+func (b *RepoBundle) runStructuralBuild(ctx context.Context, done chan struct{}) {
 	idx, err := b.StructuralBuilder(ctx)
 
 	b.structuralMu.Lock()
@@ -157,8 +161,31 @@ func (b *RepoBundle) runStructuralBuild(done chan struct{}) {
 		b.structuralBuilt.Store(true) // publish last; happens-before close(done)
 	}
 	b.structuralBuilding = false
+	if b.structuralCancel != nil {
+		b.structuralCancel() // release the ctx's timer resources
+		b.structuralCancel = nil
+	}
 	b.structuralMu.Unlock()
 	close(done)
+}
+
+// stopStructuralBuild cancels an in-flight structural build and waits for it
+// to exit (audit N7). Called from reapEntry before cleanup() rm-rf's the
+// corpus dir the build is parsing, and by Close, so no build goroutine
+// outlives the bundle (goleak) or reads a deleted temp clone. No-op when no
+// build is running. BuildWithContext honors cancellation at the next file
+// boundary, so the wait is bounded.
+func (b *RepoBundle) stopStructuralBuild() {
+	b.structuralMu.Lock()
+	done := b.structuralDone
+	if b.structuralCancel != nil {
+		b.structuralCancel()
+	}
+	building := b.structuralBuilding
+	b.structuralMu.Unlock()
+	if building && done != nil {
+		<-done
+	}
 }
 
 // StructuralPending reports whether a structural build is currently running
@@ -221,15 +248,21 @@ type cacheEntry struct {
 // Concurrent uncached requests for the same key dedupe via singleflight,
 // and entries are LRU-evicted at the configured bound.
 type Cache struct {
-	mu     sync.Mutex
-	max    int
-	ll     *list.List // front = most recently used
-	items  map[string]*list.Element
-	build  Builder
-	sf     singleflight.Group
-	closed bool   // M8: set under mu by Close(); checked by builders to avoid use-after-close
-	gen    uint64 // audit R7: bumped by Purge(); a build started under an older gen must not repopulate
+	mu       sync.Mutex
+	max      int
+	ll       *list.List // front = most recently used
+	items    map[string]*list.Element
+	build    Builder
+	sf       singleflight.Group
+	closed   bool                // M8: set under mu by Close(); checked by builders to avoid use-after-close
+	gen      uint64              // audit R7: bumped by Purge(); a build started under an older gen must not repopulate
+	inflight map[string]struct{} // audit N6: keys with a build currently in singleflight, so Purge can Forget them
 }
+
+// errPurgedDuringBuild is returned when a build's generation no longer
+// matches (a Purge ran while it built). GetBundle retries once internally
+// on it (audit N6) rather than surfacing it to the caller.
+var errPurgedDuringBuild = fmt.Errorf("repo: cache purged during build; retry")
 
 // NewCache creates a cache bound to max entries (≤0 ⇒ DefaultCacheSize).
 //
@@ -240,7 +273,7 @@ func NewCache(max int, build Builder) *Cache {
 	if max <= 0 {
 		max = DefaultCacheSize
 	}
-	return &Cache{max: max, ll: list.New(), items: map[string]*list.Element{}, build: build}
+	return &Cache{max: max, ll: list.New(), items: map[string]*list.Element{}, build: build, inflight: map[string]struct{}{}}
 }
 
 // Len is the number of cached entries (used by tests).
@@ -274,8 +307,14 @@ func (c *Cache) detachAll() []*cacheEntry {
 }
 
 func reapEntry(ent *cacheEntry) {
-	if ent.bundle != nil && ent.bundle.Index != nil {
-		_ = ent.bundle.Index.Close()
+	if ent.bundle != nil {
+		// Stop any in-flight structural build BEFORE cleanup rm-rf's the
+		// corpus dir it's parsing (audit N7) — prevents a wasted 10-min parse
+		// of a deleted tree and a goroutine outliving the cache.
+		ent.bundle.stopStructuralBuild()
+		if ent.bundle.Index != nil {
+			_ = ent.bundle.Index.Close()
+		}
 	}
 	if ent.cleanup != nil {
 		ent.cleanup()
@@ -308,12 +347,15 @@ func (c *Cache) Purge() {
 	// landing afterward, serving bm25 for the process lifetime.
 	c.gen++
 	ents := c.detachAll()
-	c.mu.Unlock()
-	// Forget the in-flight singleflight turns so NEW Get calls start a fresh
-	// build (under the new gen) rather than joining a doomed pre-purge one.
-	for _, ent := range ents {
-		c.sf.Forget(ent.key)
+	// Forget the IN-FLIGHT singleflight turns (audit N6): the key that most
+	// needs forgetting is a FIRST build not yet in c.items — exactly the
+	// autoFetchModel case — which detachAll() (cached entries only) misses.
+	// Forgetting under c.mu means new Gets start a fresh turn under the new
+	// gen instead of joining the doomed pre-purge build.
+	for k := range c.inflight {
+		c.sf.Forget(k)
 	}
+	c.mu.Unlock()
 	for _, ent := range ents {
 		reapEntry(ent) // M2: blocking close+cleanup outside the lock
 	}
@@ -412,7 +454,20 @@ func (c *Cache) GetBundle(ctx context.Context, source string) (*RepoBundle, erro
 	if err != nil {
 		return nil, err
 	}
+	// Retry once on a purge-during-build (audit N6): the first attempt's build
+	// was invalidated by a concurrent Purge, so a second attempt builds fresh
+	// under the new generation instead of surfacing "purged; retry" to the
+	// agent. Bounded to 2 tries so a purge storm can't loop.
+	for attempt := 0; ; attempt++ {
+		b, err := c.getBundleOnce(ctx, key)
+		if err == errPurgedDuringBuild && attempt < 1 {
+			continue
+		}
+		return b, err
+	}
+}
 
+func (c *Cache) getBundleOnce(ctx context.Context, key string) (*RepoBundle, error) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -427,12 +482,18 @@ func (c *Cache) GetBundle(ctx context.Context, source string) (*RepoBundle, erro
 	c.mu.Unlock()
 
 	v, err, _ := c.sf.Do(key, func() (any, error) {
-		// Snapshot the generation this build starts under (audit R7). If a
-		// Purge bumps it while we build, the bundle is stale and must not be
-		// inserted — checked alongside c.closed below.
+		// Snapshot the generation this build starts under (audit R7) and mark
+		// the key in-flight so Purge can Forget it (audit N6). If a Purge bumps
+		// the gen while we build, the bundle is stale and must not be inserted.
 		c.mu.Lock()
 		startGen := c.gen
+		c.inflight[key] = struct{}{}
 		c.mu.Unlock()
+		defer func() {
+			c.mu.Lock()
+			delete(c.inflight, key)
+			c.mu.Unlock()
+		}()
 
 		bundle, cleanup, err := c.build(ctx, key)
 		if err != nil {
@@ -466,7 +527,7 @@ func (c *Cache) GetBundle(ctx context.Context, source string) (*RepoBundle, erro
 		if c.gen != startGen {
 			c.mu.Unlock()
 			reap(bundle.Index, cleanup)
-			return nil, fmt.Errorf("repo: cache purged during build; retry")
+			return nil, errPurgedDuringBuild
 		}
 		// Re-check in case another sf turn populated it. If we lost the
 		// race, the cache already has a usable entry; reap the loser.

@@ -33,7 +33,7 @@ package search
 import (
 	"context"
 	"fmt"
-	"hash/fnv"
+	"hash/maphash"
 	"io"
 	"io/fs"
 	"os"
@@ -720,13 +720,19 @@ type tokenCache struct {
 
 func newTokenCache() *tokenCache { return &tokenCache{byHash: map[uint64][]string{}} }
 
-// hashText64 is a fast (non-crypto) FNV-1a hash of text, used only as an
-// ephemeral in-process token-cache key (never serialized), so seed
-// stability across processes is irrelevant.
+// tokenHashSeed seeds the token-cache hash. Process-random (the cache is
+// ephemeral and never serialized, so cross-process stability is irrelevant),
+// which also makes collisions unconstructible — relevant since ken shallow-
+// clones untrusted remote repos (audit N5 note).
+var tokenHashSeed = maphash.MakeSeed()
+
+// hashText64 hashes text for the token-cache key. maphash.String is AES-
+// backed and ZERO-ALLOC (audit N5): the previous fnv.New64a().Write([]byte(
+// text)) allocated a full copy of every chunk's text per flush plus a hasher,
+// through a hash.Hash64 interface that defeats inlining — a net loss versus
+// the runtime memhash it was meant to beat.
 func hashText64(text string) uint64 {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(text))
-	return h.Sum64()
+	return maphash.String(tokenHashSeed, text)
 }
 
 // tokenizeDocs returns the index-aligned BM25 token lists for chunks.

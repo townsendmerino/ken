@@ -411,17 +411,19 @@ func TestRepoBundle_LazyStructural(t *testing.T) {
 	})
 }
 
-// TestCache_PurgeDuringBuild_NoStaleRepopulate is the audit R7 regression:
-// a build already in flight when Purge() runs must NOT insert its stale
-// (pre-purge) bundle into the cache. This is the autoFetchModel bm25→hybrid
-// race — without the generation guard the in-flight bm25 build lands in the
-// "purged" cache and every later query serves bm25 for the process lifetime.
+// TestCache_PurgeDuringBuild_NoStaleRepopulate is the audit R7 + N6
+// regression: a build in flight when Purge() runs must NOT insert its stale
+// (pre-purge) bundle — the generation guard reaps it — AND the caller must
+// transparently RETRY and get a valid fresh bundle rather than a hard error
+// (N6). This is the autoFetchModel bm25→hybrid race: without the guard the
+// stale bm25 bundle lands in the "purged" cache and serves bm25 forever;
+// without the N6 retry the user's first query fails outright.
 func TestCache_PurgeDuringBuild_NoStaleRepopulate(t *testing.T) {
 	releaseBuild := make(chan struct{})
 	var builds, cleanups atomic.Int64
 	b := func(ctx context.Context, _ string) (*RepoBundle, func(), error) {
 		if builds.Add(1) == 1 {
-			<-releaseBuild // only the FIRST build blocks (the purge race)
+			<-releaseBuild // only the FIRST (doomed) build blocks past the purge
 		}
 		dir := t.TempDir()
 		ix, _ := search.NewWatchedIndex(dir, search.ModeBM25, "line", "", true)
@@ -438,25 +440,53 @@ func TestCache_PurgeDuringBuild_NoStaleRepopulate(t *testing.T) {
 	}()
 
 	time.Sleep(50 * time.Millisecond) // let the build enter singleflight
-	c.Purge()                         // bump gen while the build is in flight
+	c.Purge()                         // bump gen + Forget the in-flight key
 	time.Sleep(20 * time.Millisecond)
-	close(releaseBuild) // build finishes AFTER the purge
+	close(releaseBuild) // doomed build finishes AFTER the purge → gen mismatch
 
-	if err := <-getErr; err == nil {
-		t.Error("Get whose build was purged should return an error, not a stale bundle")
+	// N6: the caller retries internally and gets a valid fresh bundle.
+	if err := <-getErr; err != nil {
+		t.Errorf("Get should retry past the purge and succeed, got error: %v", err)
 	}
-	if got := c.Len(); got != 0 {
-		t.Errorf("Len after purge-during-build = %d, want 0 (stale bundle must not repopulate)", got)
-	}
+	// R7: the stale (doomed) bundle was reaped, not cached; the cache holds
+	// exactly the fresh retry bundle.
 	if got := cleanups.Load(); got != 1 {
-		t.Errorf("stale bundle cleanup invocations = %d, want 1 (must be reaped)", got)
-	}
-	// The cache stays OPEN: a fresh Get rebuilds under the new generation
-	// (this second build doesn't block).
-	if _, err := c.Get(context.Background(), path); err != nil {
-		t.Fatalf("post-purge Get should rebuild: %v", err)
+		t.Errorf("stale bundle cleanup invocations = %d, want 1 (doomed build reaped)", got)
 	}
 	if got := c.Len(); got != 1 {
-		t.Errorf("Len after post-purge rebuild = %d, want 1", got)
+		t.Errorf("Len = %d, want 1 (fresh retry bundle cached, stale one not)", got)
+	}
+	if got := builds.Load(); got != 2 {
+		t.Errorf("builds = %d, want 2 (1 doomed + 1 retry)", got)
+	}
+}
+
+// TestBundle_StopStructuralBuild_CancelsInFlight is the audit N7 regression:
+// evicting/closing a bundle with an in-flight structural build must cancel it
+// and wait, so it can't keep parsing a temp dir cleanup is about to rm-rf (and
+// can't outlive the cache — goleak enforces the latter for the package).
+func TestBundle_StopStructuralBuild_CancelsInFlight(t *testing.T) {
+	started := make(chan struct{})
+	b := &RepoBundle{StructuralBuilder: func(ctx context.Context) (*structural.Index, error) {
+		close(started)
+		<-ctx.Done() // block until cancelled
+		return nil, ctx.Err()
+	}}
+	// Kick the build off with a short caller deadline so StructuralIndex hands
+	// back promptly (nil, "still building") while the build runs in background.
+	cctx, ccancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer ccancel()
+	_ = b.StructuralIndex(cctx)
+	<-started // the background build is now running and blocked on ctx.Done()
+
+	done := make(chan struct{})
+	go func() { b.stopStructuralBuild(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stopStructuralBuild did not return — in-flight build was not cancelled (N7)")
+	}
+	if b.structuralBuilding {
+		t.Error("structuralBuilding still true after stopStructuralBuild")
 	}
 }
