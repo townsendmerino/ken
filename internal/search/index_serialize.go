@@ -259,7 +259,13 @@ func serializeIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, chunkerNa
 	writeU32(&buf, embedDim)
 
 	// --- Chunks section ---
-	var chunksBody bytes.Buffer
+	// Write the body DIRECTLY into buf and back-patch its length, instead
+	// of building a separate chunksBody buffer and copying it in (audit
+	// §21): the separate bodies doubled peak memory (chunksBody + vecsBody
+	// alive simultaneously alongside the growing buf).
+	chunksLenOff := buf.Len()
+	writeU32(&buf, 0) // length placeholder, back-patched below
+	chunksStart := buf.Len()
 	for i, c := range chunks {
 		// L4 (defensive bound): line numbers are 1-based per the
 		// chunk.Chunk contract; negative inputs would round-trip
@@ -271,31 +277,37 @@ func serializeIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, chunkerNa
 			return nil, fmt.Errorf("search: serializeIndex: chunk[%d] has negative line numbers (StartLine=%d EndLine=%d)",
 				i, c.StartLine, c.EndLine)
 		}
-		writeLPString(&chunksBody, c.File)
-		writeU32(&chunksBody, uint32(c.StartLine))
-		writeU32(&chunksBody, uint32(c.EndLine))
+		writeLPString(&buf, c.File)
+		writeU32(&buf, uint32(c.StartLine))
+		writeU32(&buf, uint32(c.EndLine))
 		if c.Tombstoned {
-			chunksBody.WriteByte(1)
+			buf.WriteByte(1)
 		} else {
-			chunksBody.WriteByte(0)
+			buf.WriteByte(0)
 		}
-		writeLPString(&chunksBody, c.Text)
+		writeLPString(&buf, c.Text)
 	}
-	writeU32(&buf, uint32(chunksBody.Len()))
-	buf.Write(chunksBody.Bytes())
+	binary.LittleEndian.PutUint32(buf.Bytes()[chunksLenOff:], uint32(buf.Len()-chunksStart))
 
 	// --- Vecs section --- (empty body iff mode == ModeBM25)
-	var vecsBody bytes.Buffer
+	vecsLenOff := buf.Len()
+	writeU32(&buf, 0) // length placeholder
+	vecsStart := buf.Len()
 	if mode != ModeBM25 {
-		vecsBody.Grow(len(chunks) * int(embedDim) * 4)
+		// Pack all floats into one scratch slice with binary.PutUint32 (no
+		// per-float Buffer.Write — 16.4M calls on a 64k×256 index) and do a
+		// single bulk Write into the pre-grown buf.
+		vecBytes := make([]byte, 0, len(chunks)*int(embedDim)*4)
+		var word [4]byte
 		for _, v := range vecs {
 			for _, f := range v {
-				writeU32(&vecsBody, math.Float32bits(f))
+				binary.LittleEndian.PutUint32(word[:], math.Float32bits(f))
+				vecBytes = append(vecBytes, word[:]...)
 			}
 		}
+		buf.Write(vecBytes)
 	}
-	writeU32(&buf, uint32(vecsBody.Len()))
-	buf.Write(vecsBody.Bytes())
+	binary.LittleEndian.PutUint32(buf.Bytes()[vecsLenOff:], uint32(buf.Len()-vecsStart))
 
 	// --- CRC32 trailer ---
 	crc := crc32.ChecksumIEEE(buf.Bytes())
