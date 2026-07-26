@@ -11,7 +11,7 @@ import (
 // hasEnrichLabel reports whether any published chunk carries the Arm B label.
 func hasEnrichLabel(wi *WatchedIndex) bool {
 	for _, c := range wi.Load().Chunks() {
-		if strings.Contains(c.Text, "# func:") {
+		if strings.Contains(c.Text, "# ken:") {
 			return true
 		}
 	}
@@ -41,10 +41,10 @@ func TestLazyEnrichment_EventuallyMatchesInline(t *testing.T) {
 	defer func() { _ = lazy.Close() }()
 
 	if !hasEnrichLabel(inline) {
-		t.Fatal("inline build should carry the # func: label")
+		t.Fatal("inline build should carry the # ken: label")
 	}
 	if !hasEnrichLabel(lazy) {
-		t.Fatal("lazy build (synchronous bg on watch=false) should carry the # func: label")
+		t.Fatal("lazy build (synchronous bg on watch=false) should carry the # ken: label")
 	}
 
 	ic, lc := inline.Load().Chunks(), lazy.Load().Chunks()

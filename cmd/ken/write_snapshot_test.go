@@ -48,7 +48,7 @@ func TestCmdIndex_WriteSnapshot(t *testing.T) {
 	// Cross-binary contract: the config-key ken wrote must equal what ken-mcp
 	// computes (bm25 → model fingerprint "bm25", enrichment on), so ken-mcp
 	// trusts the snapshot instead of rebuilding.
-	wantKey := search.SnapshotConfigKey(search.ModeBM25, "line", search.ModelFingerprint(nil, ""), true)
+	wantKey := search.SnapshotConfigKey(search.ModeBM25, "line", search.ModelFingerprint(nil, ""), true, false, false)
 	if m.ConfigKey != wantKey {
 		t.Errorf("config-key mismatch:\n wrote %q\n mcp   %q", m.ConfigKey, wantKey)
 	}

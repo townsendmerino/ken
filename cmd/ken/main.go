@@ -468,9 +468,10 @@ func cmdIndex(args []string) int {
 			return 1
 		}
 		defer func() { _ = wix.Close() }()
-		// enrich=true: NewWatchedIndex builds with enrichment on (FSOptions{}),
-		// matching ken-mcp's config-key so the snapshot loads without a rebuild.
-		key := search.SnapshotConfigKey(mode, chunker, search.ModelFingerprint(wix.EmbedModel(), model), true)
+		// enrich=true, lazy/staged=false: NewWatchedIndex builds with enrichment
+		// on (FSOptions{}) and no deferral, matching ken-mcp's non-lazy config
+		// key so the snapshot loads without a rebuild.
+		key := search.SnapshotConfigKey(mode, chunker, search.ModelFingerprint(wix.EmbedModel(), model), true, false, false)
 		if err := search.WriteSnapshot(rest[0], wix, key); err != nil {
 			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 			return 1

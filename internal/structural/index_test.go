@@ -117,10 +117,11 @@ class Session:
 	}
 }
 
-// TestEnrich_ArmBBaseline_FormatStability pins the M0d Arm B baseline
-// format: "# func: NAME | calls: A, B | raises: X". This is the format
-// the production extractor MUST produce when EnrichOptions is the zero
-// value, so the Go and Python materializers stay byte-identical.
+// TestEnrich_ArmBBaseline_FormatStability pins the Arm B baseline format:
+// "# ken: func: NAME | calls: A, B | raises: X" (the "# ken:" sentinel was
+// added in audit N4 so the label is self-identifying for StripLabel). This
+// is the format the production extractor MUST produce when EnrichOptions is
+// the zero value, so the Go and Python materializers stay byte-identical.
 func TestEnrich_ArmBBaseline_FormatStability(t *testing.T) {
 	dir := t.TempDir()
 	src := `
@@ -141,7 +142,7 @@ def sina_xml_to_url_list(xml_data):
 	}
 
 	got := ix.Enrich("q265734.py", EnrichOptions{})
-	want := "# func: sina_xml_to_url_list | calls: parseString, getElementsByTagName, append\n"
+	want := "# ken: func: sina_xml_to_url_list | calls: parseString, getElementsByTagName, append\n"
 	if got != want {
 		t.Errorf("Enrich(Arm B baseline) mismatch:\n  got:  %q\n  want: %q", got, want)
 	}

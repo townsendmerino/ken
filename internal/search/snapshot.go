@@ -86,19 +86,29 @@ type SnapshotManifest struct {
 //     from the walk (and a changed ignore file is itself an indexed file),
 //     so the manifest file set differs ⇒ ALREADY caught by drift ⇒ NOT
 //     keyed here (including them would only add false-invalidation risk).
-func SnapshotConfigKey(mode Mode, chunker, modelFingerprint string, enrich bool) string {
-	enrichTag := "on"
-	if !enrich {
-		enrichTag = "off"
+func SnapshotConfigKey(mode Mode, chunker, modelFingerprint string, enrich, lazy, staged bool) string {
+	onOff := func(b bool) string {
+		if b {
+			return "on"
+		}
+		return "off"
 	}
 	// Human-readable and greppable; exact bytes are all that matter for the
 	// equality gate. The mode int keeps hybrid/hybrid-rerank distinct.
+	//
+	// lazy/staged are keyed (audit N3): a lazy/staged run publishes BM25 with
+	// deferred enrichment/embedding, and its drift-path snapshot can be
+	// vector-less or differently-labelled — an inline run must NOT accept it.
+	// v2 (was v1) also invalidates every pre-sentinel snapshot so the N4 label
+	// format change (`# ken:` prefix) can't leak old-format labels on load.
 	return strings.Join([]string{
-		"v1",
+		"v2",
 		"mode=" + strconv.Itoa(int(mode)),
 		"chunker=" + chunker,
 		"model=" + modelFingerprint,
-		"enrich=" + enrichTag,
+		"enrich=" + onOff(enrich),
+		"lazy=" + onOff(lazy),
+		"staged=" + onOff(staged),
 	}, "|")
 }
 

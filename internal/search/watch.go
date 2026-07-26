@@ -387,7 +387,12 @@ func (w *WatchedIndex) SnapshotBytes() ([]byte, error) {
 	if ix == nil {
 		return nil, fmt.Errorf("search: SnapshotBytes: no index published")
 	}
-	return serializeIndex(ix.Chunks(), ix.Vecs(), w.mode, w.chunkerName)
+	// Serialize the PUBLISHED index's own mode (audit N3): reading w.mode here
+	// races the warm pass's `w.mode = targetMode` write under corpusMu, and
+	// ix.Mode() is also the correct value — it matches the very chunks/vecs
+	// being serialized (a staged pre-warm snapshot is BM25 + vector-less
+	// together). w.chunkerName is set once at construction and never mutated.
+	return serializeIndex(ix.Chunks(), ix.Vecs(), ix.Mode(), w.chunkerName)
 }
 
 // warmCorpusInBackground is the unified cold-start warm pass for M2 (lazy

@@ -6,21 +6,27 @@ import (
 	"strings"
 )
 
-// labelLineRE matches a single Arm B enrichment label line — enrichCore's
-// output: "# " + one-or-more "arm: value" segments joined by " | " + "\n".
-// The alternation is the set of arms enrichCore can emit FIRST (primaryFunc
-// may be "", so the leading arm is any of these; "returns" only ever
-// follows "params"). Anchored at start and bounded to one line, so at most
-// the leading label is stripped.
-var labelLineRE = regexp.MustCompile(`^# (?:func|calls|raises|called by|imports|params|siblings): [^\n]*\n`)
+// labelSentinel prefixes every Arm B enrichment label line (audit N4). It is
+// a self-identifying marker no real source line starts with, so StripLabel
+// can key on it EXACTLY — ending three rounds of producer/consumer drift and
+// the widening false-positive surface a grammar match had (a genuine comment
+// like "# raises: ValueError when …" was being deleted from results). Kept
+// short; it's a single token that appears in every enriched chunk, so its
+// BM25 IDF is ~0 (no ranking effect) and its uniform embedding contribution
+// cancels under normalization. The v2 snapshot-key bump (SnapshotConfigKey)
+// invalidates every pre-sentinel snapshot so old-format labels can't linger.
+const labelSentinel = "# ken:"
+
+// labelLineRE matches a single sentinel-prefixed enrichment label line.
+var labelLineRE = regexp.MustCompile(`^` + regexp.QuoteMeta(labelSentinel) + ` [^\n]*\n`)
 
 // StripLabel removes a single leading Arm B enrichment label line from text
 // (no-op when text isn't enriched). The one strip helper for BOTH the
 // indexer's idempotent warm pass — so re-running enrichment on an
 // already-labelled corpus can't double the label (audit R2) — and the MCP
-// result boundary — so the synthetic line never reaches the agent, for
-// EVERY arm combination, not just "func:" (audit R5). Sharing it keeps the
-// producer (enrichCore) and consumer from drifting a third time.
+// result boundary — so the synthetic line never reaches the agent (audit R5).
+// Matching the sentinel exactly means a real source line can't be
+// mis-stripped (audit N4).
 func StripLabel(text string) string {
 	return labelLineRE.ReplaceAllLiteralString(text, "")
 }
@@ -50,9 +56,10 @@ const (
 // additive arms enable one of the bool fields below; the label
 // grows by appending one extra `| section` per enabled fact-type.
 //
-// Always-present sections (the M0d Arm B baseline):
+// Always-present sections (the M0d Arm B baseline; the "# ken:" sentinel
+// prefix was added in audit N4 so StripLabel matches the label exactly):
 //
-//	# func: <name>
+//	# ken: func: <name>
 //	  | calls: <comma-sep, max 8>
 //	  | raises: <comma-sep, max 4>
 //
@@ -157,7 +164,8 @@ func enrichCore(fs *FileStruct, opts EnrichOptions, callersResolver func(name st
 	if len(parts) == 0 {
 		return ""
 	}
-	return "# " + strings.Join(parts, " | ") + "\n"
+	// labelSentinel ("# ken:") prefix so StripLabel matches exactly (audit N4).
+	return labelSentinel + " " + strings.Join(parts, " | ") + "\n"
 }
 
 // primaryFuncName returns the file's identifying function — the

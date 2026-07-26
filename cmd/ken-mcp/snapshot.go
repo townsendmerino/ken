@@ -28,7 +28,8 @@ import (
 // config. See search.SnapshotConfigKey for what's keyed (and, importantly,
 // what isn't — size caps / ignore rules are caught by drift, not the key).
 func snapshotConfigKey(mode search.Mode, chunker string, model *embed.StaticModel, modelDir string, fsOpts search.FSOptions) string {
-	return search.SnapshotConfigKey(mode, chunker, search.ModelFingerprint(model, modelDir), !fsOpts.DisableEnrichment)
+	return search.SnapshotConfigKey(mode, chunker, search.ModelFingerprint(model, modelDir),
+		!fsOpts.DisableEnrichment, fsOpts.LazyEnrichment, fsOpts.StagedEmbedding)
 }
 
 // currentManifest walks dir and stamps each file (via search.CurrentManifest),
@@ -119,7 +120,15 @@ func tryLoadSnapshot(dir string, mode search.Mode, modeStr, chunker, modelDir st
 	// boot is a clean load). Best-effort.
 	logger.Logf(kenmcp.LogInfo, "reconciled snapshot for %s: %d changed/added, %d deleted (of %d snapshot files) — skipped full rebuild, watching",
 		dir, len(changed), len(deleted), len(stored.Files))
-	writeSnapshot(dir, wi, mode, chunker, modelDir, fsOpts, logger)
+	// Skip when lazy/staged (audit N3): the reconciled index is still pre-warm
+	// (staged publishes vector-less BM25 with realMode held back), so persisting
+	// now would write a BM25 .bin stamped with the served (BM25) mode — a next
+	// boot rejects it on mode mismatch and full-rebuilds forever. The warm
+	// pass's own notifyFlush → writeSnapshot persists the full-quality snapshot
+	// once vectors are ready. Matches the cold-build gate in main.go.
+	if !fsOpts.LazyEnrichment && !fsOpts.StagedEmbedding {
+		writeSnapshot(dir, wi, mode, chunker, modelDir, fsOpts, logger)
+	}
 	return wi
 }
 
