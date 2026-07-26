@@ -380,7 +380,7 @@ func handleSearch(ctx context.Context, cfg *Config, args SearchArgs) (*sdk.CallT
 	// sources where the chunk's relative path can be stat()ed for
 	// file size. http(s) clones land in a temp dir under TMPDIR;
 	// passing that root is fine — the stats are best-effort.
-	return runSearchWithTelemetry(wi.Load(), args, cfg.TelemetryLog, cfg.TelemetryInResponse, cfg.UsageRecorder, source)
+	return runSearchWithTelemetry(wi.Load(), args, cfg.TelemetryLog, cfg.TelemetryInResponse, cfg.UsageRecorder, source, wi.Warming())
 }
 
 func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
@@ -395,7 +395,7 @@ func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (
 	if err != nil {
 		return errorResult(args.Output, fmt.Sprintf("Failed to index %q: %s", source, err.Error())), nil, nil
 	}
-	return runFindRelatedWithUsage(wi.Load(), args, cfg.UsageRecorder, source)
+	return runFindRelatedWithUsage(wi.Load(), args, cfg.UsageRecorder, source, wi.Warming())
 }
 
 // runSearch executes a search against a resolved Index — independent of
@@ -411,7 +411,7 @@ func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (
 // hybrid against a BM25-only index sees "mode=bm25" in the header
 // (capability downgrade is visible, not silent).
 func runSearch(ix *search.Index, args SearchArgs) (*sdk.CallToolResult, any, error) {
-	return runSearchWithTelemetry(ix, args, nil, false, nil, "")
+	return runSearchWithTelemetry(ix, args, nil, false, nil, "", false)
 }
 
 // runSearchWithTelemetry is the runSearch variant that optionally
@@ -423,7 +423,7 @@ func runSearch(ix *search.Index, args SearchArgs) (*sdk.CallToolResult, any, err
 // recorder: when non-nil, one Record call is appended on each
 // successful search (len(results) > 0). sourceRoot scopes file_chars
 // computation — file paths in results are joined to it before stat.
-func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query string, t search.Telemetry), includeInResponse bool, recorder UsageRecorder, sourceRoot string) (*sdk.CallToolResult, any, error) {
+func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query string, t search.Telemetry), includeInResponse bool, recorder UsageRecorder, sourceRoot string, warming bool) (*sdk.CallToolResult, any, error) {
 	requestedMode := ix.Mode()
 	if args.Mode != "" {
 		parsed, perr := search.ParseMode(args.Mode)
@@ -479,6 +479,9 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 		Query: args.Query,
 		Mode:  search.ModeNames()[int(effectiveMode)],
 	}
+	if warming {
+		resp.Semantic = "warming"
+	}
 	if hasFilters {
 		resp.Filter = &SearchFilterMeta{
 			Languages:              args.Languages,
@@ -513,6 +516,9 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 	}
 	header := fmt.Sprintf("Search results for: %q (mode=%s)",
 		args.Query, search.ModeNames()[int(effectiveMode)])
+	if warming {
+		header += " — semantic index still warming (BM25 results now; hybrid arriving shortly)"
+	}
 	if hasFilters {
 		header += fmt.Sprintf(" — %d of %d candidate%s passed filter",
 			len(results), rawCount, pluralS(rawCount))
@@ -611,13 +617,13 @@ func formatTelemetryLine(t search.Telemetry) string {
 // runFindRelated executes a find_related against a resolved Index. The
 // caller has already validated args.FilePath and args.Line.
 func runFindRelated(ix *search.Index, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
-	return runFindRelatedWithUsage(ix, args, nil, "")
+	return runFindRelatedWithUsage(ix, args, nil, "", false)
 }
 
 // runFindRelatedWithUsage is runFindRelated + optional usage recording.
 // recorder=nil disables tracking; otherwise one Record call is appended
 // per successful response. sourceRoot scopes file_chars computation.
-func runFindRelatedWithUsage(ix *search.Index, args FindRelatedArgs, recorder UsageRecorder, sourceRoot string) (*sdk.CallToolResult, any, error) {
+func runFindRelatedWithUsage(ix *search.Index, args FindRelatedArgs, recorder UsageRecorder, sourceRoot string, warming bool) (*sdk.CallToolResult, any, error) {
 	topK := args.TopK
 	if topK <= 0 {
 		topK = DefaultTopK
@@ -627,6 +633,11 @@ func runFindRelatedWithUsage(ix *search.Index, args FindRelatedArgs, recorder Us
 	}
 	resp := FindRelatedResponse{
 		Anchor: FindRelatedAnchor{File: args.FilePath, Line: args.Line},
+	}
+	if warming {
+		// find_related needs the semantic arm; during staging it isn't ready
+		// yet. Flag it so the agent knows to retry shortly.
+		resp.Semantic = "warming"
 	}
 	results, err := ix.FindRelated(args.FilePath, args.Line, topK)
 	if err != nil {

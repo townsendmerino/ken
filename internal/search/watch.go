@@ -51,6 +51,17 @@ type WatchedIndex struct {
 	chunkerName string
 	modelDir    string
 
+	// realMode is the configured mode when serving is STAGED (M4): the initial
+	// index is published as `mode` = ModeBM25 (lexical-only, instant), and the
+	// background warm pass upgrades `mode` to realMode (e.g. ModeHybrid) once
+	// vectors are ready. Zero (ModeBM25) when not staging.
+	realMode Mode
+
+	// warmDoEnrich records whether the background warm pass must prepend the
+	// Arm B label (i.e. enrichment was deferred off the initial build — M2 lazy
+	// enrich, or M4 staged which defers both enrich and embed).
+	warmDoEnrich bool
+
 	// Current snapshot. Read via wi.ix.Load(); never nil after
 	// NewWatchedIndex returns successfully.
 	ix atomic.Pointer[Index]
@@ -280,6 +291,22 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 		fsOpts:        opts,
 		migrationDirs: migDirs,
 	}
+	// Cold-start warm deferral. staged (M4) defers BOTH the enrich parse and the
+	// embed, serving BM25 lexical instantly; lazyEnrich (M2) defers only the
+	// enrich parse (embedding stays inline). Either way the background warm pass
+	// finishes the work. warmDoEnrich records that the label must be (re)added
+	// there (it was skipped on the initial build).
+	staged := opts.StagedEmbedding && model != nil && mode.needsModel()
+	lazyEnrich := opts.LazyEnrichment && !opts.DisableEnrichment
+	warm := staged || lazyEnrich
+	if warm {
+		wi.warmDoEnrich = !opts.DisableEnrichment
+	}
+	if staged {
+		wi.realMode = mode // publish as BM25; the warm pass upgrades to this
+		wi.mode = ModeBM25
+	}
+
 	// Optional pre-publish reconcile (snapshot-seeded drift): mutate the
 	// corpus BEFORE the initial build so the first published Index already
 	// reflects the changes — one build, not seed-then-reconcile's two. Runs
@@ -290,15 +317,12 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 	}
 	wi.ix.Store(wi.buildUnionedIndexLocked())
 
-	// M2: lazy enrichment. The build above published a RAW index for a fast
-	// first-servable; now bring it to full quality. Ignored when enrichment is
-	// off. On the non-watching path there's no long-lived process to run it
-	// async, so enrich synchronously before returning (the returned index is
-	// fully enriched, as callers expect).
-	lazyEnrich := opts.LazyEnrichment && !opts.DisableEnrichment
+	// Bring the deferred build to full quality. On the non-watching path
+	// there's no long-lived process, so warm synchronously before returning
+	// (the returned index is fully built, as callers expect).
 	if !watch {
-		if lazyEnrich {
-			wi.enrichCorpusInBackground(context.Background())
+		if warm {
+			wi.warmCorpusInBackground(context.Background())
 		}
 		close(wi.done)
 		return wi, nil
@@ -321,13 +345,13 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 
 	go wi.loop()
 
-	// Background enrichment goroutine, tracked so Close() waits for it and
-	// cancels it via wi.ctx.
-	if lazyEnrich {
+	// Background warm goroutine, tracked so Close() waits for it and cancels it
+	// via wi.ctx.
+	if warm {
 		wi.bgWG.Add(1)
 		go func() {
 			defer wi.bgWG.Done()
-			wi.enrichCorpusInBackground(wi.ctx)
+			wi.warmCorpusInBackground(wi.ctx)
 		}()
 	}
 	return wi, nil
@@ -346,31 +370,40 @@ func (w *WatchedIndex) SnapshotBytes() ([]byte, error) {
 	return serializeIndex(ix.Chunks(), ix.Vecs(), w.mode, w.chunkerName)
 }
 
-// enrichCorpusInBackground is the cold-start M2 lazy-enrichment pass: after a
-// LazyEnrichment build published a RAW index (no Arm B labels) for a fast
-// first-servable, this re-labels every live chunk (one tree-sitter parse per
-// file), re-embeds it, and republishes the fully-enriched index atomically.
-// Runs once, off the query path (reads use the atomic snapshot throughout).
+// warmCorpusInBackground is the unified cold-start warm pass for M2 (lazy
+// enrichment) and M4 (staged embedding). After a deferred build published a
+// partial index — un-labelled (M2/M4) and/or vector-less BM25 (M4) — for a fast
+// first query, this brings it to full quality: prepend the Arm B label per file
+// (when warmDoEnrich), re-embed under the target mode, and republish atomically,
+// upgrading the served mode (bm25 → realMode) if staged.
 //
-// It holds corpusMu for the whole pass — reads are unaffected (they Load() the
-// published *Index), but watch flushes queue behind it; at cold start there are
-// typically no edits yet. ctx cancellation (Close) aborts at the next file
-// boundary. The parse honors KEN_ENRICH_FILE_BUDGET_MS via ExtractFile.
-func (w *WatchedIndex) enrichCorpusInBackground(ctx context.Context) {
+// It works on FRESH slices — the published partial index shares w.chunks/w.vecs
+// backing arrays and readers use them lock-free, so it must never mutate those
+// in place. Holds corpusMu for the pass (reads unaffected; watch flushes queue,
+// and at cold start there are typically no edits yet). ctx cancellation (Close)
+// aborts at the next file boundary. The parse honors KEN_ENRICH_FILE_BUDGET_MS
+// via ExtractFile; embedding honors the M3 cache.
+func (w *WatchedIndex) warmCorpusInBackground(ctx context.Context) {
 	start := time.Now()
 	w.corpusMu.Lock()
 	defer w.corpusMu.Unlock()
 
-	// Work on FRESH slices: the currently-published raw index shares
-	// w.chunks/w.vecs' backing arrays and readers use it lock-free (atomic
-	// Load), so we must NOT mutate those elements in place — build the
-	// enriched corpus alongside and swap the whole thing in atomically.
+	// Target mode: realMode when staged (upgrades bm25 → hybrid), else the
+	// current mode (M2 lazy-only keeps its mode).
+	targetMode := w.mode
+	if w.realMode != ModeBM25 {
+		targetMode = w.realMode
+	}
+	needEmbed := w.model != nil && targetMode.needsModel()
+
 	newChunks := make([]chunk.Chunk, len(w.chunks))
 	copy(newChunks, w.chunks)
-	newVecs := make([][]float32, len(w.vecs))
-	copy(newVecs, w.vecs)
+	newVecs := make([][]float32, len(newChunks))
+	if !needEmbed {
+		// Preserve any existing vectors verbatim (nothing to (re)embed).
+		copy(newVecs, w.vecs)
+	}
 
-	// Group live chunk indices by file (labels are per-file).
 	byFile := map[string][]int{}
 	for i := range newChunks {
 		if newChunks[i].Tombstoned {
@@ -379,37 +412,47 @@ func (w *WatchedIndex) enrichCorpusInBackground(ctx context.Context) {
 		byFile[newChunks[i].File] = append(byFile[newChunks[i].File], i)
 	}
 
-	enriched := 0
 	for rel, idxs := range byFile {
 		if ctx.Err() != nil {
-			return // Close() cancelled — leave the raw index published
+			return // Close() cancelled — leave the partial index published
 		}
-		data, err := os.ReadFile(filepath.Join(w.root, rel))
-		if err != nil {
-			continue
-		}
-		label := enrichLabelFor(rel, data)
-		if label == "" {
-			continue // no extractor / no structural content — raw is correct
-		}
-		for _, i := range idxs {
-			newChunks[i].Text = label + newChunks[i].Text // reassigns the copy, not w.chunks[i]
-			if w.model != nil && i < len(newVecs) {
-				newVecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, newChunks[i].Text) // fresh vec, not shared array
+		var label string
+		if w.warmDoEnrich {
+			if data, err := os.ReadFile(filepath.Join(w.root, rel)); err == nil {
+				label = enrichLabelFor(rel, data)
 			}
 		}
-		enriched++
+		for _, i := range idxs {
+			if label != "" {
+				newChunks[i].Text = label + newChunks[i].Text // reassigns the copy, not w.chunks[i]
+			}
+			if needEmbed {
+				newVecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, newChunks[i].Text)
+			}
+		}
 	}
-	if enriched == 0 {
-		return
-	}
+
 	w.chunks = newChunks
 	w.vecs = newVecs
+	w.mode = targetMode // upgrade bm25 → hybrid when staged; unchanged otherwise
 	w.ix.Store(w.buildUnionedIndexLocked())
 	w.notifySwap()
-	// Reuse the flush notification so ken-mcp's OnFlush re-persists the now
-	// -enriched snapshot (M1) — a boot after this is a clean enriched load.
-	w.notifyFlush(len(w.chunks)+len(w.extraChunks), enriched, 0, time.Since(start))
+	// Reuse the flush notification so ken-mcp's OnFlush re-persists the now-full
+	// snapshot (M1) — a boot after this is a clean full-quality load.
+	w.notifyFlush(len(w.chunks)+len(w.extraChunks), len(byFile), 0, time.Since(start))
+}
+
+// Warming reports whether the semantic arm is still being built in the
+// background (M4 staged embedding): the served index is BM25 but will upgrade
+// to the configured mode. False when not staging, or once the upgrade lands.
+// realMode is set once at construction (before any goroutine), so it's safe to
+// read; the served mode is an atomic Load.
+func (w *WatchedIndex) Warming() bool {
+	if w.realMode == ModeBM25 {
+		return false
+	}
+	ix := w.Load()
+	return ix == nil || ix.Mode() != w.realMode
 }
 
 // EmbedModel returns the Model2Vec model this index queries with (nil for

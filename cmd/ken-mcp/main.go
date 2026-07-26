@@ -245,13 +245,13 @@ func buildOrLoadSnapshot(ctx context.Context, dir string, mode search.Mode, mode
 		return nil, err
 	}
 	if persistSnapshot {
-		// M2: with lazy enrichment the build just published a RAW index; the
-		// background enrich pass will republish the enriched one and its
-		// OnFlush persists that. Persisting the raw index now would race that
-		// and could leave a raw snapshot on disk, so let the background pass
-		// own the write. (A crash mid-enrich → no snapshot → next boot
-		// lazy-rebuilds, which is also fast — self-consistent.)
-		if !fsOpts.LazyEnrichment {
+		// M2/M4: with lazy enrichment or staged embedding the build just
+		// published a RAW/BM25 index; the background pass republishes the full
+		// one and its OnFlush persists that. Persisting the partial index now
+		// would race that and could leave a partial snapshot on disk, so let
+		// the background pass own the write. (A crash mid-warm → no snapshot →
+		// next boot rebuilds, which is also fast — self-consistent.)
+		if !fsOpts.LazyEnrichment && !fsOpts.StagedEmbedding {
 			writeSnapshot(dir, wi, mode, chunker, modelDir, fsOpts, logger)
 		}
 	}
@@ -371,6 +371,20 @@ func main() {
 	embedCacheEnabled := envBool("KEN_MCP_EMBED_CACHE", false, logger)
 	embedCacheMax := envInt("KEN_MCP_EMBED_CACHE_MAX", embedcache.DefaultMaxEntries, logger)
 
+	// Cold-start M4 (opt-in, default off): staged readiness — serve BM25
+	// (lexical-only) instantly on a cold hybrid build, embed in the background,
+	// then upgrade to hybrid. Tool responses carry "semantic":"warming" until
+	// the upgrade lands. Takes precedence over lazy enrichment (both defer
+	// background work; keep them exclusive to avoid two background passes).
+	staged := envBool("KEN_MCP_STAGED", false, logger)
+	if staged && lazyEnrich {
+		logger.Logf(kenmcp.LogWarn, "KEN_MCP_STAGED and KEN_MCP_LAZY_ENRICH both set — using staged (it also serves before enrichment via inline enrich)")
+		lazyEnrich = false
+	}
+	if staged {
+		logger.Logf(kenmcp.LogInfo, "staged readiness on (KEN_MCP_STAGED): cold builds serve BM25 first, embed to hybrid in background")
+	}
+
 	// M5: neural reranker — opt-in (default off), loaded lazily on the
 	// first hybrid+rerank query so the ~491 ms encoder.Load stays off the
 	// cold-start path. The model is shared across every WatchedIndex (via
@@ -459,6 +473,7 @@ func main() {
 			DisableFoldMigrations: noAutoMigrations,
 			LogWriter:             os.Stderr,
 			LazyEnrichment:        lazyEnrich,
+			StagedEmbedding:       staged,
 		}
 		// Assign the interface only when non-nil so a nil *Cache doesn't become
 		// a non-nil VecCache holding a nil pointer.

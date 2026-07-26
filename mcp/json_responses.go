@@ -26,9 +26,13 @@ import (
 // downgrade), the filter block (when filters were applied), and
 // the per-result list.
 type SearchResponse struct {
-	Query   string            `json:"query"`
-	Mode    string            `json:"mode"`
-	Results []SearchResultRow `json:"results"`
+	Query string `json:"query"`
+	Mode  string `json:"mode"`
+	// Semantic is "warming" when staged readiness (M4) is serving BM25
+	// lexical results while the embedding arm builds in the background; the
+	// mode field reads "bm25" meanwhile. Absent once hybrid is ready.
+	Semantic string            `json:"semantic,omitempty"`
+	Results  []SearchResultRow `json:"results"`
 	// Filter is non-nil ONLY when one of languages /
 	// path_contains / exclude_path_contains was set. Lets agents
 	// see when a filter was the limiting factor — same signal the
@@ -59,8 +63,10 @@ type SearchFilterMeta struct {
 // query echo (find_related has no query string and no filters in
 // Pass 1).
 type FindRelatedResponse struct {
-	Anchor  FindRelatedAnchor `json:"anchor"`
-	Results []SearchResultRow `json:"results"`
+	Anchor FindRelatedAnchor `json:"anchor"`
+	// Semantic is "warming" during M4 staged readiness (see SearchResponse).
+	Semantic string            `json:"semantic,omitempty"`
+	Results  []SearchResultRow `json:"results"`
 }
 
 // FindRelatedAnchor echoes the (file, line) the agent used to seed

@@ -340,7 +340,33 @@ data — enable where full rebuilds of the same content recur. Tests: vec
 serialization, put/get, model/dim scope invalidation, size-bound eviction
 (-race).
 
-### M4 — Serve-before-warm (staged readiness)
+### M4 — Serve-before-warm (staged readiness) — SHIPPED (opt-in)
+
+**Shipped v1, opt-in (`KEN_MCP_STAGED=1`, default off).** On a cold hybrid
+build, the initial index is published as **BM25 (lexical-only)** for an instant
+first query; a background pass then enriches + embeds and republishes as hybrid.
+Staged defers **both** the enrich parse and the embed (it subsumes M2 for the
+staged case), so first-servable is the pure BM25 floor. Measured on yii2 (~12 k
+chunks, M1 Pro, median of 3): inline hybrid 2.37 s → **staged first-servable
+564 ms = 4.2×**; the full hybrid+enriched index lands in the background.
+
+The M2 and M4 background passes are now one unified `warmCorpusInBackground`
+(re-label when deferred, re-embed under the target mode, upgrade bm25→hybrid,
+atomic fresh-slice republish). `WatchedIndex.Warming()` reports the interim
+state; **tool responses carry `"semantic":"warming"`** (JSON) + a header note
+(markdown) until the upgrade lands — the honesty contract, so a bench/agent
+knows it's getting lexical-only temporarily. `KEN_MCP_STAGED` takes precedence
+over `KEN_MCP_LAZY_ENRICH` (both defer background work; kept exclusive). A lazy
+cold build defers the snapshot persist to the warm pass's OnFlush (persists the
+full hybrid snapshot; crash mid-warm → next boot rebuilds, also fast).
+
+Dual-number honesty: report BOTH first-servable (564 ms) and fully-warm (~2.4 s)
+in any cold-start comparison. Default OFF pending the 4-core-x86 profile + rebench.
+Tests (-race): staged serves bm25 then upgrades to hybrid (watch), synchronous
+upgrade (no-watch), and the `semantic:warming` wire field.
+
+*(Original design below.)*
+
 
 Don't gate the first servable query on the semantic arm.
 

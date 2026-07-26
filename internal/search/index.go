@@ -114,6 +114,16 @@ type FSOptions struct {
 	// load (which skips embedding entirely). nil = no cache (encode directly).
 	EmbedCache VecCache
 
+	// StagedEmbedding defers the semantic (embedding) arm off the cold-build
+	// critical path (cold-start M4). When true on a model-needing mode, the
+	// initial build embeds NOTHING and serves as BM25 (lexical-only) for an
+	// instant first query; a WatchedIndex then embeds every chunk in the
+	// background and republishes as the configured mode (bm25 → hybrid) — the
+	// same serve-bm25-then-upgrade pattern as model auto-fetch (ADR-037).
+	// Ignored for ModeBM25 (nothing to defer). BM25 results are correct
+	// immediately; the semantic arm just arrives shortly after.
+	StagedEmbedding bool
+
 	// LazyEnrichment defers Arm B enrichment off the cold-build critical path
 	// (cold-start M2). When true, the initial build embeds RAW chunks (no
 	// `# func:` label) so first-servable pays only the walk/chunk/embed floor,
@@ -485,11 +495,14 @@ func walkAndChunkFSWithModel(ctx context.Context, fsys fs.FS, mode Mode, chunker
 				// unchanged, which is the correct no-op behavior
 				// for unsupported languages). DisableEnrichment
 				// opts out entirely.
-				// LazyEnrichment defers this to a background pass (M2): the
-				// initial build embeds raw chunks for a fast first-servable.
-				enrichChunks(j.rel, data, cs, opts.DisableEnrichment || opts.LazyEnrichment)
+				// LazyEnrichment (M2) and StagedEmbedding (M4) both defer the
+				// enrichment parse to the background warm pass for a fast
+				// first-servable; the initial build serves un-labelled chunks.
+				enrichChunks(j.rel, data, cs, opts.DisableEnrichment || opts.LazyEnrichment || opts.StagedEmbedding)
+				// StagedEmbedding (M4) defers embedding to a background pass:
+				// the initial build serves BM25 for a fast first query.
 				var localVecs [][]float32
-				if model != nil {
+				if model != nil && !opts.StagedEmbedding {
 					localVecs = make([][]float32, len(cs))
 					for i, c := range cs {
 						localVecs[i] = encodeCached(opts.EmbedCache, model, c.Text)
