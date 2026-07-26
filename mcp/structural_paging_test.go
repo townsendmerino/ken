@@ -97,3 +97,30 @@ func TestSymbols_Truncation(t *testing.T) {
 		t.Errorf("markdown missing truncation notice:\n%s", md)
 	}
 }
+
+// TestSymbols_OvershotJSON is the audit N9 regression: paging past the end in
+// json mode must carry an "overshot" signal in the structured response, not a
+// silent empty list.
+func TestSymbols_OvershotJSON(t *testing.T) {
+	ctx, sess, cleanup := newInMemoryServerClient(t)
+	defer cleanup()
+
+	res, err := sess.CallTool(ctx, &sdk.CallToolParams{
+		Name:      "symbols",
+		Arguments: map[string]any{"offset": 100000, "output": "json"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(symbols): %v", err)
+	}
+	var resp SymbolsResponse
+	txt := res.Content[0].(*sdk.TextContent).Text
+	if err := json.Unmarshal([]byte(txt), &resp); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, txt)
+	}
+	if resp.TotalSymbols == 0 {
+		t.Skip("corpus has no symbols; overshoot not exercised")
+	}
+	if !resp.Overshot {
+		t.Errorf("offset past the end should set overshot=true in json mode; got %+v", resp)
+	}
+}

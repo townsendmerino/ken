@@ -136,10 +136,13 @@ type OutlineResponse struct {
 	ByFile  []OutlineFileEntry `json:"by_file,omitempty"`
 	// Paging metadata for directory outlines (audit §6). TotalFiles is
 	// the count under the path before the offset/limit window; Truncated
-	// is true when the window didn't reach the end.
+	// is true when the window didn't reach the end; Overshot is true when
+	// offset was past the end (audit N9 — so json-mode agents get the
+	// overshoot signal the markdown callers already got, not a silent []).
 	TotalFiles int  `json:"total_files,omitempty"`
 	Offset     int  `json:"offset,omitempty"`
 	Truncated  bool `json:"truncated,omitempty"`
+	Overshot   bool `json:"overshot,omitempty"`
 }
 
 // OutlineEntryOut is one item in a file's outline.
@@ -166,10 +169,11 @@ type SymbolsResponse struct {
 	Symbols    []string `json:"symbols"`
 	// Paging metadata (audit §6). TotalSymbols is the match count before
 	// the offset/limit window; Truncated is true when it didn't reach the
-	// end.
+	// end; Overshot is true when offset was past the end (audit N9).
 	TotalSymbols int  `json:"total_symbols,omitempty"`
 	Offset       int  `json:"offset,omitempty"`
 	Truncated    bool `json:"truncated,omitempty"`
+	Overshot     bool `json:"overshot,omitempty"`
 }
 
 // RecentlyChangedResponse is the `recently_changed` tool's JSON shape.

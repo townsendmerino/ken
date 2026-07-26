@@ -354,7 +354,7 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	jsonMode := args.Output == "json"
 	// Entries always initialized (audit R15): JSON mode must emit "entries":
 	// [] not null on an empty window, matching every other empty path here.
-	resp := OutlineResponse{Path: path, Entries: []OutlineEntryOut{}, TotalFiles: totalFiles, Offset: lo, Truncated: truncated}
+	resp := OutlineResponse{Path: path, Entries: []OutlineEntryOut{}, TotalFiles: totalFiles, Offset: lo, Truncated: truncated, Overshot: overshot}
 	if overshot {
 		return dispatchOutput(args.Output, resp,
 			fmt.Sprintf("offset %d is past the end (%d file%s total). Lower `offset`.", args.Offset, totalFiles, pluralS(totalFiles)))
@@ -446,6 +446,7 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 		TotalSymbols: totalSymbols,
 		Offset:       lo,
 		Truncated:    truncated,
+		Overshot:     overshot,
 	}
 	if overshot {
 		// Paged past the end (audit R15): tell the agent it overshot rather
