@@ -33,6 +33,7 @@ package search
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"io/fs"
 	"os"
@@ -703,14 +704,30 @@ func buildIndexFromDocs(chunks []chunk.Chunk, docs [][]string, vecs [][]float32,
 // tokenizeDocs rebuilds the map from the current chunk set each call, so
 // entries whose text was edited away are evicted; the map holds at most
 // one entry per live chunk (no unbounded process-lifetime growth — the
-// smell called out in audit §6). Keys are the chunks' own text strings,
-// so the map stores string headers, not copies of the text bytes. Not
-// safe for concurrent use; the watch path only touches it under corpusMu.
+// smell called out in audit §6). Not safe for concurrent use; the watch
+// path only touches it under corpusMu.
+//
+// Keyed by a 64-bit FNV hash of the chunk text, NOT the full text string
+// (audit R11): a string-keyed map hashes the ENTIRE text on every lookup
+// AND insert — two full-length hashes per chunk per flush, O(corpus bytes)
+// even when nothing changed (e.g. a Tier-2 SetExtraChunks rebuild). The
+// hash key is computed once per chunk and the map then hashes 8 bytes.
+// Collision risk is a benign, astronomically-rare wrong-tokens-for-one-
+// chunk (same class encodeCached already accepts for embeddings).
 type tokenCache struct {
-	byText map[string][]string
+	byHash map[uint64][]string
 }
 
-func newTokenCache() *tokenCache { return &tokenCache{byText: map[string][]string{}} }
+func newTokenCache() *tokenCache { return &tokenCache{byHash: map[uint64][]string{}} }
+
+// hashText64 is a fast (non-crypto) FNV-1a hash of text, used only as an
+// ephemeral in-process token-cache key (never serialized), so seed
+// stability across processes is irrelevant.
+func hashText64(text string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(text))
+	return h.Sum64()
+}
 
 // tokenizeDocs returns the index-aligned BM25 token lists for chunks.
 // Tombstoned chunks map to nil (no postings, df unaffected). Misses are
@@ -731,24 +748,26 @@ func tokenizeDocs(chunks []chunk.Chunk, cache *tokenCache) [][]string {
 		parallelTokenize(chunks, docs, miss)
 		return docs
 	}
-	next := make(map[string][]string, len(chunks))
+	next := make(map[uint64][]string, len(chunks))
+	hashes := make([]uint64, len(chunks)) // one full-text hash per chunk, reused below
 	miss := make([]int, 0)
 	for i := range chunks {
 		if chunks[i].Tombstoned {
 			continue
 		}
-		if toks, ok := cache.byText[chunks[i].Text]; ok {
+		hashes[i] = hashText64(chunks[i].Text)
+		if toks, ok := cache.byHash[hashes[i]]; ok {
 			docs[i] = toks
-			next[chunks[i].Text] = toks
+			next[hashes[i]] = toks
 		} else {
 			miss = append(miss, i)
 		}
 	}
 	parallelTokenize(chunks, docs, miss)
 	for _, i := range miss {
-		next[chunks[i].Text] = docs[i]
+		next[hashes[i]] = docs[i]
 	}
-	cache.byText = next
+	cache.byHash = next
 	return docs
 }
 

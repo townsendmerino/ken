@@ -93,12 +93,12 @@ func TestTokenizeDocs_CacheReusesAndEvicts(t *testing.T) {
 	}
 
 	// The edited-away text must be gone from the cache (bounded growth).
-	if _, stale := cache.byText[oldText]; stale {
+	if _, stale := cache.byHash[hashText64(oldText)]; stale {
 		t.Errorf("cache still holds evicted text %q", oldText)
 	}
 	// The cache holds exactly the live chunks (100), not 101.
-	if len(cache.byText) != 100 {
-		t.Errorf("cache size = %d, want 100 (one per live chunk, stale evicted)", len(cache.byText))
+	if len(cache.byHash) != 100 {
+		t.Errorf("cache size = %d, want 100 (one per live chunk, stale evicted)", len(cache.byHash))
 	}
 }
 

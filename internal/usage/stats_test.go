@@ -277,3 +277,43 @@ func writeRecord(t *testing.T, path, call string, results, snippet, file int, ts
 		t.Fatalf("write savings record: %v", err)
 	}
 }
+
+// TestRecorder_ReopensAfterRotation is the audit R10 regression: on POSIX a
+// moved/removed file leaves the cached fd writing to the rotated-away inode.
+// The amortized SameFile check must notice and reopen the live path.
+func TestRecorder_ReopensAfterRotation(t *testing.T) {
+	orig := usageRotationCheckEvery
+	usageRotationCheckEvery = 1 // check on every write
+	defer func() { usageRotationCheckEvery = orig }()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "savings.jsonl")
+	r := NewRecorder(path)
+
+	r.Record("search", 1, 10, 100) // opens + writes line 1
+	// Rotate: move the current file aside (logrotate-style).
+	rotated := path + ".1"
+	if err := os.Rename(path, rotated); err != nil {
+		t.Fatal(err)
+	}
+	// Next Record must detect the rotation and reopen the live path.
+	r.Record("find_related", 1, 10, 100)
+	t.Cleanup(func() { _ = r.Close() })
+
+	// The live path exists again with exactly the post-rotation record...
+	live, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("live path not recreated after rotation: %v", err)
+	}
+	if n := len(strings.Split(strings.TrimRight(string(live), "\n"), "\n")); n != 1 {
+		t.Errorf("live file has %d lines, want 1 (only the post-rotation record)", n)
+	}
+	if !strings.Contains(string(live), "find_related") {
+		t.Errorf("post-rotation record didn't land in the live file: %s", live)
+	}
+	// ...and the rotated file kept the original record (not appended to).
+	old, _ := os.ReadFile(rotated)
+	if !strings.Contains(string(old), "search") || strings.Contains(string(old), "find_related") {
+		t.Errorf("rotated file should hold only the pre-rotation record: %s", old)
+	}
+}

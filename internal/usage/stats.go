@@ -61,8 +61,32 @@ type Recorder struct {
 	// file is the append handle, opened lazily on the first Record and
 	// cached (audit §19): the old code re-ran MkdirAll + Open + Close on
 	// every tool call. Nil until first successful open, or after a write
-	// error resets it so the next call reopens (handles log rotation).
+	// error / detected rotation resets it so the next call reopens.
 	file *os.File
+	// writesSinceCheck counts writes since the last rotation check. On
+	// POSIX, rename(2)/unlink(2) do NOT invalidate an open fd, so a write
+	// error never fires after `logrotate` moves the file — the handle keeps
+	// appending to the rotated-away (or unlinked) inode. We periodically
+	// os.SameFile the path against the fd to catch it (audit R10).
+	writesSinceCheck int
+}
+
+// usageRotationCheckEvery bounds how often Record stats the path to detect
+// rotation. ~120-byte appends; a check every few hundred is negligible. A
+// var (not const) only so tests can force a check every write; production
+// never reassigns it.
+var usageRotationCheckEvery = 256
+
+// sameFileAsHandle reports whether path still names the same inode f points
+// at. A missing path (rotated/unlinked with nothing recreated) or any stat
+// error returns false → the caller reopens the live path.
+func sameFileAsHandle(f *os.File, path string) bool {
+	fi1, err1 := f.Stat()
+	fi2, err2 := os.Stat(path)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return os.SameFile(fi1, fi2)
 }
 
 // NewRecorder returns a Recorder that appends to path. path is NOT
@@ -123,6 +147,19 @@ func (r *Recorder) Record(callType string, results, snippetChars, fileChars int)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Amortized rotation check (audit R10): every N writes, verify the cached
+	// handle still names the live path; if `logrotate` moved/removed it, drop
+	// the handle so the open below reopens (recreating the file).
+	if r.file != nil {
+		r.writesSinceCheck++
+		if r.writesSinceCheck >= usageRotationCheckEvery {
+			r.writesSinceCheck = 0
+			if !sameFileAsHandle(r.file, r.path) {
+				_ = r.file.Close()
+				r.file = nil
+			}
+		}
+	}
 	if r.file == nil {
 		// First call (or reopening after a write error / rotation). O_APPEND
 		// keeps sub-PIPE_BUF writes atomic across processes on a persistent
@@ -136,10 +173,11 @@ func (r *Recorder) Record(callType string, results, snippetChars, fileChars int)
 			return // retried on the next call
 		}
 		r.file = f
+		r.writesSinceCheck = 0
 	}
 	if _, err := r.file.Write(line); err != nil {
-		// Drop the handle so the next call reopens (e.g. after log rotation
-		// moved the file out from under us).
+		// Drop the handle so the next call reopens (e.g. a transient write
+		// error, or a stat-check gap where the file was moved).
 		_ = r.file.Close()
 		r.file = nil
 	}
