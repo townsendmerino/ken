@@ -159,10 +159,10 @@ func (c *Cache) flushLocked() {
 		c.buf = make(map[string][]float32)
 		return
 	}
+	defer func() { _ = stmt.Close() }()
 	for k, v := range c.buf {
 		_, _ = stmt.Exec([]byte(k), vecToBytes(v))
 	}
-	_ = stmt.Close()
 	_ = tx.Commit()
 	c.buf = make(map[string][]float32)
 	c.evictLocked()

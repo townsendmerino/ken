@@ -327,23 +327,30 @@ func sqliteFillIndexes(ctx context.Context, conn *sql.DB, t *tableInfo) error {
 
 	for _, m := range metas {
 		q2 := fmt.Sprintf("PRAGMA index_info(%s)", sqliteQuoteIdent(m.name))
-		colRows, err := conn.QueryContext(ctx, q2)
+		// Scoped closure so colRows.Close is deferred per-iteration (not
+		// leaked until function return) and rows.Err() is checked.
+		cols, err := func() ([]string, error) {
+			colRows, err := conn.QueryContext(ctx, q2)
+			if err != nil {
+				return nil, err
+			}
+			defer colRows.Close()
+			var cols []string
+			for colRows.Next() {
+				var seqno, cid int
+				var name sql.NullString
+				if err := colRows.Scan(&seqno, &cid, &name); err != nil {
+					return nil, err
+				}
+				if name.Valid {
+					cols = append(cols, name.String)
+				}
+			}
+			return cols, colRows.Err()
+		}()
 		if err != nil {
 			return err
 		}
-		var cols []string
-		for colRows.Next() {
-			var seqno, cid int
-			var name sql.NullString
-			if err := colRows.Scan(&seqno, &cid, &name); err != nil {
-				colRows.Close()
-				return err
-			}
-			if name.Valid {
-				cols = append(cols, name.String)
-			}
-		}
-		colRows.Close()
 		// Render in the same indexdef shape extractIndexColumns understands.
 		uniqueKW := ""
 		if m.unique {
@@ -496,10 +503,10 @@ func sqliteAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot
 				warn(opts, "sqlite: sample query failed for %s: %v", t.name, err)
 				return
 			}
+			defer rows.Close()
 			cols, err := rows.Columns()
 			if err != nil {
 				warn(opts, "sqlite: column metadata for %s: %v", t.name, err)
-				rows.Close()
 				return
 			}
 			var collected [][]string
@@ -525,7 +532,6 @@ func sqliteAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot
 			if err := rows.Err(); err != nil {
 				warn(opts, "sqlite: sample row iteration for %s ended early: %v", t.name, err)
 			}
-			rows.Close()
 			t.sampleRows = collected
 		})
 	}

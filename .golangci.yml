@@ -22,6 +22,11 @@ linters:
     - ineffassign
     - staticcheck
     - unused
+    # SQL-shape linters aimed at internal/db's bug history (audit §20):
+    # rowserrcheck catches a missing rows.Err() after a Rows loop (shipped
+    # twice, hand-fixed twice); sqlclosecheck catches an unclosed Rows/Stmt.
+    - rowserrcheck
+    - sqlclosecheck
 
   settings:
     staticcheck:

@@ -439,36 +439,37 @@ JOIN information_schema.key_column_usage kcu
 WHERE tc.table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
   AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE');
 `
-	rows, err := conn.QueryContext(ctx, q1)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var schema, name, col, ctype string
-		if err := rows.Scan(&schema, &name, &col, &ctype); err != nil {
-			rows.Close()
+	if err := func() error {
+		rows, err := conn.QueryContext(ctx, q1)
+		if err != nil {
 			return err
 		}
-		if !filterSchema(schema, "mysql", opts) {
-			continue
-		}
-		t, ok := tables[schema+"."+name]
-		if !ok {
-			continue
-		}
-		for i := range t.columns {
-			if t.columns[i].name == col {
-				switch ctype {
-				case "PRIMARY KEY":
-					t.columns[i].isPrimaryKey = true
-				case "UNIQUE":
-					t.columns[i].isUnique = true
+		defer rows.Close()
+		for rows.Next() {
+			var schema, name, col, ctype string
+			if err := rows.Scan(&schema, &name, &col, &ctype); err != nil {
+				return err
+			}
+			if !filterSchema(schema, "mysql", opts) {
+				continue
+			}
+			t, ok := tables[schema+"."+name]
+			if !ok {
+				continue
+			}
+			for i := range t.columns {
+				if t.columns[i].name == col {
+					switch ctype {
+					case "PRIMARY KEY":
+						t.columns[i].isPrimaryKey = true
+					case "UNIQUE":
+						t.columns[i].isUnique = true
+					}
 				}
 			}
 		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+		return rows.Err()
+	}(); err != nil {
 		return err
 	}
 
@@ -839,10 +840,10 @@ func mysqlAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot,
 				warn(opts, "mysql: sample query failed for %s.%s: %v", t.schema, t.name, err)
 				return nil
 			}
+			defer rows.Close()
 			cols, err := rows.Columns()
 			if err != nil {
 				warn(opts, "mysql: column metadata for %s.%s: %v", t.schema, t.name, err)
-				rows.Close()
 				return nil
 			}
 			// Per-column DB type names so we convert []byte→string ONLY for
@@ -889,7 +890,6 @@ func mysqlAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot,
 			if err := rows.Err(); err != nil {
 				warn(opts, "mysql: sample row iteration for %s ended early: %v", t.name, err)
 			}
-			rows.Close()
 			t.sampleRows = collected
 			return nil
 		})
