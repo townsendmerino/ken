@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -388,7 +389,10 @@ func TestReindexDBTool_InProgress(t *testing.T) {
 // facing response includes the error text verbatim. We don't try to
 // classify the error (transient vs fatal) — that's the agent's call.
 func TestReindexDBTool_Error(t *testing.T) {
-	const errText = "introspection query failed: connection refused"
+	// A pgconn connect failure names the internal host, service account,
+	// database, and a private IP. The tool result reaches the MODEL's context,
+	// so it must be sanitized (audit db/mcp #4) — never the raw error.
+	const errText = "db: Refresh: db: connect: failed to connect to `host=prod-pg.internal user=ken_ro database=billing`: dial tcp 10.0.0.5:5432: connect: connection refused"
 	ctx, sess, cleanup := newReindexServerClient(t, &mockDB{
 		TryRefreshFunc: func(context.Context) ReindexResult {
 			return ReindexResult{Err: &mockError{errText}}
@@ -407,8 +411,10 @@ func TestReindexDBTool_Error(t *testing.T) {
 	if !strings.Contains(txt, "Reindex failed:") {
 		t.Errorf("expected 'Reindex failed:' prefix, got: %s", txt)
 	}
-	if !strings.Contains(txt, errText) {
-		t.Errorf("expected verbatim error text, got: %s", txt)
+	for _, leak := range []string{"prod-pg.internal", "ken_ro", "billing", "10.0.0.5", "host=", "user="} {
+		if strings.Contains(txt, leak) {
+			t.Errorf("reindex_db result leaked %q into the model context: %s", leak, txt)
+		}
 	}
 }
 
@@ -498,5 +504,34 @@ func TestServer_NoRepoNoDefault_ReturnsValidationText(t *testing.T) {
 	txt := res.Content[0].(*sdk.TextContent).Text
 	if !strings.Contains(txt, "no repo specified") {
 		t.Errorf("expected 'no repo specified' text, got: %s", txt)
+	}
+}
+
+// TestSafeDBErrorMessage: the reindex_db error path must never leak DB
+// credentials or internal topology into the model's context (audit db/mcp #4).
+func TestSafeDBErrorMessage(t *testing.T) {
+	// Connection-class error (pgconn names host/user/database + a private IP).
+	connErr := errors.New("db: Refresh: db: connect: failed to connect to `host=prod-pg.internal user=ken_ro database=billing`: dial tcp 10.0.0.5:5432: connect: connection refused")
+	got := safeDBErrorMessage(connErr)
+	for _, leak := range []string{"prod-pg.internal", "ken_ro", "billing", "10.0.0.5", "host=prod", "user=ken"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("connect-class error leaked %q: %q", leak, got)
+		}
+	}
+	if !strings.Contains(got, "could not connect") {
+		t.Errorf("connect-class error should collapse to a generic message; got %q", got)
+	}
+
+	// Query-class error: schema detail is fine, but any stray topology token
+	// is still redacted as a backstop.
+	qErr := errors.New("db: Refresh: ERROR: permission denied for table secrets (host=leaky user=admin)")
+	got = safeDBErrorMessage(qErr)
+	if !strings.Contains(got, "permission denied for table secrets") {
+		t.Errorf("query-class error should keep its detail; got %q", got)
+	}
+	for _, leak := range []string{"host=leaky", "user=admin"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("query-class error leaked %q: %q", leak, got)
+		}
 	}
 }

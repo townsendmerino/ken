@@ -477,9 +477,17 @@ func TestRedactDSN(t *testing.T) {
 		// in the authority), so the fail-safe <redacted> branch fires.
 		// That's still safe — the password doesn't leak.
 		{"mysql URL form with parens", "mysql://alice:s3cret@tcp(host:3306)/db", "<redacted>"},
-		// Native go-sql-driver/mysql form: no `://`; strip up to first '@'.
+		// Native go-sql-driver/mysql form: no `://`; strip up to the LAST
+		// '@' before the last '/' (mirrors the driver — '@', ':' and '/'
+		// are all legal in a password; audit db/mcp #2).
 		{"native MySQL TCP", "alice:s3cret@tcp(host:3306)/db?parseTime=true", "tcp(host:3306)/db?parseTime=true"},
 		{"native MySQL unix socket", "alice:s3cret@unix(/var/run/mysqld.sock)/db", "unix(/var/run/mysqld.sock)/db"},
+		// '@' inside the password (the audit db/mcp #2 leak): the FIRST-'@'
+		// cut returned `s05cret!@tcp(...)`, leaking the tail.
+		{"@ in password", "svc:s3cret@!@tcp(db.internal:3306)/app", "tcp(db.internal:3306)/app"},
+		{"two @ in password", "svc:a@b@c@tcp(h:3306)/app", "tcp(h:3306)/app"},
+		{"@ in password, unix socket path has /", "svc:s3cret@x@unix(/var/run/m.sock)/db", "unix(/var/run/m.sock)/db"},
+		{": in password", "svc:s3:cret@tcp(h:3306)/db", "tcp(h:3306)/db"},
 		// SQLite: no userinfo to redact; unchanged.
 		{"sqlite three-slash", "sqlite:///tmp/test.db", "sqlite:///tmp/test.db"},
 		// Edge case: input contains '@' but no scheme — treat as native form.

@@ -1137,11 +1137,19 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 // On URL-parse failure for the scheme'd case, returns "<redacted>"
 // rather than risking the original.
 func redactDSN(dsn string) string {
-	// Native driver DSN (no scheme): strip everything up to and
-	// including the first '@'.
+	// Native driver DSN (no scheme): strip the userinfo. go-sql-driver's
+	// grammar is `[user[:password]@][net[(addr)]]/dbname[?params]` and it
+	// splits on the LAST '@' before the last '/' (so '@', ':' and '/' are all
+	// legal inside the password). Cutting on the FIRST '@' (audit db/mcp #2)
+	// leaked the password tail for a DSN like `svc:p@ss@tcp(h)/db`. Mirror the
+	// driver: last '@' before the last '/'.
 	if !strings.Contains(dsn, "://") {
-		if _, after, ok := strings.Cut(dsn, "@"); ok {
-			return after
+		lastSlash := strings.LastIndex(dsn, "/")
+		if lastSlash < 0 {
+			lastSlash = len(dsn)
+		}
+		if i := strings.LastIndex(dsn[:lastSlash], "@"); i >= 0 {
+			return dsn[i+1:]
 		}
 		return dsn // no userinfo to redact
 	}

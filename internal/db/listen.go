@@ -78,9 +78,13 @@ const triggerRecheckInterval = 30 * time.Second
 // WaitForNotification call doesn't starve introspection — both can
 // fire concurrently.
 type Listener struct {
-	dsn      string
-	onNotify func(context.Context)
-	logger   io.Writer
+	// connConfig is parsed once at construction (audit db/mcp #7): passing the
+	// raw DSN to pgx.Connect on every reconnect meant a parse failure echoed
+	// the whole DSN — password included — into the stderr reconnect loop
+	// forever. ConnectConfig(cfg) errors carry no DSN string.
+	connConfig *pgx.ConnConfig
+	onNotify   func(context.Context)
+	logger     io.Writer
 
 	// debounceWindow is exposed via the zero-value mechanism for tests
 	// that want to use a shorter window without exporting a setter.
@@ -98,6 +102,15 @@ func NewListener(opts Options, onNotify func(context.Context)) (*Listener, error
 	if onNotify == nil {
 		return nil, errors.New("db.NewListener: onNotify callback is required")
 	}
+	// Parse the DSN once here (audit db/mcp #7): pgx.ParseConfig's *url.Error
+	// echoes the whole DSN (password included) on a malformed URL-form DSN —
+	// which envDSN's url.Parse-only validation lets through (bad sslmode,
+	// unknown params). Return a generic error so the raw DSN never reaches a
+	// caller/log, matching indexSchemaPostgres (db.go) and mysqlURLToConfig.
+	connConfig, err := pgx.ParseConfig(opts.DSN)
+	if err != nil {
+		return nil, errors.New("db.NewListener: unparseable postgres DSN")
+	}
 	logger := opts.LogWriter
 	if logger == nil {
 		// Never default to os.Stdout — that's the JSON-RPC channel for
@@ -106,7 +119,7 @@ func NewListener(opts Options, onNotify func(context.Context)) (*Listener, error
 		logger = io.Discard
 	}
 	return &Listener{
-		dsn:            opts.DSN,
+		connConfig:     connConfig,
 		onNotify:       onNotify,
 		logger:         logger,
 		debounceWindow: defaultDebounceWindow,
@@ -159,7 +172,7 @@ func (l *Listener) Run(ctx context.Context) error {
 // Run to decide whether to reset the backoff (mid-loop disconnects are
 // healthier signals than connect-time failures).
 func (l *Listener) runOnce(ctx context.Context) (listened bool, err error) {
-	conn, err := pgx.Connect(ctx, l.dsn)
+	conn, err := pgx.ConnectConfig(ctx, l.connConfig)
 	if err != nil {
 		return false, fmt.Errorf("connect: %w", err)
 	}

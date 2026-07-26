@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -76,8 +77,9 @@ type ReindexResult struct {
 	Elapsed time.Duration
 
 	// Err is non-nil on real failure (connection error, query failure).
-	// InProgress is false in this case; the handler reports the error
-	// text verbatim so the agent can decide whether to surface or retry.
+	// InProgress is false in this case; the handler surfaces a
+	// credential/topology-sanitized message (safeDBErrorMessage, audit
+	// db/mcp #4) — never the raw error, which names host/user/database.
 	Err error
 }
 
@@ -334,6 +336,26 @@ func NewServer(cfg Config) *sdk.Server {
 //   - InProgress → "Reindex already in progress; nothing to do."
 //   - Err != nil → "Reindex failed: <err>"
 //   - success → "Reindexed in 123ms."
+//
+// dbTopologyToken matches pgconn's credential/topology tokens in a DB error
+// (host=…, user=…, database=…, dbname=…, password=…, port=…).
+var dbTopologyToken = regexp.MustCompile(`(?i)\b(host|user|database|dbname|password|port|passfile)=\S+`)
+
+// safeDBErrorMessage renders a DB refresh error for the MODEL's context without
+// leaking credentials or internal topology (audit db/mcp #4; internal/db/db.go's
+// stated policy that host/user/password never reach agent output). A
+// connection-class error — whose text names the internal host, service account,
+// database, and often a private IP:port — collapses to a fixed message; any
+// other error (a query/permission failure that carries schema names but no DSN)
+// passes through with stray host=/user=/… tokens redacted as a backstop.
+func safeDBErrorMessage(err error) string {
+	s := err.Error()
+	if strings.Contains(s, "connect") {
+		return "could not connect to the configured database (check the ken-mcp server logs for details)"
+	}
+	return dbTopologyToken.ReplaceAllString(s, "$1=<redacted>")
+}
+
 func handleReindexDB(ctx context.Context, cfg *Config) (*sdk.CallToolResult, any, error) {
 	if cfg.DB == nil {
 		return textResult("DB indexing is not configured (KEN_DB_DSN is unset); nothing to reindex."), nil, nil
@@ -343,7 +365,7 @@ func handleReindexDB(ctx context.Context, cfg *Config) (*sdk.CallToolResult, any
 	case res.InProgress:
 		return textResult("Reindex already in progress; nothing to do."), nil, nil
 	case res.Err != nil:
-		return textResult(fmt.Sprintf("Reindex failed: %s", res.Err.Error())), nil, nil
+		return textResult("Reindex failed: " + safeDBErrorMessage(res.Err)), nil, nil
 	default:
 		return textResult(fmt.Sprintf("Reindexed in %dms.", res.Elapsed.Milliseconds())), nil, nil
 	}
