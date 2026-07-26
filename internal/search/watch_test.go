@@ -869,14 +869,14 @@ func TestWatchedIndex_OversizedSinceEvent_Skipped(t *testing.T) {
 }
 
 // TestWatchedIndex_SlowFlush_EventsDrainAndConverge is the composition test
-// the 2026-07-26 re-audit called the single highest-value fixture: a flush
-// whose OnFlush blocks far longer than the debounce ceiling, with events
-// (including a directory-shaped Remove) arriving DURING it. It exercises
-// R1 (no busy-spin / no hang once past the ceiling with pending events),
-// R8 (the event loop keeps draining while the flush goroutine is busy —
-// isTrackedRel + the resync scan are lock-free, and flush unlocks before
-// OnFlush), and the async handoff. Asserts the corpus converges to ground
-// truth within a bounded wall-clock.
+// the 2026-07-26 re-audit called the single highest-value fixture — and it
+// now actually BITES (round-3 test-quality finding: the old version passed
+// even with R1 reverted, because it asserted only eventual convergence). It
+// blocks OnFlush far past the debounce ceiling with events arriving during
+// it, and asserts BOTH: (a) the loop's timer-fire count stays tiny — R1's
+// busy-spin would push it into the thousands+ — and (b) the corpus converges
+// (R8: the loop keeps draining while the flush goroutine is busy; flush
+// unlocks before OnFlush).
 func TestWatchedIndex_SlowFlush_EventsDrainAndConverge(t *testing.T) {
 	root := makeTempRepo(t, map[string]string{
 		"base.py": "def base():\n    return 0\n",
@@ -884,11 +884,13 @@ func TestWatchedIndex_SlowFlush_EventsDrainAndConverge(t *testing.T) {
 	wi := withShortDebounce(t, root, true)
 
 	var flushes atomic.Int64
+	firstFlushDone := make(chan struct{})
 	wi.SetOnFlush(func(string) {
 		// Block the FIRST flush well past the maxDebounce ceiling
 		// (5×debounce) so a pending event would trip R1's old spin.
 		if flushes.Add(1) == 1 {
 			time.Sleep(8 * shortDebounce)
+			close(firstFlushDone)
 		}
 	})
 
@@ -903,28 +905,84 @@ func TestWatchedIndex_SlowFlush_EventsDrainAndConverge(t *testing.T) {
 	if !waitForSwap(t, swaps, 5*time.Second) {
 		t.Fatal("flush 1 never published")
 	}
+	wakeupsBefore := wi.loopWakeups.Load()
 
-	// While flush 1's OnFlush is still sleeping, mutate the tree: a new file
-	// AND a remove (the Remove exercises the lock-free isTrackedRel path —
-	// under R8 it would have blocked on corpusMu held by the flush).
+	// While flush 1's OnFlush is still sleeping, add a pending event (this is
+	// the past-the-ceiling-with-pending-work state R1 spun in).
 	if err := os.WriteFile(filepath.Join(root, "f2.py"), []byte("def f2():\n    return 2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(root, "base.py")); err != nil {
-		t.Fatal(err)
+	// Let the slow OnFlush run to completion (the whole ceiling-exceeded window).
+	<-firstFlushDone
+
+	// R1: across that multi-ceiling window the loop must NOT have spun. A
+	// busy-spin fires the timer ~1.7M/s; a correct loop fires it a handful of
+	// times. Generous bound catches the spin without flaking on scheduling.
+	if spun := wi.loopWakeups.Load() - wakeupsBefore; spun > 200 {
+		t.Errorf("loop woke %d times during a slow flush — busy-spin (R1 regressed)", spun)
 	}
 
-	// Converge: f1 + f2 present, base.py gone — within a bounded time. A
-	// busy-spin wouldn't hang but a deadlock (blocked loop) would time out.
+	// R8/handoff: f1 + f2 both converge.
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
 		got := wi.Load()
-		if containsFile(got, "f1.py") && containsFile(got, "f2.py") && !containsFile(got, "base.py") {
-			return // converged
+		if containsFile(got, "f1.py") && containsFile(got, "f2.py") {
+			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	got := wi.Load()
-	t.Errorf("did not converge: f1=%v f2=%v base-gone=%v; chunks: %s",
-		containsFile(got, "f1.py"), containsFile(got, "f2.py"), !containsFile(got, "base.py"), chunkFiles(got))
+	t.Errorf("did not converge: f1=%v f2=%v; chunks: %s",
+		containsFile(got, "f1.py"), containsFile(got, "f2.py"), chunkFiles(got))
+}
+
+// TestWatchedIndex_DirRenameDuringFlush_Tombstoned is the audit N2 regression:
+// a directory rename that fires DURING an in-flight flush (which just appended
+// that dir's chunks) must still tombstone them — the old stale-snapshot gate
+// dropped the event and orphaned the chunks forever. Uses a slow first flush
+// so the rename lands mid-flight.
+func TestWatchedIndex_DirRenameDuringFlush_Tombstoned(t *testing.T) {
+	root := makeTempRepo(t, map[string]string{"keep.py": "def keep():\n    return 0\n"})
+	// Pre-create the package dir + file so the first flush indexes it.
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pkg", "mod.py"), []byte("def modfn():\n    return 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wi := withShortDebounce(t, root, true)
+	if !containsFile(wi.Load(), "pkg/mod.py") {
+		t.Fatal("precondition: pkg/mod.py should be indexed at construction")
+	}
+
+	var flushes atomic.Int64
+	wi.SetOnFlush(func(string) {
+		if flushes.Add(1) == 1 {
+			time.Sleep(6 * shortDebounce)
+		}
+	})
+	swaps := make(chan struct{}, 32)
+	wi.SetOnSwap(swaps)
+	drainSwaps(swaps)
+
+	// Touch keep.py to start a slow flush, then rename the dir DURING it.
+	if err := os.WriteFile(filepath.Join(root, "keep.py"), []byte("def keep():\n    return 9\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForSwap(t, swaps, 5*time.Second) {
+		t.Fatal("first flush never published")
+	}
+	if err := os.Rename(filepath.Join(root, "pkg"), filepath.Join(root, "pkg2")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The renamed-away dir's chunks must be tombstoned (not orphaned).
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		if !containsFile(wi.Load(), "pkg/mod.py") {
+			return // old path gone
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("pkg/mod.py still indexed after the dir was renamed during a flush (N2); chunks: %s", chunkFiles(wi.Load()))
 }

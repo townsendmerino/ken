@@ -65,6 +65,21 @@ type WatchedIndex struct {
 	// enrich, or M4 staged which defers both enrich and embed).
 	warmDoEnrich bool
 
+	// stagedPending is true from construction until the M4 staged warm pass
+	// fills w.vecs. While set, w.vecs is intentionally empty (BM25 served) and
+	// the watch-path append sites (appendFile/refoldMigrationDir) must NOT
+	// append per-chunk vectors — otherwise w.vecs grows to `c` entries against
+	// N+c chunks and compactCorpus panics (audit N1). Cleared by the warm pass
+	// under corpusMu once it publishes a full-length vecs. Written only under
+	// corpusMu; read there too.
+	stagedPending bool
+
+	// loopWakeups counts debounce-timer fires the loop has serviced. Test-only
+	// observability (audit round-3 "test quality"): a slow-flush composition
+	// test asserts this stays bounded, which is what actually catches R1's
+	// busy-spin — eventual convergence alone passed even with R1 reverted.
+	loopWakeups atomic.Int64
+
 	// Current snapshot. Read via wi.ix.Load(); never nil after
 	// NewWatchedIndex returns successfully.
 	ix atomic.Pointer[Index]
@@ -314,6 +329,7 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 	if staged {
 		wi.realMode = mode // publish as BM25; the warm pass upgrades to this
 		wi.mode = ModeBM25
+		wi.stagedPending = true // vecs stay empty until the warm pass fills them (audit N1)
 	}
 
 	// Optional pre-publish reconcile (snapshot-seeded drift): mutate the
@@ -345,12 +361,7 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 	wi.fs = w
 	wi.ctx, wi.cancel = context.WithCancel(context.Background())
 
-	if err := addRecursive(w, root, wi.fsOpts.LogWriter); err != nil {
-		_ = w.Close()
-		wi.cancel()
-		close(wi.done)
-		return nil, err
-	}
+	wi.addRecursiveWatch(root) // never fails the build (audit §4); gitignore-pruned (R9/§3)
 
 	go wi.loop()
 
@@ -449,7 +460,8 @@ func (w *WatchedIndex) warmCorpusInBackground(ctx context.Context) {
 
 	w.chunks = newChunks
 	w.vecs = newVecs
-	w.mode = targetMode // upgrade bm25 → hybrid when staged; unchanged otherwise
+	w.mode = targetMode     // upgrade bm25 → hybrid when staged; unchanged otherwise
+	w.stagedPending = false // vecs is now full-length: appendFile/refold may embed (audit N1)
 	w.ix.Store(w.buildUnionedIndexLocked())
 	w.notifySwap()
 	// Reuse the flush notification so ken-mcp's OnFlush re-persists the now-full
@@ -658,14 +670,19 @@ func (w *WatchedIndex) loop() {
 			if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
 				continue
 			}
-			// REMOVE/RENAME: the file is already gone; ShouldIndex
-			// would return false (stat fails). Accept those without
-			// matcher check so we can still tombstone.
+			// REMOVE/RENAME: the file is already gone; ShouldIndex would
+			// return false (stat fails). Accept UNCONDITIONALLY (audit N2):
+			// the old `knownIndexedFile || isTrackedRel` gate read a snapshot
+			// that's stale for the whole in-flight flush, so a directory
+			// rename during a flush that just appended that dir's chunks was
+			// dropped and its chunks orphaned forever (§14's exact case). The
+			// batched tombstoneFile is a documented no-op when nothing matches
+			// ("false positives can't over-tombstone"), so accepting every
+			// Remove/Rename is safe; a stray non-indexed remove costs at most
+			// one no-op rebuild. (.git isn't watched, so no git-op flood.)
 			if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-				if knownIndexedFile(rel) || w.isTrackedRel(rel) {
-					dirty[rel] = mergeOp(dirty[rel], ev.Op)
-					resetTimer()
-				}
+				dirty[rel] = mergeOp(dirty[rel], ev.Op)
+				resetTimer()
 				continue
 			}
 			// A newly-created or moved-in DIRECTORY (audit §2): fsnotify
@@ -687,9 +704,15 @@ func (w *WatchedIndex) loop() {
 					if !w.matcher.ShouldDescend(rel) {
 						continue
 					}
-					_ = addRecursive(w.fs, ev.Name, w.fsOpts.LogWriter)
-					w.enqueueDirFiles(ev.Name, dirty)
-					resetTimer()
+					w.addRecursiveWatch(ev.Name)
+					// Only arm the debounce if the new dir actually contributed
+					// indexable files (audit N8): a mkdir of an empty or
+					// all-ignored dir must not set firstDirty with an empty
+					// batch, or the ceiling later drives delay to 0 and bypasses
+					// the debounce for the next real event.
+					if w.enqueueDirFiles(ev.Name, dirty) {
+						resetTimer()
+					}
 					continue
 				}
 			}
@@ -723,6 +746,7 @@ func (w *WatchedIndex) loop() {
 			// are logged but not acted on — the watcher stays armed.
 			w.logf("fsnotify error: %v", err)
 		case <-timerC():
+			w.loopWakeups.Add(1)
 			if flushing {
 				// A flush is still running — keep accumulating into dirty and
 				// just disarm. The `case <-flushDone` arm re-arms the timer if
@@ -762,6 +786,11 @@ func (w *WatchedIndex) loop() {
 			if len(dirty) > 0 {
 				// Events landed while the flush ran — schedule the next one.
 				resetTimer()
+			} else {
+				// Nothing pending — clear firstDirty (audit N8) so a stray
+				// timer-fire-while-flushing that kept it set can't make the
+				// next event compute delay=0 and bypass the debounce.
+				firstDirty = time.Time{}
 			}
 		}
 	}
@@ -898,7 +927,9 @@ func (w *WatchedIndex) refoldMigrationDir(dir string) {
 	}
 	for _, c := range folded {
 		w.chunks = append(w.chunks, c)
-		if w.model != nil {
+		// Same staged guard as appendFile (audit N1): don't grow vecs while
+		// pre-warm, or it misaligns with chunks and compactCorpus panics.
+		if w.model != nil && !w.stagedPending {
 			w.vecs = append(w.vecs, encodeCached(w.fsOpts.EmbedCache, w.model, c.Text))
 		}
 	}
@@ -918,6 +949,16 @@ func (w *WatchedIndex) refoldMigrationDir(dir string) {
 // built snapshot. The reranker instance is shared across rebuilds so
 // its content-hash LRU cache carries forward.
 func (w *WatchedIndex) buildUnionedIndexLocked() *Index {
+	// Parallel-slice invariant, checked wherever the corpus is assembled — not
+	// only at first build (audit N1/R6): w.vecs is empty (BM25 or staged
+	// pre-warm) or exactly one-per-chunk. A violation would otherwise surface
+	// as an opaque makeslice/index panic in compactCorpus on the flush
+	// goroutine, killing the process. Degrade to BM25 for this snapshot + log,
+	// rather than crash. With the N1 append-site guards this should never fire.
+	if len(w.vecs) != 0 && len(w.vecs) != len(w.chunks) {
+		w.logf("BUG: vecs/chunks misaligned (vecs=%d chunks=%d); dropping vectors, serving BM25 for this snapshot", len(w.vecs), len(w.chunks))
+		w.vecs = nil
+	}
 	if w.tokens == nil {
 		w.tokens = newTokenCache()
 	}
@@ -1211,7 +1252,11 @@ func (w *WatchedIndex) appendFile(rel string) {
 	enrichChunks(rel, data, cs, w.fsOpts.DisableEnrichment)
 	for _, c := range cs {
 		w.chunks = append(w.chunks, c)
-		if w.model != nil {
+		// Skip embedding while a staged build is still pre-warm (audit N1):
+		// w.vecs must stay empty until the warm pass fills it, or vecs and
+		// chunks misalign and compactCorpus panics. The warm pass re-embeds
+		// every chunk (including these) and clears stagedPending.
+		if w.model != nil && !w.stagedPending {
 			w.vecs = append(w.vecs, encodeCached(w.fsOpts.EmbedCache, w.model, c.Text))
 		}
 	}
@@ -1251,44 +1296,14 @@ func (w *WatchedIndex) relPath(absPath string) string {
 	return rel
 }
 
-// isTrackedRel reports whether the watcher has any existing chunks for
-// the given relPath. Used to accept REMOVE/RENAME events even when the
-// file is already gone (and thus stat-unavailable) — if we previously
-// indexed it, we want to tombstone its chunks now.
-//
-// Reads the PUBLISHED index snapshot (w.ix.Load()) lock-free rather than
-// taking corpusMu over w.chunks (audit R8): it runs inline on the event
-// loop, and the flush goroutine holds corpusMu for its whole (multi-second)
-// duration — so locking here re-blocks the very loop the async flush was
-// meant to keep draining. The published Index's chunk array is immutable
-// after Store (§1 copy-on-write), so a lock-free scan is safe; a snapshot
-// one flush stale is fine for a "was this ever indexed" test.
-func (w *WatchedIndex) isTrackedRel(rel string) bool {
-	ix := w.ix.Load()
-	if ix == nil {
-		return false
-	}
-	// Exact file, OR a directory whose subtree we've indexed (audit §14: a
-	// dir Remove/Rename must be accepted so its subtree gets tombstoned).
-	prefix := rel + "/"
-	for i := range ix.chunks {
-		if ix.chunks[i].Tombstoned {
-			continue
-		}
-		if ix.chunks[i].File == rel || strings.HasPrefix(ix.chunks[i].File, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 // enqueueDirFiles walks a directory that just appeared (created or moved-in)
 // and enqueues every indexable file inside for (re)indexing (audit §2). No
 // per-file fsnotify event fires for files that already existed when the watch
 // was added, so we discover them ourselves — filtering through the same
 // Matcher.ShouldIndex the initial walk uses. Prunes .git/ and .ken/. Best
 // effort: walk errors on individual entries are skipped.
-func (w *WatchedIndex) enqueueDirFiles(absDir string, dirty map[string]fsnotify.Op) {
+func (w *WatchedIndex) enqueueDirFiles(absDir string, dirty map[string]fsnotify.Op) bool {
+	added := false
 	_ = filepath.WalkDir(absDir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -1308,9 +1323,11 @@ func (w *WatchedIndex) enqueueDirFiles(absDir string, dirty map[string]fsnotify.
 		rel := w.relPath(p)
 		if rel != "" && w.matcher.ShouldIndex(rel) {
 			dirty[rel] = mergeOp(dirty[rel], fsnotify.Create)
+			added = true
 		}
 		return nil
 	})
+	return added
 }
 
 // logf writes a diagnostic to the FSOptions.LogWriter (nil discards).
@@ -1337,10 +1354,10 @@ func (w *WatchedIndex) enqueueFullResync(dirty map[string]fsnotify.Op) {
 	// during the burst, so those subtrees have no inotify watch and would
 	// stay dark. addRecursive is idempotent (re-Adding a watched dir is a
 	// no-op) and gitignore-pruning happens via the per-file ShouldIndex
-	// filter below. w.fs is nil for a no-watch index (ReconcileFiles callers).
-	if w.fs != nil {
-		_ = addRecursive(w.fs, w.root, w.fsOpts.LogWriter)
-	}
+	// filter below. addRecursiveWatch no-ops when w.fs is nil (ReconcileFiles
+	// callers) and prunes gitignored trees so the resync doesn't itself
+	// exhaust the watch table (audit §3 leftover).
+	w.addRecursiveWatch(w.root)
 
 	present := make(map[string]bool)
 	_ = filepath.WalkDir(w.root, func(p string, d fs.DirEntry, err error) error {
@@ -1393,12 +1410,13 @@ func mergeOp(a, b fsnotify.Op) fsnotify.Op {
 	return a | b
 }
 
-// addRecursive registers `root` and every subdirectory with the
-// fsnotify watcher except .git/ (load-bearing skip: any git operation
-// fires hundreds of events inside .git/objects) and .ken/ (v0.8.3
-// pre-built-index directory — paired with the matching prunes in
-// internal/repo's WalkFS + Matcher.ShouldIndex so the watcher
-// doesn't pay kernel-event cost for index.bin writes).
+// addRecursiveWatch registers absRoot and every subdirectory with the
+// fsnotify watcher, EXCEPT .git/ (load-bearing: any git op fires hundreds of
+// events inside .git/objects), .ken/, and any gitignored subtree (audit
+// R9/§3 leftover): without the ignore prune, a legit dir containing its own
+// node_modules — or the overflow resync re-walking the whole root — registers
+// an inotify watch on every ignored directory, exhausting max_user_watches.
+// Pruning here mirrors enqueueDirFiles's ShouldDescend gate.
 //
 // Never fails the build over a watch problem (audit search §4): a dir we
 // can't read (any WalkDir error, not only ErrPermission — the prior code
@@ -1407,11 +1425,14 @@ func mergeOp(a, b fsnotify.Op) fsnotify.Op {
 // subtree. Add-failures are counted and reported as ONE summary line, not
 // one-per-dir (audit R12: ~42k lines at startup on a 50k-dir tree past an
 // 8192 watch limit).
-func addRecursive(w *fsnotify.Watcher, root string, logw io.Writer) error {
+func (w *WatchedIndex) addRecursiveWatch(absRoot string) {
+	if w.fs == nil {
+		return
+	}
 	var addFails int
 	var firstErr error
 	var firstPath string
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(absRoot, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return fs.SkipDir // unreadable dir — skip, never abort
 		}
@@ -1421,31 +1442,20 @@ func addRecursive(w *fsnotify.Watcher, root string, logw io.Writer) error {
 		if name := d.Name(); name == ".git" || name == ".ken" {
 			return fs.SkipDir
 		}
-		if aerr := w.Add(path); aerr != nil {
+		// Don't watch gitignored subtrees (R9/§3): also prunes their descent.
+		if reld := w.relPath(p); reld != "" && !w.matcher.ShouldDescend(reld) {
+			return fs.SkipDir
+		}
+		if aerr := w.fs.Add(p); aerr != nil {
 			addFails++
 			if firstErr == nil {
-				firstErr, firstPath = aerr, path
+				firstErr, firstPath = aerr, p
 			}
 		}
 		return nil
 	})
-	if addFails > 0 && logw != nil {
-		fmt.Fprintf(logw, "search: watch registration failed for %d dir(s) under %q (first: %q: %v); live updates disabled for those subtrees\n",
-			addFails, root, firstPath, firstErr)
+	if addFails > 0 {
+		w.logf("watch registration failed for %d dir(s) under %q (first: %q: %v); live updates disabled for those subtrees",
+			addFails, absRoot, firstPath, firstErr)
 	}
-	return nil
-}
-
-// knownIndexedFile is a small helper for events on files that no longer
-// exist on disk: we can't stat them, but if the rel path has one of ken's
-// recognized source-file extensions we trust the event and let
-// tombstoneFile + "no match found" be the safe no-op behavior.
-//
-// This is intentionally permissive: false negatives just mean a
-// REMOVE/RENAME on a never-indexed file becomes a no-op tombstone attempt
-// (no-op because no chunks match). False positives can't over-tombstone —
-// tombstoneFile only marks matching chunks. (audit §26: dropped the unused
-// `root` parameter and the never-implemented "special filenames" claim.)
-func knownIndexedFile(rel string) bool {
-	return chunk.Language(rel) != ""
 }
