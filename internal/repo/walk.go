@@ -218,6 +218,16 @@ func NewMatcher(opts Options) *Matcher {
 	}
 }
 
+// MaxFileBytes is the size ceiling this matcher enforces (the resolved
+// KEN_MAX_FILE_BYTES / DefaultMaxFileBytes). Exposed so the watch path can
+// bound its own re-read defensively (audit search §15).
+func (m *Matcher) MaxFileBytes() int64 {
+	if m == nil {
+		return DefaultMaxFileBytes
+	}
+	return m.maxFileBytes
+}
+
 // ShouldIndex reports whether Walk would have included relPath
 // (slash-separated, relative to the matcher's root). Mirrors Walk's
 // rules: not under .git/, not matched by any applicable .gitignore

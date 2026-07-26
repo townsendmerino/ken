@@ -807,3 +807,63 @@ func TestWatchedIndex_AsyncFlush_BackToBack(t *testing.T) {
 		}
 	}
 }
+
+// TestWatchedIndex_DebounceMaxDelay_NoStarvation is the audit §13
+// regression: continuous churn (writes faster than the debounce) must still
+// flush within the maxDebounce ceiling (5× debounce) instead of resetting
+// the timer forever.
+func TestWatchedIndex_DebounceMaxDelay_NoStarvation(t *testing.T) {
+	root := makeTempRepo(t, map[string]string{"a.py": "def a():\n    return 0\n"})
+	wi := withShortDebounce(t, root, true)
+	swaps := make(chan struct{}, 32)
+	wi.SetOnSwap(swaps)
+	drainSwaps(swaps)
+
+	// Write a churn file more often than the debounce (60ms) for longer than
+	// the maxDebounce ceiling (5×60ms=300ms). Without the ceiling the timer
+	// would reset forever and no swap would fire.
+	stop := make(chan struct{})
+	go func() {
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = os.WriteFile(filepath.Join(root, "churn.py"),
+					[]byte("def churn():\n    return "+string(rune('0'+i%10))+"\n"), 0o644)
+				i++
+				time.Sleep(shortDebounce / 3) // faster than the debounce
+			}
+		}
+	}()
+	defer close(stop)
+
+	// A swap MUST occur within a few maxDebounce windows despite the churn.
+	if !waitForSwap(t, swaps, 3*time.Second) {
+		t.Fatal("no flush within the maxDebounce ceiling — continuous churn starved the reindex (§13)")
+	}
+}
+
+// TestWatchedIndex_OversizedSinceEvent_Skipped is the audit §15 regression:
+// a file that passes admission at event time but has grown past the size cap
+// by flush time must be skipped, not read wholesale.
+func TestWatchedIndex_OversizedSinceEvent_Skipped(t *testing.T) {
+	root := makeTempRepo(t, map[string]string{"keep.py": "def keep():\n    return 1\n"})
+	wi := withShortDebounce(t, root, false) // drive appendFile via ReconcileFiles
+
+	// Write a file larger than the default 2 MiB cap, then reconcile it.
+	big := filepath.Join(root, "huge.py")
+	blob := make([]byte, (2<<20)+1024)
+	for i := range blob {
+		blob[i] = 'a'
+	}
+	if err := os.WriteFile(big, blob, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wi.ReconcileFiles([]string{"huge.py"}, nil)
+
+	if containsFile(wi.Load(), "huge.py") {
+		t.Errorf("oversized huge.py was indexed on the watch path; §15 size guard not enforced")
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -586,9 +587,29 @@ func (w *WatchedIndex) loop() {
 	flushing := false
 	flushDone := make(chan struct{}, 1)
 
+	// Debounce starvation ceiling (audit search §13): every accepted event
+	// pushes the debounce deadline out by w.debounce, so a tool writing an
+	// indexed file more often than that (webpack/tsc/cargo --watch, a
+	// test-runner loop) would reset the timer forever and NEVER flush — the
+	// index frozen for the whole session. Cap the total wait since the first
+	// dirty event at maxDebounce; when we hit it, arm for 0 so the next tick
+	// flushes. firstDirty resets on flush.
+	maxDebounce := 5 * w.debounce
+	var firstDirty time.Time
+
 	resetTimer := func() {
+		if firstDirty.IsZero() {
+			firstDirty = time.Now()
+		}
+		delay := w.debounce
+		if remaining := maxDebounce - time.Since(firstDirty); remaining < delay {
+			delay = remaining
+			if delay < 0 {
+				delay = 0
+			}
+		}
 		if timer == nil {
-			timer = time.NewTimer(w.debounce)
+			timer = time.NewTimer(delay)
 			return
 		}
 		if !timer.Stop() {
@@ -597,7 +618,7 @@ func (w *WatchedIndex) loop() {
 			default:
 			}
 		}
-		timer.Reset(w.debounce)
+		timer.Reset(delay)
 	}
 
 	// timerC returns the timer's channel iff a timer is armed, else
@@ -691,11 +712,13 @@ func (w *WatchedIndex) loop() {
 			}
 			if len(dirty) == 0 {
 				timer = nil
+				firstDirty = time.Time{}
 				continue
 			}
 			batch := dirty
 			dirty = make(map[string]fsnotify.Op)
 			timer = nil
+			firstDirty = time.Time{} // start a fresh debounce window for the next batch
 			flushing = true
 			// Tracked by bgWG so Close() (which does <-w.done then
 			// bgWG.Wait()) awaits an in-flight flush before teardown —
@@ -760,7 +783,19 @@ func (w *WatchedIndex) reconcileCorpusLocked(batch map[string]fsnotify.Op) int {
 	// migration file shows up in the folded chunk for the whole dir.
 	touchedMigDirs := map[string]bool{}
 
-	for rel, op := range batch {
+	// Iterate the batch in sorted path order (audit §17): appending in Go's
+	// randomized map-iteration order gave two processes on the same repo
+	// different chunk orders → different BM25 doc IDs → different tie-breaks
+	// in rerankTopK, and non-reproducible SnapshotBytes. The build path
+	// sorts for exactly this reason; the flush path must too.
+	rels := make([]string, 0, len(batch))
+	for rel := range batch {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+
+	for _, rel := range rels {
+		op := batch[rel]
 		if w.migrationDirs[path.Dir(rel)] {
 			touchedMigDirs[path.Dir(rel)] = true
 		}
@@ -774,11 +809,17 @@ func (w *WatchedIndex) reconcileCorpusLocked(batch map[string]fsnotify.Op) int {
 		w.appendFile(rel)
 	}
 
-	// Re-fold every touched migration dir. Tombstone the dir's folded
-	// chunks first (those live in the chunks slice with File pointing at
-	// one of the dir's source files); then re-walk the dir on disk via
-	// sql.FoldMigrations and append the fresh folded chunks.
+	// Re-fold every touched migration dir (sorted, same determinism reason).
+	// Tombstone the dir's folded chunks first (those live in the chunks
+	// slice with File pointing at one of the dir's source files); then
+	// re-walk the dir on disk via sql.FoldMigrations and append the fresh
+	// folded chunks.
+	migDirs := make([]string, 0, len(touchedMigDirs))
 	for d := range touchedMigDirs {
+		migDirs = append(migDirs, d)
+	}
+	sort.Strings(migDirs)
+	for _, d := range migDirs {
 		w.tombstoneFoldedChunksForDir(d)
 		w.refoldMigrationDir(d)
 	}
@@ -1057,6 +1098,31 @@ func intStr(n int) string {
 	return string(digits[i:])
 }
 
+// readCappedFile reads abs but refuses anything larger than the matcher's
+// size ceiling (audit search §15): even after ShouldIndex's Lstat passes,
+// the file could grow before this read (TOCTOU), so bound it with a
+// LimitReader at cap+1 and reject if the extra byte materializes. Returns
+// the bytes, or an error the caller treats as "skip this file".
+func (w *WatchedIndex) readCappedFile(abs string) ([]byte, error) {
+	cap := int64(repo.DefaultMaxFileBytes)
+	if w.matcher != nil {
+		cap = w.matcher.MaxFileBytes()
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, cap+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > cap {
+		return nil, fmt.Errorf("search: %s exceeds max file bytes (%d)", abs, cap)
+	}
+	return data, nil
+}
+
 // tombstoneFile marks every existing chunk whose File == rel as
 // Tombstoned. Caller holds corpusMu.
 func (w *WatchedIndex) tombstoneFile(rel string) {
@@ -1088,8 +1154,16 @@ func (w *WatchedIndex) tombstoneFile(rel string) {
 // per-file — so skipSQLStructural is set to true here. Line-chunked
 // raw text still flows through chunk.ChunkFile.
 func (w *WatchedIndex) appendFile(rel string) {
+	// Re-check admission at flush time (audit §15): ShouldIndex (with its
+	// size + binary-sniff guards) ran at EVENT time, up to a debounce window
+	// ago. A file that was 1 KB when its Create fired can be 800 MB by now
+	// (a build artifact / growing log), or have turned binary. Re-running
+	// ShouldIndex here re-Lstats and rejects it.
+	if w.matcher != nil && !w.matcher.ShouldIndex(rel) {
+		return
+	}
 	abs := filepath.Join(w.root, filepath.FromSlash(rel))
-	data, err := os.ReadFile(abs)
+	data, err := w.readCappedFile(abs)
 	if err != nil {
 		return
 	}
