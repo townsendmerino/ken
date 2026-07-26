@@ -773,3 +773,37 @@ func TestWatchedIndex_FullResync_RecoversFromDroppedEvents(t *testing.T) {
 		t.Error("modified a.py content (alpha_v2) not searchable after resync")
 	}
 }
+
+// TestWatchedIndex_AsyncFlush_BackToBack exercises the audit §12 async
+// single-flight flush across multiple flush cycles: sequential writes each
+// trigger their own flush (via the flushing→flushDone→re-arm path) and all
+// accumulate correctly, with the event loop never wedged.
+func TestWatchedIndex_AsyncFlush_BackToBack(t *testing.T) {
+	root := makeTempRepo(t, map[string]string{
+		"base.py": "def base():\n    return 0\n",
+	})
+	wi := withShortDebounce(t, root, true)
+	swaps := make(chan struct{}, 16)
+	wi.SetOnSwap(swaps)
+	drainSwaps(swaps)
+
+	for i := 0; i < 4; i++ {
+		name := filepath.Join(root, "gen"+string(rune('A'+i))+".py")
+		body := "def gen" + string(rune('A'+i)) + "():\n    return " + string(rune('0'+i)) + "\n"
+		if err := os.WriteFile(name, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if !waitForSwap(t, swaps, 5*time.Second) {
+			t.Fatalf("no swap after write %d", i)
+		}
+	}
+
+	got := wi.Load()
+	// base + all 4 generated files must be present — nothing dropped by the
+	// async flush cycles.
+	for _, want := range []string{"base.py", "genA.py", "genB.py", "genC.py", "genD.py"} {
+		if !containsFile(got, want) {
+			t.Errorf("%s missing after back-to-back async flushes; chunks: %s", want, chunkFiles(got))
+		}
+	}
+}

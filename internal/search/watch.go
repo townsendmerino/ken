@@ -575,6 +575,17 @@ func (w *WatchedIndex) loop() {
 	dirty := make(map[string]fsnotify.Op)
 	var timer *time.Timer
 
+	// Async single-flight flush (audit search §12): the flush does file
+	// I/O + embedding + a full BM25/ANN rebuild, which used to run inline
+	// on this goroutine — for its whole duration (seconds on a big
+	// checkout) w.fs.Events wasn't drained, filling the kernel queue toward
+	// overflow. Now the flush runs on a tracked goroutine so the loop keeps
+	// draining events; `flushing` is the single-flight guard and flushDone
+	// signals completion. Correctness doesn't rely on the guard — flush()
+	// takes corpusMu — but it stops redundant flushes piling up under churn.
+	flushing := false
+	flushDone := make(chan struct{}, 1)
+
 	resetTimer := func() {
 		if timer == nil {
 			timer = time.NewTimer(w.debounce)
@@ -672,10 +683,39 @@ func (w *WatchedIndex) loop() {
 			// are logged but not acted on — the watcher stays armed.
 			w.logf("fsnotify error: %v", err)
 		case <-timerC():
+			if flushing {
+				// A flush is still running — keep accumulating into dirty
+				// and re-arm; we'll flush the batch once flushDone fires.
+				resetTimer()
+				continue
+			}
+			if len(dirty) == 0 {
+				timer = nil
+				continue
+			}
 			batch := dirty
 			dirty = make(map[string]fsnotify.Op)
 			timer = nil
-			w.flush(batch)
+			flushing = true
+			// Tracked by bgWG so Close() (which does <-w.done then
+			// bgWG.Wait()) awaits an in-flight flush before teardown —
+			// no flush goroutine writes w.ix after the cache reaps this
+			// index / rm -rf's a temp clone.
+			w.bgWG.Add(1)
+			go func() {
+				defer w.bgWG.Done()
+				w.flush(batch)
+				select {
+				case flushDone <- struct{}{}:
+				default: // loop already gone (shutdown) — don't block
+				}
+			}()
+		case <-flushDone:
+			flushing = false
+			if len(dirty) > 0 {
+				// Events landed while the flush ran — schedule the next one.
+				resetTimer()
+			}
 		}
 	}
 }
