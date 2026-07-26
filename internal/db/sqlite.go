@@ -183,6 +183,10 @@ func introspectSQLite(ctx context.Context, conn *sql.DB, opts Options) (*schemaS
 		tableMap[qualifiedKey(t.schema, t.name)] = t
 	}
 
+	// Pass 1: columns + indexes for EVERY table first, so every table's PK
+	// is known before any FK is resolved (audit §13 — an implicit
+	// `REFERENCES parent` FK needs to look up parent's real PK, which may
+	// be a later table in this slice).
 	for i := range tables {
 		t := &tables[i]
 		if err := sqliteFillColumns(ctx, conn, t); err != nil {
@@ -191,6 +195,10 @@ func introspectSQLite(ctx context.Context, conn *sql.DB, opts Options) (*schemaS
 		if err := sqliteFillIndexes(ctx, conn, t); err != nil {
 			warn(opts, "sqlite: indexes for %s: %v", t.name, err)
 		}
+	}
+	// Pass 2: FKs, now that tableMap columns are fully populated.
+	for i := range tables {
+		t := &tables[i]
 		if err := sqliteFillForeignKeys(ctx, conn, t, tableMap); err != nil {
 			warn(opts, "sqlite: foreign keys for %s: %v", t.name, err)
 		}
@@ -378,10 +386,24 @@ func sqliteFillForeignKeys(ctx context.Context, conn *sql.DB, t *tableInfo, tabl
 		}
 		toColStr := toCol.String
 		if !toCol.Valid || toColStr == "" {
-			// PRAGMA returns NULL for `to` when the FK references the PK
-			// without naming the column explicitly. Fall back to "id" —
-			// the common case — for display only.
-			toColStr = "id"
+			// PRAGMA returns NULL for `to` when the FK references the parent's
+			// PK without naming the column. Resolve the parent's REAL primary
+			// key from tableMap rather than guessing "id" (audit §13 —
+			// fabricating a column name the parent doesn't have is wrong data
+			// presented confidently, which is worse than omission).
+			toColStr = ""
+			if rt, ok := tableMap[qualifiedKey("", refTable)]; ok {
+				for i := range rt.columns {
+					if rt.columns[i].isPrimaryKey {
+						toColStr = rt.columns[i].name
+						break
+					}
+				}
+			}
+			if toColStr == "" {
+				// No explicit PK column — SQLite's implicit key is rowid.
+				toColStr = "rowid"
+			}
 		}
 		// Column-level: forward FK pointer.
 		for i := range t.columns {
@@ -440,66 +462,72 @@ ORDER BY name;`
 // ORDER BY 1) and same cell-truncation policy via the shared
 // truncateCell/formatCell helpers.
 //
-// Approx row counts: SQLite has no pg_class.reltuples equivalent that
-// updates without a manual ANALYZE; we just do COUNT(*) at sampling
-// time. For typical migration-driven dev SQLite files (low row counts),
-// this is cheap. The result is rendered as "of ~N" matching the
-// Postgres path.
+// Approx row counts: SQLite has no pg_class.reltuples equivalent. Rather
+// than a full-table-scan COUNT(*) (audit §28 — O(n) B-tree scan, brutal on
+// a multi-GB analytics .db, for a value rendered as the approximate "~N"),
+// use MAX(rowid): an O(log n) index lookup on the common rowid table. It
+// overestimates after deletes (rowids aren't reused), which is fine for an
+// explicitly-approximate display. WITHOUT ROWID tables have no rowid, so
+// MAX(rowid) errors — we leave approxRowCount 0 and emit.go omits "of ~N".
 func sqliteAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot, opts Options) {
 	for i := range snap.tables {
 		t := &snap.tables[i]
-		// Per-table COUNT(*) for approxRowCount.
-		var n int64
-		if err := conn.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", sqliteQuoteIdent(t.name))).Scan(&n); err == nil {
-			t.approxRowCount = float64(n)
-		}
+		// Per-table recover (audit §26): one exotic driver conversion panic
+		// skips the table instead of crashing the process, matching Postgres.
+		withSampleRecover(opts, t.name, func() {
+			// Cheap approximate row count via MAX(rowid).
+			var n sql.NullInt64
+			if err := conn.QueryRowContext(ctx, fmt.Sprintf("SELECT MAX(rowid) FROM %s", sqliteQuoteIdent(t.name))).Scan(&n); err == nil && n.Valid {
+				t.approxRowCount = float64(n.Int64)
+			}
 
-		orderClause := "ORDER BY 1"
-		for _, c := range t.columns {
-			if c.isPrimaryKey {
-				orderClause = "ORDER BY " + sqliteQuoteIdent(c.name)
-				break
+			orderClause := "ORDER BY 1"
+			for _, c := range t.columns {
+				if c.isPrimaryKey {
+					orderClause = "ORDER BY " + sqliteQuoteIdent(c.name)
+					break
+				}
 			}
-		}
-		// LIMIT must be an int literal in SQLite's PRAGMA-free query path,
-		// but passing it as a parameter is supported by the driver.
-		q := fmt.Sprintf("SELECT * FROM %s %s LIMIT ?", sqliteQuoteIdent(t.name), orderClause)
-		rows, err := conn.QueryContext(ctx, q, opts.SampleRows)
-		if err != nil {
-			warn(opts, "sqlite: sample query failed for %s: %v", t.name, err)
-			continue
-		}
-		cols, err := rows.Columns()
-		if err != nil {
-			warn(opts, "sqlite: column metadata for %s: %v", t.name, err)
+			// LIMIT must be an int literal in SQLite's PRAGMA-free query path,
+			// but passing it as a parameter is supported by the driver.
+			q := fmt.Sprintf("SELECT * FROM %s %s LIMIT ?", sqliteQuoteIdent(t.name), orderClause)
+			rows, err := conn.QueryContext(ctx, q, opts.SampleRows)
+			if err != nil {
+				warn(opts, "sqlite: sample query failed for %s: %v", t.name, err)
+				return
+			}
+			cols, err := rows.Columns()
+			if err != nil {
+				warn(opts, "sqlite: column metadata for %s: %v", t.name, err)
+				rows.Close()
+				return
+			}
+			var collected [][]string
+			for rows.Next() {
+				vals := make([]any, len(cols))
+				ptrs := make([]any, len(cols))
+				for j := range vals {
+					ptrs[j] = &vals[j]
+				}
+				if err := rows.Scan(ptrs...); err != nil {
+					warn(opts, "sqlite: sample scan failed for %s: %v", t.name, err)
+					continue
+				}
+				cells := make([]string, len(vals))
+				for j, v := range vals {
+					cells[j] = truncateCell(formatCell(v))
+				}
+				collected = append(collected, cells)
+			}
+			// Surface a mid-iteration read error (code review §4): without this,
+			// rows.Next() stopping early on an error silently accepts a partial
+			// sample. The Postgres path already checks rows.Err().
+			if err := rows.Err(); err != nil {
+				warn(opts, "sqlite: sample row iteration for %s ended early: %v", t.name, err)
+			}
 			rows.Close()
-			continue
-		}
-		var collected [][]string
-		for rows.Next() {
-			vals := make([]any, len(cols))
-			ptrs := make([]any, len(cols))
-			for j := range vals {
-				ptrs[j] = &vals[j]
-			}
-			if err := rows.Scan(ptrs...); err != nil {
-				warn(opts, "sqlite: sample scan failed for %s: %v", t.name, err)
-				continue
-			}
-			cells := make([]string, len(vals))
-			for j, v := range vals {
-				cells[j] = truncateCell(formatCell(v))
-			}
-			collected = append(collected, cells)
-		}
-		// Surface a mid-iteration read error (code review §4): without this,
-		// rows.Next() stopping early on an error silently accepts a partial
-		// sample. The Postgres path already checks rows.Err().
-		if err := rows.Err(); err != nil {
-			warn(opts, "sqlite: sample row iteration for %s ended early: %v", t.name, err)
-		}
-		rows.Close()
-		t.sampleRows = collected
+			t.sampleRows = collected
+		})
 	}
 }
 

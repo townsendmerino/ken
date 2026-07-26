@@ -14,6 +14,22 @@ import (
 // underlying data is not modified — only the displayed slice.
 const maxSampleCellChars = 80
 
+// withSampleRecover runs fn, converting a panic into a warn log so one
+// pathological table (an exotic driver type conversion — the hazard the
+// Postgres sampleOne recover was written for) skips instead of crashing the
+// whole ken-mcp process. Applied symmetrically across all three engines
+// (audit §26): a panic inside the MySQL errgroup goroutine or the SQLite
+// loop was previously fatal, where the Postgres equivalent warned and
+// continued.
+func withSampleRecover(opts Options, label string, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			warn(opts, "panic sampling %s: %v", label, r)
+		}
+	}()
+	fn()
+}
+
 // sampleRowsImpl pulls Options.SampleRows rows from every table in snap
 // and attaches them to tableInfo.sampleRows. Also
 // populates approxRowCount from pg_class.reltuples (free to query, no

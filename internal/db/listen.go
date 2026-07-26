@@ -176,7 +176,16 @@ func (l *Listener) runOnce(ctx context.Context) (listened bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("connect: %w", err)
 	}
-	defer conn.Close(context.Background())
+	// Bound the Terminate write (audit §27): with context.Background() a
+	// half-open socket (firewall change, hard VM kill — no RST) makes
+	// Close block on the OS TCP timeout (~15 min), during which Run never
+	// reaches its reconnect backoff and LISTEN-driven refresh stays dead
+	// even after the DB returns.
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	}()
 
 	// Trigger-existence check: if missing, log the fix command once, then
 	// POLL for it on this live connection (code review §4). The prior

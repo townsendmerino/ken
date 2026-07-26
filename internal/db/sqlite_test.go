@@ -215,3 +215,51 @@ func TestSQLiteIntegration_RelativeDSNResolution(t *testing.T) {
 		t.Errorf("expected TABLE only_one chunk; got:\n%s", chunks[0].Text)
 	}
 }
+
+// TestSQLiteIntegration_ImplicitFKResolvesRealPK is the audit §13
+// regression: an implicit `REFERENCES parent` FK (no column named) whose
+// parent's PK is NOT "id" must render the parent's REAL primary-key column,
+// not a fabricated "id".
+func TestSQLiteIntegration_ImplicitFKResolvesRealPK(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "fk.db")
+	conn, err := sql.Open("sqlite", file)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	// customers' PK is `uuid`, NOT id. orders references it implicitly.
+	stmts := []string{
+		`CREATE TABLE customers (uuid TEXT PRIMARY KEY, name TEXT)`,
+		`CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_uuid TEXT REFERENCES customers, total REAL)`,
+	}
+	for _, s := range stmts {
+		if _, err := conn.Exec(s); err != nil {
+			conn.Close()
+			t.Fatalf("exec %q: %v", s, err)
+		}
+	}
+	conn.Close()
+
+	chunks, err := IndexSchema(ctx, Options{DSN: "sqlite://" + file, LogWriter: &bytes.Buffer{}})
+	if err != nil {
+		t.Fatalf("IndexSchema: %v", err)
+	}
+	var ordersText string
+	for _, c := range chunks {
+		if strings.Contains(c.Text, "TABLE orders") {
+			ordersText = c.Text
+		}
+	}
+	if ordersText == "" {
+		t.Fatal("no chunk for TABLE orders")
+	}
+	if !strings.Contains(ordersText, "customers(uuid)") {
+		t.Errorf("orders FK should resolve to customers(uuid) (the real PK), got:\n%s", ordersText)
+	}
+	if strings.Contains(ordersText, "customers(id)") {
+		t.Errorf("orders FK fabricated a non-existent customers(id):\n%s", ordersText)
+	}
+}

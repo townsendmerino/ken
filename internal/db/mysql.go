@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-sql-driver/mysql"
 	"golang.org/x/sync/errgroup"
@@ -106,6 +107,14 @@ func indexSchemaMySQL(ctx context.Context, opts Options) ([]chunk.Chunk, error) 
 	// burst of 8+ goroutines could exhaust shared MySQL max_connections.
 	// ADR-031.
 	conn.SetMaxOpenConns(sampleWorkers())
+	// Match idle to open (audit §10): database/sql defaults MaxIdleConns to
+	// 2, so with 8 sample workers 6 of every 8 connection releases CLOSE the
+	// connection instead of pooling it — ~375 extra TLS handshakes on a
+	// 500-table sample, added to the very loop ADR-031 parallelized to save
+	// time. ConnMaxLifetime bounds staleness behind connection proxies
+	// (ProxySQL/RDS Proxy silently drop idle backends).
+	conn.SetMaxIdleConns(sampleWorkers())
+	conn.SetConnMaxLifetime(5 * time.Minute)
 	defer func() { _ = conn.Close() }()
 
 	if err := conn.PingContext(ctx); err != nil {
@@ -808,6 +817,13 @@ func mysqlAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot,
 	for i := range snap.tables {
 		t := &snap.tables[i]
 		g.Go(func() error {
+			// A panic here runs in an errgroup goroutine — fatal to the
+			// whole process without this recover (audit §26).
+			defer func() {
+				if r := recover(); r != nil {
+					warn(opts, "panic sampling %s.%s: %v", t.schema, t.name, r)
+				}
+			}()
 			orderClause := "ORDER BY 1"
 			for _, c := range t.columns {
 				if c.isPrimaryKey {
@@ -829,6 +845,19 @@ func mysqlAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot,
 				rows.Close()
 				return nil
 			}
+			// Per-column DB type names so we convert []byte→string ONLY for
+			// textual columns (audit §14): a BLOB/BINARY/VARBINARY must stay
+			// []byte so formatCell's "<N bytes>" path fires, matching
+			// Postgres — otherwise raw PNG/NUL bytes get UTF-8-mangled,
+			// tokenized, embedded, and returned to the model.
+			textCol := make([]bool, len(cols))
+			haveTypes := false
+			if cts, cerr := rows.ColumnTypes(); cerr == nil && len(cts) == len(cols) {
+				haveTypes = true
+				for j, ct := range cts {
+					textCol[j] = mysqlIsTextType(ct.DatabaseTypeName())
+				}
+			}
 			var collected [][]string
 			for rows.Next() {
 				vals := make([]any, len(cols))
@@ -843,16 +872,11 @@ func mysqlAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot,
 				cells := make([]string, len(vals))
 				for j, v := range vals {
 					// go-sql-driver/mysql returns VARCHAR / CHAR / TEXT / JSON
-					// as []byte rather than string (default driver behavior,
-					// unlike pgx which returns string). Convert at the
-					// driver boundary so formatCell renders them as the
-					// string they actually are. Genuine binary columns
-					// (BLOB / BINARY / VARBINARY) on MySQL also come back
-					// as []byte, but we let those render as strings too —
-					// formatCell's BYTEA path on Postgres still applies to
-					// pgx's []byte, where pgx only returns it for actual
-					// binary types.
-					if b, ok := v.([]byte); ok {
+					// as []byte rather than string (unlike pgx). Convert to
+					// string only for textual columns; leave genuine binary as
+					// []byte so formatCell renders "<N bytes>". When type
+					// metadata is unavailable, fall back to a utf8.Valid gate.
+					if b, ok := v.([]byte); ok && (haveTypes && textCol[j] || !haveTypes && utf8.Valid(b)) {
 						v = string(b)
 					}
 					cells[j] = truncateCell(formatCell(v))
@@ -871,6 +895,20 @@ func mysqlAppendSamples(ctx context.Context, conn *sql.DB, snap *schemaSnapshot,
 		})
 	}
 	_ = g.Wait()
+}
+
+// mysqlIsTextType reports whether a go-sql-driver DatabaseTypeName names a
+// textual column whose []byte value should render as a string. Everything
+// else — notably BLOB/BINARY/VARBINARY/GEOMETRY — stays []byte so
+// formatCell emits "<N bytes>" (audit §14). Type names are upper-case.
+func mysqlIsTextType(dbType string) bool {
+	switch strings.ToUpper(dbType) {
+	case "VARCHAR", "CHAR", "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT",
+		"JSON", "ENUM", "SET", "DECIMAL", "DATE", "TIME", "DATETIME", "TIMESTAMP", "YEAR":
+		return true
+	default:
+		return false
+	}
 }
 
 // sampleWorkers is the concurrency cap for parallel sample-row fetches
