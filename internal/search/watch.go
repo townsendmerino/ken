@@ -619,17 +619,28 @@ func (w *WatchedIndex) loop() {
 				}
 				continue
 			}
+			// A newly-created or moved-in DIRECTORY (audit §2): fsnotify
+			// delivers one Create for the dir and NO per-file events for
+			// contents that already existed (a `mv` or `mkdir && write`
+			// race), and ShouldIndex is false for directories — so the
+			// file-oriented path below would skip it and the new package
+			// would be invisible until restart. Watch the whole subtree and
+			// enqueue its indexable files ourselves. Must run BEFORE the
+			// matcher gate (which rejects the dir).
+			if ev.Op&fsnotify.Create != 0 {
+				if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() {
+					_ = addRecursive(w.fs, ev.Name)
+					w.enqueueDirFiles(ev.Name, dirty)
+					resetTimer()
+					continue
+				}
+			}
 			// WRITE/CREATE: filter through matcher rules so we
 			// don't reindex .git/HEAD, oversized binaries, etc.
 			if !w.matcher.ShouldIndex(rel) {
 				continue
 			}
 			dirty[rel] = mergeOp(dirty[rel], ev.Op)
-			// Newly-created directory? Add it to the watcher so we
-			// see events for files inside.
-			if ev.Op&fsnotify.Create != 0 {
-				w.addNewDir(ev.Name)
-			}
 			resetTimer()
 		case err, ok := <-w.fs.Errors:
 			if !ok {
@@ -977,8 +988,17 @@ func intStr(n int) string {
 // tombstoneFile marks every existing chunk whose File == rel as
 // Tombstoned. Caller holds corpusMu.
 func (w *WatchedIndex) tombstoneFile(rel string) {
+	// Match the exact file OR — for a directory Remove/Rename, which fires no
+	// per-file events (audit §14) — every chunk under rel+"/". The "/" boundary
+	// keeps `internal/auth` from matching `internal/authz/…`. A regular file
+	// remove (rel="a.go") has an empty prefix match, so this is a no-op beyond
+	// the exact case.
+	prefix := rel + "/"
 	for i := range w.chunks {
-		if w.chunks[i].File == rel && !w.chunks[i].Tombstoned {
+		if w.chunks[i].Tombstoned {
+			continue
+		}
+		if w.chunks[i].File == rel || strings.HasPrefix(w.chunks[i].File, prefix) {
 			w.chunks[i].Tombstoned = true
 		}
 	}
@@ -1058,26 +1078,43 @@ func (w *WatchedIndex) relPath(absPath string) string {
 func (w *WatchedIndex) isTrackedRel(rel string) bool {
 	w.corpusMu.Lock()
 	defer w.corpusMu.Unlock()
+	// Exact file, OR a directory whose subtree we've indexed (audit §14: a
+	// dir Remove/Rename must be accepted so its subtree gets tombstoned).
+	prefix := rel + "/"
 	for i := range w.chunks {
-		if w.chunks[i].File == rel && !w.chunks[i].Tombstoned {
+		if w.chunks[i].Tombstoned {
+			continue
+		}
+		if w.chunks[i].File == rel || strings.HasPrefix(w.chunks[i].File, prefix) {
 			return true
 		}
 	}
 	return false
 }
 
-// addNewDir adds a newly-created directory to the watcher recursively.
-// Used when CREATE events report a new subdirectory: without this,
-// files created inside it never fire events. Skips .git silently.
-func (w *WatchedIndex) addNewDir(absPath string) {
-	info, err := os.Stat(absPath)
-	if err != nil || !info.IsDir() {
-		return
-	}
-	if filepath.Base(absPath) == ".git" {
-		return
-	}
-	_ = w.fs.Add(absPath)
+// enqueueDirFiles walks a directory that just appeared (created or moved-in)
+// and enqueues every indexable file inside for (re)indexing (audit §2). No
+// per-file fsnotify event fires for files that already existed when the watch
+// was added, so we discover them ourselves — filtering through the same
+// Matcher.ShouldIndex the initial walk uses. Prunes .git/ and .ken/. Best
+// effort: walk errors on individual entries are skipped.
+func (w *WatchedIndex) enqueueDirFiles(absDir string, dirty map[string]fsnotify.Op) {
+	_ = filepath.WalkDir(absDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if name := d.Name(); name == ".git" || name == ".ken" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		rel := w.relPath(p)
+		if rel != "" && w.matcher.ShouldIndex(rel) {
+			dirty[rel] = mergeOp(dirty[rel], fsnotify.Create)
+		}
+		return nil
+	})
 }
 
 // mergeOp combines two op bitmasks for the same path during a debounce

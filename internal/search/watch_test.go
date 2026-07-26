@@ -643,3 +643,80 @@ func TestWatchedIndex_DeleteWhileReading_NoRace(t *testing.T) {
 		t.Error("deleted a.py should be gone from results after reconcile")
 	}
 }
+
+// TestWatchedIndex_MovedInDirectory_Indexed is the audit §2 regression: moving
+// a directory (with existing files) into the watched tree fires ONE Create for
+// the dir and no per-file events, so enqueueDirFiles is the only path that
+// indexes its contents. mkdir-then-write would also exercise it, but a move is
+// the deterministic "files already exist" case.
+func TestWatchedIndex_MovedInDirectory_Indexed(t *testing.T) {
+	root := makeTempRepo(t, map[string]string{
+		"main.py": "def main():\n    return 1\n",
+	})
+	wi := withShortDebounce(t, root, true)
+	swaps := make(chan struct{}, 8)
+	wi.SetOnSwap(swaps)
+	drainSwaps(swaps)
+
+	// Stage a package OUTSIDE the watched root, then move it in.
+	staging := filepath.Join(t.TempDir(), "authpkg")
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "token.py"),
+		[]byte("def mint_token():\n    return 'jwt'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(staging, filepath.Join(root, "auth")); err != nil {
+		t.Skipf("cross-dir rename unavailable: %v", err)
+	}
+
+	if !waitForSwap(t, swaps, 5*time.Second) {
+		t.Fatal("no snapshot publish after moving a directory in")
+	}
+	if !containsFile(wi.Load(), "auth/token.py") {
+		t.Errorf("moved-in auth/token.py not indexed; chunks: %s", chunkFiles(wi.Load()))
+	}
+	if len(wi.Search("mint_token", 5)) == 0 {
+		t.Error("Search('mint_token') found nothing — moved-in package is invisible")
+	}
+}
+
+// TestWatchedIndex_DirectoryRename_RepathsSubtree is the audit §14 regression:
+// renaming a directory (MOVED_FROM old + MOVED_TO new, no per-file events)
+// must tombstone the whole old subtree and index the new one.
+func TestWatchedIndex_DirectoryRename_RepathsSubtree(t *testing.T) {
+	root := makeTempRepo(t, map[string]string{
+		"auth/session.py": "def open_session():\n    return 's'\n",
+		"main.py":         "def main():\n    return 1\n",
+	})
+	wi := withShortDebounce(t, root, true)
+	if !containsFile(wi.Load(), "auth/session.py") {
+		t.Fatalf("precondition: auth/session.py should be indexed initially")
+	}
+	swaps := make(chan struct{}, 8)
+	wi.SetOnSwap(swaps)
+	drainSwaps(swaps)
+
+	if err := os.Rename(filepath.Join(root, "auth"), filepath.Join(root, "authz")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait until the re-path lands (poll a few swaps — MOVED_FROM/TO may arrive
+	// in separate debounce windows).
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		waitForSwap(t, swaps, time.Second)
+		got := wi.Load()
+		if !containsFile(got, "auth/session.py") && containsFile(got, "authz/session.py") {
+			return // re-pathed
+		}
+	}
+	got := wi.Load()
+	if containsFile(got, "auth/session.py") {
+		t.Errorf("stale old path auth/session.py still indexed after dir rename; chunks: %s", chunkFiles(got))
+	}
+	if !containsFile(got, "authz/session.py") {
+		t.Errorf("new path authz/session.py not indexed after dir rename; chunks: %s", chunkFiles(got))
+	}
+}
