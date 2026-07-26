@@ -244,7 +244,15 @@ func buildOrLoadSnapshot(ctx context.Context, dir string, mode search.Mode, mode
 		return nil, err
 	}
 	if persistSnapshot {
-		writeSnapshot(dir, wi, mode, chunker, modelDir, fsOpts, logger)
+		// M2: with lazy enrichment the build just published a RAW index; the
+		// background enrich pass will republish the enriched one and its
+		// OnFlush persists that. Persisting the raw index now would race that
+		// and could leave a raw snapshot on disk, so let the background pass
+		// own the write. (A crash mid-enrich → no snapshot → next boot
+		// lazy-rebuilds, which is also fast — self-consistent.)
+		if !fsOpts.LazyEnrichment {
+			writeSnapshot(dir, wi, mode, chunker, modelDir, fsOpts, logger)
+		}
 	}
 	return wi, nil
 }
@@ -345,6 +353,15 @@ func main() {
 	// applies to local-path repos (http sources are throwaway temp clones).
 	snapshotEnabled := envBool("KEN_MCP_SNAPSHOT", true, logger)
 
+	// Cold-start M2 (opt-in, default off): defer Arm B enrichment off the
+	// cold-build path — serve a raw BM25/dense index for a fast first query,
+	// then enrich + republish in the background. Only bites on a true cold
+	// build; a snapshot load (M1) is already enriched.
+	lazyEnrich := envBool("KEN_MCP_LAZY_ENRICH", false, logger)
+	if lazyEnrich {
+		logger.Logf(kenmcp.LogInfo, "lazy enrichment on (KEN_MCP_LAZY_ENRICH): cold builds serve pre-enrichment, enrich in background")
+	}
+
 	// M5: neural reranker — opt-in (default off), loaded lazily on the
 	// first hybrid+rerank query so the ~491 ms encoder.Load stays off the
 	// cold-start path. The model is shared across every WatchedIndex (via
@@ -402,6 +419,7 @@ func main() {
 		fsOpts := search.FSOptions{
 			DisableFoldMigrations: noAutoMigrations,
 			LogWriter:             os.Stderr,
+			LazyEnrichment:        lazyEnrich,
 		}
 		// M1 snapshot persistence applies only to local-path repos: an http
 		// source is a throwaway temp clone (cleanup != nil) that's rm-rf'd on

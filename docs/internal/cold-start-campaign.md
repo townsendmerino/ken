@@ -240,7 +240,29 @@ query; kernel-scale snapshot load measured and published; true cold unchanged.
 
 Estimate: 4–6 days including ADR + fuzz.
 
-### M2 — Lazy / async enrichment (promoted ahead of the embedding cache)
+### M2 — Lazy / async enrichment (promoted ahead of the embedding cache) — SHIPPED (opt-in)
+
+**Shipped v1, opt-in (`KEN_MCP_LAZY_ENRICH=1`, default off).** The cold build
+serves a RAW BM25/dense index for a fast first query; a background pass
+(`WatchedIndex.enrichCorpusInBackground`) then re-labels every file, re-embeds,
+and republishes the fully-enriched index atomically (fresh slices — never
+mutates the live array; `Close()` waits on / cancels it). `FSOptions.LazyEnrichment`
+gates the initial inline enrich; `enrichLabelFor` is the single-source label so
+inline and background can't drift; the background parse honors the M2-Task-2
+`KEN_ENRICH_FILE_BUDGET_MS`. Interaction with M1: a lazy cold build defers the
+raw-snapshot persist and lets the background pass's OnFlush persist the
+*enriched* snapshot, so the next boot is a clean enriched load (crash
+mid-enrich → no snapshot → next boot lazy-rebuilds, also fast).
+
+Measured first-servable (yii2 ~12 k chunks, M1 Pro, median of 3): **bm25 3.2×**
+(1.66 s → 522 ms — ≈ the enrich-off floor, acceptance met), **hybrid 1.9×**
+(2.34 s → 1.21 s). Full enrichment completes in the background off the query
+path. Default stays **off** pending a 4-core-x86 profile of background-sweep vs
+on-demand and the honest dual-number (first-servable vs fully-warm) rebench.
+
+Tests (-race): lazy build eventually matches the inline-enriched corpus byte
+for byte (watch=false runs the pass synchronously); watch=true serves raw
+first, then swaps in the enriched index; the fresh-slice publish is race-clean.
 
 **Motivation (M0(a)):** the 0.47.0 parser is ~2.7× slower on PHP than the
 version the external bench measured, and the enrichment tree-sitter parse is

@@ -105,6 +105,19 @@ type FSOptions struct {
 	// FromPath/FromFS additionally read KEN_ENRICH=off as an env
 	// shortcut.
 	DisableEnrichment bool
+
+	// LazyEnrichment defers Arm B enrichment off the cold-build critical path
+	// (cold-start M2). When true, the initial build embeds RAW chunks (no
+	// `# func:` label) so first-servable pays only the walk/chunk/embed floor,
+	// not the ~50%-of-index-time tree-sitter parse; a WatchedIndex then runs a
+	// background pass that extracts the label per file, re-embeds, and
+	// republishes the fully-enriched index atomically. Ignored when
+	// DisableEnrichment is set (nothing to defer). Only meaningful on the
+	// WatchedIndex path (a live server); the plain FromFS/FromPath builds treat
+	// it as enrich-inline. Enrichment is additive (label-only, ADR-035), so
+	// pre-enrichment results are well-formed — just lower-ranked until the
+	// background pass lands.
+	LazyEnrichment bool
 }
 
 // Mode selects the retrieval strategy.
@@ -341,17 +354,26 @@ func enrichChunks(rel string, data []byte, cs []chunk.Chunk, disable bool) {
 	if disable {
 		return
 	}
-	efs := structural.ExtractFile(rel, data)
-	if efs == nil {
-		return
-	}
-	label := structural.EnrichFromFileStruct(efs, structural.EnrichOptions{})
+	label := enrichLabelFor(rel, data)
 	if label == "" {
 		return
 	}
 	for i := range cs {
 		cs[i].Text = label + cs[i].Text
 	}
+}
+
+// enrichLabelFor returns the Arm B structural label for a file (`# func: … |
+// calls: … | raises: …\n`), or "" when the file has no registered extractor or
+// no structural content. Single source of the label so the inline build path
+// (enrichChunks) and the lazy background pass (WatchedIndex.enrichCorpusInBackground)
+// can't drift.
+func enrichLabelFor(rel string, data []byte) string {
+	efs := structural.ExtractFile(rel, data)
+	if efs == nil {
+		return ""
+	}
+	return structural.EnrichFromFileStruct(efs, structural.EnrichOptions{})
 }
 
 // Concurrency safety prerequisites (verified in parallelism Phase 1):
@@ -455,7 +477,9 @@ func walkAndChunkFSWithModel(ctx context.Context, fsys fs.FS, mode Mode, chunker
 				// unchanged, which is the correct no-op behavior
 				// for unsupported languages). DisableEnrichment
 				// opts out entirely.
-				enrichChunks(j.rel, data, cs, opts.DisableEnrichment)
+				// LazyEnrichment defers this to a background pass (M2): the
+				// initial build embeds raw chunks for a fast first-servable.
+				enrichChunks(j.rel, data, cs, opts.DisableEnrichment || opts.LazyEnrichment)
 				var localVecs [][]float32
 				if model != nil {
 					localVecs = make([][]float32, len(cs))

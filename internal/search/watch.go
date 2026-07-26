@@ -92,8 +92,9 @@ type WatchedIndex struct {
 	fs      *fsnotify.Watcher
 	ctx     context.Context
 	cancel  context.CancelFunc
-	done    chan struct{} // closed by the goroutine just before exit
-	closeMu sync.Mutex    // serializes Close() — idempotent
+	done    chan struct{}  // closed by the goroutine just before exit
+	closeMu sync.Mutex     // serializes Close() — idempotent
+	bgWG    sync.WaitGroup // tracks the M2 lazy-enrichment background pass
 
 	// Test hook: receives one value per published snapshot. nil
 	// disables. Use SetOnSwap to set before any events arrive.
@@ -289,7 +290,16 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 	}
 	wi.ix.Store(wi.buildUnionedIndexLocked())
 
+	// M2: lazy enrichment. The build above published a RAW index for a fast
+	// first-servable; now bring it to full quality. Ignored when enrichment is
+	// off. On the non-watching path there's no long-lived process to run it
+	// async, so enrich synchronously before returning (the returned index is
+	// fully enriched, as callers expect).
+	lazyEnrich := opts.LazyEnrichment && !opts.DisableEnrichment
 	if !watch {
+		if lazyEnrich {
+			wi.enrichCorpusInBackground(context.Background())
+		}
 		close(wi.done)
 		return wi, nil
 	}
@@ -310,6 +320,16 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 	}
 
 	go wi.loop()
+
+	// Background enrichment goroutine, tracked so Close() waits for it and
+	// cancels it via wi.ctx.
+	if lazyEnrich {
+		wi.bgWG.Add(1)
+		go func() {
+			defer wi.bgWG.Done()
+			wi.enrichCorpusInBackground(wi.ctx)
+		}()
+	}
 	return wi, nil
 }
 
@@ -324,6 +344,72 @@ func (w *WatchedIndex) SnapshotBytes() ([]byte, error) {
 		return nil, fmt.Errorf("search: SnapshotBytes: no index published")
 	}
 	return serializeIndex(ix.Chunks(), ix.Vecs(), w.mode, w.chunkerName)
+}
+
+// enrichCorpusInBackground is the cold-start M2 lazy-enrichment pass: after a
+// LazyEnrichment build published a RAW index (no Arm B labels) for a fast
+// first-servable, this re-labels every live chunk (one tree-sitter parse per
+// file), re-embeds it, and republishes the fully-enriched index atomically.
+// Runs once, off the query path (reads use the atomic snapshot throughout).
+//
+// It holds corpusMu for the whole pass — reads are unaffected (they Load() the
+// published *Index), but watch flushes queue behind it; at cold start there are
+// typically no edits yet. ctx cancellation (Close) aborts at the next file
+// boundary. The parse honors KEN_ENRICH_FILE_BUDGET_MS via ExtractFile.
+func (w *WatchedIndex) enrichCorpusInBackground(ctx context.Context) {
+	start := time.Now()
+	w.corpusMu.Lock()
+	defer w.corpusMu.Unlock()
+
+	// Work on FRESH slices: the currently-published raw index shares
+	// w.chunks/w.vecs' backing arrays and readers use it lock-free (atomic
+	// Load), so we must NOT mutate those elements in place — build the
+	// enriched corpus alongside and swap the whole thing in atomically.
+	newChunks := make([]chunk.Chunk, len(w.chunks))
+	copy(newChunks, w.chunks)
+	newVecs := make([][]float32, len(w.vecs))
+	copy(newVecs, w.vecs)
+
+	// Group live chunk indices by file (labels are per-file).
+	byFile := map[string][]int{}
+	for i := range newChunks {
+		if newChunks[i].Tombstoned {
+			continue
+		}
+		byFile[newChunks[i].File] = append(byFile[newChunks[i].File], i)
+	}
+
+	enriched := 0
+	for rel, idxs := range byFile {
+		if ctx.Err() != nil {
+			return // Close() cancelled — leave the raw index published
+		}
+		data, err := os.ReadFile(filepath.Join(w.root, rel))
+		if err != nil {
+			continue
+		}
+		label := enrichLabelFor(rel, data)
+		if label == "" {
+			continue // no extractor / no structural content — raw is correct
+		}
+		for _, i := range idxs {
+			newChunks[i].Text = label + newChunks[i].Text // reassigns the copy, not w.chunks[i]
+			if w.model != nil && i < len(newVecs) {
+				newVecs[i] = w.model.Encode(newChunks[i].Text) // fresh vec, not shared array
+			}
+		}
+		enriched++
+	}
+	if enriched == 0 {
+		return
+	}
+	w.chunks = newChunks
+	w.vecs = newVecs
+	w.ix.Store(w.buildUnionedIndexLocked())
+	w.notifySwap()
+	// Reuse the flush notification so ken-mcp's OnFlush re-persists the now
+	// -enriched snapshot (M1) — a boot after this is a clean enriched load.
+	w.notifyFlush(len(w.chunks)+len(w.extraChunks), enriched, 0, time.Since(start))
 }
 
 // EmbedModel returns the Model2Vec model this index queries with (nil for
@@ -422,6 +508,9 @@ func (w *WatchedIndex) Close() error {
 	// Wait for the goroutine to drain. If watch=false there's no
 	// goroutine but `done` was closed eagerly in NewWatchedIndex.
 	<-w.done
+	// Wait for the M2 background-enrichment pass (if any) — cancel() above
+	// signals it via wi.ctx; it aborts at the next file boundary.
+	w.bgWG.Wait()
 	return nil
 }
 
