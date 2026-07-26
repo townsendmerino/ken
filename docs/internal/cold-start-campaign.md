@@ -52,6 +52,25 @@ Two distinct user experiences to fix, in priority order:
 - **True cold** (first index ever, or invalidated snapshot) — should be minutes → tens
   of seconds, and should serve *something* early.
 
+## Results (consolidated, final binary)
+
+Time to a servable first query, measured in one pass on the shipped code
+(HEAD `2a1b82d`), yii2 PHP corpus (~12 k chunks), hybrid mode, M1 Pro / 16 GB,
+median of 3. **All speedups are M1 Pro; absolute times won't hold on a 4-core
+i5 — the on-by-default calibration owes that measurement.**
+
+| scenario | first-servable | vs cold |
+|---|---:|---:|
+| cold full build (baseline = fully-warm) | 2.39 s | 1× |
+| **M1** everyday-cold — restart, repo unchanged *(default on)* | 573 ms | **4.2×** |
+| **M1** reconcile — restart after a 1-file edit *(default on)* | 746 ms | **3.2×** |
+| **M2** lazy enrich — true cold, first query *(opt-in)* | 1.24 s | 1.9× |
+| **M4** staged — true cold, first query *(opt-in)* | 564 ms | **4.2×** |
+
+Dual-number honesty (M3/M4): first-servable above; the **fully-warm** hybrid
+index (the 2.39 s baseline) lands in the background shortly after for M2/M4.
+M3 (embed cache) is a rebuild lever, not a first-query one (warm rebuild 1.5×).
+
 ## Milestones
 
 ### M0 — Profile the build path (prerequisite; do first) — ✅ DONE 2026-07-25

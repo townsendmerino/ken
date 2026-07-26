@@ -13,6 +13,73 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [1.3.0] — 2026-07-25 — cold-start campaign (snapshots + serve-before-warm)
+
+Addresses the cold-start UX raised in [#61](https://github.com/townsendmerino/ken/issues/61)
+(Trofimov's Cursor-MCP bench, 256.6 s to first query on a PHP/Yii monorepo):
+**`ken-mcp` no longer rebuilds the index from scratch on every launch.** New
+behavior is default-on and backward-compatible; the deeper deferral modes are
+opt-in pending 4-core-x86 calibration. Design in
+[ADR-039](docs/internal/DECISIONS.md#adr-039) + `docs/internal/cold-start-campaign.md`.
+
+### Added
+
+- **Persistent index snapshots + reconcile-on-boot — default on (ADR-039).**
+  `ken-mcp` persists the built index to `<repo>/.ken/snapshot.{bin,manifest}`
+  and, on restart, loads it + drift-scans (config-key ⊕ per-file mtime/size)
+  instead of rebuilding when the repo is unchanged. A restart after a few edits
+  **reconciles only the changed files** (falls back to full rebuild past 50 %
+  drift). Any missing/corrupt/mismatched/drifted state degrades silently to a
+  live build; both loaders are **fuzzed** (untrusted input). `KEN_MCP_SNAPSHOT=0`
+  disables; local-path repos only; `.ken/` is a cache (gitignore it). Distinct
+  from the ADR-024 operator prebuilt (`.ken/index.bin`, frozen), which still wins.
+- **Staged readiness — `KEN_MCP_STAGED` (opt-in).** On a true-cold hybrid build,
+  serve **BM25 lexical instantly**, then enrich + embed in the background and
+  upgrade to hybrid. Tool responses carry `"semantic":"warming"` until ready.
+- **Lazy/async enrichment — `KEN_MCP_LAZY_ENRICH` (opt-in).** Defers the Arm B
+  tree-sitter parse off the cold path (serve raw, enrich in background).
+- **Content-hash embedding cache — `KEN_MCP_EMBED_CACHE` (opt-in).** Persistent
+  `sha256(chunk)→vector` cache at `<repo>/.ken/embed.db` so a full rebuild
+  re-embeds only never-seen text (`KEN_MCP_EMBED_CACHE_MAX` bounds it). The
+  SQLite impl is isolated in `internal/embedcache` so the `mcp` package stays
+  DB-driver-free (v0.6.0 binary-size contract).
+- **`ken index --write-snapshot`** — build once + persist for CI prewarming
+  (shares the writer with `ken-mcp`).
+- **Lazy structural symbol-index build.** `ken-mcp` defers `structural.Build`
+  to the first structural-tool call, removing a redundant full-corpus parse
+  pass from every cold start.
+- **Per-file parse budget — `KEN_ENRICH_FILE_BUDGET_MS`** (ken-mcp default
+  500 ms; off in the CLI/library). Skips + logs + counts a file whose
+  tree-sitter parse exceeds the budget, guarding against pathological
+  template-like files the size cap misses.
+
+### Performance
+
+First query on the yii2 PHP corpus (~12 k chunks), hybrid, M1 Pro, median of 3.
+**Speedups are M1 Pro; absolute times will differ on a 4-core i5** — the
+opt-in modes stay off until that's measured.
+
+| scenario | first-servable | vs cold |
+|---|---:|---:|
+| cold full build (baseline / fully-warm) | 2.39 s | 1× |
+| M1 everyday-cold — restart, repo unchanged *(default)* | 573 ms | **4.2×** |
+| M1 reconcile — restart after a 1-file edit *(default)* | 746 ms | **3.2×** |
+| M4 staged — true cold, first query *(opt-in)* | 564 ms | **4.2×** |
+| M2 lazy enrich — true cold, first query *(opt-in)* | 1.24 s | 1.9× |
+
+Dual-number honesty: for M2/M4 the fully-warm hybrid index (≈ the 2.39 s
+baseline) lands in the background shortly after first-servable.
+
+### Notes
+
+- **Why the deferral matters (M0(a)):** the gotreesitter 0.20.5 → 0.47.0 bump
+  shipped in 1.1.1 (a correctness fix) *regressed* the PHP tree-sitter parse
+  ~2.7× — and the parse is ~50 % of cold index time. So the campaign takes the
+  parse **off the cold path** rather than trying to speed it up. Also filed a
+  ratchet data point upstream (`docs/internal/gotreesitter-php-datapoint.md`).
+- Index throughput and warm-search latency are unchanged (the opt-in modes are
+  off by default; the default index path is untouched).
+
 ## [1.2.1] — 2026-07-24 — x/text CVE fix
 
 A security fast-follow to 1.2.0, same day. No feature or behavior changes.
