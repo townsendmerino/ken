@@ -87,6 +87,12 @@ type WatchedIndex struct {
 	vecs     [][]float32
 	model    *embed.StaticModel
 
+	// tokens memoizes BM25 tokenization keyed by chunk text so a flush
+	// only re-tokenizes re-chunked files, not the whole corpus (audit
+	// §5). Written under corpusMu by buildUnionedIndexLocked; nil-safe
+	// (tokenizeDocs treats a nil cache as "tokenize everything fresh").
+	tokens *tokenCache
+
 	// v0.7.0 (ADR-017): "extra" chunks injected by the orchestrator
 	// from non-FS sources — currently database introspection via
 	// internal/db.Refresher. These survive fsnotify-driven flushes
@@ -786,9 +792,13 @@ func (w *WatchedIndex) refoldMigrationDir(dir string) {
 // built snapshot. The reranker instance is shared across rebuilds so
 // its content-hash LRU cache carries forward.
 func (w *WatchedIndex) buildUnionedIndexLocked() *Index {
+	if w.tokens == nil {
+		w.tokens = newTokenCache()
+	}
 	var ix *Index
 	if len(w.extraChunks) == 0 {
-		ix = BuildIndex(w.chunks, w.vecs, w.mode, w.model)
+		docs := tokenizeDocs(w.chunks, w.tokens)
+		ix = buildIndexFromDocs(w.chunks, docs, w.vecs, w.mode, w.model)
 	} else {
 		merged := make([]chunk.Chunk, 0, len(w.chunks)+len(w.extraChunks))
 		merged = append(merged, w.chunks...)
@@ -799,7 +809,15 @@ func (w *WatchedIndex) buildUnionedIndexLocked() *Index {
 			mergedVecs = append(mergedVecs, w.vecs...)
 			mergedVecs = append(mergedVecs, w.extraVecs...)
 		}
-		ix = BuildIndex(merged, mergedVecs, w.mode, w.model)
+		// FS chunks reuse the cache (the common, per-save path); the
+		// extras (Tier-2 DB chunks) are tokenized fresh — they change on
+		// their own refresh cadence and caching them would only add map
+		// churn. Concatenated FS-first so indices stay stable (matching
+		// the merged chunk order above).
+		docs := make([][]string, 0, len(merged))
+		docs = append(docs, tokenizeDocs(w.chunks, w.tokens)...)
+		docs = append(docs, tokenizeDocs(w.extraChunks, nil)...)
+		ix = buildIndexFromDocs(merged, docs, mergedVecs, w.mode, w.model)
 	}
 	if w.reranker != nil {
 		ix.reranker = w.reranker

@@ -41,6 +41,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/townsendmerino/aikit/ann"
@@ -656,19 +657,115 @@ func FromFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.Sta
 // (Search / FindRelated / ResolveChunk) checks Tombstoned before
 // returning a result.
 func BuildIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, model *embed.StaticModel) *Index {
-	docs := make([][]string, len(chunks))
-	for i, c := range chunks {
-		if c.Tombstoned {
-			docs[i] = nil // contributes no postings; df unaffected
-			continue
-		}
-		docs[i] = bm25.Tokenize(c.Text)
-	}
+	return buildIndexFromDocs(chunks, tokenizeDocs(chunks, nil), vecs, mode, model)
+}
+
+// buildIndexFromDocs is BuildIndex with the per-chunk BM25 token lists
+// supplied by the caller (docs[i]==nil for tombstoned chunks). Split out
+// so the incremental watch path can feed cached tokens (audit §5) while
+// the cold path computes them fresh — both share the assembly + ann.New.
+// docs MUST be index-aligned with chunks.
+func buildIndexFromDocs(chunks []chunk.Chunk, docs [][]string, vecs [][]float32, mode Mode, model *embed.StaticModel) *Index {
 	ix := &Index{mode: mode, chunks: chunks, bm: bm25.Build(docs), model: model, vecs: vecs}
 	if model != nil {
 		ix.flat = ann.New(vecs)
 	}
 	return ix
+}
+
+// tokenCache memoizes BM25 tokenization keyed by chunk text. Tokens are a
+// pure function of Chunk.Text, so on the incremental watch path — where a
+// single-file save re-chunks ~5 of N chunks — reusing cached tokens turns
+// BuildIndex's per-flush O(corpus) tokenize into O(changed) (audit §5).
+//
+// tokenizeDocs rebuilds the map from the current chunk set each call, so
+// entries whose text was edited away are evicted; the map holds at most
+// one entry per live chunk (no unbounded process-lifetime growth — the
+// smell called out in audit §6). Keys are the chunks' own text strings,
+// so the map stores string headers, not copies of the text bytes. Not
+// safe for concurrent use; the watch path only touches it under corpusMu.
+type tokenCache struct {
+	byText map[string][]string
+}
+
+func newTokenCache() *tokenCache { return &tokenCache{byText: map[string][]string{}} }
+
+// tokenizeDocs returns the index-aligned BM25 token lists for chunks.
+// Tombstoned chunks map to nil (no postings, df unaffected). Misses are
+// tokenized in parallel across NumCPU workers — each worker writes only
+// its own docs[i], so the result is identical to a serial pass regardless
+// of worker count (byte-stability preserved; bm25.Build consumes the
+// index-ordered slice). When cache is non-nil, cached texts are reused
+// and the cache is repopulated to exactly the current live chunks.
+func tokenizeDocs(chunks []chunk.Chunk, cache *tokenCache) [][]string {
+	docs := make([][]string, len(chunks))
+	if cache == nil {
+		miss := make([]int, 0, len(chunks))
+		for i := range chunks {
+			if !chunks[i].Tombstoned {
+				miss = append(miss, i)
+			}
+		}
+		parallelTokenize(chunks, docs, miss)
+		return docs
+	}
+	next := make(map[string][]string, len(chunks))
+	miss := make([]int, 0)
+	for i := range chunks {
+		if chunks[i].Tombstoned {
+			continue
+		}
+		if toks, ok := cache.byText[chunks[i].Text]; ok {
+			docs[i] = toks
+			next[chunks[i].Text] = toks
+		} else {
+			miss = append(miss, i)
+		}
+	}
+	parallelTokenize(chunks, docs, miss)
+	for _, i := range miss {
+		next[chunks[i].Text] = docs[i]
+	}
+	cache.byText = next
+	return docs
+}
+
+// parallelTokenize tokenizes chunks[i].Text for every i in idxs, writing
+// docs[i]. bm25.Tokenize is goroutine-safe (its scratch buffers come from
+// a sync.Pool), and workers touch disjoint docs indices, so no locking is
+// needed. Small batches run serially to skip the goroutine overhead.
+func parallelTokenize(chunks []chunk.Chunk, docs [][]string, idxs []int) {
+	n := len(idxs)
+	if n == 0 {
+		return
+	}
+	workers := runtime.NumCPU()
+	if workers > n {
+		workers = n
+	}
+	if workers <= 1 || n < 64 {
+		for _, i := range idxs {
+			docs[i] = bm25.Tokenize(chunks[i].Text)
+		}
+		return
+	}
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for {
+				k := int(next.Add(1)) - 1
+				if k >= n {
+					return
+				}
+				i := idxs[k]
+				docs[i] = bm25.Tokenize(chunks[i].Text)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // WithExtraChunks returns a new *Index containing the receiver's chunks
