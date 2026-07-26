@@ -68,7 +68,7 @@ func filePathPenalty(filePath string) float64 {
 	if testFileRE.MatchString(norm) || testDirRE.MatchString(norm) {
 		pen *= strongPenalty
 	}
-	if _, ok := reexportFilenames[path.Base(filePath)]; ok {
+	if _, ok := reexportFilenames[path.Base(norm)]; ok { // norm, not filePath (audit §24)
 		pen *= moderatePenalty
 	}
 	if compatDirRE.MatchString(norm) {

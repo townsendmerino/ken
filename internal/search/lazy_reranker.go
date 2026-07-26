@@ -81,11 +81,28 @@ func (lr *LazyReranker) Loaded() bool { return lr.loaded.Load() }
 // Err returns the error from the loader call, or nil if not yet
 // loaded or loaded successfully. Use after Loaded() to distinguish
 // the "loaded successfully" and "loaded but errored" states.
-func (lr *LazyReranker) Err() error { return lr.err }
+//
+// Gating on loaded.Load() is the synchronization (audit §30): ensureLoaded
+// writes lr.err then Stores loaded=true, so a reader that observes
+// loaded==true here has an acquire edge to that release and safely sees
+// lr.err — no unsynchronized read even if a first Rerank is in flight.
+// Does not force a load (returns nil while unloaded).
+func (lr *LazyReranker) Err() error {
+	if !lr.loaded.Load() {
+		return nil
+	}
+	return lr.err
+}
 
 // Inner returns the loaded reranker, or nil if not yet loaded /
 // loader errored. Used by callers (e.g. the persistent-cache save
 // path in cmd/ken-mcp) that need to operate on the underlying
 // *NeuralReranker — at shutdown the cache is saved only if loading
-// actually happened.
-func (lr *LazyReranker) Inner() Reranker { return lr.inner }
+// actually happened. Gated on loaded.Load() for the same acquire edge as
+// Err (audit §30); does not force a load.
+func (lr *LazyReranker) Inner() Reranker {
+	if !lr.loaded.Load() {
+		return nil
+	}
+	return lr.inner
+}

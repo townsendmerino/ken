@@ -631,7 +631,7 @@ func (w *WatchedIndex) loop() {
 			// would return false (stat fails). Accept those without
 			// matcher check so we can still tombstone.
 			if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-				if knownIndexedFile(w.root, rel) || w.isTrackedRel(rel) {
+				if knownIndexedFile(rel) || w.isTrackedRel(rel) {
 					dirty[rel] = mergeOp(dirty[rel], ev.Op)
 					resetTimer()
 				}
@@ -1136,8 +1136,11 @@ func (w *WatchedIndex) relPath(absPath string) string {
 		return ""
 	}
 	rel = filepath.ToSlash(rel)
-	if rel == "" || rel[0] == '.' && len(rel) >= 2 && rel[1] == '.' {
-		// rel starting with ".." means outside root.
+	// Reject only genuine "outside root" escapes (audit §25): match exactly
+	// ".." or a "../" prefix, NOT any name starting with ".." — legitimately
+	// named entries like "..data" / "..config" (Kubernetes ConfigMap mounts)
+	// must pass through.
+	if rel == "" || rel == ".." || strings.HasPrefix(rel, "../") {
 		return ""
 	}
 	return rel
@@ -1295,16 +1298,16 @@ func addRecursive(w *fsnotify.Watcher, root string, logw io.Writer) error {
 	})
 }
 
-// knownIndexedFile is a small helper for events on files that no
-// longer exist on disk: we can't stat them, but if the rel path looks
-// like one of ken's normal source-file extensions OR is a known
-// special filename, we'll trust the event and let tombstoneFile +
-// "no match found" be the safe no-op behavior.
+// knownIndexedFile is a small helper for events on files that no longer
+// exist on disk: we can't stat them, but if the rel path has one of ken's
+// recognized source-file extensions we trust the event and let
+// tombstoneFile + "no match found" be the safe no-op behavior.
 //
 // This is intentionally permissive: false negatives just mean a
-// REMOVE/RENAME on a never-indexed file becomes a no-op tombstone
-// attempt (no-op because no chunks match). False positives can't
-// over-tombstone — tombstoneFile only marks matching chunks.
-func knownIndexedFile(root, rel string) bool {
+// REMOVE/RENAME on a never-indexed file becomes a no-op tombstone attempt
+// (no-op because no chunks match). False positives can't over-tombstone —
+// tombstoneFile only marks matching chunks. (audit §26: dropped the unused
+// `root` parameter and the never-implemented "special filenames" claim.)
+func knownIndexedFile(rel string) bool {
 	return chunk.Language(rel) != ""
 }

@@ -15,7 +15,19 @@ import (
 	"testing/fstest"
 
 	"github.com/townsendmerino/aikit/chunk"
+	"github.com/townsendmerino/aikit/embed"
 )
+
+// mustWithExtra calls WithExtraChunks and fails the test on error (the
+// error path is exercised separately). Keeps the assertion sites terse.
+func mustWithExtra(t *testing.T, ix *Index, extras []chunk.Chunk) *Index {
+	t.Helper()
+	out, err := ix.WithExtraChunks(extras)
+	if err != nil {
+		t.Fatalf("WithExtraChunks: %v", err)
+	}
+	return out
+}
 
 // makeExtras constructs a deterministic chunk slice for tests. The
 // chunks contain single-token nonce words that the BM25 tokenizer
@@ -54,7 +66,7 @@ func TestIndex_WithExtraChunks_NoModel_BM25Only(t *testing.T) {
 	}
 
 	extras := makeExtras(t)
-	newIx := ix.WithExtraChunks(extras)
+	newIx := mustWithExtra(t, ix, extras)
 
 	if newIx == nil {
 		t.Fatal("WithExtraChunks returned nil")
@@ -87,7 +99,7 @@ func TestIndex_WithExtraChunks_OriginalUnchanged(t *testing.T) {
 	ix := baseBM25Index(t)
 	origLen := ix.Len()
 
-	_ = ix.WithExtraChunks(makeExtras(t))
+	_ = mustWithExtra(t, ix, makeExtras(t))
 
 	if ix.Len() != origLen {
 		t.Errorf("WithExtraChunks mutated receiver; ix.Len() %d → %d", origLen, ix.Len())
@@ -107,7 +119,7 @@ func TestIndex_WithExtraChunks_EmptyExtras(t *testing.T) {
 	ix := baseBM25Index(t)
 
 	// nil extras
-	newIx := ix.WithExtraChunks(nil)
+	newIx := mustWithExtra(t, ix, nil)
 	if newIx == nil {
 		t.Fatal("WithExtraChunks(nil) returned nil")
 	}
@@ -119,7 +131,7 @@ func TestIndex_WithExtraChunks_EmptyExtras(t *testing.T) {
 	}
 
 	// empty slice (semantically same as nil)
-	newIx2 := ix.WithExtraChunks([]chunk.Chunk{})
+	newIx2 := mustWithExtra(t, ix, []chunk.Chunk{})
 	if newIx2 == nil {
 		t.Fatal("WithExtraChunks(empty) returned nil")
 	}
@@ -142,8 +154,8 @@ func TestIndex_WithExtraChunks_ReplacesNotAccumulates(t *testing.T) {
 		{File: "db://second.txt", Text: "qzxsecondonly", StartLine: 1, EndLine: 1},
 	}
 
-	mid := ix.WithExtraChunks(first)
-	final := mid.WithExtraChunks(second)
+	mid := mustWithExtra(t, ix, first)
+	final := mustWithExtra(t, mid, second)
 
 	// final must NOT include first's marker (replace semantics).
 	// Note: the receiver of the second call is `mid`, NOT the original
@@ -161,7 +173,7 @@ func TestIndex_WithExtraChunks_ReplacesNotAccumulates(t *testing.T) {
 	//
 	// We test the SAME-RECEIVER call pattern, which IS what mcp.Run
 	// does:
-	finalReplaced := ix.WithExtraChunks(second)
+	finalReplaced := mustWithExtra(t, ix, second)
 	if hits := finalReplaced.Search("qzxfirstonly", 5); len(hits) != 0 {
 		t.Errorf("same-receiver WithExtraChunks(second) returned %d hits for first's marker; should be 0 (replace, not accumulate)", len(hits))
 	}
@@ -177,7 +189,7 @@ func TestIndex_WithExtraChunks_ReplacesNotAccumulates(t *testing.T) {
 // "Tier 2 chunks ALONGSIDE FS chunks" guarantee.
 func TestIndex_WithExtraChunks_PreservesOriginalSearchability(t *testing.T) {
 	ix := baseBM25Index(t)
-	newIx := ix.WithExtraChunks(makeExtras(t))
+	newIx := mustWithExtra(t, ix, makeExtras(t))
 
 	// "alpha" appears in a.md's first line; should be findable in
 	// the new index too.
@@ -215,5 +227,27 @@ func TestIndex_WithExtraChunks_VecsRetention(t *testing.T) {
 	// stay nil (matches the FromFS-BM25 path).
 	if ix.model == nil && ix.vecs != nil {
 		t.Errorf("BM25-mode Index has non-nil vecs; BuildIndex should not have retained them")
+	}
+}
+
+// TestIndex_WithExtraChunks_InvariantReturnsError is the audit §23
+// regression: a model-mode Index whose vecs count doesn't match its chunk
+// count must return an error, NOT panic (the old behavior crashed the MCP
+// server via mcp.Run's refresh callback).
+func TestIndex_WithExtraChunks_InvariantReturnsError(t *testing.T) {
+	// Hand-build an inconsistent Index: non-nil model sentinel but
+	// mismatched vecs. A nil *embed.StaticModel is non-nil enough to take
+	// the model branch? No — the branch checks ix.model != nil, so we need
+	// a non-nil model. Use a zero-value model pointer; WithExtraChunks only
+	// reaches model.Encode AFTER the invariant check, so it never derefs it.
+	bad := &Index{
+		mode:   ModeHybrid,
+		chunks: []chunk.Chunk{{File: "a", Text: "x"}, {File: "b", Text: "y"}},
+		vecs:   [][]float32{{0.1}}, // 1 vec for 2 chunks — inconsistent
+		model:  &embed.StaticModel{},
+	}
+	_, err := bad.WithExtraChunks([]chunk.Chunk{{File: "c", Text: "z"}})
+	if err == nil {
+		t.Fatal("expected an error on the vecs/chunks length mismatch, got nil (did it panic instead?)")
 	}
 }

@@ -190,7 +190,14 @@ func runOnTransport(ctx context.Context, fsys fs.FS, opts Options, transport sdk
 	if opts.DB != nil {
 		baseIx := ix // capture the no-extras snapshot for rebuilds
 		onExtras := func(extras []chunk.Chunk) {
-			newIx := baseIx.WithExtraChunks(extras)
+			newIx, err := baseIx.WithExtraChunks(extras)
+			if err != nil {
+				// Non-fatal (audit §23): keep serving the prior snapshot
+				// rather than crash the server on an index-invariant
+				// violation.
+				logger.Logf(LogWarn, "mcp.Run: could not integrate %d DB chunks: %v", len(extras), err)
+				return
+			}
 			ixPtr.Store(newIx)
 			logger.Logf(LogInfo, "mcp.Run: integrated %d DB chunks into the embedded index", len(extras))
 		}

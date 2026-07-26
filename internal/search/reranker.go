@@ -222,6 +222,14 @@ func applyRerankerWithTelemetry(r Reranker, query string, ranked []Result, cfg r
 	for _, b := range blended {
 		out = append(out, Result{Chunk: head[b.idx].Chunk, Score: b.final})
 	}
+	// The head's Score is a min-max-normalized blend in [0,1]; the tail
+	// keeps its raw RRF scores (~0.01–0.03). So when k > rerankN the
+	// returned Result.Score is NOT globally comparable across the head/tail
+	// boundary — it is only rank-ORDINAL under rerank (the list order is
+	// correct; the numeric Score is not a cross-boundary magnitude). Callers
+	// surfacing Score (mcp SearchResultRow) should treat it as ordinal, not
+	// a similarity. (audit §29 — documented rather than rescaled to avoid
+	// perturbing the validated head ordering.)
 	out = append(out, tail...)
 	return out
 }

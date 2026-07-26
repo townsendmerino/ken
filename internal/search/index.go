@@ -796,12 +796,12 @@ func parallelTokenize(chunks []chunk.Chunk, docs [][]string, idxs []int) {
 // receiver concurrently (the receiver is immutable). The atomic-swap
 // of the resulting pointer is the caller's responsibility (mcp.Run
 // uses atomic.Pointer[Index] for this).
-func (ix *Index) WithExtraChunks(extras []chunk.Chunk) *Index {
+func (ix *Index) WithExtraChunks(extras []chunk.Chunk) (*Index, error) {
 	if len(extras) == 0 {
 		// No-op: rebuild from the receiver's state. Returns a fresh
 		// pointer (not ix itself) so callers can always treat the
 		// return value as a new snapshot to atomic-store.
-		return BuildIndex(ix.chunks, ix.vecs, ix.mode, ix.model)
+		return BuildIndex(ix.chunks, ix.vecs, ix.mode, ix.model), nil
 	}
 
 	merged := make([]chunk.Chunk, 0, len(ix.chunks)+len(extras))
@@ -812,16 +812,16 @@ func (ix *Index) WithExtraChunks(extras []chunk.Chunk) *Index {
 	if ix.model != nil {
 		// Semantic / hybrid: encode extras via the retained model.
 		// Invariant: when model != nil, ix.vecs has one entry per
-		// existing chunk. BuildIndex enforces this on all current
-		// callers (FromFSWithModel + LoadSerializedIndex); a
-		// hypothetical caller that sets model without parallel vecs
-		// would produce a short mergedVecs and ann.Flat over a
-		// truncated matrix — wrong rankings silently. L2 hardening:
-		// fail fast in that case rather than continue with bad data.
+		// existing chunk. A caller that sets model without parallel vecs
+		// would produce a short mergedVecs and ann.Flat over a truncated
+		// matrix — wrong rankings silently. Return an error instead of
+		// panicking (audit §23): this is reachable from mcp.Run's DB-
+		// refresh callback, and a panic there takes down the whole MCP
+		// server; the caller keeps serving the prior snapshot.
 		if len(ix.vecs) != len(ix.chunks) {
-			panic(fmt.Sprintf(
-				"search: WithExtraChunks invariant: model != nil requires len(vecs)==len(chunks); got vecs=%d chunks=%d",
-				len(ix.vecs), len(ix.chunks)))
+			return nil, fmt.Errorf(
+				"search: WithExtraChunks: model != nil requires len(vecs)==len(chunks); got vecs=%d chunks=%d",
+				len(ix.vecs), len(ix.chunks))
 		}
 		extraVecs := make([][]float32, len(extras))
 		for i, c := range extras {
@@ -833,7 +833,7 @@ func (ix *Index) WithExtraChunks(extras []chunk.Chunk) *Index {
 	}
 	// ModeBM25 path: mergedVecs stays nil; BuildIndex builds BM25 only.
 
-	return BuildIndex(merged, mergedVecs, ix.mode, ix.model)
+	return BuildIndex(merged, mergedVecs, ix.mode, ix.model), nil
 }
 
 // Len is the number of indexed chunks.
@@ -1212,7 +1212,11 @@ func (ix *Index) SearchWithQVecPredicted(query string, qVec []float32, predicted
 		}
 		return out, mode
 	case ModeHybrid:
-		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, k, -1, predicted)
+		// Over-fetch by the tombstone count (audit §11): the loop below
+		// filters tombstones AFTER retrieval, so passing bare k here would
+		// return fewer than k results on a tombstone-carrying index — the
+		// exact bug SearchMode's hybrid branch documents fixing.
+		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, overFetch, -1, predicted)
 		out := make([]Result, 0, k)
 		for _, r := range ranked {
 			c := ix.chunks[r.idx]
