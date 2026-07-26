@@ -398,7 +398,11 @@ func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db D
 			logger.Logf(LogDebug, "find_related: repo=%q ignored (embedded-corpus mode)", args.Repo)
 		}
 		if args.FilePath == "" || args.Line <= 0 {
-			return textResult("file_path is required and line must be ≥ 1."), nil, nil
+			// Output-mode-aware error (audit §21): the Cache-backed server
+			// returns errorResult here, so a json-mode agent hitting the
+			// embedded server on a bad `line` must get {"error":…}, not bare
+			// markdown it can't parse.
+			return errorResult(args.Output, "file_path is required and line must be ≥ 1."), nil, nil
 		}
 		return runFindRelated(ixPtr.Load(), args)
 	})

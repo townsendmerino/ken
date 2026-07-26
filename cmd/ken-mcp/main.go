@@ -976,6 +976,18 @@ func setupReranker(logger *kenmcp.Logger) (*search.LazyReranker, *rerankerLoader
 	topN := envInt("KEN_MCP_RERANK_TOP_N", 50, logger)
 	cacheSize := envInt("KEN_MCP_RERANK_CACHE_SIZE", search.DefaultRerankerCacheSize, logger)
 	beta := envFloat("KEN_MCP_RERANK_BETA", 0.25, logger)
+	// Validate before wiring (audit §22): cmd/ken validates these but the
+	// MCP side passed them straight to search.WithRerankN / WithRerankBlendBeta,
+	// so KEN_MCP_RERANK_TOP_N=-5 or a beta outside [0,1] reached the reranker
+	// unchecked. Clamp to the documented defaults with a warning.
+	if topN <= 0 {
+		logger.Logf(kenmcp.LogWarn, "KEN_MCP_RERANK_TOP_N=%d must be > 0 — using 50", topN)
+		topN = 50
+	}
+	if beta < 0 || beta > 1 {
+		logger.Logf(kenmcp.LogWarn, "KEN_MCP_RERANK_BETA=%v must be in [0,1] — using 0.25", beta)
+		beta = 0.25
+	}
 	// Default int8: aikit ≥v1.5.0's q8 reranker reaches f32 latency parity at
 	// ~21× less runtime memory + ¼ weight storage, cosine 0.997 unchanged.
 	quant := envEnum("KEN_MCP_RERANK_QUANT", []string{"f32", "int8"}, "int8", logger)

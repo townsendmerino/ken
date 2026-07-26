@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	git "github.com/go-git/go-git/v5"
@@ -75,6 +76,15 @@ func CloneShallow(ctx context.Context, urlStr string) (string, func(), error) {
 	// Route go-git's clone through the guarded http client: re-validates
 	// the IP at dial time (DNS-rebinding-safe) and caps the pack stream.
 	installGuardedCloneClient()
+
+	// One shared byte budget for THIS clone (audit §24): every connection
+	// go-git opens for it (info/refs, upload-pack, redirects) decrements the
+	// same counter, so the cap is genuinely per-clone, not per-connection.
+	if limit := maxCloneBytes(); limit > 0 {
+		budget := &atomic.Int64{}
+		budget.Store(limit)
+		ctx = context.WithValue(ctx, cloneBudgetKey, budget)
+	}
 
 	sum := sha256.Sum256([]byte(urlStr))
 	dir := filepath.Join(os.TempDir(), "ken-mcp", hex.EncodeToString(sum[:])[:16])
@@ -184,26 +194,36 @@ func maxCloneBytes() int64 {
 	return defaultMaxCloneBytes
 }
 
-// cappedConn wraps a net.Conn and fails reads once the per-connection byte
-// budget is exhausted. unlimited (cap ≤ 0) passes through untouched.
+// cloneBudgetKey carries a per-clone byte budget through the request
+// context so every connection a single clone opens (info/refs GET +
+// upload-pack POST + any redirect, each a fresh dial under
+// DisableKeepAlives) decrements ONE shared counter (audit §24). Without
+// this the cap was per-connection, giving a hostile host ~N× the
+// configured ceiling for an N-request clone.
+type cloneBudgetKeyType struct{}
+
+var cloneBudgetKey cloneBudgetKeyType
+
+// cappedConn wraps a net.Conn and fails reads once the shared per-clone
+// byte budget is exhausted. A nil budget (cap ≤ 0) passes through untouched.
 type cappedConn struct {
 	net.Conn
-	remaining int64
-	unlimited bool
+	budget *atomic.Int64 // shared across all conns of one clone; nil ⇒ unlimited
 }
 
 func (c *cappedConn) Read(p []byte) (int, error) {
-	if c.unlimited {
+	if c.budget == nil {
 		return c.Conn.Read(p)
 	}
-	if c.remaining <= 0 {
+	remaining := c.budget.Load()
+	if remaining <= 0 {
 		return 0, ErrCloneTooLarge
 	}
-	if int64(len(p)) > c.remaining {
-		p = p[:c.remaining]
+	if int64(len(p)) > remaining {
+		p = p[:remaining]
 	}
 	n, err := c.Conn.Read(p)
-	c.remaining -= int64(n)
+	c.budget.Add(-int64(n))
 	return n, err
 }
 
@@ -239,8 +259,19 @@ func guardedCloneDial(ctx context.Context, network, addr string) (net.Conn, erro
 	if err != nil {
 		return nil, err
 	}
+	// Prefer the shared per-clone budget from the request context (audit
+	// §24); fall back to a fresh per-connection budget only if none was
+	// attached (defensive — CloneShallow always attaches one).
+	if b, ok := ctx.Value(cloneBudgetKey).(*atomic.Int64); ok {
+		return &cappedConn{Conn: conn, budget: b}, nil
+	}
 	limit := maxCloneBytes()
-	return &cappedConn{Conn: conn, remaining: limit, unlimited: limit <= 0}, nil
+	if limit <= 0 {
+		return &cappedConn{Conn: conn, budget: nil}, nil
+	}
+	b := &atomic.Int64{}
+	b.Store(limit)
+	return &cappedConn{Conn: conn, budget: b}, nil
 }
 
 var installGuardedCloneClientOnce sync.Once
@@ -248,8 +279,9 @@ var installGuardedCloneClientOnce sync.Once
 // installGuardedCloneClient registers (process-once) a go-git http(s)
 // client that dials through guardedCloneDial. Global to go-git's protocol
 // registry, but ken-mcp's only go-git network use is CloneShallow, so it
-// scopes to clones. Keep-alive is disabled so each clone gets a fresh byte
-// budget (no pooled-conn carry-over between clones).
+// scopes to clones. Keep-alive is disabled so every request re-validates
+// its IP at dial time (DNS-rebinding-safe); the per-clone byte budget is
+// shared across those connections via the request context (audit §24).
 func installGuardedCloneClient() {
 	installGuardedCloneClientOnce.Do(func() {
 		t := http.DefaultTransport.(*http.Transport).Clone()

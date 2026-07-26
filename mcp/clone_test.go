@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -19,11 +20,52 @@ type readOnlyConn struct {
 
 func (c readOnlyConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
+// budgetOf builds a shared clone byte budget seeded to n (audit §24).
+func budgetOf(n int64) *atomic.Int64 {
+	b := &atomic.Int64{}
+	b.Store(n)
+	return b
+}
+
+// TestCappedConn_SharedBudgetAcrossConns is the audit §24 regression: two
+// connections that share one budget (as all connections of a single clone
+// now do) can't each spend the full cap — the SECOND is cut off once the
+// first drained the shared counter.
+func TestCappedConn_SharedBudgetAcrossConns(t *testing.T) {
+	shared := budgetOf(120)
+	c1 := &cappedConn{Conn: readOnlyConn{r: bytes.NewReader(make([]byte, 100))}, budget: shared}
+	c2 := &cappedConn{Conn: readOnlyConn{r: bytes.NewReader(make([]byte, 100))}, budget: shared}
+
+	drain := func(c *cappedConn) (int, error) {
+		buf := make([]byte, 256)
+		total := 0
+		for {
+			n, err := c.Read(buf)
+			total += n
+			if err != nil {
+				return total, err
+			}
+		}
+	}
+	// First conn reads its 100 bytes (budget 120 → 20 left), ends in EOF.
+	if n, err := drain(c1); err != io.EOF || n != 100 {
+		t.Fatalf("c1 drain = (%d, %v), want (100, EOF)", n, err)
+	}
+	// Second conn only has 20 bytes of shared budget left → ErrCloneTooLarge.
+	n, err := drain(c2)
+	if !errors.Is(err, ErrCloneTooLarge) {
+		t.Fatalf("c2 should hit the shared cap; got (%d, %v)", n, err)
+	}
+	if n > 20 {
+		t.Errorf("c2 read %d bytes past the 20 remaining in the shared budget", n)
+	}
+}
+
 // TestCappedConn_AbortsOverCap: a stream larger than the byte budget reads
 // up to the cap then fails with ErrCloneTooLarge (the #15 pack-size guard).
 func TestCappedConn_AbortsOverCap(t *testing.T) {
 	src := readOnlyConn{r: bytes.NewReader(make([]byte, 100))}
-	c := &cappedConn{Conn: src, remaining: 50}
+	c := &cappedConn{Conn: src, budget: budgetOf(50)}
 	buf := make([]byte, 256)
 	total := 0
 	var last error
@@ -47,7 +89,7 @@ func TestCappedConn_AbortsOverCap(t *testing.T) {
 // EOF, never ErrCloneTooLarge.
 func TestCappedConn_UnderCap(t *testing.T) {
 	src := readOnlyConn{r: bytes.NewReader(make([]byte, 100))}
-	c := &cappedConn{Conn: src, remaining: 200}
+	c := &cappedConn{Conn: src, budget: budgetOf(200)}
 	buf := make([]byte, 256)
 	total := 0
 	for {
