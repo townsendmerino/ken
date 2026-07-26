@@ -16,7 +16,7 @@ package mcp
 // AddTool description for the honest framing the agent reads.
 //
 // Lifecycle: each handler resolves the cached RepoBundle via
-// Cache.GetBundle, then calls bundle.StructuralIndex(), which builds
+// Cache.GetBundle, then calls bundle.StructuralIndex(ctx), which builds
 // the structural symbol index lazily on first use (cold-start M0).
 // It may return nil for repos whose corpus has no files
 // matching a registered extractor — the structural index covers
@@ -76,7 +76,7 @@ func handleDefinition(ctx context.Context, cfg *Config, args DefinitionArgs) (*s
 	}
 	// Builds the structural symbol index on first use (lazy — cold-start M0);
 	// nil on unsupported corpus or build failure, handled just below.
-	sidx := bundle.StructuralIndex()
+	sidx := bundle.StructuralIndex(ctx)
 	if sidx == nil {
 		return errorResult(args.Output,
 			"No structural index available for this repo. "+
@@ -145,7 +145,7 @@ func handleReferences(ctx context.Context, cfg *Config, args ReferencesArgs) (*s
 	}
 	// Builds the structural symbol index on first use (lazy — cold-start M0);
 	// nil on unsupported corpus or build failure, handled just below.
-	sidx := bundle.StructuralIndex()
+	sidx := bundle.StructuralIndex(ctx)
 	if sidx == nil {
 		return errorResult(args.Output,
 			"No structural index available for this repo. "+
@@ -225,7 +225,7 @@ func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.Cal
 	}
 	// Builds the structural symbol index on first use (lazy — cold-start M0);
 	// nil on unsupported corpus or build failure, handled just below.
-	sidx := bundle.StructuralIndex()
+	sidx := bundle.StructuralIndex(ctx)
 	if sidx == nil {
 		return errorResult(args.Output,
 			"No structural index available for this repo. "+
@@ -303,7 +303,7 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	}
 	// Builds the structural symbol index on first use (lazy — cold-start M0);
 	// nil on unsupported corpus or build failure, handled just below.
-	sidx := bundle.StructuralIndex()
+	sidx := bundle.StructuralIndex(ctx)
 	if sidx == nil {
 		return errorResult(args.Output,
 			"No structural index available for this repo. "+
@@ -404,7 +404,7 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 	}
 	// Builds the structural symbol index on first use (lazy — cold-start M0);
 	// nil on unsupported corpus or build failure, handled just below.
-	sidx := bundle.StructuralIndex()
+	sidx := bundle.StructuralIndex(ctx)
 	if sidx == nil {
 		return errorResult(args.Output,
 			"No structural index available for this repo. "+

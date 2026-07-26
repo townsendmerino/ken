@@ -36,7 +36,7 @@ func newInMemoryServerClient(t *testing.T) (context.Context, *sdk.ClientSession,
 		t.Fatalf("structural.Build: %v", err)
 	}
 	cache := NewCache(4, func(context.Context, string) (*RepoBundle, func(), error) {
-		return &RepoBundle{Index: ix, StructuralBuilder: func() (*structural.Index, error) { return sx, nil }}, nil, nil
+		return &RepoBundle{Index: ix, StructuralBuilder: func(context.Context) (*structural.Index, error) { return sx, nil }}, nil, nil
 	})
 	srv := NewServer(Config{Cache: cache, DefaultRepo: "../testdata/repo"})
 

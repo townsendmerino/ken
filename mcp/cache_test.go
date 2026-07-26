@@ -270,8 +270,7 @@ func TestNormalizeKey(t *testing.T) {
 }
 
 // TestRepoBundle_LazyStructural verifies the cold-start-M0 lazy structural
-// build: the symbol index is NOT built at bundle creation, is built exactly
-// once on first StructuralIndex() call (even under concurrency), is cached
+// build: the symbol index is NOT built at bundle creation, // once on first StructuralIndex() call (even under concurrency), is cached
 // thereafter, and StructuralIfBuilt() never triggers a build.
 func TestRepoBundle_LazyStructural(t *testing.T) {
 	// A real structural index over testdata/repo (has auth.py the
@@ -283,7 +282,7 @@ func TestRepoBundle_LazyStructural(t *testing.T) {
 
 	t.Run("build once, cached, peek does not trigger", func(t *testing.T) {
 		var calls atomic.Int64
-		b := &RepoBundle{StructuralBuilder: func() (*structural.Index, error) {
+		b := &RepoBundle{StructuralBuilder: func(context.Context) (*structural.Index, error) {
 			calls.Add(1)
 			return sx, nil
 		}}
@@ -297,7 +296,7 @@ func TestRepoBundle_LazyStructural(t *testing.T) {
 		}
 
 		// First use builds it.
-		if got := b.StructuralIndex(); got != sx {
+		if got := b.StructuralIndex(context.Background()); got != sx {
 			t.Fatalf("StructuralIndex() = %p, want %p", got, sx)
 		}
 		if n := calls.Load(); n != 1 {
@@ -305,7 +304,7 @@ func TestRepoBundle_LazyStructural(t *testing.T) {
 		}
 
 		// Second use returns the cache; builder not re-invoked.
-		if got := b.StructuralIndex(); got != sx {
+		if got := b.StructuralIndex(context.Background()); got != sx {
 			t.Fatalf("StructuralIndex() second call = %p, want %p", got, sx)
 		}
 		if n := calls.Load(); n != 1 {
@@ -319,7 +318,7 @@ func TestRepoBundle_LazyStructural(t *testing.T) {
 
 	t.Run("concurrent first use builds exactly once", func(t *testing.T) {
 		var calls atomic.Int64
-		b := &RepoBundle{StructuralBuilder: func() (*structural.Index, error) {
+		b := &RepoBundle{StructuralBuilder: func(context.Context) (*structural.Index, error) {
 			calls.Add(1)
 			return sx, nil
 		}}
@@ -328,7 +327,7 @@ func TestRepoBundle_LazyStructural(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if got := b.StructuralIndex(); got != sx {
+				if got := b.StructuralIndex(context.Background()); got != sx {
 					t.Errorf("StructuralIndex() = %p, want %p", got, sx)
 				}
 			}()
@@ -341,7 +340,7 @@ func TestRepoBundle_LazyStructural(t *testing.T) {
 
 	t.Run("nil builder degrades to nil, no panic", func(t *testing.T) {
 		b := &RepoBundle{} // no StructuralBuilder
-		if got := b.StructuralIndex(); got != nil {
+		if got := b.StructuralIndex(context.Background()); got != nil {
 			t.Fatalf("StructuralIndex() with nil builder = %p, want nil", got)
 		}
 		if got := b.StructuralIfBuilt(); got != nil {
@@ -349,20 +348,35 @@ func TestRepoBundle_LazyStructural(t *testing.T) {
 		}
 	})
 
-	t.Run("build failure is cached, not retried", func(t *testing.T) {
+	t.Run("build failure is retried, not cached", func(t *testing.T) {
+		// audit db/mcp §8: a transient failure (e.g. a client timeout that
+		// cancels ctx) must NOT permanently disable the structural tools.
+		// The builder fails twice, then succeeds; each call retries.
 		var calls atomic.Int64
-		b := &RepoBundle{StructuralBuilder: func() (*structural.Index, error) {
-			calls.Add(1)
-			return nil, context.DeadlineExceeded // simulate a failed build
+		b := &RepoBundle{StructuralBuilder: func(context.Context) (*structural.Index, error) {
+			if calls.Add(1) < 3 {
+				return nil, context.DeadlineExceeded // simulate a transient failure
+			}
+			return sx, nil
 		}}
-		if got := b.StructuralIndex(); got != nil {
-			t.Fatalf("StructuralIndex() on failed build = %p, want nil", got)
+		if got := b.StructuralIndex(context.Background()); got != nil {
+			t.Fatalf("StructuralIndex() on 1st (failed) build = %p, want nil", got)
 		}
-		if got := b.StructuralIndex(); got != nil {
-			t.Fatalf("StructuralIndex() second call = %p, want nil", got)
+		if got := b.StructuralIfBuilt(); got != nil {
+			t.Fatalf("StructuralIfBuilt() after a failed build = %p, want nil (failure not cached)", got)
 		}
-		if n := calls.Load(); n != 1 {
-			t.Fatalf("failed builder invoked %d times, want 1 (failure cached, not retried)", n)
+		if got := b.StructuralIndex(context.Background()); got != nil {
+			t.Fatalf("StructuralIndex() on 2nd (failed) build = %p, want nil", got)
+		}
+		// Third call succeeds and is cached from then on.
+		if got := b.StructuralIndex(context.Background()); got != sx {
+			t.Fatalf("StructuralIndex() on 3rd (successful) build = %p, want %p", got, sx)
+		}
+		if got := b.StructuralIndex(context.Background()); got != sx {
+			t.Fatalf("StructuralIndex() after success not cached = %p, want %p", got, sx)
+		}
+		if n := calls.Load(); n != 3 {
+			t.Fatalf("builder invoked %d times, want 3 (2 retried failures + 1 cached success)", n)
 		}
 	})
 }

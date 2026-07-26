@@ -241,7 +241,13 @@ func NewServer(cfg Config) *sdk.Server {
 			"form in parentheses so an agent can disambiguate when the bare name lives on " +
 			"multiple types. Collisions return all sites in alphabetical-by-file order; " +
 			"ordering does NOT reflect confidence ranking.",
-	}, func(ctx context.Context, _ *sdk.CallToolRequest, args DefinitionArgs) (*sdk.CallToolResult, any, error) {
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args DefinitionArgs) (*sdk.CallToolResult, any, error) {
+		// The first structural call builds the whole-corpus symbol index,
+		// which can take tens of seconds on a large polyglot repo (audit
+		// db/mcp §8). Heartbeat so the client doesn't time out; no-op when
+		// the client sent no progressToken.
+		stop := startProgressHeartbeat(ctx, req, "ken definition")
+		defer stop()
 		return handleDefinition(ctx, &cfg, args)
 	})
 
@@ -254,7 +260,9 @@ func NewServer(cfg Config) *sdk.Server {
 			"in different files collapse into a single result list with no semantic " +
 			"disambiguation. Use this for `where is X used` style questions, not for " +
 			"compiler-grade rename refactors.",
-	}, func(ctx context.Context, _ *sdk.CallToolRequest, args ReferencesArgs) (*sdk.CallToolResult, any, error) {
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args ReferencesArgs) (*sdk.CallToolResult, any, error) {
+		stop := startProgressHeartbeat(ctx, req, "ken references")
+		defer stop()
 		return handleReferences(ctx, &cfg, args)
 	})
 
@@ -267,7 +275,9 @@ func NewServer(cfg Config) *sdk.Server {
 			"100% on a 400-edge sample across 8 languages. For function-level call hierarchy " +
 			"(which specific function calls X), fall back to an LSP — ken doesn't track caller-" +
 			"function scopes.",
-	}, func(ctx context.Context, _ *sdk.CallToolRequest, args CallersArgs) (*sdk.CallToolResult, any, error) {
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args CallersArgs) (*sdk.CallToolResult, any, error) {
+		stop := startProgressHeartbeat(ctx, req, "ken callers")
+		defer stop()
 		return handleCallers(ctx, &cfg, args)
 	})
 
@@ -279,7 +289,9 @@ func NewServer(cfg Config) *sdk.Server {
 			"For a directory path: returns the outline of every indexed file under it. " +
 			"Fast structural overview for understanding what a file or package contains " +
 			"without reading the source.",
-	}, func(ctx context.Context, _ *sdk.CallToolRequest, args OutlineArgs) (*sdk.CallToolResult, any, error) {
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args OutlineArgs) (*sdk.CallToolResult, any, error) {
+		stop := startProgressHeartbeat(ctx, req, "ken outline")
+		defer stop()
 		return handleOutline(ctx, &cfg, args)
 	})
 
@@ -289,7 +301,9 @@ func NewServer(cfg Config) *sdk.Server {
 			"optionally filtered by a subdirectory `path` prefix. " +
 			"Useful as a starting point: `what's in this package?` or `what does this repo export?`. " +
 			"Names only — pair with `definition` or `outline` to get locations + structure.",
-	}, func(ctx context.Context, _ *sdk.CallToolRequest, args SymbolsArgs) (*sdk.CallToolResult, any, error) {
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args SymbolsArgs) (*sdk.CallToolResult, any, error) {
+		stop := startProgressHeartbeat(ctx, req, "ken symbols")
+		defer stop()
 		return handleSymbols(ctx, &cfg, args)
 	})
 
@@ -303,7 +317,12 @@ func NewServer(cfg Config) *sdk.Server {
 			"clone manually first if you need git history for a remote repo. " +
 			"Use this to understand `what's been worked on recently` or `who is touching this area` " +
 			"without shelling out to git log.",
-	}, func(ctx context.Context, _ *sdk.CallToolRequest, args RecentlyChangedArgs) (*sdk.CallToolResult, any, error) {
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args RecentlyChangedArgs) (*sdk.CallToolResult, any, error) {
+		// go-git history walk + per-commit tree diff can run long on deep
+		// histories; heartbeat so a client with a progressToken doesn't
+		// time out (audit db/mcp §8; pairs with §5's ctx-cancellation).
+		stop := startProgressHeartbeat(ctx, req, "ken recently_changed")
+		defer stop()
 		return handleRecentlyChanged(ctx, &cfg, args)
 	})
 

@@ -529,11 +529,11 @@ func main() {
 		// failure (unsupported language, parse errors) it returns nil
 		// and the Track 2 tools degrade to a clear "no structural index
 		// available" message.
-		structuralBuilder := func() (*structural.Index, error) {
-			six, sErr := structural.Build(dir)
+		structuralBuilder := func(ctx context.Context) (*structural.Index, error) {
+			six, sErr := structural.BuildWithContext(ctx, dir)
 			if sErr != nil {
 				logger.Logf(kenmcp.LogWarn, "structural index build failed for %s: %v "+
-					"(track 2 tools will report no structure available)", dir, sErr)
+					"(track 2 tools will report no structure available; will retry on next call)", dir, sErr)
 				return nil, sErr
 			}
 			stats := six.Stats()

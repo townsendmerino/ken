@@ -44,34 +44,53 @@ type RepoBundle struct {
 
 	// StructuralBuilder constructs the structural symbol index over the
 	// repo's corpus. nil ⇒ the bundle has no structural support (it stays
-	// unset for repos/tests that don't wire one). Invoked at most once, by
-	// the first StructuralIndex() call.
-	StructuralBuilder func() (*structural.Index, error)
+	// unset for repos/tests that don't wire one). Invoked by the first
+	// StructuralIndex() call; on error it is retried on the next call
+	// (audit db/mcp §8) — only a successful build is cached. The context
+	// lets a client cancellation / timeout abort the whole-corpus parse.
+	StructuralBuilder func(context.Context) (*structural.Index, error)
 
-	structuralOnce  sync.Once
-	structuralBuilt atomic.Bool
+	structuralMu    sync.Mutex  // serializes concurrent builds
+	structuralBuilt atomic.Bool // set once a build succeeds
 	structuralIdx   *structural.Index
 }
 
 // StructuralIndex returns the structural symbol index, building it on the
-// first call and caching the result for every subsequent call. A nil result
-// (no builder wired, or a build that failed / found no supported files) is
-// cached too — the build is attempted at most once. Safe for concurrent
-// tool handlers: sync.Once serializes the build so N simultaneous
-// structural-tool calls trigger exactly one parse.
-func (b *RepoBundle) StructuralIndex() *structural.Index {
+// first call and caching a SUCCESSFUL result for every subsequent call.
+// Unlike the old sync.Once, a failed or cancelled build is NOT cached
+// (audit db/mcp §8): a transient failure — a client timeout that cancels
+// ctx, a temporarily-unreadable file — would otherwise disable all five
+// structural tools for this repo until the process restarts. The next call
+// retries. Concurrent callers serialize on structuralMu so N simultaneous
+// tool calls still trigger at most one in-flight parse; a build that
+// already succeeded returns immediately without taking the lock.
+//
+// Returns nil (never panics) when no builder is wired or the build failed
+// / found no supported files — every tool handler defends against nil.
+func (b *RepoBundle) StructuralIndex(ctx context.Context) *structural.Index {
 	if b.StructuralBuilder == nil {
 		return nil
 	}
-	b.structuralOnce.Do(func() {
-		if idx, err := b.StructuralBuilder(); err == nil {
-			b.structuralIdx = idx
-		}
-		// Publish "built" last: StructuralIfBuilt reads structuralIdx only
-		// after observing this store, so the write above happens-before
-		// that read without a lock.
-		b.structuralBuilt.Store(true)
-	})
+	if b.structuralBuilt.Load() {
+		return b.structuralIdx
+	}
+	b.structuralMu.Lock()
+	defer b.structuralMu.Unlock()
+	// Re-check under the lock: another goroutine may have built it while
+	// we waited.
+	if b.structuralBuilt.Load() {
+		return b.structuralIdx
+	}
+	idx, err := b.StructuralBuilder(ctx)
+	if err != nil {
+		// Not cached — the next call retries. Don't set structuralBuilt.
+		return nil
+	}
+	b.structuralIdx = idx
+	// Publish "built" last: StructuralIfBuilt reads structuralIdx only
+	// after observing this store, so the write above happens-before that
+	// read without holding structuralMu.
+	b.structuralBuilt.Store(true)
 	return b.structuralIdx
 }
 

@@ -35,6 +35,7 @@
 package structural
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -455,6 +456,16 @@ func langCacheFor(grammarName string) *langCache {
 // gitignore aligns the structural index's notion of "this repo"
 // with what the chunker already considers it to be.
 func Build(corpusDir string) (*Index, error) {
+	return BuildWithContext(context.Background(), corpusDir)
+}
+
+// BuildWithContext is Build with cancellation. The whole-corpus tree-sitter
+// parse is the dominant cold-start cost on large polyglot repos (M0: a 44s
+// build exceeded an MCP client's tool-call timeout), so the lazy structural
+// builder threads the request context here (audit db/mcp §8): workers stop
+// pulling jobs once ctx is cancelled and the build returns ctx.Err() instead
+// of running a whole core to completion on an abandoned request.
+func BuildWithContext(ctx context.Context, corpusDir string) (*Index, error) {
 	ix := &Index{
 		files:   make(map[string]*FileStruct),
 		callers: make(map[string][]CallSite),
@@ -496,6 +507,12 @@ func Build(corpusDir string) (*Index, error) {
 	for range numWorkers {
 		wg.Go(func() {
 			for j := range jobs {
+				if ctx.Err() != nil {
+					// Cancelled: drain the channel without doing work so
+					// the feeder goroutine below can finish sending and
+					// close(jobs) unblocks. Cheap vs the parse we skip.
+					continue
+				}
 				ext := filepath.Ext(j.rel)
 				gram, ok := kenLangToTSLang[ext]
 				if !ok {
@@ -524,6 +541,9 @@ func Build(corpusDir string) (*Index, error) {
 	}
 	close(jobs)
 	wg.Wait()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	// Merge results in lexical order (results[i] aligned with
 	// relPaths[i] which itself came from repo.WalkFS sorted output).
 	// Deterministic merge ⇒ deterministic pass 2 iteration ⇒ the
