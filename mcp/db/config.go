@@ -88,6 +88,13 @@ type Config struct {
 	// reindex_db tool invocations.
 	ReindexInterval time.Duration
 
+	// StartupTimeout bounds the initial synchronous introspection Setup
+	// runs before returning (audit db/mcp §3). 0 (default) ⇒ 30 s. An
+	// unreachable DSN otherwise blocks startup on the OS TCP-connect
+	// default; on timeout Setup returns an error and the caller runs
+	// without DB integration.
+	StartupTimeout time.Duration
+
 	// EnableListen activates the v0.8.0 Part 1 LISTEN/NOTIFY listener.
 	// Postgres-only — non-Postgres DSNs with EnableListen=true emit
 	// a debug log and ignore the flag. Requires the one-time setup
@@ -139,6 +146,7 @@ func (cfg Config) toDBOptions() db.Options {
 		DSN:             cfg.DSN,
 		SampleRows:      cfg.SampleRows,
 		ReindexInterval: cfg.ReindexInterval,
+		StartupTimeout:  cfg.StartupTimeout,
 		LogWriter:       logWriter,
 		IncludeSchemas:  include,
 		ExcludeSchemas:  exclude,

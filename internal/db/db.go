@@ -68,6 +68,17 @@ type Options struct {
 	// only at startup or via Refresher.Refresh (typically SIGHUP).
 	ReindexInterval time.Duration
 
+	// StartupTimeout bounds the initial synchronous IndexSchema that
+	// SetupTier2 runs before the server serves JSON-RPC (audit db/mcp
+	// §3). Without it, a DSN pointing at an unreachable host (firewall
+	// dropping SYN, VPN down) blocks on TCP connect for the OS default
+	// (~130 s on Linux) — the MCP client sees no `initialize` response
+	// and reports the server as failed to start, when FS-only mode would
+	// have worked. On timeout SetupTier2 returns an error and the caller
+	// continues FS-only ("Tier 2 going dark is not fatal"). 0/negative ⇒
+	// the 30 s default (see validate).
+	StartupTimeout time.Duration
+
 	// LogWriter is the destination for diagnostic messages (skipped
 	// tables, transient query errors). nil defaults to os.Stderr. Must
 	// not be wired to os.Stdout — that's the JSON-RPC channel for
@@ -109,6 +120,9 @@ func (o Options) validate() Options {
 	}
 	if o.LogWriter == nil {
 		o.LogWriter = os.Stderr
+	}
+	if o.StartupTimeout <= 0 {
+		o.StartupTimeout = 30 * time.Second
 	}
 	return o
 }

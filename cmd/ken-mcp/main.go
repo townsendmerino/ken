@@ -1012,6 +1012,9 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 		sampleRows = 0
 	}
 	reindex := envDuration("KEN_DB_REINDEX_INTERVAL", 0, logger)
+	// Bound the startup introspection so an unreachable DSN can't hang the
+	// server before it serves JSON-RPC (audit db/mcp §3).
+	startupTimeout := envDuration("KEN_DB_STARTUP_TIMEOUT", 30*time.Second, logger)
 
 	// v0.7.2 (ADR-019) schema filtering: KEN_DB_SCHEMAS (allow-list) +
 	// KEN_DB_EXCLUDE_SCHEMAS (deny-list). When both are set the allow-
@@ -1075,6 +1078,7 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 		DSN:             dsn,
 		SampleRows:      sampleRows,
 		ReindexInterval: reindex,
+		StartupTimeout:  startupTimeout,
 		EnableListen:    enableListen,
 		// v0.7.2: schema filtering (Postgres + MySQL; ignored by SQLite).
 		IncludeSchemas: includeSchemas,

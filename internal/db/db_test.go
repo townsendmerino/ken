@@ -138,6 +138,16 @@ func TestOptions_Validate(t *testing.T) {
 	if o.SampleRows != -7 {
 		t.Errorf("validate() must not mutate caller's struct (caller's SampleRows = %d)", o.SampleRows)
 	}
+	// StartupTimeout: 0/negative default to 30s (audit §3); positive kept.
+	if got.StartupTimeout != 30*time.Second {
+		t.Errorf("zero StartupTimeout should default to 30s; got %v", got.StartupTimeout)
+	}
+	if kept := (Options{DSN: "x", StartupTimeout: 5 * time.Second}).validate(); kept.StartupTimeout != 5*time.Second {
+		t.Errorf("positive StartupTimeout should be preserved; got %v", kept.StartupTimeout)
+	}
+	if neg := (Options{DSN: "x", StartupTimeout: -1}).validate(); neg.StartupTimeout != 30*time.Second {
+		t.Errorf("negative StartupTimeout should default to 30s; got %v", neg.StartupTimeout)
+	}
 }
 
 // TestOptions_LogWriterRespected confirms a caller-supplied writer is

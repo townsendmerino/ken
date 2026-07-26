@@ -65,7 +65,14 @@ func SetupTier2(ctx context.Context, opts Options, enableListen bool, onSwap fun
 	// the initial chunk set BEFORE we construct the Refresher — this
 	// matches v0.7.0's wireDBTier2 ordering so the caller's snapshot
 	// target sees DB chunks before any agent search is served.
-	initial, err := IndexSchema(ctx, opts)
+	//
+	// Bounded by opts.StartupTimeout (audit db/mcp §3): this runs before
+	// the server serves JSON-RPC, so an unreachable DSN must not block on
+	// the OS TCP-connect default. On timeout IndexSchema returns a
+	// DeadlineExceeded error and the caller degrades to FS-only.
+	introspectCtx, cancel := context.WithTimeout(ctx, opts.StartupTimeout)
+	initial, err := IndexSchema(introspectCtx, opts)
+	cancel()
 	if err != nil {
 		return nil, nil, fmt.Errorf("initial IndexSchema: %w", err)
 	}
