@@ -227,7 +227,8 @@ type Cache struct {
 	items  map[string]*list.Element
 	build  Builder
 	sf     singleflight.Group
-	closed bool // M8: set under mu by Close(); checked by builders to avoid use-after-close
+	closed bool   // M8: set under mu by Close(); checked by builders to avoid use-after-close
+	gen    uint64 // audit R7: bumped by Purge(); a build started under an older gen must not repopulate
 }
 
 // NewCache creates a cache bound to max entries (≤0 ⇒ DefaultCacheSize).
@@ -299,8 +300,20 @@ func (c *Cache) Purge() {
 		c.mu.Unlock()
 		return
 	}
+	// Bump the generation (audit R7): a build already in flight when Purge
+	// runs must NOT insert its now-stale bundle into the "purged" cache — the
+	// post-build critical section in GetBundle compares the gen it started
+	// under against this and reaps on mismatch. Without it, autoFetchModel's
+	// purge (bm25→hybrid upgrade) could be undone by an in-flight bm25 build
+	// landing afterward, serving bm25 for the process lifetime.
+	c.gen++
 	ents := c.detachAll()
 	c.mu.Unlock()
+	// Forget the in-flight singleflight turns so NEW Get calls start a fresh
+	// build (under the new gen) rather than joining a doomed pre-purge one.
+	for _, ent := range ents {
+		c.sf.Forget(ent.key)
+	}
 	for _, ent := range ents {
 		reapEntry(ent) // M2: blocking close+cleanup outside the lock
 	}
@@ -414,6 +427,13 @@ func (c *Cache) GetBundle(ctx context.Context, source string) (*RepoBundle, erro
 	c.mu.Unlock()
 
 	v, err, _ := c.sf.Do(key, func() (any, error) {
+		// Snapshot the generation this build starts under (audit R7). If a
+		// Purge bumps it while we build, the bundle is stale and must not be
+		// inserted — checked alongside c.closed below.
+		c.mu.Lock()
+		startGen := c.gen
+		c.mu.Unlock()
+
 		bundle, cleanup, err := c.build(ctx, key)
 		if err != nil {
 			return nil, err
@@ -434,13 +454,19 @@ func (c *Cache) GetBundle(ctx context.Context, source string) (*RepoBundle, erro
 		}
 
 		c.mu.Lock()
-		// M8: a Close() that fired while build was in flight has already
-		// drained the map. Don't repopulate it — reap the just-built
-		// watcher + cleanup so they don't outlive the cache.
+		// M8 / R7: a Close() or Purge() that fired while the build was in
+		// flight has already drained the map. Don't repopulate it — reap the
+		// just-built watcher + cleanup so they don't outlive the cache (Close)
+		// or resurrect a pre-purge bundle (Purge).
 		if c.closed {
 			c.mu.Unlock()
 			reap(bundle.Index, cleanup)
 			return nil, fmt.Errorf("repo: cache is closed")
+		}
+		if c.gen != startGen {
+			c.mu.Unlock()
+			reap(bundle.Index, cleanup)
+			return nil, fmt.Errorf("repo: cache purged during build; retry")
 		}
 		// Re-check in case another sf turn populated it. If we lost the
 		// race, the cache already has a usable entry; reap the loser.

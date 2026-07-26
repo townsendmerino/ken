@@ -585,11 +585,26 @@ feedLoop:
 			}
 			for _, c := range folded {
 				chunks = append(chunks, c)
-				if model != nil {
-					vecs = append(vecs, model.Encode(c.Text))
+				// Mirror the worker path's staged/cache handling (audit R6):
+				// without the !StagedEmbedding guard, a repo with a migrations
+				// dir + KEN_MCP_STAGED=1 produced len(vecs)==numFolded while
+				// len(chunks)==numRegular+numFolded — misaligning the parallel
+				// slices ann.New/compactCorpus/serialize all assume, giving
+				// wrong FindRelated neighbours and eventually a flush panic.
+				// Also route through encodeCached so folded chunks aren't
+				// silently excluded from the embed cache.
+				if model != nil && !opts.StagedEmbedding {
+					vecs = append(vecs, encodeCached(opts.EmbedCache, model, c.Text))
 				}
 			}
 		}
+	}
+	// Parallel-slice invariant (audit R6): vecs is either empty (BM25 or
+	// staged — filled later by the warm pass) or one-per-chunk. Anything
+	// else silently corrupts ann.Flat / compaction / serialization.
+	if len(vecs) != 0 && len(vecs) != len(chunks) {
+		return nil, nil, nil, nil, fmt.Errorf(
+			"search: build invariant: len(vecs)=%d must be 0 or len(chunks)=%d", len(vecs), len(chunks))
 	}
 	return chunks, vecs, model, migDirs, nil
 }

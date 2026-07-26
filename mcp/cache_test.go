@@ -410,3 +410,53 @@ func TestRepoBundle_LazyStructural(t *testing.T) {
 		}
 	})
 }
+
+// TestCache_PurgeDuringBuild_NoStaleRepopulate is the audit R7 regression:
+// a build already in flight when Purge() runs must NOT insert its stale
+// (pre-purge) bundle into the cache. This is the autoFetchModel bm25→hybrid
+// race — without the generation guard the in-flight bm25 build lands in the
+// "purged" cache and every later query serves bm25 for the process lifetime.
+func TestCache_PurgeDuringBuild_NoStaleRepopulate(t *testing.T) {
+	releaseBuild := make(chan struct{})
+	var builds, cleanups atomic.Int64
+	b := func(ctx context.Context, _ string) (*RepoBundle, func(), error) {
+		if builds.Add(1) == 1 {
+			<-releaseBuild // only the FIRST build blocks (the purge race)
+		}
+		dir := t.TempDir()
+		ix, _ := search.NewWatchedIndex(dir, search.ModeBM25, "line", "", true)
+		return &RepoBundle{Index: ix}, func() { cleanups.Add(1) }, nil
+	}
+	c := NewCache(8, b)
+	t.Cleanup(c.Close)
+	path := t.TempDir()
+
+	getErr := make(chan error, 1)
+	go func() {
+		_, err := c.Get(context.Background(), path)
+		getErr <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond) // let the build enter singleflight
+	c.Purge()                         // bump gen while the build is in flight
+	time.Sleep(20 * time.Millisecond)
+	close(releaseBuild) // build finishes AFTER the purge
+
+	if err := <-getErr; err == nil {
+		t.Error("Get whose build was purged should return an error, not a stale bundle")
+	}
+	if got := c.Len(); got != 0 {
+		t.Errorf("Len after purge-during-build = %d, want 0 (stale bundle must not repopulate)", got)
+	}
+	if got := cleanups.Load(); got != 1 {
+		t.Errorf("stale bundle cleanup invocations = %d, want 1 (must be reaped)", got)
+	}
+	// The cache stays OPEN: a fresh Get rebuilds under the new generation
+	// (this second build doesn't block).
+	if _, err := c.Get(context.Background(), path); err != nil {
+		t.Fatalf("post-purge Get should rebuild: %v", err)
+	}
+	if got := c.Len(); got != 1 {
+		t.Errorf("Len after post-purge rebuild = %d, want 1", got)
+	}
+}
