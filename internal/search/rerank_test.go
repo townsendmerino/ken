@@ -133,3 +133,25 @@ func approx(a, b float64) bool {
 	}
 	return d < 1e-9
 }
+
+// TestChunkDefinedNameSets_LastComponent pins the audit R14 / §6 behavior:
+// the capture-and-compare definition scan matches on the LAST identifier
+// component of a qualified name, so `class A::B::C {` defines "C", not "B".
+func TestChunkDefinedNameSets_LastComponent(t *testing.T) {
+	gen, _ := chunkDefinedNameSets("class A::B::C {\n")
+	if _, ok := gen["C"]; !ok {
+		t.Error("expected the last component C to be a defined name")
+	}
+	if _, ok := gen["B"]; ok {
+		t.Error("mid-chain B must NOT be a defined name (last-component rule)")
+	}
+	// definitionTier must agree: a symbol matching the last component boosts,
+	// a mid-chain one does not.
+	c := chunk.Chunk{File: "x.cpp", Text: "class A::B::C {\n"}
+	if definitionTier(c, []string{"C"}, 1.0) == 0 {
+		t.Error("definitionTier should boost for the defined last component C")
+	}
+	if definitionTier(c, []string{"B"}, 1.0) != 0 {
+		t.Error("definitionTier should NOT boost for mid-chain B")
+	}
+}

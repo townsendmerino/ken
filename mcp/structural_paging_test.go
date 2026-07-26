@@ -17,25 +17,27 @@ func TestPageWindow(t *testing.T) {
 		total, offset, limit int
 		wantLo, wantHi       int
 		wantTruncated        bool
+		wantOvershot         bool
 	}{
-		{"empty", 0, 0, 0, 0, 0, false},
-		{"under cap, no args", 10, 0, 0, 0, 10, false},
-		{"over cap, no args", 1200, 0, 0, 0, 500, true},
-		{"explicit limit under total", 100, 0, 20, 0, 20, true},
-		{"explicit limit reaches end", 20, 0, 20, 0, 20, false},
-		{"offset into middle", 100, 40, 20, 40, 60, true},
-		{"offset+limit past end", 100, 90, 20, 90, 100, false},
-		{"offset past total clamps", 100, 200, 20, 100, 100, false},
-		{"negative offset clamps to 0", 100, -5, 10, 0, 10, true},
-		{"limit over max clamps to max", 1000, 0, 99999, 0, 500, true},
-		{"negative limit uses cap", 1000, 0, -3, 0, 500, true},
+		{"empty", 0, 0, 0, 0, 0, false, false},
+		{"under cap, no args", 10, 0, 0, 0, 10, false, false},
+		{"over cap, no args", 1200, 0, 0, 0, 500, true, false},
+		{"explicit limit under total", 100, 0, 20, 0, 20, true, false},
+		{"explicit limit reaches end", 20, 0, 20, 0, 20, false, false},
+		{"offset into middle", 100, 40, 20, 40, 60, true, false},
+		{"offset+limit past end", 100, 90, 20, 90, 100, false, false},
+		{"offset past total clamps (overshot)", 100, 200, 20, 100, 100, false, true},
+		{"offset exactly total (overshot)", 100, 100, 20, 100, 100, false, true},
+		{"negative offset clamps to 0", 100, -5, 10, 0, 10, true, false},
+		{"limit over max clamps to max", 1000, 0, 99999, 0, 500, true, false},
+		{"negative limit uses cap", 1000, 0, -3, 0, 500, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			lo, hi, trunc := pageWindow(tc.total, tc.offset, tc.limit, max)
-			if lo != tc.wantLo || hi != tc.wantHi || trunc != tc.wantTruncated {
-				t.Errorf("pageWindow(%d,%d,%d,%d) = (%d,%d,%v); want (%d,%d,%v)",
-					tc.total, tc.offset, tc.limit, max, lo, hi, trunc, tc.wantLo, tc.wantHi, tc.wantTruncated)
+			lo, hi, trunc, overshot := pageWindow(tc.total, tc.offset, tc.limit, max)
+			if lo != tc.wantLo || hi != tc.wantHi || trunc != tc.wantTruncated || overshot != tc.wantOvershot {
+				t.Errorf("pageWindow(%d,%d,%d,%d) = (%d,%d,%v,%v); want (%d,%d,%v,%v)",
+					tc.total, tc.offset, tc.limit, max, lo, hi, trunc, overshot, tc.wantLo, tc.wantHi, tc.wantTruncated, tc.wantOvershot)
 			}
 			// Invariants: 0 ≤ lo ≤ hi ≤ total, window ≤ max.
 			if lo < 0 || lo > hi || hi > tc.total {

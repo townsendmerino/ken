@@ -691,7 +691,7 @@ func main() {
 		}
 	}
 
-	srv := kenmcp.NewServer(kenmcp.Config{
+	cfg := kenmcp.Config{
 		Cache:       cache,
 		DefaultRepo: defaultRepo,
 		Mode:        sm.mode,
@@ -704,8 +704,16 @@ func main() {
 		DB:                  refresher,
 		TelemetryLog:        telemetryLog,
 		TelemetryInResponse: telemetryInResponse,
-		UsageRecorder:       usageRecorder,
-	})
+	}
+	// Assign only when non-nil (audit R13): a nil *usage.Recorder stored into
+	// the interface field would make cfg.UsageRecorder non-nil, so the
+	// `rec == nil` fast-path never fires and every search/find_related pays
+	// the unique-file stat cost for a disabled feature. Mirrors the
+	// fsOpts.EmbedCache guard.
+	if usageRecorder != nil {
+		cfg.UsageRecorder = usageRecorder
+	}
+	srv := kenmcp.NewServer(cfg)
 
 	// Shutdown cleanup: drop temp clone directories (disk leak) and, M9,
 	// persist the rerank LRU to disk so the next ken-mcp launch starts warm.

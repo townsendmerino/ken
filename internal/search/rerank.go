@@ -228,11 +228,33 @@ func fileStem(p string) string {
 	return strings.TrimSuffix(b, path.Ext(b))
 }
 
+// chunkDefinedNameSets scans content ONCE per pattern and returns the set of
+// defined identifier last-components (audit R14): the general set exact, the
+// SQL set lowercased for case-insensitive membership. definitionTier tests
+// every candidate name against these O(1), instead of re-running both regex
+// scans once per name (2×len(names) full scans on the hot O(N) boost paths).
+func chunkDefinedNameSets(content string) (gen, sqlLower map[string]struct{}) {
+	gen = map[string]struct{}{}
+	sqlLower = map[string]struct{}{}
+	for _, m := range defGeneralPattern.FindAllStringSubmatch(content, -1) {
+		gen[lastIdentComponent(m[1])] = struct{}{}
+	}
+	for _, m := range defSQLPattern.FindAllStringSubmatch(content, -1) {
+		sqlLower[strings.ToLower(lastIdentComponent(m[1]))] = struct{}{}
+	}
+	return gen, sqlLower
+}
+
 // definitionTier mirrors semble boosting._definition_tier.
 func definitionTier(c chunk.Chunk, names []string, boostUnit float64) float64 {
+	gen, sqlLower := chunkDefinedNameSets(c.Text)
 	defines := false
 	for _, n := range names {
-		if chunkDefinesSymbol(c.Text, n) {
+		if _, ok := gen[n]; ok {
+			defines = true
+			break
+		}
+		if _, ok := sqlLower[strings.ToLower(n)]; ok {
 			defines = true
 			break
 		}

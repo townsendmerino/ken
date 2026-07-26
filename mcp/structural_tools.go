@@ -345,14 +345,20 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	// Bound the whole-repo dump (audit §6): a path-less outline on a big
 	// monorepo would otherwise emit every symbol of every file.
 	totalFiles := len(files)
-	lo, hi, truncated := pageWindow(totalFiles, args.Offset, args.Limit, MaxOutlineFiles)
+	lo, hi, truncated, overshot := pageWindow(totalFiles, args.Offset, args.Limit, MaxOutlineFiles)
 	files = files[lo:hi]
 
 	// Outline each file ONCE (audit §16): keep the raw entries for the
 	// markdown render instead of calling sidx.Outline again, and only build
 	// the JSON structs when json output was actually requested.
 	jsonMode := args.Output == "json"
-	resp := OutlineResponse{Path: path, TotalFiles: totalFiles, Offset: lo, Truncated: truncated}
+	// Entries always initialized (audit R15): JSON mode must emit "entries":
+	// [] not null on an empty window, matching every other empty path here.
+	resp := OutlineResponse{Path: path, Entries: []OutlineEntryOut{}, TotalFiles: totalFiles, Offset: lo, Truncated: truncated}
+	if overshot {
+		return dispatchOutput(args.Output, resp,
+			fmt.Sprintf("offset %d is past the end (%d file%s total). Lower `offset`.", args.Offset, totalFiles, pluralS(totalFiles)))
+	}
 	type fileOutline struct {
 		file    string
 		entries []structural.OutlineEntry
@@ -432,7 +438,7 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 	}
 	// Bound the whole-repo dump (audit §6).
 	totalSymbols := len(names)
-	lo, hi, truncated := pageWindow(totalSymbols, args.Offset, args.Limit, MaxSymbols)
+	lo, hi, truncated, overshot := pageWindow(totalSymbols, args.Offset, args.Limit, MaxSymbols)
 	names = names[lo:hi]
 	resp := SymbolsResponse{
 		PathPrefix:   path,
@@ -440,6 +446,12 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 		TotalSymbols: totalSymbols,
 		Offset:       lo,
 		Truncated:    truncated,
+	}
+	if overshot {
+		// Paged past the end (audit R15): tell the agent it overshot rather
+		// than returning a silent empty page that reads as "no symbols".
+		return dispatchOutput(args.Output, resp,
+			fmt.Sprintf("offset %d is past the end (%d symbols total). Lower `offset`.", args.Offset, totalSymbols))
 	}
 	if totalSymbols == 0 {
 		md := ""
@@ -477,10 +489,14 @@ func renderSymbolsMarkdown(r SymbolsResponse) string {
 // short of the total (i.e. the caller should page or narrow). A
 // zero-or-negative limit means "use the cap"; limit is itself capped at
 // max so a client can't ask past the hard bound (audit §6).
-func pageWindow(total, offset, limit, max int) (lo, hi int, truncated bool) {
+func pageWindow(total, offset, limit, max int) (lo, hi int, truncated, overshot bool) {
 	if offset < 0 {
 		offset = 0
 	}
+	// overshot: the caller paged PAST the end of a non-empty set (audit R15).
+	// Handlers surface this as "offset N is past the end (total M)" instead
+	// of a silent empty page that reads as "nothing here".
+	overshot = total > 0 && offset >= total
 	if offset > total {
 		offset = total
 	}
@@ -492,7 +508,7 @@ func pageWindow(total, offset, limit, max int) (lo, hi int, truncated bool) {
 	if hi > total {
 		hi = total
 	}
-	return lo, hi, hi < total
+	return lo, hi, hi < total, overshot
 }
 
 // === formatting helpers ===

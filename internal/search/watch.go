@@ -1332,6 +1332,16 @@ func (w *WatchedIndex) logf(format string, args ...any) {
 // (Tier-2 DB) chunks live in w.extraChunks, not w.chunks, so they are not
 // scanned here and never get spuriously tombstoned.
 func (w *WatchedIndex) enqueueFullResync(dirty map[string]fsnotify.Op) {
+	// Re-register watches over the whole tree first (audit search §3): the
+	// overflow may have dropped the Create events for directories added
+	// during the burst, so those subtrees have no inotify watch and would
+	// stay dark. addRecursive is idempotent (re-Adding a watched dir is a
+	// no-op) and gitignore-pruning happens via the per-file ShouldIndex
+	// filter below. w.fs is nil for a no-watch index (ReconcileFiles callers).
+	if w.fs != nil {
+		_ = addRecursive(w.fs, w.root, w.fsOpts.LogWriter)
+	}
+
 	present := make(map[string]bool)
 	_ = filepath.WalkDir(w.root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -1388,38 +1398,42 @@ func mergeOp(a, b fsnotify.Op) fsnotify.Op {
 // fires hundreds of events inside .git/objects) and .ken/ (v0.8.3
 // pre-built-index directory — paired with the matching prunes in
 // internal/repo's WalkFS + Matcher.ShouldIndex so the watcher
-// doesn't pay kernel-event cost for index.bin writes). Errors on
-// individual dirs are logged silently — a permission-denied subdir
-// shouldn't fail the whole watcher.
+// doesn't pay kernel-event cost for index.bin writes).
+//
+// Never fails the build over a watch problem (audit search §4): a dir we
+// can't read (any WalkDir error, not only ErrPermission — the prior code
+// aborted on the rest) is skipped, and a failed w.Add (ENOSPC when inotify
+// max_user_watches is exhausted, EACCES) just loses live updates for that
+// subtree. Add-failures are counted and reported as ONE summary line, not
+// one-per-dir (audit R12: ~42k lines at startup on a 50k-dir tree past an
+// 8192 watch limit).
 func addRecursive(w *fsnotify.Watcher, root string, logw io.Writer) error {
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	var addFails int
+	var firstErr error
+	var firstPath string
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			// Permission denied on a single dir is non-fatal; skip it.
-			if errors.Is(err, fs.ErrPermission) {
-				return fs.SkipDir
-			}
-			return err
+			return fs.SkipDir // unreadable dir — skip, never abort
 		}
 		if !d.IsDir() {
 			return nil
 		}
-		name := d.Name()
-		if name == ".git" || name == ".ken" {
+		if name := d.Name(); name == ".git" || name == ".ken" {
 			return fs.SkipDir
 		}
 		if aerr := w.Add(path); aerr != nil {
-			// Watch registration failing must NOT fail the whole index build
-			// (audit search §4): the corpus is already walked/chunked/embedded,
-			// and this only costs live updates for one subtree. ENOSPC
-			// (inotify max_user_watches exhausted on a node_modules-heavy
-			// monorepo) and EACCES are the common causes. Log once per dir and
-			// continue — matching addRecursive's own doc-comment promise.
-			if logw != nil {
-				fmt.Fprintf(logw, "search: watch registration failed for %q: %v (live updates disabled for this subtree)\n", path, aerr)
+			addFails++
+			if firstErr == nil {
+				firstErr, firstPath = aerr, path
 			}
 		}
 		return nil
 	})
+	if addFails > 0 && logw != nil {
+		fmt.Fprintf(logw, "search: watch registration failed for %d dir(s) under %q (first: %q: %v); live updates disabled for those subtrees\n",
+			addFails, root, firstPath, firstErr)
+	}
+	return nil
 }
 
 // knownIndexedFile is a small helper for events on files that no longer

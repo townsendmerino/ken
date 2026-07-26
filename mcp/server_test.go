@@ -534,4 +534,26 @@ func TestSafeDBErrorMessage(t *testing.T) {
 			t.Errorf("query-class error leaked %q: %q", leak, got)
 		}
 	}
+
+	// audit #4 leftover: MySQL "Access denied for user 'ken_ro'@'10.1.2.3'"
+	// wrapped as "db: mysql ping: …" has no "connect" substring and no k=v
+	// tokens, but must NOT leak the service account or client IP.
+	myErr := errors.New("db: Refresh: db: mysql ping: Error 1045 (28000): Access denied for user 'ken_ro'@'10.1.2.3' (using password: YES)")
+	got = safeDBErrorMessage(myErr)
+	for _, leak := range []string{"ken_ro", "10.1.2.3"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("mysql auth error leaked %q: %q", leak, got)
+		}
+	}
+	if !strings.Contains(got, "could not connect") {
+		t.Errorf("mysql connection-class error should collapse to generic; got %q", got)
+	}
+
+	// audit #4 leftover: SQLite errors wrapped as "db: sqlite file /abs/path:"
+	// must not leak the on-disk path.
+	sqErr := errors.New("db: Refresh: db: sqlite file /home/ken/secret/app.db: unable to open database file")
+	got = safeDBErrorMessage(sqErr)
+	if strings.Contains(got, "/home/ken/secret/app.db") {
+		t.Errorf("sqlite error leaked the on-disk path: %q", got)
+	}
 }
