@@ -725,8 +725,9 @@ func TestWatchedIndex_DirectoryRename_RepathsSubtree(t *testing.T) {
 
 // TestWatchedIndex_FullResync_RecoversFromDroppedEvents is the audit §3
 // regression: after an fsnotify overflow drops events, enqueueFullResync
-// re-derives the dirty set from disk ground truth — new/modified files get
-// Write, vanished files get Remove — so a flush restores a correct index.
+// re-derives disk ground truth — new/modified files get Write in `dirty`, and
+// the returned `present` set drives the flush's deletion pass (audit R4-6) so
+// vanished files are tombstoned — restoring a correct index.
 func TestWatchedIndex_FullResync_RecoversFromDroppedEvents(t *testing.T) {
 	root := makeTempRepo(t, map[string]string{
 		"a.py": "def alpha():\n    return 1\n",
@@ -750,18 +751,23 @@ func TestWatchedIndex_FullResync_RecoversFromDroppedEvents(t *testing.T) {
 	}
 
 	dirty := map[string]fsnotify.Op{}
-	wi.enqueueFullResync(dirty)
+	present := wi.enqueueFullResync(dirty)
 	if dirty["a.py"]&fsnotify.Write == 0 {
 		t.Errorf("a.py (modified) should be enqueued Write; got %v", dirty["a.py"])
 	}
 	if dirty["c.py"]&fsnotify.Write == 0 {
 		t.Errorf("c.py (new) should be enqueued Write; got %v", dirty["c.py"])
 	}
-	if dirty["b.py"]&fsnotify.Remove == 0 {
-		t.Errorf("b.py (deleted) should be enqueued Remove; got %v", dirty["b.py"])
+	// Deletion is no longer enqueued as a Remove op (audit R4-6): b.py is simply
+	// absent from disk truth, and the flush's resync pass tombstones it.
+	if present["b.py"] {
+		t.Errorf("b.py (deleted) should be absent from the disk-present set; got present")
+	}
+	if !present["a.py"] || !present["c.py"] {
+		t.Errorf("a.py and c.py should be in the disk-present set; got %v", present)
 	}
 
-	wi.flush(dirty)
+	wi.flush(dirty, present)
 	got := wi.Load()
 	if containsFile(got, "b.py") {
 		t.Errorf("b.py still indexed after resync; chunks: %s", chunkFiles(got))
@@ -936,53 +942,74 @@ func TestWatchedIndex_SlowFlush_EventsDrainAndConverge(t *testing.T) {
 		containsFile(got, "f1.py"), containsFile(got, "f2.py"), chunkFiles(got))
 }
 
-// TestWatchedIndex_DirRenameDuringFlush_Tombstoned is the audit N2 regression:
-// a directory rename that fires DURING an in-flight flush (which just appended
-// that dir's chunks) must still tombstone them — the old stale-snapshot gate
-// dropped the event and orphaned the chunks forever. Uses a slow first flush
-// so the rename lands mid-flight.
+// TestWatchedIndex_DirRenameDuringFlush_Tombstoned is the audit N2 regression,
+// rewritten in round 4 to actually bite (the original passed with N2 reverted —
+// it indexed pkg/ at construction, so the rename always found it in the
+// PUBLISHED snapshot and the old gate accepted it regardless). The real bug
+// needs the dir's chunks to be present in w.chunks but NOT yet published — the
+// in-flight window between a flush appending them and Store. We hit that window
+// deterministically with a reconcile hook, rename the dir inside it, and
+// synchronize on loopRemoveDelivered so the gate decision is pinned to happen
+// BEFORE the flush publishes. Verified to go RED with N2 reverted (restore the
+// `knownIndexedFile(rel) || isTrackedRel(rel)` gate around the Remove/Rename
+// accept): the rename is then dropped while pkg/ is unpublished and pkg/mod.py
+// survives.
 func TestWatchedIndex_DirRenameDuringFlush_Tombstoned(t *testing.T) {
 	root := makeTempRepo(t, map[string]string{"keep.py": "def keep():\n    return 0\n"})
-	// Pre-create the package dir + file so the first flush indexes it.
+	wi := withShortDebounce(t, root, true)
+	// pkg/ is deliberately NOT present at construction.
+	if containsFile(wi.Load(), "pkg/mod.py") {
+		t.Fatal("precondition: pkg/mod.py must NOT be indexed yet")
+	}
+
+	// The hook fires inside the flush that first appends pkg/mod.py — pkg/ is in
+	// w.chunks but not published. Rename the dir there and wait until the loop
+	// has DELIVERED the rename (before the accept gate), so the gate's verdict is
+	// fixed before this flush publishes.
+	var hookErr error
+	hookDone := make(chan struct{})
+	wi.setReconcileHook(func() {
+		base := wi.loopRemoveDelivered.Load()
+		if err := os.Rename(filepath.Join(root, "pkg"), filepath.Join(root, "pkg2")); err != nil {
+			hookErr = err
+			close(hookDone)
+			return
+		}
+		deadline := time.Now().Add(3 * time.Second)
+		for wi.loopRemoveDelivered.Load() == base {
+			if time.Now().After(deadline) {
+				break // safety net; the assertion below still catches a miss
+			}
+			time.Sleep(time.Millisecond)
+		}
+		close(hookDone)
+	})
+
+	// Create pkg/mod.py → triggers the flush whose reconcile fires the hook.
 	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "pkg", "mod.py"), []byte("def modfn():\n    return 1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	wi := withShortDebounce(t, root, true)
-	if !containsFile(wi.Load(), "pkg/mod.py") {
-		t.Fatal("precondition: pkg/mod.py should be indexed at construction")
+
+	select {
+	case <-hookDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("reconcile hook never fired — pkg/ was not appended by a flush")
+	}
+	if hookErr != nil {
+		t.Fatalf("rename inside hook: %v", hookErr)
 	}
 
-	var flushes atomic.Int64
-	wi.SetOnFlush(func(string) {
-		if flushes.Add(1) == 1 {
-			time.Sleep(6 * shortDebounce)
-		}
-	})
-	swaps := make(chan struct{}, 32)
-	wi.SetOnSwap(swaps)
-	drainSwaps(swaps)
-
-	// Touch keep.py to start a slow flush, then rename the dir DURING it.
-	if err := os.WriteFile(filepath.Join(root, "keep.py"), []byte("def keep():\n    return 9\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !waitForSwap(t, swaps, 5*time.Second) {
-		t.Fatal("first flush never published")
-	}
-	if err := os.Rename(filepath.Join(root, "pkg"), filepath.Join(root, "pkg2")); err != nil {
-		t.Fatal(err)
-	}
-
-	// The renamed-away dir's chunks must be tombstoned (not orphaned).
+	// The renamed-away dir's chunks must be tombstoned (not orphaned), and the
+	// new path picked up.
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
 		if !containsFile(wi.Load(), "pkg/mod.py") {
-			return // old path gone
+			return // old path gone — N2 holds
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Errorf("pkg/mod.py still indexed after the dir was renamed during a flush (N2); chunks: %s", chunkFiles(wi.Load()))
+	t.Errorf("pkg/mod.py still indexed after the dir was renamed during its in-flight flush (N2); chunks: %s", chunkFiles(wi.Load()))
 }

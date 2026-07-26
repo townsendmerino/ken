@@ -80,6 +80,22 @@ type WatchedIndex struct {
 	// busy-spin — eventual convergence alone passed even with R1 reverted.
 	loopWakeups atomic.Int64
 
+	// loopRemoveDelivered counts Remove/Rename events the loop has received,
+	// incremented at delivery BEFORE the accept decision. Test-only
+	// observability (audit round-4 "test quality"): the N2 bite test fires a
+	// dir rename while a flush holds the corpus in its unpublished window and
+	// waits on this counter so the gate decision is pinned to happen BEFORE the
+	// flush publishes — without that synchronization the event can land after
+	// publish, where even the reverted gate would accept it, and the test stops
+	// biting (the original N2 test's exact flaw).
+	loopRemoveDelivered atomic.Int64
+
+	// onReconcileAppended, when non-nil, is invoked inside reconcileCorpusLocked
+	// after the batch's chunks have been appended to w.chunks but before the
+	// caller publishes — the in-flight unpublished window N2 concerns. Test-only
+	// (nil in production); the N2 bite test uses it to hold a flush open there.
+	onReconcileAppended func()
+
 	// Current snapshot. Read via wi.ix.Load(); never nil after
 	// NewWatchedIndex returns successfully.
 	ix atomic.Pointer[Index]
@@ -289,7 +305,7 @@ func NewWatchedIndexReconciled(root string, mode Mode, chunkerName, modelDir str
 			for _, f := range deleted {
 				batch[f] = fsnotify.Remove
 			}
-			w.reconcileCorpusLocked(batch)
+			w.reconcileCorpusLocked(batch, nil) // explicit drift batch, not an overflow resync
 		}
 	}
 	return assembleWatched(root, mode, chunkerName, modelDir, model, chunks, vecs, nil, watch, WatchDebounce, opts, reconcile)
@@ -320,7 +336,16 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 	// enrich parse (embedding stays inline). Either way the background warm pass
 	// finishes the work. warmDoEnrich records that the label must be (re)added
 	// there (it was skipped on the initial build).
-	staged := opts.StagedEmbedding && model != nil && mode.needsModel()
+	// Staging (M4) only makes sense on a genuinely cold build — no vectors yet.
+	// A snapshot-seeded / reconciled boot arrives with vecs already full-length
+	// (LoadSerializedCorpus), so staging there would both needlessly re-embed
+	// AND misalign vecs/chunks: the pre-publish reconcile below can append
+	// chunks under the stagedPending gate that skips their vectors, and
+	// compactCorpus then indexes w.vecs[i] past its end → panic at startup
+	// (audit R4-1). Derive the decision from the corpus, not just the option, so
+	// stagedPending is true only when vecs is empty and the invariant
+	// len(vecs)∈{0,len(chunks)} holds through every reconcile mutation.
+	staged := opts.StagedEmbedding && model != nil && mode.needsModel() && len(vecs) == 0
 	lazyEnrich := opts.LazyEnrichment && !opts.DisableEnrichment
 	warm := staged || lazyEnrich
 	if warm {
@@ -516,12 +541,21 @@ func (w *WatchedIndex) ReconcileFiles(changed, deleted []string) {
 	for _, f := range deleted {
 		batch[f] = fsnotify.Remove // tombstone only
 	}
-	w.flush(batch)
+	w.flush(batch, nil) // explicit batch, not an overflow resync
 }
 
 // Load returns the current Index snapshot. Goroutine-safe; one atomic
 // load. Never returns nil after NewWatchedIndex succeeds.
 func (w *WatchedIndex) Load() *Index { return w.ix.Load() }
+
+// setReconcileHook installs a one-shot hook fired inside reconcileCorpusLocked
+// after appends and before publish (test-only; see onReconcileAppended). Set
+// under corpusMu so it synchronizes with the flush goroutine's read.
+func (w *WatchedIndex) setReconcileHook(f func()) {
+	w.corpusMu.Lock()
+	w.onReconcileAppended = f
+	w.corpusMu.Unlock()
+}
 
 // Search loads the current snapshot once and delegates. The snapshot
 // is consistent for the duration of the call even if the watcher
@@ -601,6 +635,11 @@ func (w *WatchedIndex) loop() {
 	defer close(w.done)
 
 	dirty := make(map[string]fsnotify.Op)
+	// resyncPresent, when non-nil, is the disk truth captured by the most recent
+	// event-queue-overflow resync; it travels with `dirty` into the next flush,
+	// which tombstones any indexed file absent from it (audit R4-6). nil on the
+	// normal path.
+	var resyncPresent map[string]bool
 	var timer *time.Timer
 
 	// Async single-flight flush (audit search §12): the flush does file
@@ -683,8 +722,14 @@ func (w *WatchedIndex) loop() {
 			// dropped and its chunks orphaned forever (§14's exact case). The
 			// batched tombstoneFile is a documented no-op when nothing matches
 			// ("false positives can't over-tombstone"), so accepting every
+			// Count Remove/Rename delivery before the accept for test
+			// synchronization (see loopRemoveDelivered); a no-op in production.
+			if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				w.loopRemoveDelivered.Add(1)
+			}
 			// Remove/Rename is safe; a stray non-indexed remove costs at most
-			// one no-op rebuild. (.git isn't watched, so no git-op flood.)
+			// one no-op rebuild (the flush short-circuits it, audit R4-3).
+			// (.git isn't watched, so no git-op flood.)
 			if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 				dirty[rel] = mergeOp(dirty[rel], ev.Op)
 				resetTimer()
@@ -743,7 +788,7 @@ func (w *WatchedIndex) loop() {
 			// the optional embed cache blunt it.
 			if errors.Is(err, fsnotify.ErrEventOverflow) {
 				w.logf("fsnotify event-queue overflow — dropped events; triggering a full resync")
-				w.enqueueFullResync(dirty)
+				resyncPresent = w.enqueueFullResync(dirty)
 				resetTimer()
 				continue
 			}
@@ -770,6 +815,8 @@ func (w *WatchedIndex) loop() {
 			}
 			batch := dirty
 			dirty = make(map[string]fsnotify.Op)
+			batchResync := resyncPresent
+			resyncPresent = nil
 			timer = nil
 			firstDirty = time.Time{} // start a fresh debounce window for the next batch
 			flushing = true
@@ -780,7 +827,7 @@ func (w *WatchedIndex) loop() {
 			w.bgWG.Add(1)
 			go func() {
 				defer w.bgWG.Done()
-				w.flush(batch)
+				w.flush(batch, batchResync)
 				select {
 				case flushDone <- struct{}{}:
 				default: // loop already gone (shutdown) — don't block
@@ -803,10 +850,23 @@ func (w *WatchedIndex) loop() {
 
 // flush rebuilds the snapshot from the current corpus state plus the
 // batched dirty events. Called from the debouncer goroutine only.
-func (w *WatchedIndex) flush(batch map[string]fsnotify.Op) {
+// resyncPresent is non-nil only after an event-queue-overflow resync
+// (audit R4-6): it is the disk truth, and any indexed file absent from it
+// AND untouched by this batch is tombstoned as vanished-while-events-dropped.
+func (w *WatchedIndex) flush(batch map[string]fsnotify.Op, resyncPresent map[string]bool) {
 	start := time.Now()
 	w.corpusMu.Lock()
-	compacted := w.reconcileCorpusLocked(batch)
+	compacted, changed := w.reconcileCorpusLocked(batch, resyncPresent)
+	// No-op batch (audit R4-3): every event resolved to a path we never indexed
+	// — a stray gitignored .swp/.orig Remove inside a watched dir, an editor
+	// touching a binary/oversized file. Skip the whole expensive tail (full BM25
+	// + ANN rebuild, and in ken-mcp the OnFlush = whole-repo WalkFS + serialize +
+	// two fsync'd writes + FreeOSMemory). The published snapshot is unchanged, so
+	// nothing to swap or notify. A real rename still tombstones, so N2 holds.
+	if !changed && compacted == 0 {
+		w.corpusMu.Unlock()
+		return
+	}
 	newIx := w.buildUnionedIndexLocked()
 	w.ix.Store(newIx)
 	total := len(w.chunks) + len(w.extraChunks)
@@ -824,12 +884,17 @@ func (w *WatchedIndex) flush(batch map[string]fsnotify.Op) {
 
 // reconcileCorpusLocked applies a batch of file events to the mutable corpus
 // (tombstone/append per file + migration refold + compact) and returns the
-// number of tombstones compacted away. It does NOT rebuild or publish the
-// Index — the caller runs buildUnionedIndexLocked + publish. Shared by flush
-// (which publishes after) and the snapshot-seeded reconcile constructor (which
-// runs it BEFORE the single initial publish, avoiding a seed-then-reconcile
-// double build). Caller holds corpusMu (or is single-threaded construction).
-func (w *WatchedIndex) reconcileCorpusLocked(batch map[string]fsnotify.Op) int {
+// number of tombstones compacted away plus whether the batch actually changed
+// the corpus. changed is false when every event was a no-op — e.g. a stray
+// Remove of a never-indexed path (a .swp/.orig gitignored file inside a watched
+// dir), which the unconditional Remove-accept gate now lets through (audit N2)
+// but which must not trigger flush's full rebuild + snapshot persist (audit
+// R4-3). It does NOT rebuild or publish the Index — the caller runs
+// buildUnionedIndexLocked + publish. Shared by flush (which publishes after)
+// and the snapshot-seeded reconcile constructor (which runs it BEFORE the
+// single initial publish, avoiding a seed-then-reconcile double build). Caller
+// holds corpusMu (or is single-threaded construction).
+func (w *WatchedIndex) reconcileCorpusLocked(batch map[string]fsnotify.Op, resyncPresent map[string]bool) (int, bool) {
 	// Copy-on-write (audit search §1): BuildIndex stores the chunks slice
 	// header verbatim, so the currently-published *Index aliases w.chunks'
 	// backing array — and readers touch chunk[i].Tombstoned lock-free
@@ -859,19 +924,26 @@ func (w *WatchedIndex) reconcileCorpusLocked(batch map[string]fsnotify.Op) int {
 	}
 	sort.Strings(rels)
 
+	changed := false
 	for _, rel := range rels {
 		op := batch[rel]
 		if w.migrationDirs[path.Dir(rel)] {
 			touchedMigDirs[path.Dir(rel)] = true
 		}
 		if op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-			w.tombstoneFile(rel)
+			if w.tombstoneFile(rel) > 0 {
+				changed = true
+			}
 			continue
 		}
 		// WRITE or CREATE: tombstone existing chunks for this file,
 		// then re-chunk + re-embed and append.
-		w.tombstoneFile(rel)
-		w.appendFile(rel)
+		if w.tombstoneFile(rel) > 0 {
+			changed = true
+		}
+		if w.appendFile(rel) > 0 {
+			changed = true
+		}
 	}
 
 	// Re-fold every touched migration dir (sorted, same determinism reason).
@@ -885,11 +957,49 @@ func (w *WatchedIndex) reconcileCorpusLocked(batch map[string]fsnotify.Op) int {
 	}
 	sort.Strings(migDirs)
 	for _, d := range migDirs {
-		w.tombstoneFoldedChunksForDir(d)
-		w.refoldMigrationDir(d)
+		if w.tombstoneFoldedChunksForDir(d) > 0 {
+			changed = true
+		}
+		if w.refoldMigrationDir(d) > 0 {
+			changed = true
+		}
 	}
 
-	return w.compactCorpus()
+	// Test hook (nil in production): fire while the just-appended chunks are in
+	// w.chunks but the caller hasn't published — the in-flight window N2 covers.
+	// Fires once; cleared under corpusMu (held here) so the next flush proceeds.
+	if w.onReconcileAppended != nil {
+		hook := w.onReconcileAppended
+		w.onReconcileAppended = nil
+		hook()
+	}
+
+	// Overflow-resync deletion pass (audit R4-6): tombstone every indexed file
+	// that is absent from disk (`resyncPresent`) AND untouched by this batch.
+	// Reading w.chunks here — under corpusMu, and after the in-flight flush has
+	// completed (flushes are single-flighted) — is what makes this catch a file
+	// the previous flush appended but hadn't published when the overflow ate its
+	// Remove; the old event-loop pass against the published snapshot could not.
+	// The "not in batch" guard protects a file created after the disk walk whose
+	// Create arrived normally and is being re-appended this same flush.
+	if resyncPresent != nil {
+		for i := range w.chunks {
+			if w.chunks[i].Tombstoned {
+				continue
+			}
+			f := w.chunks[i].File
+			if resyncPresent[f] {
+				continue
+			}
+			if _, inBatch := batch[f]; inBatch {
+				continue
+			}
+			w.chunks[i].Tombstoned = true
+			changed = true
+		}
+	}
+
+	return w.compactCorpus(), changed
 }
 
 // tombstoneFoldedChunksForDir marks every chunk whose File lives inside
@@ -901,8 +1011,9 @@ func (w *WatchedIndex) reconcileCorpusLocked(batch map[string]fsnotify.Op) int {
 // raw .sql content for files in the dir is owned by per-file appendFile
 // and has already been re-emitted by the caller's per-file tombstone +
 // re-append. Only the folded chunks need this dir-wide refresh.
-func (w *WatchedIndex) tombstoneFoldedChunksForDir(dir string) {
+func (w *WatchedIndex) tombstoneFoldedChunksForDir(dir string) int {
 	const marker = "-- folded from migrations"
+	n := 0
 	for i := range w.chunks {
 		if w.chunks[i].Tombstoned {
 			continue
@@ -912,8 +1023,10 @@ func (w *WatchedIndex) tombstoneFoldedChunksForDir(dir string) {
 		}
 		if strings.Contains(w.chunks[i].Text, marker) {
 			w.chunks[i].Tombstoned = true
+			n++
 		}
 	}
+	return n
 }
 
 // refoldMigrationDir re-runs sql.FoldMigrations against the migration
@@ -922,13 +1035,13 @@ func (w *WatchedIndex) tombstoneFoldedChunksForDir(dir string) {
 // LogWriter (nil discards) and the dir keeps the previously-tombstoned
 // folded chunks invalidated — net: the snapshot reflects "best effort"
 // with no stale folded chunk surviving the flush.
-func (w *WatchedIndex) refoldMigrationDir(dir string) {
+func (w *WatchedIndex) refoldMigrationDir(dir string) int {
 	folded, err := sql.FoldMigrations(os.DirFS(w.root), dir, w.fsOpts.LogWriter)
 	if err != nil {
 		if w.fsOpts.LogWriter != nil {
 			fmt.Fprintf(w.fsOpts.LogWriter, "search: WatchedIndex.refoldMigrationDir(%q): %v\n", dir, err)
 		}
-		return
+		return 0
 	}
 	for _, c := range folded {
 		w.chunks = append(w.chunks, c)
@@ -938,6 +1051,7 @@ func (w *WatchedIndex) refoldMigrationDir(dir string) {
 			w.vecs = append(w.vecs, encodeCached(w.fsOpts.EmbedCache, w.model, c.Text))
 		}
 	}
+	return len(folded)
 }
 
 // buildUnionedIndexLocked constructs the published Index from the union
@@ -1103,9 +1217,17 @@ func (w *WatchedIndex) compactCorpus() int {
 		return 0
 	}
 	newChunks := make([]chunk.Chunk, 0, len(w.chunks)-dropped)
+	// Defensive: if vecs and chunks ever fall out of alignment (the R4-1 class:
+	// a stagedPending append that skipped its vector), drop the vectors entirely
+	// and degrade to BM25 rather than index w.vecs[i] out of range and panic on
+	// the flush/startup goroutine. buildUnionedIndexLocked's invariant check
+	// then republishes as BM25. Aligned corpora take the fast path unchanged.
 	var newVecs [][]float32
-	if w.vecs != nil {
+	if len(w.vecs) == len(w.chunks) {
 		newVecs = make([][]float32, 0, len(w.vecs)-dropped)
+	} else if len(w.vecs) != 0 {
+		w.logf("BUG: compactCorpus vecs/chunks misaligned (%d vecs, %d chunks); dropping vectors, degrading to BM25", len(w.vecs), len(w.chunks))
+		w.vecs = nil
 	}
 	for i, c := range w.chunks {
 		if c.Tombstoned {
@@ -1202,21 +1324,27 @@ func (w *WatchedIndex) readCappedFile(abs string) ([]byte, error) {
 
 // tombstoneFile marks every existing chunk whose File == rel as
 // Tombstoned. Caller holds corpusMu.
-func (w *WatchedIndex) tombstoneFile(rel string) {
+// Returns the number of chunks newly tombstoned — 0 means this file/dir had
+// nothing indexed, which lets reconcileCorpusLocked skip the expensive rebuild
+// for a stray Remove of an unindexed path (audit R4-3).
+func (w *WatchedIndex) tombstoneFile(rel string) int {
 	// Match the exact file OR — for a directory Remove/Rename, which fires no
 	// per-file events (audit §14) — every chunk under rel+"/". The "/" boundary
 	// keeps `internal/auth` from matching `internal/authz/…`. A regular file
 	// remove (rel="a.go") has an empty prefix match, so this is a no-op beyond
 	// the exact case.
 	prefix := rel + "/"
+	n := 0
 	for i := range w.chunks {
 		if w.chunks[i].Tombstoned {
 			continue
 		}
 		if w.chunks[i].File == rel || strings.HasPrefix(w.chunks[i].File, prefix) {
 			w.chunks[i].Tombstoned = true
+			n++
 		}
 	}
+	return n
 }
 
 // appendFile re-reads, re-chunks, and re-embeds `rel`, appending the
@@ -1230,24 +1358,27 @@ func (w *WatchedIndex) tombstoneFile(rel string) {
 // chunks are produced by the post-pass refoldMigrationDir rather than
 // per-file — so skipSQLStructural is set to true here. Line-chunked
 // raw text still flows through chunk.ChunkFile.
-func (w *WatchedIndex) appendFile(rel string) {
+// Returns the number of chunks appended — 0 means the file was rejected at
+// admission, unreadable, or produced no chunks, letting reconcileCorpusLocked
+// skip a no-op rebuild (audit R4-3).
+func (w *WatchedIndex) appendFile(rel string) int {
 	// Re-check admission at flush time (audit §15): ShouldIndex (with its
 	// size + binary-sniff guards) ran at EVENT time, up to a debounce window
 	// ago. A file that was 1 KB when its Create fired can be 800 MB by now
 	// (a build artifact / growing log), or have turned binary. Re-running
 	// ShouldIndex here re-Lstats and rejects it.
 	if w.matcher != nil && !w.matcher.ShouldIndex(rel) {
-		return
+		return 0
 	}
 	abs := filepath.Join(w.root, filepath.FromSlash(rel))
 	data, err := w.readCappedFile(abs)
 	if err != nil {
-		return
+		return 0
 	}
 	skipSQLStructural := w.migrationDirs[path.Dir(rel)]
 	cs, err := chunkOneFile(w.chunkerName, rel, data, skipSQLStructural)
 	if err != nil {
-		return
+		return 0
 	}
 	// M3 (code review §3): apply the SAME Arm B enrichment the initial build
 	// does, gated on the same flag, BEFORE embedding — otherwise every file
@@ -1265,6 +1396,7 @@ func (w *WatchedIndex) appendFile(rel string) {
 			w.vecs = append(w.vecs, encodeCached(w.fsOpts.EmbedCache, w.model, c.Text))
 		}
 	}
+	return len(cs)
 }
 
 // notifySwap delivers one nonblocking signal to the onSwap channel if
@@ -1353,7 +1485,7 @@ func (w *WatchedIndex) logf(format string, args ...any) {
 // the incremental view can no longer be trusted (audit search §3). Extra
 // (Tier-2 DB) chunks live in w.extraChunks, not w.chunks, so they are not
 // scanned here and never get spuriously tombstoned.
-func (w *WatchedIndex) enqueueFullResync(dirty map[string]fsnotify.Op) {
+func (w *WatchedIndex) enqueueFullResync(dirty map[string]fsnotify.Op) map[string]bool {
 	// Re-register watches over the whole tree first (audit search §3): the
 	// overflow may have dropped the Create events for directories added
 	// during the burst, so those subtrees have no inotify watch and would
@@ -1382,23 +1514,16 @@ func (w *WatchedIndex) enqueueFullResync(dirty map[string]fsnotify.Op) {
 		}
 		return nil
 	})
-	// Tombstone indexed FS files that vanished while events were dropped.
-	// Read the published snapshot lock-free (audit R8): this runs inline on
-	// the event loop, so taking corpusMu would block it behind an in-flight
-	// flush. The published chunk array is immutable after Store (§1 COW).
-	seen := make(map[string]bool)
-	if ix := w.ix.Load(); ix != nil {
-		for i := range ix.chunks {
-			f := ix.chunks[i].File
-			if ix.chunks[i].Tombstoned || seen[f] {
-				continue
-			}
-			seen[f] = true
-			if !present[f] {
-				dirty[f] = mergeOp(dirty[f], fsnotify.Remove)
-			}
-		}
-	}
+	// Deletion detection is deferred to the flush (audit R4-6): computing it
+	// here against the published snapshot (w.ix.Load()) MISSES a file that an
+	// in-flight flush already appended to w.chunks but hasn't published yet —
+	// if that file was deleted with its Remove dropped by the same overflow, it
+	// would appear in neither `present` (gone from disk) nor the stale snapshot,
+	// so its chunks would never be tombstoned. Instead we hand `present` to the
+	// flush, which (single-flighted after the in-flight one completes) tombstones
+	// every chunk whose File is absent from disk AND untouched by this batch,
+	// reading the authoritative w.chunks under corpusMu.
+	return present
 }
 
 // mergeOp combines two op bitmasks for the same path during a debounce
