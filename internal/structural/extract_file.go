@@ -2,6 +2,7 @@ package structural
 
 import (
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/odvcencio/gotreesitter"
@@ -30,7 +31,7 @@ const maxEnrichBytes = 64 << 10
 // Goroutine-safe under the same conditions as Build: langCacheFor
 // holds a per-grammar parser pool that owns its internal state.
 func ExtractFile(rel string, data []byte) *FileStruct {
-	ext := filepath.Ext(rel)
+	ext := strings.ToLower(filepath.Ext(rel))
 	gram, ok := kenLangToTSLang[ext]
 	if !ok {
 		return nil

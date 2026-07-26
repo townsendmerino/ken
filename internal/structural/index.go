@@ -513,7 +513,7 @@ func BuildWithContext(ctx context.Context, corpusDir string) (*Index, error) {
 					// close(jobs) unblocks. Cheap vs the parse we skip.
 					continue
 				}
-				ext := filepath.Ext(j.rel)
+				ext := strings.ToLower(filepath.Ext(j.rel))
 				gram, ok := kenLangToTSLang[ext]
 				if !ok {
 					continue
@@ -545,9 +545,13 @@ func BuildWithContext(ctx context.Context, corpusDir string) (*Index, error) {
 		return nil, ctx.Err()
 	}
 	// Merge results in lexical order (results[i] aligned with
-	// relPaths[i] which itself came from repo.WalkFS sorted output).
-	// Deterministic merge ⇒ deterministic pass 2 iteration ⇒ the
-	// methods/defs maps' append ordering is reproducible across runs.
+	// relPaths[i], from repo.WalkFS's sorted output). NB (audit §28): this
+	// ordered merge does NOT by itself make output deterministic — pass 2
+	// below ranges `for path, fs := range ix.files`, a randomized map
+	// iteration, so the defs/methods/callers slices are built in random
+	// order. Determinism is restored downstream by uniqStringsSorted (defs/
+	// methods) and the callers sort. Keep those sorts: without them this
+	// merge order would NOT save us.
 	for _, r := range results {
 		if r == nil {
 			continue
