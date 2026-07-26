@@ -46,6 +46,46 @@ func TestRecorder_writeAppendsLine(t *testing.T) {
 	}
 }
 
+// TestRecorder_persistentHandle_CloseAndReopen exercises the audit §19
+// cached append handle: repeated Records reuse one fd, Close releases it,
+// and a Record after Close transparently reopens. All writes survive.
+func TestRecorder_persistentHandle_CloseAndReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "savings.jsonl")
+	r := NewRecorder(path)
+
+	r.Record("search", 1, 10, 100)
+	r.Record("search", 1, 10, 100)
+	if r.file == nil {
+		t.Fatal("expected a cached file handle after Record")
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if r.file != nil {
+		t.Error("file handle should be nil after Close")
+	}
+	// Record after Close reopens and appends (doesn't truncate).
+	r.Record("find_related", 1, 10, 100)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines, want 3 (all writes across the close boundary survive)", len(lines))
+	}
+	// Close is idempotent + nil-safe.
+	if err := r.Close(); err != nil {
+		t.Errorf("second Close: %v", err)
+	}
+	var nilRec *Recorder
+	if err := nilRec.Close(); err != nil {
+		t.Errorf("nil Close: %v", err)
+	}
+}
+
 // TestRecorder_privacy_noQueryTextOrPaths: this is the contract the
 // privacy promise rests on — no query string, no file path, no chunk
 // content ever lands in the jsonl. If a future Record() change adds

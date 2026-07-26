@@ -58,6 +58,11 @@ type Record struct {
 type Recorder struct {
 	mu   sync.Mutex
 	path string
+	// file is the append handle, opened lazily on the first Record and
+	// cached (audit §19): the old code re-ran MkdirAll + Open + Close on
+	// every tool call. Nil until first successful open, or after a write
+	// error resets it so the next call reopens (handles log rotation).
+	file *os.File
 }
 
 // NewRecorder returns a Recorder that appends to path. path is NOT
@@ -118,15 +123,43 @@ func (r *Recorder) Record(callType string, results, snippetChars, fileChars int)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
-		return
+	if r.file == nil {
+		// First call (or reopening after a write error / rotation). O_APPEND
+		// keeps sub-PIPE_BUF writes atomic across processes on a persistent
+		// fd just as well as reopening did — closing between writes bought
+		// nothing.
+		if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
+			return
+		}
+		f, err := os.OpenFile(r.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return // retried on the next call
+		}
+		r.file = f
 	}
-	f, err := os.OpenFile(r.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return
+	if _, err := r.file.Write(line); err != nil {
+		// Drop the handle so the next call reopens (e.g. after log rotation
+		// moved the file out from under us).
+		_ = r.file.Close()
+		r.file = nil
 	}
-	defer f.Close()
-	_, _ = f.Write(line)
+}
+
+// Close releases the cached append handle. Safe on a nil Recorder and
+// idempotent. cmd/ken-mcp calls it from its shutdown cleanup; a Recorder
+// that's never Closed still has its fd reclaimed at process exit.
+func (r *Recorder) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.file != nil {
+		err := r.file.Close()
+		r.file = nil
+		return err
+	}
+	return nil
 }
 
 // ── Aggregation + rendering (port of semble's stats.py) ─────────────
@@ -183,7 +216,11 @@ func BuildSummary(path string) (Summary, error) {
 	defer f.Close()
 
 	now := time.Now()
-	today := now.Truncate(24 * time.Hour)
+	// Local-midnight boundary (audit §9): time.Truncate rounds relative to
+	// the zero time in UTC, so it silently bucketed by UTC day despite the
+	// doc promising local. Build midnight in the receiver's location.
+	y, mo, d := now.Date()
+	today := time.Date(y, mo, d, 0, 0, 0, 0, now.Location())
 	sevenDaysAgo := today.AddDate(0, 0, -6) // include today + previous 6 days
 
 	scan := bufio.NewScanner(f)

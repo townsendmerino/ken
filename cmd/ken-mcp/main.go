@@ -734,6 +734,8 @@ func main() {
 		if dbCleanup != nil {
 			dbCleanup()
 		}
+		// Flush + close the cached usage-stats append handle (audit §19).
+		_ = usageRecorder.Close()
 		cache.Close()
 	}
 
