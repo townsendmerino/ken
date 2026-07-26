@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -670,6 +671,19 @@ func (w *WatchedIndex) flush(batch map[string]fsnotify.Op) {
 // runs it BEFORE the single initial publish, avoiding a seed-then-reconcile
 // double build). Caller holds corpusMu (or is single-threaded construction).
 func (w *WatchedIndex) reconcileCorpusLocked(batch map[string]fsnotify.Op) int {
+	// Copy-on-write (audit search §1): BuildIndex stores the chunks slice
+	// header verbatim, so the currently-published *Index aliases w.chunks'
+	// backing array — and readers touch chunk[i].Tombstoned lock-free
+	// (tombstoneCount/ResolveChunk). tombstoneFile below writes that field in
+	// place, which would be an unsynchronized read/write on the live snapshot
+	// (data race, and the file's chunks vanish from results mid-flush). Clone
+	// first so every mutation here lands on a fresh array; the old array the
+	// published snapshot serves from is never touched (ARCHITECTURE.md
+	// invariant #2). Cheap next to the whole-corpus BM25 rebuild this flush
+	// already does. (At construction — NewWatchedIndexReconciled — nothing is
+	// published yet, so the clone is a harmless no-op-cost.)
+	w.chunks = slices.Clone(w.chunks)
+
 	// Migration dirs touched by this batch; we'll re-fold them in one
 	// pass after per-file tombstone/append, so an ALTER added in one
 	// migration file shows up in the folded chunk for the whole dir.

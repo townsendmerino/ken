@@ -206,15 +206,20 @@ func TestWatchedIndex_Compaction_DropsTombstones(t *testing.T) {
 // where the compacted slice and its parallel structures (vecs, BM25
 // postings, ann.Flat rows) drift out of sync.
 //
-// All inspection happens AFTER the swap completes so the read goes
-// through atomic.Pointer.Load → fresh compacted slice; reading the
-// initial-snapshot chunks directly before the swap races with the
-// debouncer's tombstoneFile write (the race detector can't see
-// fsnotify's OS-mediated happens-before).
+// As of the audit §1 fix, reconcileCorpusLocked copies-on-write
+// (slices.Clone) before any tombstoneFile mutation, so a published
+// snapshot's chunk array is never written after Store — reads via
+// ResolveChunk / Search (and even a direct wi.Load().chunks read) no
+// longer race the debouncer.
 //
-// Future test authors: don't read wi.Load().chunks directly — use
-// ResolveChunk / Search, which synchronize through atomic.Pointer.Load.
-// Commit eaa9406 has the original race this guideline came from.
+// NB the earlier guidance here was imprecise: atomic.Pointer.Load
+// synchronizes the *pointer*, not the pointed-to array, so before the
+// COW fix ResolveChunk / Search raced tombstoneFile's in-place write
+// exactly the same as a direct read would (the race detector just
+// couldn't see fsnotify's OS-mediated happens-before to flag it).
+// The invariant that makes reads safe is "the writer never mutates a
+// published array," not the atomic Load. Commit eaa9406 has the
+// original race this guideline came from.
 func TestWatchedIndex_Compaction_PreservesChunkContent(t *testing.T) {
 	root := makeTempRepo(t, map[string]string{
 		"a.py": "def alpha():\n    return 'a'\n",
@@ -586,4 +591,55 @@ func chunkFiles(ix *Index) string {
 		}
 	}
 	return string(b)
+}
+
+// TestWatchedIndex_DeleteWhileReading_NoRace is the audit §1 regression: delete
+// an already-indexed file (→ tombstoneFile in-place write) while reader
+// goroutines loop Search / ResolveChunk (which read chunk[i].Tombstoned
+// lock-free). Before the copy-on-write fix this was an unsynchronized
+// read/write on the published snapshot's array; with the clone it's clean.
+// Run under -race.
+func TestWatchedIndex_DeleteWhileReading_NoRace(t *testing.T) {
+	root := makeTempRepo(t, map[string]string{
+		"a.py": "def alpha():\n    return 'a'\n",
+		"b.py": "def beta():\n    return 'b'\n",
+	})
+	wi, err := NewWatchedIndex(root, ModeBM25, "line", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = wi.Close() }()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					wi.Search("alpha", 5)
+					wi.ResolveChunk("a.py", 1)
+				}
+			}
+		}()
+	}
+
+	// Delete a.py (tombstone) and churn b.py — reconcile runs the mutation
+	// path under corpusMu while the readers race the published array.
+	_ = os.Remove(filepath.Join(root, "a.py"))
+	wi.ReconcileFiles(nil, []string{"a.py"})
+	for range 5 {
+		wi.ReconcileFiles([]string{"b.py"}, nil)
+	}
+
+	close(stop)
+	wg.Wait()
+
+	if len(wi.Search("alpha", 5)) != 0 {
+		t.Error("deleted a.py should be gone from results after reconcile")
+	}
 }
