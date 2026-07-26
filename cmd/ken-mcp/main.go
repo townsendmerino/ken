@@ -106,6 +106,32 @@ func (b *buildState) set(mode search.Mode, modeStr, modelDir string) {
 	b.mode, b.modeStr, b.modelDir = mode, modeStr, modelDir
 }
 
+// dbExtras holds the latest Tier-2 DB chunk set so a rebuilt default repo
+// re-inherits it (audit db/mcp §1). The old wiring captured the default
+// repo's *WatchedIndex once and wrote every refresh into that pointer; when
+// the bounded LRU evicted + closed that entry, the Refresher kept writing
+// into a dead index while the next Get rebuilt the default repo FS-only —
+// schema chunks silently gone until restart. Instead the Refresher stores
+// the chunks here, and the cache Builder re-applies them whenever it
+// (re)builds the pinned default repo, so eviction self-heals on the next
+// build. Written by the Refresher goroutine, read by Builder goroutines.
+type dbExtras struct {
+	mu     sync.Mutex
+	chunks []chunk.Chunk
+}
+
+func (d *dbExtras) store(cs []chunk.Chunk) {
+	d.mu.Lock()
+	d.chunks = cs
+	d.mu.Unlock()
+}
+
+func (d *dbExtras) load() []chunk.Chunk {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.chunks
+}
+
 // autoFetchFunc fetches the model into dest and returns the count of files
 // newly downloaded. Injected so autoFetchModel is unit-testable without a
 // network; autoFetchRealFetch is the production implementation.
@@ -406,6 +432,19 @@ func main() {
 	// buildState is the live mode/model the cache Builder reads; the
 	// auto-fetch goroutine flips it bm25 → hybrid once the model arrives.
 	bs := &buildState{mode: sm.mode, modeStr: sm.modeStr, modelDir: sm.modelDir}
+
+	// dbExtrasHolder carries the latest Tier-2 DB chunk set so a rebuilt
+	// default repo re-inherits it after LRU eviction (audit db/mcp §1).
+	// dbDefaultKey is the normalized cache key the extras attach to; the
+	// Builder matches its `source` arg against it. Empty when no default
+	// repo or no DB is configured — the Builder's apply then no-ops.
+	dbExtrasHolder := &dbExtras{}
+	var dbDefaultKey string
+	if defaultRepo != "" {
+		if k, _, kerr := kenmcp.NormalizeKey(defaultRepo); kerr == nil {
+			dbDefaultKey = k
+		}
+	}
 	rerankStatus := "off"
 	if lazyReranker != nil {
 		rerankStatus = "on (lazy)"
@@ -498,6 +537,17 @@ func main() {
 		if lazyReranker != nil {
 			ix.SetReranker(lazyReranker, rerankerOptions...)
 		}
+		// Tier-2 self-heal (audit db/mcp §1): if this is the pinned default
+		// repo and the Refresher has published DB chunks, re-apply them so a
+		// rebuild after LRU eviction inherits the schema chunks instead of
+		// serving FS-only. No-op on the very first build (holder empty) and
+		// for every non-default repo.
+		if dbDefaultKey != "" && source == dbDefaultKey {
+			if extras := dbExtrasHolder.load(); len(extras) > 0 {
+				ix.SetExtraChunks(extras)
+				logger.Logf(kenmcp.LogInfo, "Tier 2: re-applied %d DB chunks to rebuilt default repo %q", len(extras), dir)
+			}
+		}
 		// Log reindex activity at info-level so warn-default runs stay
 		// quiet but `KEN_MCP_LOG_LEVEL=info` shows agents the file
 		// watcher is doing its job. Stays on stderr (never stdout, the
@@ -586,7 +636,7 @@ func main() {
 	// Returns (nil refresher, nil cleanup) when Tier 2 isn't configured
 	// or initial connection fails (the latter logs warn and continues
 	// with FS-only rather than crashing startup).
-	refresher, dbCleanup := wireDBTier2(ctx, logger, cache, defaultRepo)
+	refresher, dbCleanup := wireDBTier2(ctx, logger, cache, defaultRepo, dbExtrasHolder)
 
 	// Background model auto-fetch (KEN_MCP_AUTO_FETCH, default on). When the
 	// model was missing at startup we serve bm25 now; this pulls the model,
@@ -1001,7 +1051,7 @@ func setupReranker(logger *kenmcp.Logger) (*search.LazyReranker, *rerankerLoader
 //   - Initial db.IndexSchema fails: warning, Tier 2 stays off (no
 //     refresher started — agents shouldn't get stale empty chunks if
 //     the DB was never reachable).
-func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache, defaultRepo string) (*mcpdb.Refresher, func()) {
+func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache, defaultRepo string, extras *dbExtras) (*mcpdb.Refresher, func()) {
 	dsn := envDSN("KEN_DB_DSN", logger)
 	if dsn == "" {
 		return nil, nil
@@ -1053,10 +1103,11 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 		return nil, nil
 	}
 
-	// Pre-warm the default repo's WatchedIndex. This is what makes DB
-	// chunks land in the snapshot the agent's first search returns.
-	wix, err := cache.Get(ctx, defaultRepo)
-	if err != nil {
+	// Pre-warm the default repo's WatchedIndex so its first build is paid
+	// here, not on the agent's first search. onExtras below re-resolves it
+	// through the cache on each refresh (audit db/mcp §1) rather than
+	// capturing this pointer, so an LRU eviction self-heals.
+	if _, err := cache.Get(ctx, defaultRepo); err != nil {
 		logger.Logf(kenmcp.LogWarn, "Tier 2: cannot pre-build default repo %q: %v — disabling Tier 2", defaultRepo, err)
 		return nil, nil
 	}
@@ -1097,7 +1148,17 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 	}
 
 	onExtras := func(chunks []chunk.Chunk) {
-		wix.SetExtraChunks(chunks)
+		// Publish to the shared holder FIRST so that if the re-resolve
+		// below has to rebuild an evicted default repo, the Builder sees
+		// these chunks and applies them (audit db/mcp §1). Then apply to
+		// the currently-cached index: cache.Get returns it cheaply when
+		// present, or rebuilds+recovers it when it was evicted.
+		extras.store(chunks)
+		if wix, err := cache.Get(ctx, defaultRepo); err == nil {
+			wix.SetExtraChunks(chunks)
+		} else {
+			logger.Logf(kenmcp.LogWarn, "Tier 2: could not resolve default repo %q to apply DB chunks: %v", defaultRepo, err)
+		}
 		logger.Logf(kenmcp.LogInfo, "Tier 2: indexed %d DB chunks into %q", len(chunks), defaultRepo)
 	}
 	cleanup, err := refresher.Start(ctx, onExtras)
