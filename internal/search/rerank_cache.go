@@ -179,12 +179,25 @@ func SaveCacheToFile(r *NeuralReranker, path, scopeKey string, embedDim int) err
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("search: SaveCacheToFile mkdir: %w", err)
 	}
-	// Atomic write: tmp file → rename. The rename is atomic on POSIX
-	// when src+dst are on the same filesystem (they are: both under
-	// the same parent dir).
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+	// Atomic write: unique tmp file → rename. Use os.CreateTemp with a
+	// per-write suffix (audit §27) rather than a fixed "<path>.tmp" — two
+	// ken-mcp processes sharing a cache path would otherwise interleave
+	// writes to the same temp file. Matches internal/modelfetch's pattern.
+	// The rename is atomic on POSIX when src+dst share a filesystem (they
+	// do: CreateTemp writes into path's parent dir).
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+"-*.tmp")
+	if err != nil {
+		return fmt.Errorf("search: SaveCacheToFile create tmp: %w", err)
+	}
+	tmp := f.Name()
+	if _, err := f.Write(body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return fmt.Errorf("search: SaveCacheToFile write tmp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("search: SaveCacheToFile close tmp: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
