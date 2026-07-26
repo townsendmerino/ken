@@ -251,10 +251,32 @@ func compileRule(pat string) (rule, bool) {
 		switch c := pat[i]; c {
 		case '*':
 			if i+1 < len(pat) && pat[i+1] == '*' {
-				b.WriteString(".*")
-				i++
-				if i+1 < len(pat) && pat[i+1] == '/' {
-					i++
+				// `**` semantics depend on whether it stands as its own path
+				// component (bounded by slashes / string ends) — audit §16.
+				// The old code emitted a bare `.*` for every `**`, dropping
+				// git's whole-component requirement: `**/migrations/*.php`
+				// then also matched `src/dbmigrations/*.php`, and `a/**/b`
+				// matched `a/xb`.
+				prevSlash := i == 0 || pat[i-1] == '/'
+				after := i + 2
+				nextSlash := after < len(pat) && pat[after] == '/'
+				atEnd := after == len(pat)
+				switch {
+				case prevSlash && nextSlash:
+					// Leading `**/` or mid `/**/`: zero or more FULL path
+					// components. The preceding `/` (mid case) is already
+					// written; consume the trailing `/` here.
+					b.WriteString("(?:.*/)?")
+					i = after // skip `**` and the `/`
+				case prevSlash && atEnd:
+					// Trailing `/**` (or lone `**`): everything beneath. The
+					// preceding `/` (or start anchor) is already handled.
+					b.WriteString(".*")
+					i = after - 1 // skip `**`
+				default:
+					// `**` not bounded by slashes → regular asterisks.
+					b.WriteString("[^/]*")
+					i++ // skip the second `*`
 				}
 			} else {
 				b.WriteString("[^/]*")
