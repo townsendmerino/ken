@@ -284,8 +284,8 @@ func TestLoadSerialized_CRCMismatch(t *testing.T) {
 }
 
 // TestLoadSerialized_ForwardCompatKenVer rewrites the ken-version
-// string to a future value but keeps the format version at 1; expects
-// successful load (kenVersion is informational). Rebuilds the LP
+// string to a future value but keeps the (current) format version;
+// expects successful load (kenVersion is informational). Rebuilds the LP
 // section + tail rather than overwriting at fixed offset so the
 // future-version string can be any length.
 func TestLoadSerialized_ForwardCompatKenVer(t *testing.T) {
@@ -473,12 +473,12 @@ func TestLoadSerialized_HostileEmbedDim_OverflowGuard(t *testing.T) {
 	var buf bytes.Buffer
 	// Header.
 	buf.WriteString("KEN1")
-	writeU32LE(&buf, 1)               // formatVersion
-	writeLP(&buf, "v0.8.3")           // kenVersion
-	buf.WriteByte(byte(ModeSemantic)) // mode
-	writeLP(&buf, "regex")            // chunker
-	writeU32LE(&buf, 2)               // numChunks
-	writeU32LE(&buf, uint32(1<<29)+1) // embedDim that overflows uint32 math
+	writeU32LE(&buf, serializeFormatVersion) // formatVersion (current, so the version check passes and the overflow guard fires)
+	writeLP(&buf, "v0.8.3")                  // kenVersion
+	buf.WriteByte(byte(ModeSemantic))        // mode
+	writeLP(&buf, "regex")                   // chunker
+	writeU32LE(&buf, 2)                      // numChunks
+	writeU32LE(&buf, uint32(1<<29)+1)        // embedDim that overflows uint32 math
 	// Chunks section: two 17-byte empty chunks (file="" + 0 + 0 + 0 + text="").
 	writeU32LE(&buf, 34) // chunksLen
 	for range 2 {

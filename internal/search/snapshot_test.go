@@ -3,11 +3,19 @@ package search
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestSnapshotConfigKey_StableAndSensitive(t *testing.T) {
 	base := SnapshotConfigKey(ModeHybrid, "regex", "dim=256,vocab=30000,bytes=999", true, false, false)
+	// The key MUST carry the current version prefix (audit R4-2/round-4 test
+	// finding): N4's whole migration story is that bumping "v1"→"v2" invalidates
+	// pre-sentinel snapshots. Without this assertion, reverting the version bump
+	// broke no test, so the mechanism was unguarded. Pin it explicitly.
+	if !strings.HasPrefix(base, "v2|") {
+		t.Fatalf("config key %q must start with the current version prefix %q", base, "v2|")
+	}
 	// Same inputs → identical key.
 	if again := SnapshotConfigKey(ModeHybrid, "regex", "dim=256,vocab=30000,bytes=999", true, false, false); again != base {
 		t.Fatalf("config key not stable:\n %q\n %q", base, again)

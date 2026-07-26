@@ -80,7 +80,15 @@ const (
 	// any incompatible change to the byte layout above. Different ken
 	// versions can read the SAME format version — the kenVersion
 	// header field is informational only.
-	serializeFormatVersion uint32 = 1
+	//
+	// v2 (audit R4-2): the enrichment label switched to the sentinel form
+	// "# ken: …" (was "# func: …"). Chunk.Text in a v1 blob carries the old
+	// label, which StripLabel's new sentinel-anchored regex no longer removes —
+	// so a v1 .ken/index.bin would serve a synthetic first line as real source.
+	// Bumping the version makes LoadSerializedIndex reject every pre-sentinel
+	// prebuilt (ErrFormatVersion → live rebuild); the SnapshotConfigKey v2 bump
+	// already covers the .ken/snapshot.{bin,manifest} artifact.
+	serializeFormatVersion uint32 = 2
 
 	// serializedKenVersion is the informational ken-version string
 	// stamped into every serialized index. Helps diagnose stale
