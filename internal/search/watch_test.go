@@ -780,6 +780,44 @@ func TestWatchedIndex_FullResync_RecoversFromDroppedEvents(t *testing.T) {
 	}
 }
 
+// TestWatchedIndex_Flush_NoOpDoesNotPublish is the audit R4-3 regression guard
+// (flagged in round 5 as having no test): a batch that changes nothing — a stray
+// Remove of a never-indexed path, e.g. a gitignored .swp inside a watched dir —
+// must NOT rebuild + publish + notify, because in ken-mcp that tail is a
+// whole-repo WalkFS + serialize + two fsync'd writes + FreeOSMemory. Driven via
+// direct flush() calls for determinism (no fsnotify timing). Bites: with the
+// `if !changed && compacted == 0 { return }` short-circuit removed, the no-op
+// flush Stores a fresh index and notifies swap, tripping both assertions.
+func TestWatchedIndex_Flush_NoOpDoesNotPublish(t *testing.T) {
+	root := makeTempRepo(t, map[string]string{"a.py": "def a():\n    return 1\n"})
+	wi := withShortDebounce(t, root, false) // no watcher; drive flush directly
+	before := wi.Load()
+	swaps := make(chan struct{}, 4)
+	wi.SetOnSwap(swaps)
+
+	// No-op: Remove of a path with no chunks → changed=false → short-circuit.
+	wi.flush(map[string]fsnotify.Op{"ghost.swp": fsnotify.Remove}, nil)
+	select {
+	case <-swaps:
+		t.Error("no-op flush notified swap — the R4-3 changed short-circuit is missing")
+	default:
+	}
+	if wi.Load() != before {
+		t.Error("no-op flush replaced the published index pointer")
+	}
+
+	// A real change still publishes.
+	wi.flush(map[string]fsnotify.Op{"a.py": fsnotify.Write}, nil)
+	select {
+	case <-swaps:
+	default:
+		t.Error("real-change flush did not notify swap")
+	}
+	if wi.Load() == before {
+		t.Error("real-change flush did not replace the published index")
+	}
+}
+
 // TestWatchedIndex_AsyncFlush_BackToBack exercises the audit §12 async
 // single-flight flush across multiple flush cycles: sequential writes each
 // trigger their own flush (via the flushing→flushDone→re-arm path) and all
@@ -979,12 +1017,26 @@ func TestWatchedIndex_DirRenameDuringFlush_Tombstoned(t *testing.T) {
 	// fixed before this flush publishes.
 	var hookErr error
 	hookDone := make(chan struct{})
-	wi.setReconcileHook(func() {
+	wi.setReconcileHook(func(batch map[string]fsnotify.Op) bool {
+		// Only act on the flush that actually appended pkg/ (round-5 robustness
+		// note): a platform that emits startup Create events could otherwise
+		// consume a one-shot hook on an earlier flush, and os.Rename would then
+		// ENOENT. Stay installed until our batch arrives.
+		ours := false
+		for k := range batch {
+			if k == "pkg" || strings.HasPrefix(k, "pkg/") {
+				ours = true
+				break
+			}
+		}
+		if !ours {
+			return false
+		}
 		base := wi.loopRemoveDelivered.Load()
 		if err := os.Rename(filepath.Join(root, "pkg"), filepath.Join(root, "pkg2")); err != nil {
 			hookErr = err
 			close(hookDone)
-			return
+			return true
 		}
 		deadline := time.Now().Add(3 * time.Second)
 		for wi.loopRemoveDelivered.Load() == base {
@@ -994,6 +1046,7 @@ func TestWatchedIndex_DirRenameDuringFlush_Tombstoned(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 		close(hookDone)
+		return true
 	})
 
 	// Create pkg/data.xyz → triggers the flush whose reconcile fires the hook.

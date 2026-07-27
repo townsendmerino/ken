@@ -229,6 +229,34 @@ func TestLoadSerialized_FormatVersionMismatch(t *testing.T) {
 	}
 }
 
+// TestLoadSerialized_V1Rejected pins the R4-2 correctness gate (audit R5-4
+// "no regression guard"): a pre-sentinel version-1 KEN1 blob MUST be rejected,
+// because its Chunk.Text carries the old "# func:" label that StripLabel's
+// sentinel-anchored regex no longer removes — loading it would serve a synthetic
+// first line to the agent as real source. Distinct from the mismatch test
+// (which uses 99): this one specifically fails if serializeFormatVersion is ever
+// reverted to 1, since a v1 blob would then load cleanly.
+func TestLoadSerialized_V1Rejected(t *testing.T) {
+	if serializeFormatVersion < 2 {
+		t.Fatalf("serializeFormatVersion = %d, want >= 2 — a v1 blob leaks pre-sentinel labels (R4-2)", serializeFormatVersion)
+	}
+	data, err := BuildAndSerializeIndex(tinyCorpus(), BuildOptions{
+		Mode: ModeBM25, Chunker: "regex",
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	corrupt := make([]byte, len(data))
+	copy(corrupt, data)
+	binary.LittleEndian.PutUint32(corrupt[4:8], 1) // stamp the old format version
+	bodyEnd := len(corrupt) - 4
+	binary.LittleEndian.PutUint32(corrupt[bodyEnd:], crc32.ChecksumIEEE(corrupt[:bodyEnd]))
+
+	if _, err := LoadSerializedIndex(corrupt, LoadOptions{}); !errors.Is(err, ErrFormatVersion) {
+		t.Fatalf("v1 blob must be rejected with ErrFormatVersion, got %v", err)
+	}
+}
+
 // TestLoadSerialized_ModeMismatch builds a BM25 index and loads it
 // asking for hybrid; expects ErrModeMismatch.
 func TestLoadSerialized_ModeMismatch(t *testing.T) {

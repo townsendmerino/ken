@@ -93,8 +93,11 @@ type WatchedIndex struct {
 	// onReconcileAppended, when non-nil, is invoked inside reconcileCorpusLocked
 	// after the batch's chunks have been appended to w.chunks but before the
 	// caller publishes — the in-flight unpublished window N2 concerns. Test-only
-	// (nil in production); the N2 bite test uses it to hold a flush open there.
-	onReconcileAppended func()
+	// (nil in production). It receives the batch and returns true to consume the
+	// hook (fire once) or false to stay installed for a later flush — so a test
+	// can wait for the specific batch it cares about even when startup Create
+	// events trigger earlier flushes (audit round-5 robustness note).
+	onReconcileAppended func(batch map[string]fsnotify.Op) bool
 
 	// Current snapshot. Read via wi.ix.Load(); never nil after
 	// NewWatchedIndex returns successfully.
@@ -548,10 +551,11 @@ func (w *WatchedIndex) ReconcileFiles(changed, deleted []string) {
 // load. Never returns nil after NewWatchedIndex succeeds.
 func (w *WatchedIndex) Load() *Index { return w.ix.Load() }
 
-// setReconcileHook installs a one-shot hook fired inside reconcileCorpusLocked
-// after appends and before publish (test-only; see onReconcileAppended). Set
-// under corpusMu so it synchronizes with the flush goroutine's read.
-func (w *WatchedIndex) setReconcileHook(f func()) {
+// setReconcileHook installs a hook fired inside reconcileCorpusLocked after
+// appends and before publish (test-only; see onReconcileAppended). The hook
+// receives the batch and returns true to consume itself. Set under corpusMu so
+// it synchronizes with the flush goroutine's read.
+func (w *WatchedIndex) setReconcileHook(f func(batch map[string]fsnotify.Op) bool) {
 	w.corpusMu.Lock()
 	w.onReconcileAppended = f
 	w.corpusMu.Unlock()
@@ -967,11 +971,13 @@ func (w *WatchedIndex) reconcileCorpusLocked(batch map[string]fsnotify.Op, resyn
 
 	// Test hook (nil in production): fire while the just-appended chunks are in
 	// w.chunks but the caller hasn't published — the in-flight window N2 covers.
-	// Fires once; cleared under corpusMu (held here) so the next flush proceeds.
+	// The hook inspects the batch and returns true to consume itself, so a test
+	// can skip earlier (e.g. startup-Create) flushes and act only on its own.
+	// Cleared under corpusMu (held here) so the next flush proceeds.
 	if w.onReconcileAppended != nil {
-		hook := w.onReconcileAppended
-		w.onReconcileAppended = nil
-		hook()
+		if w.onReconcileAppended(batch) {
+			w.onReconcileAppended = nil
+		}
 	}
 
 	// Overflow-resync deletion pass (audit R4-6): tombstone every indexed file
@@ -1094,6 +1100,20 @@ func (w *WatchedIndex) buildUnionedIndexLocked() *Index {
 			mergedVecs = make([][]float32, 0, len(w.vecs)+len(w.extraVecs))
 			mergedVecs = append(mergedVecs, w.vecs...)
 			mergedVecs = append(mergedVecs, w.extraVecs...)
+		}
+		// The w.vecs/w.chunks check above passes vacuously during the staged
+		// window (len(w.vecs)==0), but SetExtraChunks embeds extras
+		// unconditionally on w.model!=nil — so the merged pair can be N+E chunks
+		// against only E vectors (audit R5-1). That misalignment doesn't panic
+		// (indices stay in range) but silently ranks FS chunks by DB-chunk
+		// vectors in FindRelated / semantic search until the warm pass
+		// republishes. Re-check the assembled result and degrade to BM25 rather
+		// than serve confidently-wrong hits. Gating SetExtraChunks on
+		// !stagedPending instead is NOT a fix: the warm pass doesn't re-embed
+		// extras, so they'd stay vector-less forever.
+		if len(mergedVecs) != 0 && len(mergedVecs) != len(merged) {
+			w.logf("BUG: merged vecs/chunks misaligned (vecs=%d chunks=%d); dropping vectors, serving BM25 for this snapshot", len(mergedVecs), len(merged))
+			mergedVecs = nil
 		}
 		// FS chunks reuse the cache (the common, per-save path); the
 		// extras (Tier-2 DB chunks) are tokenized fresh — they change on
