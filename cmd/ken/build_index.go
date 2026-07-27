@@ -148,6 +148,14 @@ func cmdBuildIndex(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: close tmp: "+err.Error())
 		return 1
 	}
+	// Restore 0644 (audit R5-4): os.CreateTemp makes the tmp 0600, so without
+	// this the shipped .ken/index.bin — an operator artifact baked into images
+	// and //go:embed'd — becomes group/other-unreadable, and a container that
+	// builds as root then drops to a non-root uid silently fails the prebuilt
+	// load (EACCES swallowed) and pays the full cold walk+chunk+embed. The
+	// pre-round-4 WriteFile+Rename produced 0644; the same-round modelfetch
+	// conversion Chmod'd for exactly this reason.
+	_ = os.Chmod(tmpPath, 0o644)
 	if err := os.Rename(tmpPath, output); err != nil {
 		_ = os.Remove(tmpPath)
 		fmt.Fprintln(os.Stderr, "ken: rename to "+output+": "+err.Error())

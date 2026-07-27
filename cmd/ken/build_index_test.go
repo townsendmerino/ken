@@ -81,6 +81,16 @@ func TestBuildIndex_HappyPath(t *testing.T) {
 		t.Errorf("expected 'wrote ... bytes' on stderr, got:\n%s", stderr.String())
 	}
 
+	// The shipped index.bin must be world-readable (audit R5-4): CreateTemp
+	// makes 0600, and a container built as root then run as a non-root uid must
+	// still be able to read the //go:embed'd / baked-in prebuilt, or it silently
+	// falls back to the full cold build. Assert the compensating Chmod ran.
+	if fi, err := os.Stat(outPath); err != nil {
+		t.Fatalf("stat output: %v", err)
+	} else if perm := fi.Mode().Perm(); perm&0o044 == 0 {
+		t.Errorf("index.bin mode = %o, want group/other-readable (0644); CreateTemp 0600 leaked", perm)
+	}
+
 	// Read the produced file and load it through the library API to
 	// confirm it's a valid serialized index.
 	data, err := os.ReadFile(outPath)
