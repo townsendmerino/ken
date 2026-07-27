@@ -120,13 +120,19 @@ func tryLoadSnapshot(dir string, mode search.Mode, modeStr, chunker, modelDir st
 	// boot is a clean load). Best-effort.
 	logger.Logf(kenmcp.LogInfo, "reconciled snapshot for %s: %d changed/added, %d deleted (of %d snapshot files) — skipped full rebuild, watching",
 		dir, len(changed), len(deleted), len(stored.Files))
-	// Skip when lazy/staged (audit N3): the reconciled index is still pre-warm
-	// (staged publishes vector-less BM25 with realMode held back), so persisting
-	// now would write a BM25 .bin stamped with the served (BM25) mode — a next
-	// boot rejects it on mode mismatch and full-rebuilds forever. The warm
-	// pass's own notifyFlush → writeSnapshot persists the full-quality snapshot
-	// once vectors are ready. Matches the cold-build gate in main.go.
-	if !fsOpts.LazyEnrichment && !fsOpts.StagedEmbedding {
+	// Skip only while the index is genuinely still warming (audit N3/R5-3): a
+	// staged pre-warm index publishes vector-less BM25 with realMode held back,
+	// so persisting then writes a BM25 .bin stamped with the served (BM25) mode
+	// and the next boot rejects it on mode mismatch. But this reconcile path
+	// arrives with vecs ALREADY full from LoadSerializedCorpus, so R4-1's
+	// corpus-derived predicate makes staged==false → NO warm pass runs → its
+	// notifyFlush → writeSnapshot never fires. Keying off the raw StagedEmbedding
+	// option here (the pre-R4-1 shape) therefore skipped the write while nothing
+	// else persisted, so a reconciled staged boot never re-persisted and drift
+	// grew monotonically until it forced the full rebuild M1 exists to avoid.
+	// Gate on the index's actual state instead: Warming() is false on a snapshot
+	// seed, true only on a real staged cold build.
+	if !fsOpts.LazyEnrichment && !wi.Warming() {
 		writeSnapshot(dir, wi, mode, chunker, modelDir, fsOpts, logger)
 	}
 	return wi
