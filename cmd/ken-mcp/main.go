@@ -692,18 +692,26 @@ func main() {
 	}
 
 	cfg := kenmcp.Config{
-		Cache:       cache,
-		DefaultRepo: defaultRepo,
-		Mode:        sm.mode,
-		Chunker:     chunker,
-		// v0.8.0 Part 3 addendum: *mcpdb.Refresher satisfies
-		// mcp.DBIntegration. nil refresher → reindex_db tool NOT
-		// registered (tools/list stays honest for FS-only deployments).
-		// The chunk-integration callback was already wired inside
-		// wireDBTier2's Start call against the WatchedIndex.
-		DB:                  refresher,
+		Cache:               cache,
+		DefaultRepo:         defaultRepo,
+		Mode:                sm.mode,
+		Chunker:             chunker,
 		TelemetryLog:        telemetryLog,
 		TelemetryInResponse: telemetryInResponse,
+		// Warn-level sink for the full (unsanitized) reindex_db error (audit
+		// R5-2). Goes to stderr — never stdout (JSON-RPC channel).
+		Logf: func(format string, args ...any) { logger.Logf(kenmcp.LogWarn, format, args...) },
+	}
+	// v0.8.0 Part 3 addendum: *mcpdb.Refresher satisfies mcp.DBIntegration, and
+	// nil refresher → reindex_db tool NOT registered (tools/list stays honest for
+	// FS-only deployments). Assign only when non-nil (audit R5-2): wireDBTier2
+	// returns a CONCRETE-nil *mcpdb.Refresher at five sites (no DSN, validation/
+	// setup failure, …), and a concrete-nil in an interface field is a NON-nil
+	// interface — so `cfg.DB != nil` would be true with no KEN_DB_DSN at all,
+	// registering reindex_db on every FS-only server and defeating handleReindexDB's
+	// `cfg.DB == nil` honest fast path. Mirrors the usageRecorder / dbCleanup guards.
+	if refresher != nil {
+		cfg.DB = refresher
 	}
 	// Assign only when non-nil (audit R13): a nil *usage.Recorder stored into
 	// the interface field would make cfg.UsageRecorder non-nil, so the

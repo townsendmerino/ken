@@ -137,6 +137,16 @@ type Config struct {
 	// See internal/usage for the privacy contract — only counts and
 	// timestamps are persisted, never query text or file paths.
 	UsageRecorder UsageRecorder
+
+	// Logf, when non-nil, is a warn-level server log sink (stderr in
+	// cmd/ken-mcp). Used to log the FULL database error before it is
+	// credential-sanitized for the agent (audit R5-2): the reindex_db
+	// reply promises "check the ken-mcp server logs for details", and
+	// the nil-receiver / not-started sentinels never pass through
+	// doRefresh's logging — so without this they'd be logged nowhere.
+	// nil discards (SDK authors who don't wire a logger). Never write
+	// to stdout from here — that corrupts the JSON-RPC channel.
+	Logf func(format string, args ...any)
 }
 
 // UsageRecorder is the minimal seam mcp/server.go uses to log a
@@ -392,6 +402,13 @@ func handleReindexDB(ctx context.Context, cfg *Config) (*sdk.CallToolResult, any
 	case res.InProgress:
 		return textResult("Reindex already in progress; nothing to do."), nil, nil
 	case res.Err != nil:
+		// Log the full error before sanitizing (audit R5-2): the sanitized
+		// reply tells the agent to check the server logs, and the mcp/db
+		// nil-receiver / not-started sentinels don't flow through doRefresh's
+		// logging, so this is their only log site.
+		if cfg.Logf != nil {
+			cfg.Logf("reindex_db failed: %v", res.Err)
+		}
 		return textResult("Reindex failed: " + safeDBErrorMessage(res.Err)), nil, nil
 	default:
 		return textResult(fmt.Sprintf("Reindexed in %dms.", res.Elapsed.Milliseconds())), nil, nil
