@@ -7,7 +7,7 @@ require (
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/modelcontextprotocol/go-sdk v1.6.1
+	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/odvcencio/gotreesitter v0.47.0
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/townsendmerino/aikit v1.13.0
@@ -16,7 +16,10 @@ require (
 	modernc.org/sqlite v1.54.0
 )
 
-require github.com/jackc/puddle/v2 v2.2.2 // indirect
+require (
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
+	golang.org/x/time v0.15.0 // indirect
+)
 
 require (
 	dario.cat/mergo v1.0.0 // indirect
