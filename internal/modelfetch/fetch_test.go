@@ -3,6 +3,8 @@ package modelfetch
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -282,6 +284,111 @@ func TestFetch_ContextCancelAborts(t *testing.T) {
 	entries, _ := os.ReadDir(dest)
 	for _, e := range entries {
 		t.Errorf("unexpected file in dest after cancelled Fetch: %s", e.Name())
+	}
+}
+
+// fakeHFXet mimics HuggingFace's post-Xet-migration flow (issue #66):
+// resolve/main 302-redirects to a CAS endpoint, advertising the true content
+// sha256 + size on the 302 as X-Linked-Etag / X-Linked-Size, while the FINAL
+// (CAS) response's ETag is a DIFFERENT 64-hex value — the Xet block hash. A
+// verifier that trusts the final ETag rejects a perfectly good download; the
+// fix reads X-Linked-Etag instead.
+func fakeHFXet(t *testing.T, files map[string][]byte) *httptest.Server {
+	t.Helper()
+	const xetBlockHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if name := strings.TrimPrefix(r.URL.Path, "/xet-cas/"); name != r.URL.Path {
+			body, ok := files[name]
+			if !ok {
+				http.Error(w, "no such object", http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Length", lenHeader(len(body)))
+			// The Xet CDN's ETag is the block hash, not the file sha256.
+			w.Header().Set("ETag", `"`+xetBlockHash+`"`)
+			_, _ = w.Write(body)
+			return
+		}
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		if len(parts) < 5 || parts[2] != "resolve" || parts[3] != "main" {
+			http.Error(w, "bad path", http.StatusNotFound)
+			return
+		}
+		body, ok := files[parts[4]]
+		if !ok {
+			http.Error(w, "no such file", http.StatusNotFound)
+			return
+		}
+		sum := sha256.Sum256(body)
+		w.Header().Set("X-Linked-Etag", `"`+hex.EncodeToString(sum[:])+`"`)
+		w.Header().Set("X-Linked-Size", lenHeader(len(body)))
+		http.Redirect(w, r, srv.URL+"/xet-cas/"+parts[4], http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestFetch_XetRedirect_VerifiesAgainstLinkedEtag is the issue #66 regression:
+// a Xet-backed download whose bytes are correct must SUCCEED even though the
+// final CDN ETag is the (unrelated) Xet block hash. Pre-fix this failed with a
+// "checksum mismatch" because the verifier compared the real sha256 against
+// that block hash.
+func TestFetch_XetRedirect_VerifiesAgainstLinkedEtag(t *testing.T) {
+	srv := fakeHFXet(t, map[string][]byte{
+		"model.safetensors": bytes.Repeat([]byte{0xab}, 1<<20),
+		"tokenizer.json":    bytes.Repeat([]byte("x"), 8<<10),
+		"config.json":       bytes.Repeat([]byte("y"), 1024),
+	})
+	dest := t.TempDir()
+
+	got, err := Fetch(context.Background(), Options{
+		Model: "minishlab/potion-code-16M", Dest: dest, BaseURL: srv.URL, Progress: nopWriter{},
+	})
+	if err != nil {
+		t.Fatalf("Fetch over Xet redirect: %v", err)
+	}
+	if got != 3 {
+		t.Errorf("downloaded count: got %d, want 3", got)
+	}
+	for _, name := range modelFiles {
+		if info, err := os.Stat(filepath.Join(dest, name)); err != nil || info.Size() == 0 {
+			t.Errorf("%s missing/empty after Xet fetch (err=%v)", name, err)
+		}
+	}
+}
+
+// TestFetch_XetRedirect_RejectsCorruptBody proves the integrity gate still
+// bites against the AUTHORITATIVE hash: when the CAS body's sha256 doesn't match
+// the X-Linked-Etag the 302 advertised, the download is rejected and no file is
+// left behind. (Guards against the fix degenerating into "skip the check".)
+func TestFetch_XetRedirect_RejectsCorruptBody(t *testing.T) {
+	real := bytes.Repeat([]byte{0xab}, 1<<20)
+	corrupt := bytes.Repeat([]byte{0xcd}, 1<<20) // same length, different bytes
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/xet-cas/") {
+			w.Header().Set("Content-Length", lenHeader(len(corrupt)))
+			w.Header().Set("ETag", `"`+strings.Repeat("f", 64)+`"`)
+			_, _ = w.Write(corrupt) // body does NOT match the advertised X-Linked-Etag
+			return
+		}
+		sum := sha256.Sum256(real) // 302 advertises the sha256 of the REAL bytes
+		w.Header().Set("X-Linked-Etag", `"`+hex.EncodeToString(sum[:])+`"`)
+		w.Header().Set("X-Linked-Size", lenHeader(len(real)))
+		http.Redirect(w, r, srv.URL+"/xet-cas/model.safetensors", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	dest := t.TempDir()
+	_, err := Fetch(context.Background(), Options{
+		Model: "x/y", Dest: dest, BaseURL: srv.URL, Progress: nopWriter{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected checksum mismatch against X-Linked-Etag, got %v", err)
+	}
+	if entries, _ := os.ReadDir(dest); len(entries) != 0 {
+		t.Errorf("corrupt Xet download left %d file(s) behind; want 0", len(entries))
 	}
 }
 

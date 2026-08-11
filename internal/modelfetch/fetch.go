@@ -12,12 +12,17 @@
 //
 // Download integrity (code review #1): `resolve/main` is a mutable ref with
 // no pinning, so each file is verified as it streams — the byte count against
-// Content-Length / X-Linked-Size, and the SHA-256 against HuggingFace's ETag
-// when it carries the git-lfs object id (the large safetensors file always
-// does). A truncated, empty, or swapped-mid-stream file is rejected before it
-// lands, which matters especially for the rerank checkpoint
-// (DefaultRerankModel), whose cosines have no downstream parity test to catch
-// a silently-corrupt model later.
+// Content-Length / X-Linked-Size, and the SHA-256 against the git-lfs object
+// id (the large safetensors file always carries one). A truncated, empty, or
+// swapped-mid-stream file is rejected before it lands, which matters especially
+// for the rerank checkpoint (DefaultRerankModel), whose cosines have no
+// downstream parity test to catch a silently-corrupt model later.
+//
+// The content hash + size are read from the X-Linked-Etag / X-Linked-Size
+// headers on HF's 302 redirect, NOT the final response's ETag: HF's Xet CDN
+// migration (issue #66) sets the final ETag to the Xet block hash, which is
+// also 64-hex sha-shaped but is not the file's sha256. See fetchOne's
+// CheckRedirect capture.
 //
 // The default model + destination match what ken's bench harnesses
 // already expect, so a fresh user running `ken download-model` followed
@@ -186,7 +191,37 @@ func fetchOne(ctx context.Context, opts Options, filename, target string) error 
 	// reach out about traffic patterns.
 	req.Header.Set("User-Agent", "ken-modelfetch (https://github.com/townsendmerino/ken)")
 
-	resp, err := opts.Client.Do(req)
+	// Capture the git-LFS content hash + size across the redirect chain (HF Xet
+	// migration, issue #66). `resolve/main` 302-redirects to a Xet CAS URL whose
+	// FINAL 200 ETag is the Xet block hash — NOT the file's sha256 — so verifying
+	// the download against resp.Header["ETag"] falsely fails for every Xet-backed
+	// model. The authoritative content sha256 and size ride on the 302 as
+	// X-Linked-Etag / X-Linked-Size, which Go drops from the final resp.Header;
+	// CheckRedirect is the one place we can still read the intermediate response
+	// (req.Response is the redirecting response). Copy the client so we don't
+	// mutate the caller's shared one.
+	var linkedETag, linkedSize string
+	client := *opts.Client
+	userCheck := client.CheckRedirect
+	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if r.Response != nil {
+			if v := r.Response.Header.Get("X-Linked-Etag"); v != "" {
+				linkedETag = v
+			}
+			if v := r.Response.Header.Get("X-Linked-Size"); v != "" {
+				linkedSize = v
+			}
+		}
+		if userCheck != nil {
+			return userCheck(r, via)
+		}
+		if len(via) >= 10 { // mirror net/http's default redirect cap
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("%s: GET %s: %w", filename, url, err)
 	}
@@ -261,22 +296,35 @@ func fetchOne(ctx context.Context, opts Options, filename, target string) error 
 		_ = os.Remove(tmp)
 		return fmt.Errorf("%s: truncated download: wrote %d bytes, Content-Length was %d (transient; retry)", filename, written, resp.ContentLength)
 	}
-	if xls := resp.Header.Get("X-Linked-Size"); xls != "" {
+	// Prefer the redirect-captured X-Linked-Size (the authoritative LFS object
+	// size); fall back to the final response header for non-redirecting mocks.
+	xls := linkedSize
+	if xls == "" {
+		xls = resp.Header.Get("X-Linked-Size")
+	}
+	if xls != "" {
 		if want, perr := strconv.ParseInt(xls, 10, 64); perr == nil && want > 0 && written != want {
 			_ = os.Remove(tmp)
 			return fmt.Errorf("%s: size mismatch: wrote %d bytes, X-Linked-Size was %d (transient; retry)", filename, written, want)
 		}
 	}
 
-	// Content-hash verification when HF's ETag carries the git-lfs SHA-256
-	// object id (the safetensors file always does; small non-LFS files serve
-	// a 40-hex git-blob sha1 which etagSHA256 ignores, falling back to the
-	// size checks above).
-	if want := etagSHA256(resp.Header.Get("ETag")); want != "" {
+	// Content-hash verification against the git-lfs SHA-256 object id. Prefer the
+	// redirect-captured X-Linked-Etag (issue #66): HF's Xet CDN sets the FINAL
+	// response ETag to the Xet block hash, which is also 64-hex and would be
+	// wrongly accepted here — X-Linked-Etag is the true content sha256. Fall back
+	// to the final ETag only when no X-Linked-Etag was seen (older non-Xet files,
+	// where the final ETag IS the content sha256). A 40-hex git-blob sha1 on a
+	// small non-LFS file is ignored by etagSHA256, leaving the size checks above.
+	etagHdr := linkedETag
+	if etagHdr == "" {
+		etagHdr = resp.Header.Get("ETag")
+	}
+	if want := etagSHA256(etagHdr); want != "" {
 		got := hex.EncodeToString(hash.Sum(nil))
 		if !strings.EqualFold(got, want) {
 			_ = os.Remove(tmp)
-			return fmt.Errorf("%s: checksum mismatch (got %s, want %s) — corrupt or swapped download; retry or --force", filename, got, want)
+			return fmt.Errorf("%s: checksum mismatch (got %s, want %s) — the download does not match HuggingFace's published content hash. Retry; if it persists the upstream file may have changed (please report at https://github.com/townsendmerino/ken/issues)", filename, got, want)
 		}
 	}
 
