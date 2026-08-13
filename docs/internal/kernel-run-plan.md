@@ -18,7 +18,7 @@ Two harnesses, pick per intent:
 ## 0. One-time prerequisites
 
 ```bash
-# 1. Go toolchain matching go.mod (go 1.26.5 / its toolchain directive). Verify:
+# 1. Go toolchain matching go.mod (go 1.26.6 / its toolchain directive). Verify:
 go version
 
 # 2. Build ken with the RELEASE flags PERF.md requires (race OFF, inlining ON,
