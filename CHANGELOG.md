@@ -13,6 +13,95 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [1.3.3] — 2026-08-13 — Go security toolchain + aikit currency
+
+A security fast-follow to 1.3.2. No feature or behavior changes; the point is
+to rebuild the distributed binaries against the patched Go toolchain.
+
+### Security
+
+- **Bumped the Go toolchain 1.26.5 → 1.26.6.** go1.26.6 (2026-08-13) is a Go
+  security release with fixes across the `go` command plus `crypto/tls`,
+  `net/http`, `net/url`, `encoding/asn1`, `encoding/xml`, and `html/template`.
+  Several land on paths ken exercises — `crypto/tls` via the MySQL TLS +
+  model-fetch/clone HTTPS paths, `net/http` via ken-mcp — the same reachability
+  class as the 1.1.1 / 1.2.1 CVE fixes. 1.3.2's binaries shipped on go1.26.5, so
+  upgrade to 1.3.3 for the patched stdlib. The `go` directive in `go.mod` is the
+  single toolchain source of truth (CI reads `go-version-file: go.mod`); no
+  source changes, `govulncheck` gate clean.
+
+### Changed
+
+- **aikit v1.16.0 → v1.17.1** (latest) — aikit's linalg backend/kernel work.
+  Verified cosine-parity-preserving (≥ 1−1e-5 vs the Python reference) and
+  build-deterministic; retrieval results unchanged.
+
+## [1.3.2] — 2026-08-11 — model-download fix (HF Xet) + dependency bumps
+
+A patch release. The headline fixes `ken download-model`, which HuggingFace's
+Xet storage migration had broken for every user setting up hybrid/semantic mode.
+
+### Fixed
+
+- **`ken download-model` no longer fails with a spurious "checksum mismatch"
+  ([#66](https://github.com/townsendmerino/ken/issues/66)).** After HuggingFace
+  migrated models to its Xet storage backend, the final CDN response's `ETag`
+  became the Xet *block hash* — also 64-hex, but not the file's SHA-256 — so ken
+  rejected perfectly good downloads (and `--force` couldn't help). ken now reads
+  the authoritative content hash from the `X-Linked-Etag` header carried on the
+  redirect. The integrity gate is otherwise unchanged — a genuinely corrupt or
+  truncated download is still rejected. Ships with a regression test that
+  reproduces the exact Xet redirect flow. Thanks to **@matclab** for the report.
+
+### Changed
+
+- **aikit v1.11.0 → v1.16.0** — aikit's memory / cold-start campaign (HNSW
+  persistence, streaming index writes, lower embed/encoder peak memory).
+  Cosine-parity + build-determinism verified; retrieval unchanged.
+- **`github.com/modelcontextprotocol/go-sdk` v1.6.1 → v1.7.0** — the MCP SDK
+  (the ken-mcp stdout/JSON-RPC contract is re-verified green).
+- **`modernc.org/sqlite` v1.54.0 → v1.55.0** — the pure-Go SQLite driver used by
+  Tier-2 database indexing.
+
+## [1.3.1] — 2026-07-27 — cold-start hardening (5-round audit)
+
+Hardens the 1.3.0 cold-start campaign through five independent re-audit rounds,
+each auditing the previous round's fixes. No new features, no breaking changes;
+44 commits, all fix/perf/test, green across the full CI matrix on every round.
+
+### Fixed
+
+- **Staged-boot panic.** A `KEN_MCP_STAGED` server loading a snapshot on its
+  second start could crash on a vecs/chunks misalignment; staging is now derived
+  from the corpus and degrades to BM25 rather than panicking.
+- **Stale prebuilt index served a synthetic label as source.** A pre-enrichment
+  `.ken/index.bin` could surface a fabricated `# func:` first line to the agent;
+  the on-disk format version is bumped so such prebuilts are rejected + rebuilt.
+- **Semantic ranking with a database configured.** In the staged-warmup window
+  with `KEN_DB_DSN` set, `find_related` / semantic search could rank filesystem
+  chunks by *database* vectors; now detected and downgraded to BM25.
+- **Snapshots re-persist on a reconciled staged boot** (previously drift grew
+  every restart until it forced the full rebuild snapshots exist to avoid).
+- **Crash-durable writes.** Snapshot, prebuilt-index, rerank-cache, and
+  model-download writes fsync the file before rename and the parent dir after.
+- **Watch path.** Debounce busy-spin under slow flushes; a stray delete of an
+  unindexed file no longer triggers a full rebuild + snapshot rewrite; a
+  directory renamed during an in-flight flush no longer orphans its chunks;
+  recovery from a dropped-event (inotify overflow) storm reconciles deletions
+  against the authoritative in-memory corpus.
+- **MCP.** Structural-index background builds are cancelled when their repo is
+  evicted from the cache; `reindex_db` is registered only when a database is
+  configured and logs the full error the sanitized message points to;
+  outline/symbols responses signal truncation.
+- **CLI.** `ken build-index` output is world-readable again (0644), so a
+  prebuilt `.ken/index.bin` baked into a container image loads under a non-root
+  uid instead of silently falling back to a full cold build.
+
+### Changed
+
+- Index serialization holds ~2× less peak memory on large corpora; token hashing
+  on the watch path is zero-allocation.
+
 ## [1.3.0] — 2026-07-25 — cold-start campaign (snapshots + serve-before-warm)
 
 Addresses the cold-start UX raised in [#61](https://github.com/townsendmerino/ken/issues/61)
