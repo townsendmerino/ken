@@ -16,10 +16,10 @@ help: ## list targets
 	@grep -hE '^[a-z][a-zA-Z0-9_-]*:.*##' $(MAKEFILE_LIST) \
 	  | sort | awk -F':.*## ' '{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-build: ## build all packages + the ken / ken-mcp binaries
+build: ## build all packages + the ken / ken-mcp binaries into bin/
 	go build ./...
-	go build -o ken ./cmd/ken
-	go build -o ken-mcp ./cmd/ken-mcp
+	go build -o bin/ken ./cmd/ken
+	go build -o bin/ken-mcp ./cmd/ken-mcp
 
 test: ## run the full test suite
 	go test ./...

@@ -2,7 +2,7 @@
 
 **Current-state map of the system.** This doc answers "what is ken *now* and where does each concern live." For *why* it's built this way, see [docs/DESIGN.md](docs/DESIGN.md) (algorithm spec, precision contracts, written stage-by-stage during the port) and [docs/internal/DECISIONS.md](docs/internal/DECISIONS.md) (ADRs). When this doc and DESIGN.md §1 disagree about layout, this doc wins — DESIGN.md predates the aikit extraction (ADR-034).
 
-Last verified against the code: 2026-06-11 (v1.1.0).
+Last verified against the code: 2026-08-13 (v1.3.3).
 
 ## Bird's eye
 
@@ -80,6 +80,8 @@ Long-lived goroutines and who owns them: the SDK stdio loop (process lifetime); 
 
 The startup model-resolution ladder (env validation in [`cmd/ken-mcp/env.go`](cmd/ken-mcp/env.go)): explicit dir → `~/.ken/model` → auto-fetch in background, serving bm25 meanwhile. Search reads `ix.Mode()` per query, so the bm25→hybrid upgrade is invisible to clients.
 
+**Cold start (ADR-039, the v1.3 campaign — [`cmd/ken-mcp/snapshot.go`](cmd/ken-mcp/snapshot.go)).** ken-mcp no longer rebuilds from scratch every launch. It persists the built index to `<repo>/.ken/snapshot.{bin,manifest}` and, on restart, loads + drift-scans (config-key ⊕ per-file mtime/size) instead of rebuilding when the repo is unchanged, reconciling only changed files otherwise (`KEN_MCP_SNAPSHOT`, default on; distinct from the ADR-024 operator prebuilt `.ken/index.bin`, which still wins). Three opt-in serve-before-warm modes move first-query latency off a true-cold build: `KEN_MCP_STAGED` (serve BM25 instantly, embed in the background, upgrade to hybrid — responses carry `"semantic":"warming"`), `KEN_MCP_LAZY_ENRICH` (defer the Arm B tree-sitter parse), and `KEN_MCP_EMBED_CACHE` (persistent `sha256(chunk)→vector` cache so a rebuild re-embeds only new text). A per-file parse budget guards pathological files ([`cmd/ken-mcp/enrich_budget.go`](cmd/ken-mcp/enrich_budget.go)); the long-lived server also applies GC hygiene — `GOGC`/`GOMEMLIMIT` tuning + `FreeOSMemory` after builds/flushes ([`cmd/ken-mcp/gc.go`](cmd/ken-mcp/gc.go)), all binary-layer only so `internal/search` and aikit stay allocation-policy-free.
+
 ## Data flow
 
 **Index build** ([`internal/search/index.go`](internal/search/index.go)):
@@ -126,9 +128,10 @@ Every constant and the pipeline order are pinned to semble's Python — see DESI
 | Retrieval pipeline + rerank | [`internal/search/`](internal/search/) (`hybrid.go`, `rerank.go`, `penalties.go`, `adaptive.go`) |
 | Index build, serialization, extras | [`internal/search/index.go`](internal/search/index.go), [`index_serialize.go`](internal/search/index_serialize.go) |
 | Watch mode | [`internal/search/watch.go`](internal/search/watch.go) (ADR-012) |
+| Cold start: snapshots, serve-before-warm, parse budget, GC | [`cmd/ken-mcp/`](cmd/ken-mcp/) (`snapshot.go`, `enrich_budget.go`, `gc.go`) (ADR-039); env: `KEN_MCP_SNAPSHOT` / `KEN_MCP_STAGED` / `KEN_MCP_LAZY_ENRICH` / `KEN_MCP_EMBED_CACHE` |
 | Walker / gitignore | [`internal/repo/`](internal/repo/) |
 | Structural extraction + enrichment + structural MCP tools | [`internal/structural/`](internal/structural/), [`mcp/structural_tools.go`](mcp/structural_tools.go) |
-| DB indexing (static SQL / live introspection) | [`internal/sql/`](internal/sql/), [`internal/db/`](internal/db/), [`mcp/db/`](mcp/db/), [docs/db-indexing.md](docs/db-indexing.md) |
+| DB indexing (static SQL / live introspection; Postgres · MySQL · MariaDB · SQLite) | [`internal/sql/`](internal/sql/), [`internal/db/`](internal/db/), [`mcp/db/`](mcp/db/), [docs/db-indexing.md](docs/db-indexing.md) |
 | MCP server, cache, clone, SSRF guard | [`mcp/`](mcp/) (`server.go`, `cache.go`, `clone.go`, `run.go`) |
 | Binary wiring, env validation, auto-fetch | [`cmd/ken-mcp/`](cmd/ken-mcp/) (`main.go`, `env.go`) |
 | Benchmarks | [`bench/ndcg/`](bench/ndcg/), [`bench/tokens/`](bench/tokens/), [docs/BENCH.md](docs/BENCH.md) |

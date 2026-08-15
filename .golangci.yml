@@ -1,7 +1,9 @@
 # golangci-lint config for ken.
 #
 # Conservative posture: enable the linters that catch real bugs
-# (errcheck, staticcheck, unused, gosimple, ineffassign, govet),
+# (errcheck, staticcheck, unused, ineffassign, govet — golangci-lint v2
+# folded the old gosimple checks into staticcheck, so there's no separate
+# gosimple entry to enable),
 # disable cosmetic-only quickfix rules (QF1001 / QF1003 — De Morgan's
 # law and tagged-switch suggestions; valid stylistic preferences but
 # not bugs), and exclude common errcheck false-positive patterns
