@@ -18,7 +18,7 @@ rates across major shipping Swift codebases — broken on the vast
 majority of real Swift.
 
 This is different from the v0.20.0-rc3 C# OOM (separate memo in
-[csharp-oom-root-cause.md](csharp-oom-root-cause.md)) — Swift parses
+[csharp-oom-root-cause.md](archive/csharp-oom-root-cause.md)) — Swift parses
 finish promptly, they just produce garbage trees. The downstream
 effect is the same: a structural extractor built on
 `gotreesitter.DetectLanguageByName("swift")` returns zero useful
@@ -104,7 +104,7 @@ keywords. Likely candidates upstream:
   scanner — pure-Go ports of tree-sitter grammars have historically
   had lexer-state-machine issues that don't reproduce against the
   C reference (the gotreesitter C# OOM in
-  [csharp-oom-root-cause.md](csharp-oom-root-cause.md) is the
+  [csharp-oom-root-cause.md](archive/csharp-oom-root-cause.md) is the
   parallel case in this same release).
 - The `comment` token rule, if it's regex-shaped (`//.*$`), depends
   on `$` matching end-of-line — if the lexer's newline handling drifts

@@ -6,7 +6,11 @@
 # e.g. `GOWORK=off make check`. See DEVELOPERS.md → "Local aikit development".
 
 BINARIES := ken ken-mcp
-GOFMT_DIRS := cmd internal mcp bench
+# The single source of truth for gofmt scope — every top-level Go directory in
+# ken/ (chunk moved to the aikit module per ADR-034). CI enforces this exact
+# list via `make gofmt-check`, and CLAUDE.md / CONTRIBUTING.md point here rather
+# than repeat it, so the four locations can't drift.
+GOFMT_DIRS := cmd internal mcp bench demos
 
 .DEFAULT_GOAL := help
 
@@ -30,9 +34,11 @@ vet: ## go vet ./...
 fmt: ## format the tree in place (gofmt -w)
 	gofmt -w $(GOFMT_DIRS)
 
-check: ## pre-push gate: gofmt-clean + vet + tests (run as `GOWORK=off make check` to mirror CI)
+gofmt-check: ## fail if any Go file under GOFMT_DIRS is unformatted (the CI gate)
 	@out=$$(gofmt -l $(GOFMT_DIRS)); \
 	  if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+
+check: gofmt-check ## pre-push gate: gofmt-clean + vet + tests (run as `GOWORK=off make check` to mirror CI)
 	go vet ./...
 	go test ./...
 

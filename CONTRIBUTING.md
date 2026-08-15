@@ -23,12 +23,12 @@ reach tens of GB), and `make clean-all`. `make help` lists them.
 
 ## The bar for a change
 
-CI runs `golangci-lint` + `go vet` + `gofmt -l cmd internal mcp bench`
-(must print nothing) + the full test suite. Run all of it locally before
-opening a PR:
+CI runs `golangci-lint` + `go vet` + `make gofmt-check` (gofmt scope =
+Makefile `GOFMT_DIRS`; must print nothing) + the full test suite. Run all of
+it locally before opening a PR:
 
 ```bash
-go test ./... && go vet ./... && gofmt -l cmd internal mcp bench && golangci-lint run ./...
+go test ./... && go vet ./... && make gofmt-check && golangci-lint run ./...
 ```
 
 Two project-specific disciplines worth knowing up front:

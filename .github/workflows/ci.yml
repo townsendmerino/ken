@@ -33,16 +33,10 @@ jobs:
       - run: go version
 
       - name: gofmt -l (must print nothing)
-        run: |
-          # `chunk` moved into the aikit module per ADR-034, so it
-          # is no longer a directory in this repo. The list below is
-          # every top-level Go directory that lives in `ken/`.
-          out=$(gofmt -l bench cmd demos internal mcp)
-          if [ -n "$out" ]; then
-            echo "gofmt found unformatted files:"
-            echo "$out"
-            exit 1
-          fi
+        # Single source of truth for gofmt scope: Makefile GOFMT_DIRS. Running
+        # it through `make gofmt-check` keeps CI and the local gate on one list
+        # (chunk lives in the aikit module per ADR-034, so it isn't here).
+        run: make gofmt-check
 
       - name: go vet ./...
         run: go vet ./...

@@ -5,7 +5,7 @@
 > the OOM this plan predicted as a blocker). **Swift** is the one parked — not
 > the "clean add" predicted here, but a license-header lexer misparse (see
 > [swift-parse-root-cause.md](swift-parse-root-cause.md) /
-> [csharp-oom-root-cause.md](csharp-oom-root-cause.md)). Read the per-language
+> [csharp-oom-root-cause.md](archive/csharp-oom-root-cause.md)). Read the per-language
 > "Where each language starts today" calls below as a 2026-06-03 forecast, not
 > current status.
 
