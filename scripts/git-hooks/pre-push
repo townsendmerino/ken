@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# ken pre-push hook — runs the CI-equivalent gate before every push so a
+# gofmt / golangci-lint / vet / test failure is caught locally instead of on
+# CI (or, now that direct push is enabled, instead of landing on main).
+#
+# This is the SAME command CONTRIBUTING.md documents and that `make check`
+# runs; keeping the hook a thin wrapper around `make check` means the gate has
+# exactly one definition. Install with `make hooks` (sets core.hooksPath).
+#
+# Bypass a single push with `git push --no-verify` (e.g. pushing a WIP branch).
+set -euo pipefail
+
+echo "pre-push: running 'GOWORK=off make check' (gofmt + golangci-lint + vet + tests)…"
+echo "          bypass with 'git push --no-verify'."
+
+# GOWORK=off mirrors CI (the proxy-pinned dependency graph), matching the
+# note at the top of the Makefile.
+if ! GOWORK=off make check; then
+	echo "pre-push: gate FAILED — push aborted. Fix the above, or bypass with --no-verify." >&2
+	exit 1
+fi
+
+echo "pre-push: gate passed."

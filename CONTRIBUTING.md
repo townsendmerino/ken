@@ -17,18 +17,24 @@ go test ./...      # all tests (model-gated tests skip cleanly without a model)
 ```
 
 A [`Makefile`](Makefile) wraps the common tasks — `make build` / `test` /
-`vet` / `fmt` / `check` (the pre-push gate), plus `make clean` (build
+`vet` / `fmt` / `lint` / `check` (the pre-push gate), plus `make clean` (build
 products), `make clean-bench` (the heavy `bench_out/` scratch, which can
 reach tens of GB), and `make clean-all`. `make help` lists them.
+
+Run **`make hooks`** once after cloning to install the git hooks: a
+`pre-push` hook then runs the full gate (`GOWORK=off make check`) before every
+push, so a lint / format / test failure is caught locally instead of on CI.
+Bypass a single push with `git push --no-verify`.
 
 ## The bar for a change
 
 CI runs `golangci-lint` + `go vet` + `make gofmt-check` (gofmt scope =
-Makefile `GOFMT_DIRS`; must print nothing) + the full test suite. Run all of
-it locally before opening a PR:
+Makefile `GOFMT_DIRS`; must print nothing) + the full test suite. All of it is
+bundled into one target that mirrors CI — run it locally before opening a PR
+(and the `pre-push` hook runs it for you):
 
 ```bash
-go test ./... && go vet ./... && make gofmt-check && golangci-lint run ./...
+GOWORK=off make check   # gofmt-check + golangci-lint + go vet + go test
 ```
 
 Two project-specific disciplines worth knowing up front:
