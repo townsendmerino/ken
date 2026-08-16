@@ -419,8 +419,16 @@ func handleReindexDB(ctx context.Context, cfg *Config) (*sdk.CallToolResult, any
 
 // resolveRepo picks the index source: explicit args.Repo wins, else the
 // server's DefaultRepo, else a user-facing validation error.
+//
+// An agent-supplied argRepo is subject to KEN_MCP_ALLOWED_REPO_ROOTS
+// confinement (opt-in; see confine.go) so a long-lived server can scope which
+// local paths an untrusted agent may point ken at. The operator-configured
+// DefaultRepo is exempt — the operator already vouched for it.
 func resolveRepo(cfg *Config, argRepo string) (string, error) {
 	if argRepo != "" {
+		if err := confineLocalRepo(argRepo); err != nil {
+			return "", err
+		}
 		return argRepo, nil
 	}
 	if cfg.DefaultRepo != "" {
