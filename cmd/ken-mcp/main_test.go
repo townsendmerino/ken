@@ -15,8 +15,6 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
-
-	kenmcp "github.com/townsendmerino/ken/mcp"
 )
 
 // kenMCPBin is the ken-mcp test-binary filename. On Windows an executable
@@ -116,21 +114,6 @@ func sqliteOpenForTest(path string) (*sql.DB, error) {
 	return sql.Open("sqlite", path)
 }
 
-// newCapturedLogger returns a kenmcp.Logger that writes to a buffer
-// (level=LogDebug so every call is captured). Used by envInt/envEnum
-// tests to assert that bad input produces the documented warn message.
-func newCapturedLogger() (*kenmcp.Logger, *bytes.Buffer) {
-	buf := &bytes.Buffer{}
-	return kenmcp.NewLogger(buf, kenmcp.LogDebug), buf
-}
-
-// TestBinary_StdoutIsCleanJSONRPC is the load-bearing test for the
-// stdout/stderr contract documented in main.go. It builds the actual
-// ken-mcp binary, exec's it under the SDK's CommandTransport (which
-// pipes stdin/stdout), and drives a real protocol session. If anything
-// in main.go (or any imported library at startup) writes to stdout, the
-// protocol stream is corrupted and this test fails loudly — the same
-// failure agents would see.
 // TestRedactDSN pins the M1 fix — redactDSN must scrub credentials
 // from every DSN shape envDSN accepts, including the native
 // go-sql-driver/mysql form that has no `://` scheme. Pre-fix, the
@@ -181,6 +164,13 @@ func TestRedactDSN(t *testing.T) {
 	}
 }
 
+// TestBinary_StdoutIsCleanJSONRPC is the load-bearing test for the
+// stdout/stderr contract documented in main.go. It builds the actual
+// ken-mcp binary, exec's it under the SDK's CommandTransport (which
+// pipes stdin/stdout), and drives a real protocol session. If anything
+// in main.go (or any imported library at startup) writes to stdout, the
+// protocol stream is corrupted and this test fails loudly — the same
+// failure agents would see.
 func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping subprocess MCP test in -short mode")

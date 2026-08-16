@@ -1,16 +1,12 @@
 package main
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/townsendmerino/ken/internal/search"
-	kenmcp "github.com/townsendmerino/ken/mcp"
 )
-
-func testLogger() *kenmcp.Logger { return kenmcp.NewLogger(io.Discard, kenmcp.LogWarn) }
 
 func TestResolveStartupMode(t *testing.T) {
 	lg := testLogger()

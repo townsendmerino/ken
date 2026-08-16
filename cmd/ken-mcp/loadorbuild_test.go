@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/townsendmerino/ken/internal/search"
-	kenmcp "github.com/townsendmerino/ken/mcp"
 
 	_ "github.com/townsendmerino/aikit/chunk/regex"
 )
@@ -44,8 +43,6 @@ func bakePrebuilt(t *testing.T, dir, chunker string) {
 		t.Fatal(err)
 	}
 }
-
-func quietLogger() *kenmcp.Logger { return kenmcp.NewLogger(os.Stderr, kenmcp.LogError) }
 
 // No pre-built index → live build with the watcher (original behavior).
 func TestLoadOrBuild_NoPrebuilt_LiveBuilds(t *testing.T) {
