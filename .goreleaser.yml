@@ -3,9 +3,9 @@
 # arm64 + amd64, archives them with LICENSE / NOTICE / README / DESIGN.
 #
 # SLIM RELEASE BUILDS (ADR-033): both binaries are compiled with the
-# gotreesitter `grammar_subset` build tags below, which embed ONLY the 17
+# gotreesitter `grammar_subset` build tags below, which embed ONLY the 24
 # grammars ken's treesitter chunker actually dispatches (chunk/treesitter
-# kenToTreeSitter) instead of all 206. Saves ~14 MB per binary. This `tags`
+# Chunker.Grammars()) instead of all 206. Saves ~14 MB per binary. This `tags`
 # list is the SINGLE SOURCE OF TRUTH for the subset — `tools/subset-tags`
 # derives the slim local/CI build from it, and chunk/treesitter's drift-guard
 # test (TestSubsetTagsMatchKenToTreeSitter) asserts this exact set equals
@@ -51,6 +51,11 @@ builds:
       - grammar_subset_zig
       - grammar_subset_dart
       - grammar_subset_c_sharp
+      - grammar_subset_sql
+      - grammar_subset_html
+      - grammar_subset_css
+      - grammar_subset_scss
+      - grammar_subset_r
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}}
 

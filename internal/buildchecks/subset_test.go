@@ -14,11 +14,11 @@ import (
 
 // TestSubsetTagsMatchKenToTreeSitter is the ADR-033 drift guard. ken's
 // release binaries are built slim — only the grammars the treesitter
-// chunker actually dispatches (KenToTreeSitter, exported from aikit
-// post-extraction) are embedded, gated by grammar_subset_<lang> build
-// tags listed in .goreleaser.yml. If that tag set drifts from
-// KenToTreeSitter in EITHER direction, the slim binary silently
-// misbehaves:
+// chunker actually dispatches (aikit/chunk/treesitter's Chunker.Grammars();
+// the underlying language→grammar map was made unexported in the 2026-07-25
+// audit) are embedded, gated by grammar_subset_<grammar> build tags listed in
+// .goreleaser.yml. If that tag set drifts from the chunker's grammar set in
+// EITHER direction, the slim binary silently misbehaves:
 //
 //   - tag missing for a mapped language → DetectLanguageByName returns
 //     nil → poolFor returns nil → that language silently line-falls-back
@@ -47,17 +47,17 @@ func TestSubsetTagsMatchKenToTreeSitter(t *testing.T) {
 	}
 
 	mapBlobs := map[string]bool{}
-	for _, blob := range treesitter.KenToTreeSitter {
+	for _, blob := range (&treesitter.Chunker{}).Grammars() {
 		mapBlobs[blob] = true
 	}
 
 	missingTag := diff(mapBlobs, tagLangs) // mapped but no slim tag → silent fallback
 	extraTag := diff(tagLangs, mapBlobs)   // tagged but not mapped → wasted bytes
 	if len(missingTag) > 0 || len(extraTag) > 0 {
-		t.Errorf("grammar_subset tags drifted from KenToTreeSitter:\n"+
-			"  mapped languages with NO slim tag (would silently line-fall-back): %v\n"+
-			"  slim tags for UNMAPPED languages (wasted embed bytes):              %v\n"+
-			"Fix: keep .goreleaser.yml's grammar_subset tag list == aikit/chunk/treesitter.KenToTreeSitter values.",
+		t.Errorf("grammar_subset tags drifted from the treesitter chunker's grammars:\n"+
+			"  grammars with NO slim tag (would silently line-fall-back): %v\n"+
+			"  slim tags for UNKNOWN grammars (wasted embed bytes):        %v\n"+
+			"Fix: keep .goreleaser.yml's grammar_subset tag list == (&treesitter.Chunker{}).Grammars().",
 			missingTag, extraTag)
 	}
 }
@@ -67,10 +67,10 @@ func TestSubsetTagsMatchKenToTreeSitter(t *testing.T) {
 // dependency bump that renamed or dropped a grammar blob. Runs in the
 // default build (all grammars embedded), so resolution is a presence check.
 func TestKenToTreeSitterGrammarsResolve(t *testing.T) {
-	for kenLang, blob := range treesitter.KenToTreeSitter {
+	for _, blob := range (&treesitter.Chunker{}).Grammars() {
 		entry := grammars.DetectLanguageByName(blob)
 		if entry == nil || entry.Language() == nil {
-			t.Errorf("KenToTreeSitter[%q]=%q does not resolve to a loadable grammar in the pinned gotreesitter — renamed/dropped upstream?", kenLang, blob)
+			t.Errorf("grammar %q does not resolve to a loadable grammar in the pinned gotreesitter — renamed/dropped upstream?", blob)
 		}
 	}
 }

@@ -10,7 +10,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/odvcencio/gotreesitter v0.48.1
 	github.com/pkoukk/tiktoken-go v0.1.8
-	github.com/townsendmerino/aikit v1.19.0
+	github.com/townsendmerino/aikit v1.20.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.22.0
 	modernc.org/sqlite v1.56.0
@@ -34,7 +34,7 @@ require (
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/go-git/go-billy/v5 v5.9.0 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
-	github.com/google/jsonschema-go v0.4.3 // indirect
+	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
@@ -49,7 +49,7 @@ require (
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3 // indirect
 	github.com/skeema/knownhosts v1.3.1 // indirect
-	github.com/townsendmerino/aikit/chunk/treesitter v1.0.0
+	github.com/townsendmerino/aikit/chunk/treesitter v1.1.1
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
