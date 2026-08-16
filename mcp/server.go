@@ -589,6 +589,12 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 		resp.Results = []SearchResultRow{}
 		return dispatchOutput(args.Output, resp, "No results found.")
 	}
+	// Token budget (max_tokens): fill the ranked list top-down and drop the
+	// tail once the estimated size would exceed the budget. Applied AFTER
+	// filters + top_k + label strip, so it counts what the agent actually
+	// receives and drives both the JSON rows and the markdown body below.
+	var budgetNote string
+	results, resp.Budget, budgetNote = budgetResult(results, args.MaxTokens)
 	recordSearchUsage(recorder, "search", results, sourceRoot)
 	for i, r := range results {
 		resp.Results = append(resp.Results, SearchResultRow{
@@ -610,6 +616,9 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 			len(results), rawCount, pluralS(rawCount))
 	}
 	body := FormatResults(header, results)
+	if budgetNote != "" {
+		body += "\n\n" + budgetNote
+	}
 	if includeInResponse {
 		body += "\n\n" + formatTelemetryLine(tel)
 	}
@@ -746,6 +755,9 @@ func runFindRelatedWithUsage(ix *search.Index, args FindRelatedArgs, recorder Us
 		return dispatchOutput(args.Output, resp, fmt.Sprintf(
 			"No related chunks found for %s:%d.", args.FilePath, args.Line))
 	}
+	// Token budget (max_tokens): see runSearchWithTelemetry.
+	var budgetNote string
+	results, resp.Budget, budgetNote = budgetResult(results, args.MaxTokens)
 	recordSearchUsage(recorder, "find_related", results, sourceRoot)
 	for i, r := range results {
 		resp.Results = append(resp.Results, SearchResultRow{
@@ -758,5 +770,9 @@ func runFindRelatedWithUsage(ix *search.Index, args FindRelatedArgs, recorder Us
 		})
 	}
 	header := fmt.Sprintf("Chunks related to %s:%d", args.FilePath, args.Line)
-	return dispatchOutput(args.Output, resp, FormatResults(header, results))
+	body := FormatResults(header, results)
+	if budgetNote != "" {
+		body += "\n\n" + budgetNote
+	}
+	return dispatchOutput(args.Output, resp, body)
 }

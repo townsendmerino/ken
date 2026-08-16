@@ -38,6 +38,18 @@ type SearchResponse struct {
 	// see when a filter was the limiting factor — same signal the
 	// markdown header carries.
 	Filter *SearchFilterMeta `json:"filter,omitempty"`
+	// Budget is non-nil ONLY when max_tokens was set, so an agent can see
+	// whether the result list was trimmed to fit its size budget.
+	Budget *BudgetMeta `json:"budget,omitempty"`
+}
+
+// BudgetMeta reports how max_tokens shaped the returned result list. Present
+// only when max_tokens was set on the request.
+type BudgetMeta struct {
+	MaxTokens    int  `json:"max_tokens"`                // the requested budget
+	ApproxTokens int  `json:"approx_tokens"`             // estimated tokens of the returned results
+	Truncated    bool `json:"truncated"`                 // true if any results were dropped to fit
+	Dropped      int  `json:"dropped_results,omitempty"` // how many ranked results were dropped
 }
 
 // SearchResultRow is one ranked hit.
@@ -67,6 +79,8 @@ type FindRelatedResponse struct {
 	// Semantic is "warming" during M4 staged readiness (see SearchResponse).
 	Semantic string            `json:"semantic,omitempty"`
 	Results  []SearchResultRow `json:"results"`
+	// Budget is non-nil ONLY when max_tokens was set (see SearchResponse.Budget).
+	Budget *BudgetMeta `json:"budget,omitempty"`
 }
 
 // FindRelatedAnchor echoes the (file, line) the agent used to seed

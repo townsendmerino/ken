@@ -81,6 +81,47 @@ func TestBinary_MCPPackageStaysDBFree(t *testing.T) {
 	}
 }
 
+// tokenizerForbiddenImports are BPE-tokenizer deps that must never enter the
+// released graph. The search/find_related max_tokens knob (token_budget.go)
+// uses a heuristic estimator precisely so ken does NOT link tiktoken — plus its
+// regexp2 dependency and the multi-MB embedded BPE tables — into every ken-mcp.
+// bench/tokens keeps tiktoken behind the `bench` build tag; this guards the
+// request-time path from re-introducing it.
+var tokenizerForbiddenImports = []string{
+	"github.com/pkoukk/tiktoken-go",
+	"github.com/dlclark/regexp2",
+}
+
+// TestBinary_StaysTokenizerFree asserts the mcp package and both released
+// binaries keep a tiktoken-free transitive import set, so max_tokens stays a
+// heuristic budget rather than a binary-bloating exact token count.
+func TestBinary_StaysTokenizerFree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping go-list-deps subprocess in -short mode")
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go tool not on PATH; can't verify dep trees")
+	}
+	for _, pkg := range []string{
+		"github.com/townsendmerino/ken/mcp",
+		"github.com/townsendmerino/ken/cmd/ken-mcp",
+		"github.com/townsendmerino/ken/cmd/ken",
+	} {
+		out, err := exec.Command("go", "list", "-deps", pkg).CombinedOutput()
+		if err != nil {
+			t.Fatalf("go list -deps %s: %v\n%s", pkg, err, out)
+		}
+		for _, dep := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			dep = strings.TrimSpace(dep)
+			for _, forbidden := range tokenizerForbiddenImports {
+				if strings.Contains(dep, forbidden) {
+					t.Errorf("%s pulled in tokenizer dep %q — max_tokens must stay heuristic (slim-binary contract)", pkg, dep)
+				}
+			}
+		}
+	}
+}
+
 // TestBinary_MCPDBPackageBringsExpectedDeps is the inverse sanity
 // check: mcp/db (the opt-in package) SHOULD transitively pull in the
 // DB drivers + internal/db. If a future refactor accidentally

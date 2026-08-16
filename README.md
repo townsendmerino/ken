@@ -127,7 +127,8 @@ Both core tools return a formatted markdown string identical to semble's `_forma
 | `query` | string | ✓ | — | Natural language or code query. |
 | `repo` | string |   | — | `https://` / `http://` URL or local directory. Required if no `KEN_MCP_DEFAULT_REPO`. |
 | `mode` | `hybrid`\|`semantic`\|`bm25` |   | `hybrid` | Search mode. |
-| `top_k` | int |   | `5` | Number of results. |
+| `top_k` | int |   | `5` | Number of results (bounds the count). |
+| `max_tokens` | int |   | — | Optional response-size budget. `top_k` bounds the *count*, but a chunk can be tiny or huge; with `max_tokens` set, ken fills the ranked list top-down and drops the tail once the estimated token cost would exceed it (top hit always kept). Approximate — ken ships no BPE tokenizer, so it's a heuristic, not an exact count. |
 
 ### `find_related`
 
@@ -137,6 +138,7 @@ Both core tools return a formatted markdown string identical to semble's `_forma
 | `line` | int (1-indexed) | ✓ | — | A line inside the chunk to seed the similarity search. |
 | `repo` | string |   | — | Same as for `search`. |
 | `top_k` | int |   | `5` | Number of similar chunks. |
+| `max_tokens` | int |   | — | Optional response-size budget; same semantics as `search`. |
 
 ## What ken indexes
 

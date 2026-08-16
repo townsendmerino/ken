@@ -59,6 +59,10 @@ type SearchArgs struct {
 	Repo  string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL (e.g. https://github.com/org/repo) or local directory path to index and search. Required when no default index was configured at startup. The index is cached after the first call, so repeat queries are fast."`
 	Mode  string `json:"mode,omitempty" jsonschema:"Optional per-call mode override: hybrid|semantic|bm25. If omitted, uses the mode the server was started with. Requesting semantic or hybrid against a bm25-only index transparently downgrades to bm25 (the response header reports the effective mode)."`
 	TopK  int    `json:"top_k,omitempty" jsonschema:"Number of results to return."`
+	// MaxTokens is a response-size budget. top_k bounds the result COUNT; a
+	// chunk can be tiny or huge, so count alone gives no guarantee on context
+	// cost. See runSearchWithTelemetry for how the budget is applied.
+	MaxTokens int `json:"max_tokens,omitempty" jsonschema:"Optional approximate token budget for the returned results (a soft ceiling on response size, complementary to top_k). When >0, results are filled top-down and the tail is dropped once the cumulative estimated token cost would exceed this — the top hit is always kept. Approximate: ken ships no BPE tokenizer, so this is a heuristic estimate, not an exact token count."`
 
 	// === 1.0 filters (over-fetch + post-filter; no ranking-quality change) ===
 	//
@@ -90,8 +94,9 @@ type FindRelatedArgs struct {
 	FilePath string `json:"file_path" jsonschema:"Path to the file as stored in the index (use file_path from a search result)."`
 	Line     int    `json:"line" jsonschema:"Line number (1-indexed)."`
 	repoArg
-	TopK   int    `json:"top_k,omitempty" jsonschema:"Number of similar chunks to return."`
-	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with anchor/results — see FindRelatedResponse)."`
+	TopK      int    `json:"top_k,omitempty" jsonschema:"Number of similar chunks to return."`
+	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"Optional approximate token budget for the returned results (a soft ceiling on response size, complementary to top_k). When >0, results are filled top-down and the tail is dropped once the cumulative estimated token cost would exceed this — the top hit is always kept. Approximate: ken ships no BPE tokenizer, so this is a heuristic estimate, not an exact token count."`
+	Output    string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with anchor/results — see FindRelatedResponse)."`
 }
 
 // ReindexDBArgs is the argument schema for the v0.8.0 reindex_db tool.
