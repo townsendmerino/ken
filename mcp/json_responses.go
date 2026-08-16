@@ -60,6 +60,9 @@ type SearchResultRow struct {
 	EndLine   int     `json:"end_line"`
 	Score     float64 `json:"score"`
 	Text      string  `json:"text"`
+	// Match is the "why this matched" explanation, present only when the
+	// request set explain=true (see SearchArgs.Explain / MatchInfo).
+	Match *MatchInfo `json:"match,omitempty"`
 }
 
 // SearchFilterMeta documents how a filter affected the result count.

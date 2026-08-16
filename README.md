@@ -133,6 +133,7 @@ Both core tools return a formatted markdown string identical to semble's `_forma
 | `mode` | `hybrid`\|`semantic`\|`bm25` |   | `hybrid` | Search mode. |
 | `top_k` | int |   | `5` | Number of results (bounds the count). |
 | `max_tokens` | int |   | — | Optional response-size budget. `top_k` bounds the *count*, but a chunk can be tiny or huge; with `max_tokens` set, ken fills the ranked list top-down and drops the tail once the estimated token cost would exceed it (top hit always kept). Approximate — ken ships no BPE tokenizer, so it's a heuristic, not an exact count. |
+| `explain` | bool |   | `false` | Annotate each result with *why it matched*: which query terms appear in the chunk (`kind=lexical`) or that it surfaced on semantic similarity with no exact term overlap (`kind=semantic`). A lexical-overlap explanation for debugging "why is this here?", not a full ranking breakdown. |
 
 ### `find_related`
 

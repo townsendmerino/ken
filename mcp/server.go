@@ -605,14 +605,19 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 	results, resp.Budget, budgetNote = budgetResult(results, args.MaxTokens)
 	recordSearchUsage(recorder, "search", results, sourceRoot)
 	for i, r := range results {
-		resp.Results = append(resp.Results, SearchResultRow{
+		row := SearchResultRow{
 			Rank:      i + 1,
 			File:      r.Chunk.File,
 			StartLine: r.Chunk.StartLine,
 			EndLine:   r.Chunk.EndLine,
 			Score:     r.Score,
 			Text:      r.Chunk.Text,
-		})
+		}
+		if args.Explain {
+			m := matchInfo(args.Query, r.Chunk.Text)
+			row.Match = &m
+		}
+		resp.Results = append(resp.Results, row)
 	}
 	header := fmt.Sprintf("Search results for: %q (mode=%s)",
 		args.Query, search.ModeNames()[int(effectiveMode)])
@@ -623,7 +628,12 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 		header += fmt.Sprintf(" — %d of %d candidate%s passed filter",
 			len(results), rawCount, pluralS(rawCount))
 	}
-	body := FormatResults(header, results)
+	var body string
+	if args.Explain {
+		body = formatResults(header, results, explainAnnotator(args.Query))
+	} else {
+		body = FormatResults(header, results)
+	}
 	if budgetNote != "" {
 		body += "\n\n" + budgetNote
 	}

@@ -63,6 +63,8 @@ type SearchArgs struct {
 	// chunk can be tiny or huge, so count alone gives no guarantee on context
 	// cost. See runSearchWithTelemetry for how the budget is applied.
 	MaxTokens int `json:"max_tokens,omitempty" jsonschema:"Optional approximate token budget for the returned results (a soft ceiling on response size, complementary to top_k). When >0, results are filled top-down and the tail is dropped once the cumulative estimated token cost would exceed this — the top hit is always kept. Approximate: ken ships no BPE tokenizer, so this is a heuristic estimate, not an exact token count."`
+	// Explain adds a per-result "why this matched" annotation. See MatchInfo.
+	Explain bool `json:"explain,omitempty" jsonschema:"When true, annotate each result with why it matched: which of your query's terms appear in the chunk (kind=lexical) or that it surfaced on semantic similarity with no exact term overlap (kind=semantic). A lexical-overlap explanation for debugging 'why is this here?', not a full ranking breakdown. Off by default."`
 
 	// === 1.0 filters (over-fetch + post-filter; no ranking-quality change) ===
 	//
@@ -229,13 +231,25 @@ type CallersArgs struct {
 // The signature accepts the [Result] alias defined in api_aliases.go;
 // SDK authors don't need to import internal/search to call this.
 func FormatResults(header string, results []Result) string {
+	return formatResults(header, results, nil)
+}
+
+// formatResults is FormatResults with an optional per-result annotator appended
+// to each result's header line (used by the `explain` path to add "match: …").
+// annotate may be nil (no annotation) or return "" for a given result to skip it.
+func formatResults(header string, results []Result, annotate func(Result) string) string {
 	var b strings.Builder
 	b.WriteString(header)
 	b.WriteString("\n\n")
 	for i, r := range results {
-		fmt.Fprintf(&b, "## %d. %s:%d-%d  [score=%.3f]\n",
+		fmt.Fprintf(&b, "## %d. %s:%d-%d  [score=%.3f]",
 			i+1, r.Chunk.File, r.Chunk.StartLine, r.Chunk.EndLine, r.Score)
-		b.WriteString("```\n")
+		if annotate != nil {
+			if a := annotate(r); a != "" {
+				fmt.Fprintf(&b, "  — %s", a)
+			}
+		}
+		b.WriteString("\n```\n")
 		b.WriteString(strings.TrimSpace(r.Chunk.Text))
 		b.WriteString("\n```\n\n")
 	}
