@@ -34,7 +34,6 @@ Everyday operational tooling; some is wired into CI/release.
 |---|---|
 | `subset-tags.sh` | Print the `grammar_subset` slim-build tags — **used by CI + `.goreleaser.yml`** (ADR-033); single source is the goreleaser `tags:` list |
 | `build-subset.sh` · `build_demo_binaries.sh` · `build-docs-mcp.sh` | Slim/demo/docs binary build drivers |
-| `regen_golden.sh` | Regenerate `testdata/golden.json` (idempotent; wraps `pin_inference.py`) |
 | `gen_third_party_licenses.py` | Regenerate `THIRD_PARTY_LICENSES.md` |
 | `dogfood_languages.go` · `dogfood_structural.go` | Run `structural.Build` over real cloned repos to surface extractor crashes / empty-Name bugs |
 | `armb_drift_diff.go` | Arm B label-level drift gate (Stage 8) |
