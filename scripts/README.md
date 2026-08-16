@@ -6,11 +6,18 @@ is imported by `ken` / `ken-mcp`; the Go files are all `//go:build ignore`
 
 > **Build / release / perf drivers moved to [`tools/`](../tools/)** — proper Go
 > commands (`go run ./tools/<name>`): `subset-tags`, `build-subset`,
-> `build-docs-mcp`, `build-demo-binaries`, `perf-startup-m2`, `rss-bench`, and
-> `gen-licenses`. The shared logic (slim-build tags, exec/size helpers) lives in
-> [`internal/devtools`](../internal/devtools/). What remains here is bench-corpus
-> data-wrangling, dogfood `//go:build ignore` Go scripts, and closed-investigation
-> diagnostics.
+> `build-docs-mcp`, `build-demo-binaries`, `perf-startup-m2`, `rss-bench`,
+> `peakrss` (peak-RSS wrapper; no `gtime`/`brew` — `perf_collect.sh` uses it),
+> and `gen-licenses`. The shared logic (slim-build tags, exec/size helpers) lives
+> in [`internal/devtools`](../internal/devtools/). What remains here is
+> bench-corpus data-wrangling (some intentionally Python — see below), dogfood
+> `//go:build ignore` Go scripts, and closed-investigation diagnostics.
+>
+> **Intentionally Python (permanent, not unconverted):** `bench_coir.py` and the
+> `bench_csn*` / `cosqa*` family fetch standard benchmark corpora via
+> `huggingface_hub` + `pyarrow`; [`bench/semble/run_ken.py`](../bench/semble/README.md)
+> reuses semble's own NDCG/loaders for an equal-footing comparison. Reusing the
+> external reference is the point — don't port these to Go.
 
 Three buckets — **reproducible drivers** you may want to re-run, **dogfood /
 build tools** wired into everyday workflows, and **historical diagnostics**
@@ -30,8 +37,7 @@ downloads/materializes a corpus once, then feeds `bench/ndcg`.
 | `bench_cosqa_heur.py` / `bench_csn_nl_stripped_heur.py` | Apply the Arm B heuristic enrichment to the bench corpus |
 | `cosqa_to_bench.py` | Convert the CoSQA dev set into ken's bench format |
 | `materialize_heur.go` | Write an Arm-B-enriched variant corpus for the heuristic bench |
-| `merge_m0d.py` / `plot_token_budget.py` | Merge per-query CSVs / plot the token-budget results |
-| `perf_collect.sh` · `kernel_demo_bench.sh` | Perf-collect + kernel-scale demo drivers (startup-latency + resident-memory drivers moved to `tools/perf-startup-m2` + `tools/rss-bench`) |
+| `perf_collect.sh` · `kernel_demo_bench.sh` | Perf-collect + kernel-scale demo drivers (startup-latency + resident-memory drivers moved to `tools/perf-startup-m2` + `tools/rss-bench`; `perf_collect.sh` now measures RSS via `tools/peakrss`) |
 | `adversarial.txt` | Adversarial query set (data, consumed by the bench harness) |
 
 ## Dogfood tools
@@ -58,7 +64,7 @@ should not need to re-run these.
 | `swift_survey.go` | Swift per-repo clean-parse survey — Swift **parked** (not shipped) |
 | `probe_rust_empty_names.go` · `probe_rust_field_name.go` | Rust extractor `function_item` field-name probes — **resolved** |
 | `maxsim_probe.go` | ColBERT/MaxSim late-interaction reranking probe — experiment |
-| `m0_hyde.py` | HyDE snippet generation for the M0 ceiling experiment — closed |
+| `m0_hyde.py` · `merge_m0d.py` · `plot_token_budget.py` | HyDE gen / per-query CSV merge / token-budget plot for the M0/M0d ceiling experiment — **closed** (results in `outputs/m0*-results.md`) |
 | `perf_startup_m0.go` · `phase0_memory_probe.go` | Cold-start M0 / Phase-0 latency + `structural.Index` resident-memory baselines — superseded by the shipped cold-start campaign (ADR-039) |
 
 > `__pycache__/` is Python bytecode cache and should not be committed —

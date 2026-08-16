@@ -3,8 +3,8 @@
 #
 # Drives `ken perf index` + `ken perf search` across the full
 # (mode × chunker) cross-product for one workload, wraps each
-# invocation in /usr/bin/time -v (Linux) / gtime -v (macOS via
-# `brew install gnu-time`) for truthful OS-level peak RSS, captures
+# invocation in tools/peakrss (getrusage ru_maxrss; no gtime / `brew
+# install gnu-time` dependency) for truthful OS-level peak RSS, captures
 # pprof CPU + heap profiles, and writes everything to
 # bench_out/<workload>/<date>/.
 #
@@ -45,7 +45,7 @@
 # Per-invocation outputs (under bench_out/<workload>/<date>/):
 #   meta.json                                  — machine + go + ken-commit + start/end
 #   records.jsonl                              — one `ken perf` JSON record per line
-#   <mode>-<chunker>.index.gtime               — /usr/bin/time -v output (RSS truth)
+#   <mode>-<chunker>.index.gtime               — tools/peakrss output (GNU time -v-compatible; RSS truth)
 #   profiles/<mode>-<chunker>.index.cpu.pprof  — pprof CPU profile (index phase)
 #   profiles/<mode>-<chunker>.index.mem.pprof  — pprof heap profile (index phase)
 #   <mode>-<chunker>.search.gtime
@@ -136,19 +136,17 @@ else
   SELECTED_CHUNKERS=("${ALL_CHUNKERS[@]}")
 fi
 
-# ── locate gtime / time ─────────────────────────────────────────────
-# OS-level peak RSS comes from gtime -v / time -v (GNU time). macOS
-# users need `brew install gnu-time` for gtime. Fall back to bash
-# `time` only if neither is present (warning emitted; the .gtime file
-# will be empty in that case but the run still completes).
-TIME_CMD=""
-if command -v gtime >/dev/null 2>&1; then
-  TIME_CMD="gtime"
-elif [[ -x /usr/bin/time ]] && /usr/bin/time -v true 2>/dev/null; then
-  TIME_CMD="/usr/bin/time"
-else
-  echo "warning: gtime / /usr/bin/time -v not available; OS-level RSS won't be captured" >&2
-  echo "  install with: brew install gnu-time (macOS) or apt-get install time (Linux)" >&2
+# ── OS-level peak RSS via tools/peakrss (no gtime / brew dependency) ──
+# tools/peakrss wraps a command, runs it, and reports peak RSS (getrusage
+# ru_maxrss) + times in GNU-`time -v`-compatible form (so the *.gtime files keep
+# their "Maximum resident set size" line). Built once here — no `brew install
+# gnu-time`, no /usr/bin/time -v. It accepts a leading `-v` so `$TIME_CMD -v CMD`
+# is unchanged. Falls back to empty (RSS not captured) only if the build fails.
+_peakrss_root="$(cd "$(dirname "$0")/.." && pwd)"
+TIME_CMD="$(mktemp -d)/peakrss"
+if ! go build -o "$TIME_CMD" "$_peakrss_root/tools/peakrss" 2>/dev/null; then
+  echo "warning: could not build tools/peakrss; OS-level RSS won't be captured" >&2
+  TIME_CMD=""
 fi
 
 # ── workload resolution ─────────────────────────────────────────────
