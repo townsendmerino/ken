@@ -731,6 +731,12 @@ var tokenHashSeed = maphash.MakeSeed()
 // text)) allocated a full copy of every chunk's text per flush plus a hasher,
 // through a hash.Hash64 interface that defeats inlining — a net loss versus
 // the runtime memhash it was meant to beat.
+//
+// This is ONE of three deliberately-different content hashes in the package,
+// each matched to its durability need: maphash here (in-memory token cache —
+// speed/zero-alloc, per-process seed OK), fnv64a in neural_rerank.go (in-memory
+// rerank LRU key), and sha256 in embed_cache.go (PERSISTENT on-disk embed cache
+// — needs a stable, process-independent digest). Not an oversight.
 func hashText64(text string) uint64 {
 	return maphash.String(tokenHashSeed, text)
 }

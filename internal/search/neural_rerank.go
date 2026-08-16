@@ -241,6 +241,11 @@ func dot64(a, b []float32) float64 {
 // trivial-collision risk on adversarial inputs (the chunker doesn't
 // produce those), and the consequence of a collision here is at most
 // returning a stale cosine for one chunk — not a correctness bug.
+//
+// Deliberately different from the package's other two content hashes (see
+// hashText64 in index.go): this is the in-memory rerank LRU key, where a stale
+// cosine is the worst case, so a cheap 64-bit FNV is enough; the persistent
+// embed cache (embed_cache.go) uses sha256 for on-disk stability instead.
 func fnvHash(s string) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(s))

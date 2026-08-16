@@ -30,6 +30,11 @@ type VecCache interface {
 	Put(key []byte, vec []float32)
 }
 
+// hashText is the key for the PERSISTENT embed cache. sha256 (not the cheaper
+// maphash/fnv the two in-memory caches use — see hashText64 in index.go) is
+// deliberate: this key is written to disk and read back across processes and
+// ken versions, so it must be a stable, seed-independent digest with negligible
+// collision risk, not a fast per-process hash. Not an oversight.
 func hashText(text string) []byte {
 	h := sha256.Sum256([]byte(text))
 	return h[:]

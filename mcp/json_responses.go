@@ -198,15 +198,6 @@ type RecentlyChangedCommit struct {
 	ChangedFiles []string `json:"changed_files"`
 }
 
-// dispatchOutput routes a handler result to either the JSON
-// serialization of `resp` or the agent-provided `markdown` string.
-// Empty/unspecified Output defaults to markdown.
-//
-// outputMode is the args.Output value verbatim; valid values are
-// "" (default → markdown) and "json". Any other value is rejected
-// with a clear error rather than silently treated as markdown — we'd
-// rather an agent that mis-spells "jsom" sees the typo than gets
-// the wrong format.
 // errorResult renders an error / edge-case message honoring the requested
 // output mode, so a json-mode agent that json.Parses every tool result
 // doesn't break on an error path (code review §4). json → {"error": msg};
@@ -231,6 +222,15 @@ func errorResult(outputMode, msg string) *sdk.CallToolResult {
 	}
 }
 
+// dispatchOutput routes a handler result to either the JSON
+// serialization of `resp` or the agent-provided `markdown` string.
+// Empty/unspecified Output defaults to markdown.
+//
+// outputMode is the args.Output value verbatim; valid values are
+// "" (default → markdown) and "json". Any other value is rejected
+// with a clear error rather than silently treated as markdown — we'd
+// rather an agent that mis-spells "jsom" sees the typo than gets
+// the wrong format.
 func dispatchOutput(outputMode string, resp any, markdown string) (*sdk.CallToolResult, any, error) {
 	switch outputMode {
 	case "", "markdown":

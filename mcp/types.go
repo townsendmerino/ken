@@ -1,10 +1,12 @@
 // Package mcp wires ken's internal search package to the
 // Model Context Protocol via the modelcontextprotocol/go-sdk. It exposes
-// the same two tools semble's Python MCP server does — `search` and
-// `find_related` — with matching argument shapes and the same
-// formatted-string output so any MCP-compatible agent (Claude Code,
-// Cursor, Codex, OpenCode, VS Code, GitHub Copilot CLI) can use ken-mcp
-// as a drop-in replacement for semble's MCP server.
+// the two semble-parity tools — `search` and `find_related`, with matching
+// argument shapes and the same formatted-string output so any MCP-compatible
+// agent (Claude Code, Cursor, Codex, OpenCode, VS Code, GitHub Copilot CLI)
+// can use ken-mcp as a drop-in replacement for semble's MCP server — plus
+// eight ken-only tools: the structural set (`definition`, `references`,
+// `callers`, `outline`, `symbols`), `status`, `recently_changed`, and
+// `reindex_db` (ten registered in total; see server.go's RegisterTools).
 //
 // The package name is "mcp" to match docs/DESIGN.md §1's layout; the SDK's own
 // "mcp" package is imported as `sdk` everywhere in this package to keep
