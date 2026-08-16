@@ -13,6 +13,73 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [1.4.0] — 2026-08-16 — search controls, `ken doctor`, +5 chunker languages
+
+A feature release: new agent-facing search controls, two opt-in operator guards,
+a health-check command, five more tree-sitter chunker languages, and a migration
+of the repo's build/perf drivers from shell/Python to Go. All additive and
+backward-compatible — every new knob is off by default and the public 1.0 API
+surface is unchanged.
+
+### Added
+
+- **`max_tokens` on `search` / `find_related`** — an optional response-size
+  budget. `top_k` bounds the result *count*, but a chunk can be tiny or huge, so
+  count gives no guarantee on context cost. When set, ken fills the ranked list
+  top-down and drops the tail once the estimated token cost would exceed the
+  budget (the top hit is always kept). Heuristic, not exact: ken links no BPE
+  tokenizer into the binary (slim-binary contract), so it's a soft ceiling; a
+  new binary-contract test keeps tiktoken out of the release graph.
+- **`explain` on `search`** — opt-in per-result "why this matched": each result
+  is annotated `kind=lexical` with the query terms present in the chunk, or
+  `kind=semantic` when it surfaced on similarity with no term overlap. A
+  lexical-overlap explanation for debugging, not a full ranking breakdown.
+- **`queries` (bulk search) on `search`** — run a batch of queries in one MCP
+  call instead of N round-trips; results are grouped per query (capped at 20).
+- **`definition` results now carry the definition's start `line`** — pass
+  `(file, line)` straight to `find_related` without a read-the-file round-trip.
+- **`recently_changed` works on `https://` repos** — resolved through the cache
+  to the clone working tree. URL repos are shallow (depth-1) clones, so history
+  is limited to the tip commit(s); that caveat is surfaced in the response.
+- **`ken doctor`** — an advisory health check that folds model availability,
+  rerank-cache warmth, Arm B enrichment, token-savings tracking, and ken-mcp
+  config into one prioritized set of recommendations (text or `--json`).
+- **`KEN_SKIP_GENERATED`** (default off) — opt-in skip of machine-generated
+  source at index time (`@generated` / `Code generated … DO NOT EDIT` headers:
+  protobuf stubs, client-go listers, mocks). Complements the minified-file sniff.
+- **`KEN_MCP_ALLOWED_REPO_ROOTS`** (default off) — confine an *agent-supplied*
+  local-path `repo` argument to a set of roots (the local-path analogue of the
+  clone SSRF guard). The operator-configured `KEN_MCP_DEFAULT_REPO` is exempt.
+- **SQL, HTML, CSS, SCSS, and R tree-sitter chunking** (opt-in
+  `--chunker=treesitter`) — five popularity-driven grammars added via aikit
+  `chunk/treesitter` v1.1.1. SCSS routes to its own grammar (the CSS grammar
+  errors on `$vars`/`@mixin`). Additive to the existing SQL *schema* indexing,
+  which is a separate DDL-parsing feature and unchanged. Structural (call-graph)
+  extraction for these is intentionally not included.
+
+### Changed
+
+- **aikit v1.19.0 → v1.20.0** and **chunk/treesitter v1.0.0 → v1.1.1** (the new
+  grammars + a `Chunker.Grammars()` accessor). Cosine-parity preserved.
+- **Dependency bumps** (dependabot): `gotreesitter` → v0.48.1, `go-git/v5` →
+  v5.19.2, `modernc.org/sqlite` → v1.56.0.
+- **Developer workflow:** `make check` now runs `golangci-lint` (it's a required
+  CI job that the target previously skipped), and `make hooks` installs a
+  pre-push gate. The repo's build/release/perf drivers moved from shell/Python
+  to Go commands under `tools/` (`subset-tags`, `build-subset`, `gen-licenses`,
+  `peakrss` — which drops the `gtime`/`brew` dependency, etc.); a couple of
+  intentional-Python exceptions (semble-NDCG reuse, HF corpus fetch) are now
+  documented as such.
+
+### Internal
+
+- Behavior-preserving refactors: split `internal/search/watch.go` (1611 lines)
+  and the MCP cache/structural-build state machine into focused files; extracted
+  `internal/envcfg` (the KEN_MCP_* parsers, with their tests), `internal/binfmt`
+  (the KEN1/KNRC/KMAN binary-envelope primitives), and `internal/devtools`;
+  `go fix ./...` (Go 1.26 modernizers). No behavior change; full test + `-race`
+  green throughout.
+
 ## [1.3.3] — 2026-08-13 — Go security toolchain + aikit currency
 
 A security fast-follow to 1.3.2. No feature or behavior changes; the point is
