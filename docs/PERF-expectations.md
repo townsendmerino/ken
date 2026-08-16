@@ -209,7 +209,7 @@ The levers, cheapest first:
   for the long-lived server.
 
 Numbers are host- and corpus-dependent; measure yours with
-[`scripts/rss_bench.sh`](../scripts/rss_bench.sh) (mirrors the external
+[`tools/rss-bench`](../tools/rss-bench) (mirrors the external
 harness so results are comparable).
 
 **Binary size (slim release builds, ADR-033):**

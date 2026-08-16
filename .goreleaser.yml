@@ -6,7 +6,7 @@
 # gotreesitter `grammar_subset` build tags below, which embed ONLY the 17
 # grammars ken's treesitter chunker actually dispatches (chunk/treesitter
 # kenToTreeSitter) instead of all 206. Saves ~14 MB per binary. This `tags`
-# list is the SINGLE SOURCE OF TRUTH for the subset — `scripts/subset-tags.sh`
+# list is the SINGLE SOURCE OF TRUTH for the subset — `tools/subset-tags`
 # derives the slim local/CI build from it, and chunk/treesitter's drift-guard
 # test (TestSubsetTagsMatchKenToTreeSitter) asserts this exact set equals
 # kenToTreeSitter's values. To add a language: add it to kenToTreeSitter AND

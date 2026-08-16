@@ -578,7 +578,7 @@ Three supporting changes land alongside the new package:
 2. **`internal/chunk/markdown` package** — a handwritten pure-Go scanner. Heading-aware boundaries (ATX + setext), atomic fenced-code / tables / lists, frontmatter (YAML `---` and TOML `+++`), byte-fidelity preserved. Registers as `"markdown"` in the chunker registry. Auto-falls back to the line chunker for non-markdown files in mixed-content corpora.
 3. **Side-effect chunker imports move to binaries.** Previously `internal/search/index.go` blank-imported both `regex` and `treesitter`, which meant any package transitively importing `search` pulled in `gotreesitter/grammars` (a single `embed.FS` containing 19 MB of grammar blobs). Now `internal/search` only blank-imports `regex` (the default); `cmd/ken` and `cmd/ken-mcp` add `treesitter` and `markdown` explicitly. `cmd/ken-mcp-docs` blank-imports only `markdown`, so the docs binary doesn't carry the grammar bundle.
 
-`cmd/ken-mcp-docs` is the canonical worked example: ~20 lines of `main.go`, gated by build tag `embed_corpus` (so a fresh clone — where `cmd/ken-mcp-docs/{model,docs}/` don't yet exist — still builds cleanly via `go build ./...`), staged + built via `scripts/build-docs-mcp.sh`.
+`cmd/ken-mcp-docs` is the canonical worked example: ~20 lines of `main.go`, gated by build tag `embed_corpus` (so a fresh clone — where `cmd/ken-mcp-docs/{model,docs}/` don't yet exist — still builds cleanly via `go build ./...`), staged + built via `tools/build-docs-mcp`.
 
 ### Alternatives considered
 
@@ -2348,7 +2348,7 @@ A throwaway measurement spike (2026-05-28) confirmed everything before committin
 
 **Bump to `v0.20.0-rc2` and make ken's own release binaries slim** (embed only the 17 grammars `chunk/treesitter`'s `kenToTreeSitter` dispatches), while the library `go build` / `mcp.Run` stays all-grammars.
 
-- **`.goreleaser.yml` is the single source of truth** for the subset: the `ken` and `ken-mcp` builds carry the 18-token `tags:` list (`grammar_subset` master gate + 17 `grammar_subset_<lang>`). `scripts/subset-tags.sh` derives the slim local/CI build from that file; no second copy.
+- **`.goreleaser.yml` is the single source of truth** for the subset: the `ken` and `ken-mcp` builds carry the 18-token `tags:` list (`grammar_subset` master gate + 17 `grammar_subset_<lang>`). `tools/subset-tags` derives the slim local/CI build from that file; no second copy.
 - **Drift guard** (`chunk/treesitter`'s `TestSubsetTagsMatchKenToTreeSitter`, runs in the default build): asserts the goreleaser tag set equals `kenToTreeSitter`'s values in both directions (missing tag → silent fallback; extra tag → wasted bytes), and `TestKenToTreeSitterGrammarsResolve` asserts every mapped grammar still exists in the pinned dep (catches an upstream rename/drop). A CI compile-smoke builds the slim binaries on every PR.
 - **csharp / shell stay omitted** (DESIGN.md §10 grammar-quality reasons) — they're simply not embedded under subset, which is the desired behavior.
 - **`go.mod` pins `v0.20.0-rc2`** — an rc, accepted deliberately (see below); also a parser-correctness improvement over v0.19.1.

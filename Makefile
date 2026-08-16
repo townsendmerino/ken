@@ -10,7 +10,7 @@ BINARIES := ken ken-mcp
 # ken/ (chunk moved to the aikit module per ADR-034). CI enforces this exact
 # list via `make gofmt-check`, and CLAUDE.md / CONTRIBUTING.md point here rather
 # than repeat it, so the four locations can't drift.
-GOFMT_DIRS := cmd internal mcp bench demos
+GOFMT_DIRS := cmd internal mcp bench demos tools
 
 .DEFAULT_GOAL := help
 

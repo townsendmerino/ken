@@ -117,7 +117,7 @@ corpora: ~1.3 s.
 
 ```bash
 # Measurement (5 iterations per cell, ~30s total)
-scripts/perf_startup_m2.sh 5
+go run ./tools/perf-startup-m2 5
 
 # Smoke: confirm lazy-load log line, then exit
 KEN_MCP_RERANK=on KEN_MCP_RERANK_MODEL_DIR=~/.ken/rerank-model \

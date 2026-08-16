@@ -4,6 +4,14 @@ Developer tooling that lives outside the built binaries. Nothing here ships or
 is imported by `ken` / `ken-mcp`; the Go files are all `//go:build ignore`
 (run with `go run scripts/<name>.go`), the rest are Python/shell utilities.
 
+> **Build / release / perf drivers moved to [`tools/`](../tools/)** — proper Go
+> commands (`go run ./tools/<name>`): `subset-tags`, `build-subset`,
+> `build-docs-mcp`, `build-demo-binaries`, `perf-startup-m2`, `rss-bench`, and
+> `gen-licenses`. The shared logic (slim-build tags, exec/size helpers) lives in
+> [`internal/devtools`](../internal/devtools/). What remains here is bench-corpus
+> data-wrangling, dogfood `//go:build ignore` Go scripts, and closed-investigation
+> diagnostics.
+
 Three buckets — **reproducible drivers** you may want to re-run, **dogfood /
 build tools** wired into everyday workflows, and **historical diagnostics**
 that fed investigations now closed (kept for provenance, not for re-running).
@@ -23,18 +31,16 @@ downloads/materializes a corpus once, then feeds `bench/ndcg`.
 | `cosqa_to_bench.py` | Convert the CoSQA dev set into ken's bench format |
 | `materialize_heur.go` | Write an Arm-B-enriched variant corpus for the heuristic bench |
 | `merge_m0d.py` / `plot_token_budget.py` | Merge per-query CSVs / plot the token-budget results |
-| `perf_collect.sh` · `perf_startup_m2.sh` · `rss_bench.sh` · `kernel_demo_bench.sh` | Startup-latency / resident-memory / kernel-scale perf drivers |
+| `perf_collect.sh` · `kernel_demo_bench.sh` | Perf-collect + kernel-scale demo drivers (startup-latency + resident-memory drivers moved to `tools/perf-startup-m2` + `tools/rss-bench`) |
 | `adversarial.txt` | Adversarial query set (data, consumed by the bench harness) |
 
-## Dogfood & build tools
+## Dogfood tools
 
-Everyday operational tooling; some is wired into CI/release.
+Everyday operational tooling (`//go:build ignore` Go scripts). Build/release/perf
+drivers moved to [`tools/`](../tools/) — see the note at the top.
 
 | Script | Purpose |
 |---|---|
-| `subset-tags.sh` | Print the `grammar_subset` slim-build tags — **used by CI + `.goreleaser.yml`** (ADR-033); single source is the goreleaser `tags:` list |
-| `build-subset.sh` · `build_demo_binaries.sh` · `build-docs-mcp.sh` | Slim/demo/docs binary build drivers |
-| `gen_third_party_licenses.py` | Regenerate `THIRD_PARTY_LICENSES.md` |
 | `dogfood_languages.go` · `dogfood_structural.go` | Run `structural.Build` over real cloned repos to surface extractor crashes / empty-Name bugs |
 | `armb_drift_diff.go` | Arm B label-level drift gate (Stage 8) |
 | `precision_sample_edges.go` | Precision edge-sampling (Stage 8 Gate 2) |

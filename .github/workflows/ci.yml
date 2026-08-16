@@ -66,7 +66,7 @@ jobs:
       - name: slim build compile-smoke (grammar_subset)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          tags="$(scripts/subset-tags.sh)"
+          tags="$(go run ./tools/subset-tags)"
           echo "subset tags: $tags"
           CGO_ENABLED=0 go build -tags "$tags" -o /dev/null ./cmd/ken ./cmd/ken-mcp
 
@@ -106,7 +106,7 @@ jobs:
       - name: slim release build compile-smoke (grammar_subset)
         shell: bash
         run: |
-          tags="$(scripts/subset-tags.sh)"
+          tags="$(go run ./tools/subset-tags)"
           echo "subset tags: $tags"
           CGO_ENABLED=0 go build -tags "$tags" -o ken.exe ./cmd/ken
           CGO_ENABLED=0 go build -tags "$tags" -o ken-mcp.exe ./cmd/ken-mcp
