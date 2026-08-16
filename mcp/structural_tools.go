@@ -44,16 +44,13 @@ import (
 // (the caller returns it directly). No error return — the failure IS the
 // *CallToolResult (code review §5).
 func resolveBundleForTool(ctx context.Context, cfg *Config, repoArg, outputMode string) (*RepoBundle, *sdk.CallToolResult) {
-	repo := repoArg
-	if repo == "" {
-		repo = cfg.DefaultRepo
-	}
-	if repo == "" {
-		return nil, errorResult(outputMode,
-			"No repo specified and no default repo configured. "+
-				"Pass `repo` (a git URL or local directory path) or "+
-				"set KEN_MCP_DEFAULT_REPO at server startup.",
-		)
+	// Reuse resolveRepo (server.go) rather than reimplement the
+	// explicit-arg-wins-else-default-else-error step — the two used to diverge
+	// in wording so an agent got different guidance depending on which of the
+	// repo-taking tools it called with no repo.
+	repo, err := resolveRepo(cfg, repoArg)
+	if err != nil {
+		return nil, errorResult(outputMode, err.Error())
 	}
 	if cfg.Cache == nil {
 		return nil, errorResult(outputMode, "server cache unavailable; cannot resolve repo")
