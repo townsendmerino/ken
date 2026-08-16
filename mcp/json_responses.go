@@ -43,6 +43,16 @@ type SearchResponse struct {
 	Budget *BudgetMeta `json:"budget,omitempty"`
 }
 
+// BulkSearchResponse is the `search` tool's response when the request supplied
+// `queries` (a batch). One SearchResponse per query, in request order.
+type BulkSearchResponse struct {
+	Queries []SearchResponse `json:"queries"`
+	// Truncated is true when more than MaxBulkQueries were supplied; Dropped is
+	// how many were not run.
+	Truncated bool `json:"truncated,omitempty"`
+	Dropped   int  `json:"dropped_queries,omitempty"`
+}
+
 // BudgetMeta reports how max_tokens shaped the returned result list. Present
 // only when max_tokens was set on the request.
 type BudgetMeta struct {

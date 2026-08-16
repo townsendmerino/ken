@@ -55,10 +55,16 @@ const (
 // has no equivalent) — see Mode's jsonschema and runSearch for
 // per-call override semantics.
 type SearchArgs struct {
-	Query string `json:"query" jsonschema:"Natural language or code query."`
-	Repo  string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL (e.g. https://github.com/org/repo) or local directory path to index and search. Required when no default index was configured at startup. The index is cached after the first call, so repeat queries are fast."`
-	Mode  string `json:"mode,omitempty" jsonschema:"Optional per-call mode override: hybrid|semantic|bm25. If omitted, uses the mode the server was started with. Requesting semantic or hybrid against a bm25-only index transparently downgrades to bm25 (the response header reports the effective mode)."`
-	TopK  int    `json:"top_k,omitempty" jsonschema:"Number of results to return."`
+	Query string `json:"query,omitempty" jsonschema:"Natural language or code query. Provide this OR queries (for a batch)."`
+	// Queries runs a batch of queries in ONE call (saves round-trips). When
+	// non-empty, `query` is ignored and the response groups results per query
+	// (JSON: a queries array of per-query responses; markdown: a section each).
+	// All other args (mode, top_k, filters, max_tokens, explain) apply to every
+	// query. Capped at MaxBulkQueries.
+	Queries []string `json:"queries,omitempty" jsonschema:"Optional batch of queries to run in one call instead of query (saves round-trips). Each is searched with the same mode/top_k/filters; results are grouped per query. Capped at 20."`
+	Repo    string   `json:"repo,omitempty" jsonschema:"https:// or http:// git URL (e.g. https://github.com/org/repo) or local directory path to index and search. Required when no default index was configured at startup. The index is cached after the first call, so repeat queries are fast."`
+	Mode    string   `json:"mode,omitempty" jsonschema:"Optional per-call mode override: hybrid|semantic|bm25. If omitted, uses the mode the server was started with. Requesting semantic or hybrid against a bm25-only index transparently downgrades to bm25 (the response header reports the effective mode)."`
+	TopK    int      `json:"top_k,omitempty" jsonschema:"Number of results to return."`
 	// MaxTokens is a response-size budget. top_k bounds the result COUNT; a
 	// chunk can be tiny or huge, so count alone gives no guarantee on context
 	// cost. See runSearchWithTelemetry for how the budget is applied.

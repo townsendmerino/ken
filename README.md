@@ -128,7 +128,8 @@ Both core tools return a formatted markdown string identical to semble's `_forma
 
 | Arg | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `query` | string | ✓ | — | Natural language or code query. |
+| `query` | string | ✓* | — | Natural language or code query. *Provide `query` **or** `queries`. |
+| `queries` | string[] |   | — | Batch of queries in one call (saves round-trips); results grouped per query. Same mode/`top_k`/filters apply to each. Capped at 20. |
 | `repo` | string |   | — | `https://` / `http://` URL or local directory. Required if no `KEN_MCP_DEFAULT_REPO`. |
 | `mode` | `hybrid`\|`semantic`\|`bm25` |   | `hybrid` | Search mode. |
 | `top_k` | int |   | `5` | Number of results (bounds the count). |

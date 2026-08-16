@@ -444,6 +444,9 @@ func textResult(s string) *sdk.CallToolResult {
 }
 
 func handleSearch(ctx context.Context, cfg *Config, args SearchArgs) (*sdk.CallToolResult, any, error) {
+	if len(args.Queries) == 0 && strings.TrimSpace(args.Query) == "" {
+		return errorResult(args.Output, "provide `query` (a single query) or `queries` (a batch)."), nil, nil
+	}
 	source, err := resolveRepo(cfg, args.Repo)
 	if err != nil {
 		return errorResult(args.Output, err.Error()), nil, nil
@@ -456,6 +459,9 @@ func handleSearch(ctx context.Context, cfg *Config, args SearchArgs) (*sdk.CallT
 	// sources where the chunk's relative path can be stat()ed for
 	// file size. http(s) clones land in a temp dir under TMPDIR;
 	// passing that root is fine — the stats are best-effort.
+	if len(args.Queries) > 0 {
+		return runSearchBulk(wi.Load(), args, cfg.UsageRecorder, source, wi.Warming())
+	}
 	return runSearchWithTelemetry(wi.Load(), args, cfg.TelemetryLog, cfg.TelemetryInResponse, cfg.UsageRecorder, source, wi.Warming())
 }
 
@@ -487,6 +493,9 @@ func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (
 // hybrid against a BM25-only index sees "mode=bm25" in the header
 // (capability downgrade is visible, not silent).
 func runSearch(ix *search.Index, args SearchArgs) (*sdk.CallToolResult, any, error) {
+	if len(args.Queries) > 0 {
+		return runSearchBulk(ix, args, nil, "", false)
+	}
 	return runSearchWithTelemetry(ix, args, nil, false, nil, "", false)
 }
 
@@ -510,14 +519,72 @@ func stripEnrichmentLabel(text string) string {
 // successful search (len(results) > 0). sourceRoot scopes file_chars
 // computation — file paths in results are joined to it before stat.
 func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query string, t search.Telemetry), includeInResponse bool, recorder UsageRecorder, sourceRoot string, warming bool) (*sdk.CallToolResult, any, error) {
-	requestedMode := ix.Mode()
-	if args.Mode != "" {
-		parsed, perr := search.ParseMode(args.Mode)
-		if perr != nil {
-			return errorResult(args.Output, perr.Error()), nil, nil
-		}
-		requestedMode = parsed
+	requestedMode, perr := parseRequestedMode(ix, args.Mode)
+	if perr != nil {
+		return errorResult(args.Output, perr.Error()), nil, nil
 	}
+	resp, tel, body := searchCore(ix, args, requestedMode, log != nil || includeInResponse, recorder, sourceRoot, warming)
+	if log != nil {
+		log(args.Query, tel)
+	}
+	if includeInResponse {
+		body += "\n\n" + formatTelemetryLine(tel)
+	}
+	return dispatchOutput(args.Output, resp, body)
+}
+
+// parseRequestedMode resolves the per-call mode override: empty ⇒ the index's
+// configured mode; otherwise the parsed override (error on an invalid string).
+func parseRequestedMode(ix *search.Index, modeStr string) (search.Mode, error) {
+	if modeStr == "" {
+		return ix.Mode(), nil
+	}
+	return search.ParseMode(modeStr)
+}
+
+// MaxBulkQueries bounds a single bulk `search` call so an agent passing a huge
+// `queries` list can't fan out unbounded work. Excess queries are dropped and
+// the response flags the truncation.
+const MaxBulkQueries = 20
+
+// runSearchBulk runs each of args.Queries through searchCore against the same
+// index/mode/filters and returns ONE combined response (a BulkSearchResponse in
+// JSON; per-query sections in markdown), saving an agent N round-trips.
+func runSearchBulk(ix *search.Index, args SearchArgs, recorder UsageRecorder, sourceRoot string, warming bool) (*sdk.CallToolResult, any, error) {
+	requestedMode, perr := parseRequestedMode(ix, args.Mode)
+	if perr != nil {
+		return errorResult(args.Output, perr.Error()), nil, nil
+	}
+	queries := args.Queries
+	dropped := 0
+	if len(queries) > MaxBulkQueries {
+		dropped = len(queries) - MaxBulkQueries
+		queries = queries[:MaxBulkQueries]
+	}
+	bulk := BulkSearchResponse{Queries: make([]SearchResponse, 0, len(queries))}
+	parts := make([]string, 0, len(queries)+1)
+	for _, q := range queries {
+		qa := args
+		qa.Queries = nil
+		qa.Query = q
+		resp, _, body := searchCore(ix, qa, requestedMode, false, recorder, sourceRoot, warming)
+		bulk.Queries = append(bulk.Queries, resp)
+		parts = append(parts, body)
+	}
+	if dropped > 0 {
+		bulk.Truncated = true
+		bulk.Dropped = dropped
+		parts = append(parts, fmt.Sprintf("_(bulk search capped at %d queries; %d dropped)_", MaxBulkQueries, dropped))
+	}
+	return dispatchOutput(args.Output, bulk, strings.Join(parts, "\n\n---\n\n"))
+}
+
+// searchCore runs one query and returns its structured response, telemetry, and
+// rendered markdown body — everything up to (not including) dispatchOutput. The
+// single-query (runSearchWithTelemetry) and bulk (runSearchBulk) paths share it.
+// requestedMode is pre-parsed; collectTel toggles the telemetry-instrumented
+// retrieval (single path when a caller wants telemetry; bulk always false).
+func searchCore(ix *search.Index, args SearchArgs, requestedMode search.Mode, collectTel bool, recorder UsageRecorder, sourceRoot string, warming bool) (SearchResponse, search.Telemetry, string) {
 	topK := args.TopK
 	if topK <= 0 {
 		topK = DefaultTopK
@@ -537,19 +604,15 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 	if hasFilters {
 		fetchK = min(topK*10, 200)
 	}
-	collect := log != nil || includeInResponse
 	var (
 		results       []search.Result
 		effectiveMode search.Mode
 		tel           search.Telemetry
 	)
-	if collect {
+	if collectTel {
 		results, effectiveMode, tel = ix.SearchModeWithTelemetry(args.Query, fetchK, requestedMode)
 	} else {
 		results, effectiveMode = ix.SearchMode(args.Query, fetchK, requestedMode)
-	}
-	if log != nil {
-		log(args.Query, tel)
 	}
 	// Apply filters and truncate. recall@filter is reported in the
 	// header (`X of Y results matched filters`) so callers can see
@@ -586,16 +649,14 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 		}
 	}
 	if len(results) == 0 {
+		resp.Results = []SearchResultRow{}
 		if hasFilters && rawCount > 0 {
-			md := fmt.Sprintf(
+			return resp, tel, fmt.Sprintf(
 				"No results match the filters (search returned %d candidate%s before filtering). "+
 					"Try removing or loosening languages / path_contains / exclude_path_contains.",
 				rawCount, pluralS(rawCount))
-			resp.Results = []SearchResultRow{}
-			return dispatchOutput(args.Output, resp, md)
 		}
-		resp.Results = []SearchResultRow{}
-		return dispatchOutput(args.Output, resp, "No results found.")
+		return resp, tel, "No results found."
 	}
 	// Token budget (max_tokens): fill the ranked list top-down and drop the
 	// tail once the estimated size would exceed the budget. Applied AFTER
@@ -637,10 +698,7 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 	if budgetNote != "" {
 		body += "\n\n" + budgetNote
 	}
-	if includeInResponse {
-		body += "\n\n" + formatTelemetryLine(tel)
-	}
-	return dispatchOutput(args.Output, resp, body)
+	return resp, tel, body
 }
 
 // applySearchFilters drops results whose file path doesn't satisfy
