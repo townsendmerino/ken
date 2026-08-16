@@ -382,13 +382,11 @@ func TestRepoBundle_LazyStructural(t *testing.T) {
 		}}
 		var wg sync.WaitGroup
 		for range 20 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				if got := b.StructuralIndex(context.Background()); got != sx {
 					t.Errorf("StructuralIndex() = %p, want %p", got, sx)
 				}
-			}()
+			})
 		}
 		wg.Wait()
 		if n := calls.Load(); n != 1 {

@@ -301,10 +301,7 @@ func (w *WatchedIndex) loop() {
 		}
 		delay := w.debounce
 		if remaining := maxDebounce - time.Since(firstDirty); remaining < delay {
-			delay = remaining
-			if delay < 0 {
-				delay = 0
-			}
+			delay = max(remaining, 0)
 		}
 		if timer == nil {
 			timer = time.NewTimer(delay)
@@ -456,15 +453,13 @@ func (w *WatchedIndex) loop() {
 			// bgWG.Wait()) awaits an in-flight flush before teardown —
 			// no flush goroutine writes w.ix after the cache reaps this
 			// index / rm -rf's a temp clone.
-			w.bgWG.Add(1)
-			go func() {
-				defer w.bgWG.Done()
+			w.bgWG.Go(func() {
 				w.flush(batch, batchResync)
 				select {
 				case flushDone <- struct{}{}:
 				default: // loop already gone (shutdown) — don't block
 				}
-			}()
+			})
 		case <-flushDone:
 			flushing = false
 			if len(dirty) > 0 {

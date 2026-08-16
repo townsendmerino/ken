@@ -367,7 +367,7 @@ func DecodeManifest(data []byte) (SnapshotManifest, error) {
 		return m, fmt.Errorf("%w: file count %d overruns buffer", ErrManifestCorrupt, numFiles)
 	}
 	m.Files = make([]FileStamp, 0, numFiles)
-	for i := uint32(0); i < numFiles; i++ {
+	for i := range numFiles {
 		file, n, err := binfmt.ReadLPStringAt(data[pos:])
 		if err != nil {
 			return m, fmt.Errorf("%w: file %d path: %v", ErrManifestCorrupt, i, err)

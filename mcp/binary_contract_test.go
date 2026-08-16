@@ -111,7 +111,7 @@ func TestBinary_StaysTokenizerFree(t *testing.T) {
 		if err != nil {
 			t.Fatalf("go list -deps %s: %v\n%s", pkg, err, out)
 		}
-		for _, dep := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		for dep := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
 			dep = strings.TrimSpace(dep)
 			for _, forbidden := range tokenizerForbiddenImports {
 				if strings.Contains(dep, forbidden) {

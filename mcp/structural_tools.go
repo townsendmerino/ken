@@ -496,10 +496,7 @@ func pageWindow(total, offset, limit, max int) (lo, hi int, truncated, overshot 
 		limit = max
 	}
 	lo = offset
-	hi = offset + limit
-	if hi > total {
-		hi = total
-	}
+	hi = min(offset+limit, total)
 	return lo, hi, hi < total, overshot
 }
 

@@ -792,10 +792,7 @@ func parallelTokenize(chunks []chunk.Chunk, docs [][]string, idxs []int) {
 	if n == 0 {
 		return
 	}
-	workers := runtime.NumCPU()
-	if workers > n {
-		workers = n
-	}
+	workers := min(runtime.NumCPU(), n)
 	if workers <= 1 || n < 64 {
 		for _, i := range idxs {
 			docs[i] = bm25.Tokenize(chunks[i].Text)
@@ -1053,7 +1050,7 @@ func (ix *Index) resolveMode(mode Mode) Mode {
 // k=n to collect all non-tombstoned (the rerank path truncates after re-scoring).
 func (ix *Index) collectResults(n, k int, at func(i int) (idx int, score float64)) []Result {
 	out := make([]Result, 0, k)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		idx, score := at(i)
 		c := ix.chunks[idx]
 		if c.Tombstoned {

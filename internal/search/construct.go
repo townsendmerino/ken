@@ -230,11 +230,9 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 	// Background warm goroutine, tracked so Close() waits for it and cancels it
 	// via wi.ctx.
 	if warm {
-		wi.bgWG.Add(1)
-		go func() {
-			defer wi.bgWG.Done()
+		wi.bgWG.Go(func() {
 			wi.warmCorpusInBackground(wi.ctx)
-		}()
+		})
 	}
 	return wi, nil
 }

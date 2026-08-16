@@ -87,7 +87,7 @@ func TestEviction(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = c.Close() }()
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		c.Put([]byte{byte('a' + i)}, []float32{float32(i)})
 	}
 	// Puts buffer in memory; force a flush (which evicts) to hit the store.
@@ -104,7 +104,7 @@ func TestEviction(t *testing.T) {
 	// Which 3 survive is unspecified within a single batched flush (map order);
 	// the guarantee is the size bound. Exactly 3 of the 6 must remain.
 	remaining := 0
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		if _, ok := c.Get([]byte{byte('a' + i)}); ok {
 			remaining++
 		}

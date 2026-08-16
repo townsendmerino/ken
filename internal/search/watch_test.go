@@ -615,9 +615,7 @@ func TestWatchedIndex_DeleteWhileReading_NoRace(t *testing.T) {
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -627,7 +625,7 @@ func TestWatchedIndex_DeleteWhileReading_NoRace(t *testing.T) {
 					wi.ResolveChunk("a.py", 1)
 				}
 			}
-		}()
+		})
 	}
 
 	// Delete a.py (tombstone) and churn b.py — reconcile runs the mutation
@@ -831,7 +829,7 @@ func TestWatchedIndex_AsyncFlush_BackToBack(t *testing.T) {
 	wi.SetOnSwap(swaps)
 	drainSwaps(swaps)
 
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		name := filepath.Join(root, "gen"+string(rune('A'+i))+".py")
 		body := "def gen" + string(rune('A'+i)) + "():\n    return " + string(rune('0'+i)) + "\n"
 		if err := os.WriteFile(name, []byte(body), 0o644); err != nil {

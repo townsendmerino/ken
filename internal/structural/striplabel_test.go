@@ -33,7 +33,7 @@ func TestStripLabel_Idempotent(t *testing.T) {
 	label := "# ken: func: handler | calls: ok\n"
 	body := "def handler(req):\n    return 1\n"
 	text := body
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		text = label + StripLabel(text) // simulate the warm pass each boot
 	}
 	if want := label + body; text != want {

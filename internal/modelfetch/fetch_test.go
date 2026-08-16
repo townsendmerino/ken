@@ -298,7 +298,7 @@ func fakeHFXet(t *testing.T, files map[string][]byte) *httptest.Server {
 	const xetBlockHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if name := strings.TrimPrefix(r.URL.Path, "/xet-cas/"); name != r.URL.Path {
+		if name, ok := strings.CutPrefix(r.URL.Path, "/xet-cas/"); ok {
 			body, ok := files[name]
 			if !ok {
 				http.Error(w, "no such object", http.StatusNotFound)
