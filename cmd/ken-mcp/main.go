@@ -465,141 +465,21 @@ func main() {
 	// calls wix.Close() before invoking the user cleanup, so a live
 	// build's watcher fds drop before the temp clone dir is rm-rf'd
 	// (Close() is a no-op for the static pre-built case).
-	builder := func(ctx context.Context, source string) (*kenmcp.RepoBundle, func(), error) {
-		var dir string
-		var cleanup func()
-		if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
-			logger.Logf(kenmcp.LogInfo, "cloning %s", source)
-			d, c, err := kenmcp.CloneShallow(ctx, source)
-			if err != nil {
-				return nil, nil, err
-			}
-			dir, cleanup = d, c
-		} else {
-			dir = source
-		}
-		// Local-path repos only: an http source is a throwaway temp clone
-		// (cleanup != nil) that's rm-rf'd on eviction, so .ken/ persistence
-		// (snapshot, embed cache) there is wasted work.
-		isLocal := cleanup == nil
-		bMode, bModeStr, bModelDir := bs.snapshot()
-
-		// M3 embed cache (opt-in): only useful when embedding is used
-		// (semantic/hybrid) on a local repo.
-		var embedCache *embedcache.Cache
-		if embedCacheEnabled && isLocal && bMode != search.ModeBM25 {
-			_ = os.MkdirAll(filepath.Join(dir, ".ken"), 0o755)
-			fp := search.ModelFingerprintFromDir(bModelDir)
-			if c, cErr := embedcache.Open(filepath.Join(dir, ".ken", "embed.db"), fp, 0, embedCacheMax); cErr != nil {
-				logger.Logf(kenmcp.LogWarn, "embed cache disabled for %s (%v)", dir, cErr)
-			} else {
-				embedCache = c
-				logger.Logf(kenmcp.LogInfo, "embed cache on for %s (.ken/embed.db)", dir)
-			}
-		}
-		// Fold the cache close into the eviction cleanup — only when there's a
-		// cache, so cleanup stays nil for a plain local repo (keeps the
-		// downstream `cleanup != nil` checks meaningful).
-		if embedCache != nil {
-			origCleanup := cleanup
-			cleanup = func() {
-				_ = embedCache.Close()
-				if origCleanup != nil {
-					origCleanup()
-				}
-			}
-		}
-
-		fsOpts := search.FSOptions{
-			DisableFoldMigrations: noAutoMigrations,
-			LogWriter:             os.Stderr,
-			LazyEnrichment:        lazyEnrich,
-			StagedEmbedding:       staged,
-		}
-		// Assign the interface only when non-nil so a nil *Cache doesn't become
-		// a non-nil VecCache holding a nil pointer.
-		if embedCache != nil {
-			fsOpts.EmbedCache = embedCache
-		}
-		persistSnapshot := snapshotEnabled && isLocal
-		ix, err := loadOrBuildWatched(ctx, dir, bMode, bModeStr, chunker, bModelDir, fsOpts, persistSnapshot, logger)
-		if err != nil {
-			if cleanup != nil {
-				cleanup()
-			}
-			return nil, nil, err
-		}
-		// M5: attach the boot-time NeuralReranker (if any) to this
-		// WatchedIndex. The same instance is shared across every repo's
-		// WatchedIndex AND survives the watcher's snapshot republishes,
-		// so the content-hash LRU stays warm regardless of file churn or
-		// switching between repos.
-		if lazyReranker != nil {
-			ix.SetReranker(lazyReranker, rerankerOptions...)
-		}
-		// Tier-2 self-heal (audit db/mcp §1): if this is the pinned default
-		// repo and the Refresher has published DB chunks, re-apply them so a
-		// rebuild after LRU eviction inherits the schema chunks instead of
-		// serving FS-only. No-op on the very first build (holder empty) and
-		// for every non-default repo.
-		if dbDefaultKey != "" && source == dbDefaultKey {
-			if extras := dbExtrasHolder.load(); len(extras) > 0 {
-				ix.SetExtraChunks(extras)
-				logger.Logf(kenmcp.LogInfo, "Tier 2: re-applied %d DB chunks to rebuilt default repo %q", len(extras), dir)
-			}
-		}
-		// Log reindex activity at info-level so warn-default runs stay
-		// quiet but `KEN_MCP_LOG_LEVEL=info` shows agents the file
-		// watcher is doing its job. Stays on stderr (never stdout, the
-		// MCP JSON-RPC channel).
-		ix.SetOnFlush(func(msg string) {
-			logger.Logf(kenmcp.LogInfo, "%s: %s", dir, msg)
-			// M1 (ADR-039): a flush changed the corpus — re-persist the
-			// snapshot so a restart after edits loads the latest, not a
-			// stale one. Best-effort (writeSnapshot never fails the server);
-			// runs in the watcher goroutine, off the query path.
-			if persistSnapshot {
-				writeSnapshot(dir, ix, bMode, chunker, bModelDir, fsOpts, logger)
-			}
-			// M2: a flush rebuilds the index snapshot, leaving the old
-			// corpus/postings/vectors as garbage. Hand the freed pages
-			// back to the OS so a long-lived idle server doesn't sit on
-			// ~2× the live heap. App-layer only (see gc.go).
-			debug.FreeOSMemory()
-		})
-
-		// Stage 8: LAZY structural-index build (cold-start M0). The
-		// structural symbol index tree-sitter-parses every file — the
-		// same per-file parse the enrichment pass already paid for, so
-		// building it eagerly here doubled the cold-start parse cost
-		// (measured ~50% of index time on PHP corpora, M0 findings) for
-		// a symbol index most sessions never query. Wire a builder
-		// instead and let RepoBundle.StructuralIndex() build it on the
-		// first definition/references/callers/outline/symbols call. On
-		// failure (unsupported language, parse errors) it returns nil
-		// and the Track 2 tools degrade to a clear "no structural index
-		// available" message.
-		structuralBuilder := func(ctx context.Context) (*structural.Index, error) {
-			six, sErr := structural.BuildWithContext(ctx, dir)
-			if sErr != nil {
-				logger.Logf(kenmcp.LogWarn, "structural index build failed for %s: %v "+
-					"(track 2 tools will report no structure available; will retry on next call)", dir, sErr)
-				return nil, sErr
-			}
-			stats := six.Stats()
-			logger.Logf(kenmcp.LogInfo,
-				"structural index built (lazy, first use) for %s: %d files, %d symbols, %d unique callees",
-				dir, stats.IndexedFiles, stats.UniqueSymbols, stats.UniqueCallees)
-			return six, nil
-		}
-
-		// M2: the initial chunk+embed build is the biggest transient-memory
-		// spike in the process lifetime. Return the freed pages to the OS
-		// now that the snapshot is published, so idle RSS settles near the
-		// live index size instead of the build high-water.
-		debug.FreeOSMemory()
-		return &kenmcp.RepoBundle{Index: ix, StructuralBuilder: structuralBuilder}, cleanup, nil
-	}
+	builder := (&repoBuilder{
+		logger:            logger,
+		bs:                bs,
+		chunker:           chunker,
+		embedCacheEnabled: embedCacheEnabled,
+		embedCacheMax:     embedCacheMax,
+		snapshotEnabled:   snapshotEnabled,
+		noAutoMigrations:  noAutoMigrations,
+		lazyEnrich:        lazyEnrich,
+		staged:            staged,
+		lazyReranker:      lazyReranker,
+		rerankerOptions:   rerankerOptions,
+		dbDefaultKey:      dbDefaultKey,
+		dbExtras:          dbExtrasHolder,
+	}).Build
 
 	cache := kenmcp.NewCache(size, builder)
 
@@ -815,6 +695,173 @@ func main() {
 			os.Exit(0)
 		}
 	}
+}
+
+// repoBuilder carries the startup config the cache Builder closes over, so the
+// per-repo build is a named, testable Build() method instead of the ~15-variable
+// capture it used to be inline in main. Mirrors rerankerLoader, which did the
+// same for the reranker load. Build has the kenmcp.Builder signature; main
+// passes rb.Build to NewCache.
+type repoBuilder struct {
+	logger            *kenmcp.Logger
+	bs                *buildState
+	chunker           string
+	embedCacheEnabled bool
+	embedCacheMax     int
+	snapshotEnabled   bool
+	noAutoMigrations  bool
+	lazyEnrich        bool
+	staged            bool
+	lazyReranker      *search.LazyReranker
+	rerankerOptions   []search.RerankerOption
+	dbDefaultKey      string    // normalized cache key the DB extras attach to ("" ⇒ none)
+	dbExtras          *dbExtras // shared holder the Refresher publishes DB chunks into
+}
+
+// Build is the kenmcp.Builder: clone http(s) URLs to a temp dir; index local
+// paths in-place. mcp.NormalizeKey hands either a canonical URL or an absolute
+// path — the scheme prefix discriminates here.
+//
+// v0.3: returns *search.WatchedIndex. A live build watches (the in-process LRU
+// otherwise serves stale results when an agent edits files mid-session); a
+// pre-built index (ADR-024, <dir>/.ken/index.bin) is served frozen with no
+// watcher via loadOrBuildWatched. The cache calls wix.Close() before invoking
+// the user cleanup, so a live build's watcher fds drop before the temp clone
+// dir is rm-rf'd (Close() is a no-op for the static pre-built case).
+func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBundle, func(), error) {
+	var dir string
+	var cleanup func()
+	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+		rb.logger.Logf(kenmcp.LogInfo, "cloning %s", source)
+		d, c, err := kenmcp.CloneShallow(ctx, source)
+		if err != nil {
+			return nil, nil, err
+		}
+		dir, cleanup = d, c
+	} else {
+		dir = source
+	}
+	// Local-path repos only: an http source is a throwaway temp clone
+	// (cleanup != nil) that's rm-rf'd on eviction, so .ken/ persistence
+	// (snapshot, embed cache) there is wasted work.
+	isLocal := cleanup == nil
+	bMode, bModeStr, bModelDir := rb.bs.snapshot()
+
+	// M3 embed cache (opt-in): only useful when embedding is used
+	// (semantic/hybrid) on a local repo.
+	var embedCache *embedcache.Cache
+	if rb.embedCacheEnabled && isLocal && bMode != search.ModeBM25 {
+		_ = os.MkdirAll(filepath.Join(dir, ".ken"), 0o755)
+		fp := search.ModelFingerprintFromDir(bModelDir)
+		if c, cErr := embedcache.Open(filepath.Join(dir, ".ken", "embed.db"), fp, 0, rb.embedCacheMax); cErr != nil {
+			rb.logger.Logf(kenmcp.LogWarn, "embed cache disabled for %s (%v)", dir, cErr)
+		} else {
+			embedCache = c
+			rb.logger.Logf(kenmcp.LogInfo, "embed cache on for %s (.ken/embed.db)", dir)
+		}
+	}
+	// Fold the cache close into the eviction cleanup — only when there's a
+	// cache, so cleanup stays nil for a plain local repo (keeps the
+	// downstream `cleanup != nil` checks meaningful).
+	if embedCache != nil {
+		origCleanup := cleanup
+		cleanup = func() {
+			_ = embedCache.Close()
+			if origCleanup != nil {
+				origCleanup()
+			}
+		}
+	}
+
+	fsOpts := search.FSOptions{
+		DisableFoldMigrations: rb.noAutoMigrations,
+		LogWriter:             os.Stderr,
+		LazyEnrichment:        rb.lazyEnrich,
+		StagedEmbedding:       rb.staged,
+	}
+	// Assign the interface only when non-nil so a nil *Cache doesn't become
+	// a non-nil VecCache holding a nil pointer.
+	if embedCache != nil {
+		fsOpts.EmbedCache = embedCache
+	}
+	persistSnapshot := rb.snapshotEnabled && isLocal
+	ix, err := loadOrBuildWatched(ctx, dir, bMode, bModeStr, rb.chunker, bModelDir, fsOpts, persistSnapshot, rb.logger)
+	if err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, nil, err
+	}
+	// M5: attach the boot-time NeuralReranker (if any) to this
+	// WatchedIndex. The same instance is shared across every repo's
+	// WatchedIndex AND survives the watcher's snapshot republishes,
+	// so the content-hash LRU stays warm regardless of file churn or
+	// switching between repos.
+	if rb.lazyReranker != nil {
+		ix.SetReranker(rb.lazyReranker, rb.rerankerOptions...)
+	}
+	// Tier-2 self-heal (audit db/mcp §1): if this is the pinned default
+	// repo and the Refresher has published DB chunks, re-apply them so a
+	// rebuild after LRU eviction inherits the schema chunks instead of
+	// serving FS-only. No-op on the very first build (holder empty) and
+	// for every non-default repo.
+	if rb.dbDefaultKey != "" && source == rb.dbDefaultKey {
+		if extras := rb.dbExtras.load(); len(extras) > 0 {
+			ix.SetExtraChunks(extras)
+			rb.logger.Logf(kenmcp.LogInfo, "Tier 2: re-applied %d DB chunks to rebuilt default repo %q", len(extras), dir)
+		}
+	}
+	// Log reindex activity at info-level so warn-default runs stay
+	// quiet but `KEN_MCP_LOG_LEVEL=info` shows agents the file
+	// watcher is doing its job. Stays on stderr (never stdout, the
+	// MCP JSON-RPC channel).
+	ix.SetOnFlush(func(msg string) {
+		rb.logger.Logf(kenmcp.LogInfo, "%s: %s", dir, msg)
+		// M1 (ADR-039): a flush changed the corpus — re-persist the
+		// snapshot so a restart after edits loads the latest, not a
+		// stale one. Best-effort (writeSnapshot never fails the server);
+		// runs in the watcher goroutine, off the query path.
+		if persistSnapshot {
+			writeSnapshot(dir, ix, bMode, rb.chunker, bModelDir, fsOpts, rb.logger)
+		}
+		// M2: a flush rebuilds the index snapshot, leaving the old
+		// corpus/postings/vectors as garbage. Hand the freed pages
+		// back to the OS so a long-lived idle server doesn't sit on
+		// ~2× the live heap. App-layer only (see gc.go).
+		debug.FreeOSMemory()
+	})
+
+	// Stage 8: LAZY structural-index build (cold-start M0). The
+	// structural symbol index tree-sitter-parses every file — the
+	// same per-file parse the enrichment pass already paid for, so
+	// building it eagerly here doubled the cold-start parse cost
+	// (measured ~50% of index time on PHP corpora, M0 findings) for
+	// a symbol index most sessions never query. Wire a builder
+	// instead and let RepoBundle.StructuralIndex() build it on the
+	// first definition/references/callers/outline/symbols call. On
+	// failure (unsupported language, parse errors) it returns nil
+	// and the Track 2 tools degrade to a clear "no structural index
+	// available" message.
+	structuralBuilder := func(ctx context.Context) (*structural.Index, error) {
+		six, sErr := structural.BuildWithContext(ctx, dir)
+		if sErr != nil {
+			rb.logger.Logf(kenmcp.LogWarn, "structural index build failed for %s: %v "+
+				"(track 2 tools will report no structure available; will retry on next call)", dir, sErr)
+			return nil, sErr
+		}
+		stats := six.Stats()
+		rb.logger.Logf(kenmcp.LogInfo,
+			"structural index built (lazy, first use) for %s: %d files, %d symbols, %d unique callees",
+			dir, stats.IndexedFiles, stats.UniqueSymbols, stats.UniqueCallees)
+		return six, nil
+	}
+
+	// M2: the initial chunk+embed build is the biggest transient-memory
+	// spike in the process lifetime. Return the freed pages to the OS
+	// now that the snapshot is published, so idle RSS settles near the
+	// live index size instead of the build high-water.
+	debug.FreeOSMemory()
+	return &kenmcp.RepoBundle{Index: ix, StructuralBuilder: structuralBuilder}, cleanup, nil
 }
 
 // startupMode is the effective serving configuration resolved by
