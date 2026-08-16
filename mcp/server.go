@@ -250,7 +250,9 @@ func NewServer(cfg Config) *sdk.Server {
 			"function / class / method; method results carry their qualified `Type.method` " +
 			"form in parentheses so an agent can disambiguate when the bare name lives on " +
 			"multiple types. Collisions return all sites in alphabetical-by-file order; " +
-			"ordering does NOT reflect confidence ranking.",
+			"ordering does NOT reflect confidence ranking. Each result carries the " +
+			"definition's start `line`, so you can pass (file, line) straight to " +
+			"`find_related` without reading the file first.",
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args DefinitionArgs) (*sdk.CallToolResult, any, error) {
 		// The first structural call builds the whole-corpus symbol index,
 		// which can take tens of seconds on a large polyglot repo (audit

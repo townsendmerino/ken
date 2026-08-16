@@ -125,6 +125,7 @@ func handleDefinition(ctx context.Context, cfg *Config, args DefinitionArgs) (*s
 		}
 		resp.Definitions = append(resp.Definitions, DefinitionRowOut{
 			File:  s.File,
+			Line:  s.Line,
 			Kind:  kindLabel(s.Kind),
 			QName: qname,
 		})
@@ -139,10 +140,14 @@ func renderDefinitionMarkdown(r DefinitionResponse) string {
 		fmt.Fprintf(&b, "_%d sites — name resolved by identifier, not type. Ambiguous; results ordered alphabetically by file path. Method sites carry their qualified `Type.method` form in parentheses._\n\n", len(r.Definitions))
 	}
 	for i, d := range r.Definitions {
+		loc := d.File
+		if d.Line > 0 {
+			loc = fmt.Sprintf("%s:%d", d.File, d.Line)
+		}
 		if d.Kind == "method" && d.QName != "" {
-			fmt.Fprintf(&b, "%d. **%s** — method (%s)\n", i+1, d.File, d.QName)
+			fmt.Fprintf(&b, "%d. **%s** — method (%s)\n", i+1, loc, d.QName)
 		} else {
-			fmt.Fprintf(&b, "%d. **%s** — %s\n", i+1, d.File, d.Kind)
+			fmt.Fprintf(&b, "%d. **%s** — %s\n", i+1, loc, d.Kind)
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")

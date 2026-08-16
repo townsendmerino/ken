@@ -118,6 +118,46 @@ type DefinitionSite struct {
 	File  string
 	Kind  DefinitionKind
 	QName string // qualified Type.method name; empty for non-methods
+	// Line is the 1-based line the definition starts on, or 0 when the
+	// extractor didn't record a span. Lets an agent chain `definition`
+	// straight into `find_related` (which needs a line) without a
+	// read-the-file round-trip in between.
+	Line int
+}
+
+// defStartLine returns the 1-based start line of the definition named `name`
+// of `kind` in fs, or 0 if fs is nil, the span wasn't recorded, or no match is
+// found. For methods, enclosingClass narrows to a specific class ("" matches
+// any). `name` is the bare name (for a method, the method name, not the
+// qualified Type.method form).
+func defStartLine(fs *FileStruct, name string, kind DefinitionKind, enclosingClass string) int {
+	if fs == nil {
+		return 0
+	}
+	if kind == DefinitionKindClass {
+		for _, c := range fs.Classes {
+			if c.Name == name {
+				return c.StartLine
+			}
+		}
+		return 0
+	}
+	for _, f := range fs.Functions {
+		if f.Name != name {
+			continue
+		}
+		if kind == DefinitionKindMethod && !f.IsMethod {
+			continue
+		}
+		if kind == DefinitionKindFunction && f.IsMethod {
+			continue
+		}
+		if enclosingClass != "" && f.EnclosingClass != enclosingClass {
+			continue
+		}
+		return f.StartLine
+	}
+	return 0
 }
 
 // DefinitionKind tags what kind of definition was found at a site.
@@ -169,12 +209,14 @@ func (ix *Index) Definition(name string) []DefinitionSite {
 	// literal text happens to contain a dot (which can't happen in
 	// any of Stage 8 v0's supported grammars, but is defensive).
 	if dot := indexOfDot(name); dot >= 0 {
+		enclosing, method := name[:dot], name[dot+1:]
 		var out []DefinitionSite
 		for _, f := range ix.methods[name] {
 			out = append(out, DefinitionSite{
 				File:  f,
 				Kind:  DefinitionKindMethod,
 				QName: name,
+				Line:  defStartLine(ix.files[f], method, DefinitionKindMethod, enclosing),
 			})
 		}
 		return out
@@ -189,7 +231,14 @@ func (ix *Index) Definition(name string) []DefinitionSite {
 		file string
 		kind DefinitionKind
 	}
-	seen := make(map[key]string) // (file, kind) → QName (empty for non-methods)
+	type siteInfo struct {
+		qname string // qualified Type.method form; empty for non-methods
+		line  int    // 1-based start line, 0 if unrecorded
+	}
+	// Keyed on (file, kind) only — the line rides in the value so it doesn't
+	// change the dedup identity (two same-name methods in one file still
+	// collapse to one site, first wins).
+	seen := make(map[key]siteInfo)
 	var ordered []key
 
 	// Top-level defs first. Kind is Function unless the file's
@@ -206,7 +255,7 @@ func (ix *Index) Definition(name string) []DefinitionSite {
 		}
 		k := key{file: f, kind: kind}
 		if _, dup := seen[k]; !dup {
-			seen[k] = ""
+			seen[k] = siteInfo{line: defStartLine(ix.files[f], name, kind, "")}
 			ordered = append(ordered, k)
 		}
 	}
@@ -243,7 +292,7 @@ func (ix *Index) Definition(name string) []DefinitionSite {
 			// EnclosingClass wins under that collision —
 			// acceptable for v0; could split later.
 			if _, dup := seen[k]; !dup {
-				seen[k] = qname
+				seen[k] = siteInfo{qname: qname, line: fn.StartLine}
 				ordered = append(ordered, k)
 			}
 		}
@@ -267,7 +316,8 @@ func (ix *Index) Definition(name string) []DefinitionSite {
 		out = append(out, DefinitionSite{
 			File:  k.file,
 			Kind:  k.kind,
-			QName: seen[k],
+			QName: seen[k].qname,
+			Line:  seen[k].line,
 		})
 	}
 	return out

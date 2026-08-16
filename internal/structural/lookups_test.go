@@ -221,6 +221,47 @@ func TestDefinition(t *testing.T) {
 	}
 }
 
+// TestDefinition_Line pins the line numbers threaded through DefinitionSite so
+// `definition` chains straight into `find_related` without a read-the-file
+// round-trip. Covers a top-level function, a class, and both bare + qualified
+// method lookups.
+func TestDefinition_Line(t *testing.T) {
+	dir := t.TempDir()
+	// Blank first lines put each definition on a known, non-1 line so a
+	// hard-coded 0 or 1 wouldn't accidentally pass.
+	src := "\n\ndef top():\n    pass\n\n\nclass User:\n    def login(self):\n        pass\n"
+	// lines: 1,2 blank · 3 def top · 4 pass · 5,6 blank · 7 class User · 8 def login · 9 pass
+	if err := os.WriteFile(filepath.Join(dir, "a.py"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	top := ix.Definition("top")
+	if len(top) != 1 || top[0].Line != 3 {
+		t.Fatalf("Definition(top) = %+v, want one site at line 3", top)
+	}
+
+	cls := ix.Definition("User")
+	if len(cls) != 1 || cls[0].Kind != DefinitionKindClass || cls[0].Line != 7 {
+		t.Fatalf("Definition(User) = %+v, want one class site at line 7", cls)
+	}
+
+	// Bare method lookup carries the method's own line, not the class's.
+	m := ix.Definition("login")
+	if len(m) != 1 || m[0].Kind != DefinitionKindMethod || m[0].Line != 8 {
+		t.Fatalf("Definition(login) = %+v, want one method site at line 8", m)
+	}
+
+	// Qualified lookup resolves the same line.
+	qm := ix.Definition("User.login")
+	if len(qm) != 1 || qm[0].Line != 8 {
+		t.Fatalf("Definition(User.login) = %+v, want one site at line 8", qm)
+	}
+}
+
 func TestOutline(t *testing.T) {
 	dir := t.TempDir()
 	src := `

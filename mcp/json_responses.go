@@ -88,7 +88,11 @@ type DefinitionResponse struct {
 // QName is the qualified name for method sites (e.g. "User.Login")
 // and empty for top-level definitions.
 type DefinitionRowOut struct {
-	File  string `json:"file"`
+	File string `json:"file"`
+	// Line is the 1-based line the definition starts on (0 if the extractor
+	// didn't record a span). Pass (file, line) straight to `find_related` — no
+	// intermediate read-the-file round-trip needed.
+	Line  int    `json:"line,omitempty"`
 	Kind  string `json:"kind"`
 	QName string `json:"qname,omitempty"`
 }
