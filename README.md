@@ -164,7 +164,9 @@ runtime/             # Yii runtime cache + logs
 
 Semantics: **union with `.gitignore`** (a path is excluded if either ignores it), evaluated independently so a `!negation` in one file can't re-include what the other excluded. `.kenignore` is **default-on** — a repo without one behaves exactly as before. For a drop-in migration from semble, ken also honors **`.sembleignore`** as a fallback when no `.kenignore` is present (`.kenignore` wins if both exist). On large committed-artifact monorepos this is the single biggest lever on index size, cold-start time, and memory. See [ADR-038](docs/internal/DECISIONS.md#adr-038-kenignore--sembleignore-ignore-file-parity).
 
-Even without a `.kenignore`, ken automatically skips files over `KEN_MAX_FILE_BYTES` (2 MiB) and **minified/generated files** (very long average line length — built bundles, single-line JSON) via `KEN_MAX_AVG_LINE_BYTES`. `.kenignore` is for the repo-specific paths those heuristics don't catch.
+Even without a `.kenignore`, ken automatically skips files over `KEN_MAX_FILE_BYTES` (2 MiB) and **minified files** (very long average line length — built bundles, single-line JSON) via `KEN_MAX_AVG_LINE_BYTES`. `.kenignore` is for the repo-specific paths those heuristics don't catch.
+
+**Generated-code skip (opt-in).** Set `KEN_SKIP_GENERATED=1` to also skip files whose header carries a machine-generated marker — `@generated`, or a `Code generated … DO NOT EDIT` banner (protobuf stubs, `client-go` listers, `stringer`/`mockgen` output). This catches generated *source* that looks normal to the minified heuristic. Off by default, because some corpora legitimately want their generated surface searchable (an agent asking "where's the typed client for X" wants that generated file). Honored on both the initial index and the live watch.
 
 ## How it works
 
