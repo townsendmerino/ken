@@ -9,11 +9,10 @@
 // benchstat + ad-hoc shell tooling). Optional pprof profiles land at
 // the path given by --cpuprofile / --memprofile.
 //
-// pprof helpers are inlined in this file rather than abstracted into
-// internal/perf — start/stop is two lines (pprof.StartCPUProfile(f) +
-// defer pprof.StopCPUProfile()), and wrapping that in a helper would
-// add an abstraction without payoff. Documented this judgment call
-// in the briefing back to the planning Claude.
+// The pprof create+start+error-handling blocks (~10 lines each, not the
+// "two lines" an earlier note claimed) were duplicated verbatim across the
+// perf subcommands, so they're factored into startCPUProfile / writeHeapProfile
+// below — a fix now lands in one place, not two.
 package main
 
 import (
@@ -69,6 +68,48 @@ func buildMeta(mode, chunker, modelDir string) perfMeta {
 		GOARCH:     runtime.GOARCH,
 		GOMAXPROCS: runtime.GOMAXPROCS(0),
 	}
+}
+
+// startCPUProfile begins a CPU profile to path, or is a no-op when path=="".
+// Returns a stop func to defer (stops the profile + closes the file) and ok;
+// on failure it prints to stderr and returns ok=false so the caller can
+// `return 1`. Shared by the perf subcommands (was inlined identically in each).
+func startCPUProfile(path string) (stop func(), ok bool) {
+	if path == "" {
+		return func() {}, true
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: --cpuprofile: "+err.Error())
+		return nil, false
+	}
+	if err := pprof.StartCPUProfile(f); err != nil {
+		fmt.Fprintln(os.Stderr, "ken: pprof.StartCPUProfile: "+err.Error())
+		_ = f.Close()
+		return nil, false
+	}
+	return func() { pprof.StopCPUProfile(); _ = f.Close() }, true
+}
+
+// writeHeapProfile writes a heap profile to path (no-op when path==""), forcing
+// a GC first per pprof convention so it reflects live objects. Prints + returns
+// false on failure. Shared by the perf subcommands.
+func writeHeapProfile(path string) bool {
+	if path == "" {
+		return true
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: --memprofile: "+err.Error())
+		return false
+	}
+	defer f.Close()
+	runtime.GC()
+	if err := pprof.WriteHeapProfile(f); err != nil {
+		fmt.Fprintln(os.Stderr, "ken: pprof.WriteHeapProfile: "+err.Error())
+		return false
+	}
+	return true
 }
 
 func cmdPerf(args []string) int {
@@ -150,19 +191,11 @@ func cmdPerfIndex(args []string) int {
 	}
 
 	// CPU profile wraps just the index build — the work we want to attribute.
-	if cpuProfile != "" {
-		f, err := os.Create(cpuProfile)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ken: --cpuprofile: "+err.Error())
-			return 1
-		}
-		defer f.Close()
-		if err := pprof.StartCPUProfile(f); err != nil {
-			fmt.Fprintln(os.Stderr, "ken: pprof.StartCPUProfile: "+err.Error())
-			return 1
-		}
-		defer pprof.StopCPUProfile()
+	cpuStop, ok := startCPUProfile(cpuProfile)
+	if !ok {
+		return 1
 	}
+	defer cpuStop()
 
 	// Force a GC so the alloc baseline is from a stable starting point —
 	// otherwise the delta picks up whatever was accumulating during
@@ -324,19 +357,11 @@ func cmdPerfSearch(args []string) int {
 	indexMs := float64(time.Since(indexStart).Microseconds()) / 1000.0
 
 	// CPU profile wraps just the search loop (not the index build).
-	if cpuProfile != "" {
-		f, err := os.Create(cpuProfile)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ken: --cpuprofile: "+err.Error())
-			return 1
-		}
-		defer f.Close()
-		if err := pprof.StartCPUProfile(f); err != nil {
-			fmt.Fprintln(os.Stderr, "ken: pprof.StartCPUProfile: "+err.Error())
-			return 1
-		}
-		defer pprof.StopCPUProfile()
+	cpuStop, ok := startCPUProfile(cpuProfile)
+	if !ok {
+		return 1
 	}
+	defer cpuStop()
 
 	// Cycle through queries until we've collected nTarget samples. If the
 	// file already has >= nTarget queries we still iterate exactly nTarget
@@ -353,18 +378,8 @@ func cmdPerfSearch(args []string) int {
 	}
 	allocDelta := allocStart.Delta()
 
-	if memProfile != "" {
-		f, err := os.Create(memProfile)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ken: --memprofile: "+err.Error())
-			return 1
-		}
-		defer f.Close()
-		runtime.GC()
-		if err := pprof.WriteHeapProfile(f); err != nil {
-			fmt.Fprintln(os.Stderr, "ken: pprof.WriteHeapProfile: "+err.Error())
-			return 1
-		}
+	if !writeHeapProfile(memProfile) {
+		return 1
 	}
 
 	rec := perfSearchRecord{

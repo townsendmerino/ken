@@ -80,27 +80,11 @@ func splitStatements(source []byte) []statement {
 			continue
 		}
 
-		// Block comment (with nesting).
+		// Block comment (possibly nested).
 		if c == '/' && i+1 < n && source[i+1] == '*' {
-			depth := 1
-			j := i + 2
-			for j < n && depth > 0 {
-				if j+1 < n && source[j] == '/' && source[j+1] == '*' {
-					depth++
-					j += 2
-					continue
-				}
-				if j+1 < n && source[j] == '*' && source[j+1] == '/' {
-					depth--
-					j += 2
-					continue
-				}
-				if source[j] == '\n' {
-					curLine++
-				}
-				j++
-			}
-			i = j
+			var nl int
+			i, nl = skipBlockComment(source, i)
+			curLine += nl
 			continue
 		}
 
@@ -194,6 +178,36 @@ func splitStatements(source []byte) []statement {
 	}
 
 	return out
+}
+
+// skipBlockComment returns the byte index just past a possibly-NESTED
+// `/* ... */` block starting at source[i] (i points at the opening `/`, with
+// source[i+1]=='*'), plus how many '\n' the block spanned (for line tracking).
+// Shared by splitStatements and tokenize so the block-comment rule lives in one
+// place, matching the file's skip*Quoted factoring. Unterminated returns
+// len(source). (tokenize previously did a single-level skip; routing it here
+// makes its pre-keyword comment skip handle nesting correctly too.)
+func skipBlockComment(source []byte, i int) (newI, newlines int) {
+	n := len(source)
+	depth := 1
+	j := i + 2
+	for j < n && depth > 0 {
+		if j+1 < n && source[j] == '/' && source[j+1] == '*' {
+			depth++
+			j += 2
+			continue
+		}
+		if j+1 < n && source[j] == '*' && source[j+1] == '/' {
+			depth--
+			j += 2
+			continue
+		}
+		if source[j] == '\n' {
+			newlines++
+		}
+		j++
+	}
+	return j, newlines
 }
 
 // skipSingleQuoted returns the byte index just past the closing quote
@@ -376,14 +390,9 @@ func firstKeywords(body []byte, max int) []string {
 			}
 			continue
 		}
-		// Skip block comment (single-level; nested handled by splitter
-		// already, but a defensive single-level skip here is harmless).
+		// Skip block comment (shared, nesting-aware helper).
 		if c == '/' && i+1 < n && body[i+1] == '*' {
-			i += 2
-			for i+1 < n && !(body[i] == '*' && body[i+1] == '/') {
-				i++
-			}
-			i += 2
+			i, _ = skipBlockComment(body, i)
 			continue
 		}
 		// Word start.

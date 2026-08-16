@@ -130,3 +130,14 @@ func TestFilterSchema_UnknownEngineKeepsUserSemantics(t *testing.T) {
 		t.Errorf("unknown engine + deny-list should keep non-denied names")
 	}
 }
+
+// TestMySQLSchemaFragmentMatchesMap guards the single-source invariant: the
+// SQL `NOT IN (...)` fragment in mysql.go is derived from mysqlSystemSchemas, so
+// editing the map must keep producing the same clause the queries expect. If the
+// map changes, this fails and forces a conscious update.
+func TestMySQLSchemaFragmentMatchesMap(t *testing.T) {
+	want := "('information_schema', 'mysql', 'performance_schema', 'sys')"
+	if mysqlSystemSchemaSQLParen != want {
+		t.Fatalf("mysqlSystemSchemaSQLParen = %q, want %q (map/SQL policy drift)", mysqlSystemSchemaSQLParen, want)
+	}
+}

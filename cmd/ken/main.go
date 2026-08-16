@@ -55,26 +55,35 @@ const (
 // path so the "not found" error from search.FromPath points users at
 // the right `ken download-model --to <path>` command.
 func resolveModelDir(flagValue string) string {
+	return resolveModelDirChain(flagValue, "KEN_MODEL_DIR", "model", "model")
+}
+
+// resolveModelDirChain is the shared four-step resolver behind resolveModelDir
+// and resolveRerankModelDir (identical logic, differing only by env var name +
+// the ~/.ken and testdata subdirectories): explicit flag → $envVar →
+// ~/.ken/<homeSub> → testdata/<repoSub>. (1)+(2) return unconditionally (an
+// explicit choice wants errors against that exact path); (3)+(4) require
+// model.safetensors to actually be present. If none resolve, returns the
+// canonical end-user path (or the repo path when $HOME is unset) so the
+// downstream "not found" error points at the right `ken download-model` command.
+func resolveModelDirChain(flagValue, envVar, homeSub, repoSub string) string {
 	if flagValue != "" {
 		return flagValue
 	}
-	if env := os.Getenv("KEN_MODEL_DIR"); env != "" {
+	if env := os.Getenv(envVar); env != "" {
 		return env
 	}
 	var homeCandidate string
 	if home, err := os.UserHomeDir(); err == nil {
-		homeCandidate = filepath.Join(home, ".ken", "model")
+		homeCandidate = filepath.Join(home, ".ken", homeSub)
 		if fileExists(filepath.Join(homeCandidate, "model.safetensors")) {
 			return homeCandidate
 		}
 	}
-	repoCandidate := filepath.Join("testdata", "model")
+	repoCandidate := filepath.Join("testdata", repoSub)
 	if fileExists(filepath.Join(repoCandidate, "model.safetensors")) {
 		return repoCandidate
 	}
-	// None exist; point at the canonical end-user path for the
-	// not-found error. Only fall back to testdata/model when $HOME
-	// is unset (CI without HOME, exotic environments).
 	if homeCandidate != "" {
 		return homeCandidate
 	}
@@ -99,27 +108,7 @@ func fileExists(p string) bool {
 // If none resolve, returns the canonical end-user path so the
 // downstream "not found" error points at `ken download-model --rerank`.
 func resolveRerankModelDir(flagValue string) string {
-	if flagValue != "" {
-		return flagValue
-	}
-	if env := os.Getenv("KEN_RERANK_MODEL_DIR"); env != "" {
-		return env
-	}
-	var homeCandidate string
-	if home, err := os.UserHomeDir(); err == nil {
-		homeCandidate = filepath.Join(home, ".ken", "rerank-model")
-		if fileExists(filepath.Join(homeCandidate, "model.safetensors")) {
-			return homeCandidate
-		}
-	}
-	repoCandidate := filepath.Join("testdata", "encoder-model")
-	if fileExists(filepath.Join(repoCandidate, "model.safetensors")) {
-		return repoCandidate
-	}
-	if homeCandidate != "" {
-		return homeCandidate
-	}
-	return repoCandidate
+	return resolveModelDirChain(flagValue, "KEN_RERANK_MODEL_DIR", "rerank-model", "encoder-model")
 }
 
 func usage() {
@@ -234,6 +223,36 @@ func extractFlag(args []string, name, def string) ([]string, string, error) {
 		}
 	}
 	return rest, val, nil
+}
+
+// rerankFlags are the five --rerank-* CLI flags cmdSearch and cmdBench both
+// accept.
+type rerankFlags struct {
+	model, topN, beta, quant, adaptive string
+}
+
+// extractRerankFlags pulls all five --rerank-* flags out of args in one call —
+// cmdSearch and cmdBench previously repeated the identical five extractFlag
+// blocks verbatim. Returns the remaining args + the extracted values.
+func extractRerankFlags(args []string) ([]string, rerankFlags, error) {
+	var rf rerankFlags
+	specs := []struct {
+		name string
+		dst  *string
+	}{
+		{"rerank-model", &rf.model},
+		{"rerank-top-n", &rf.topN},
+		{"rerank-beta", &rf.beta},
+		{"rerank-quant", &rf.quant},
+		{"rerank-adaptive", &rf.adaptive},
+	}
+	var err error
+	for _, s := range specs {
+		if args, *s.dst, err = extractFlag(args, s.name, ""); err != nil {
+			return args, rf, err
+		}
+	}
+	return args, rf, nil
 }
 
 func main() {
@@ -776,21 +795,11 @@ func parseSearchArgs(args []string) (searchArgs, error) {
 	// validates/converts only when mode == hybrid-rerank, so a stray
 	// --rerank-beta on a bm25 query is silently ignored rather than
 	// failing the unrelated query.
-	if args, sa.rerankModel, err = extractFlag(args, "rerank-model", ""); err != nil {
+	var rf rerankFlags
+	if args, rf, err = extractRerankFlags(args); err != nil {
 		return sa, err
 	}
-	if args, sa.rerankTopN, err = extractFlag(args, "rerank-top-n", ""); err != nil {
-		return sa, err
-	}
-	if args, sa.rerankBeta, err = extractFlag(args, "rerank-beta", ""); err != nil {
-		return sa, err
-	}
-	if args, sa.rerankQuant, err = extractFlag(args, "rerank-quant", ""); err != nil {
-		return sa, err
-	}
-	if args, sa.rerankAdaptive, err = extractFlag(args, "rerank-adaptive", ""); err != nil {
-		return sa, err
-	}
+	sa.rerankModel, sa.rerankTopN, sa.rerankBeta, sa.rerankQuant, sa.rerankAdaptive = rf.model, rf.topN, rf.beta, rf.quant, rf.adaptive
 	setK := func(v string) error {
 		n, err := strconv.Atoi(v)
 		if err != nil {
@@ -1009,31 +1018,12 @@ func cmdBench(args []string) int {
 	}
 	// M5: same rerank flags as cmdSearch so `ken bench --mode=hybrid-rerank`
 	// drives the M0/M6 benchmark harness through the neural pipeline.
-	rest, rerankModel, err := extractFlag(rest, "rerank-model", "")
+	rest, rf, err := extractRerankFlags(rest)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
-	rest, rerankTopN, err := extractFlag(rest, "rerank-top-n", "")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 2
-	}
-	rest, rerankBeta, err := extractFlag(rest, "rerank-beta", "")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 2
-	}
-	rest, rerankQuant, err := extractFlag(rest, "rerank-quant", "")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 2
-	}
-	rest, rerankAdaptive, err := extractFlag(rest, "rerank-adaptive", "")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 2
-	}
+	rerankModel, rerankTopN, rerankBeta, rerankQuant, rerankAdaptive := rf.model, rf.topN, rf.beta, rf.quant, rf.adaptive
 	k, err := strconv.Atoi(kStr)
 	if err != nil || k < 0 {
 		fmt.Fprintln(os.Stderr, "ken: -k expects a non-negative integer")

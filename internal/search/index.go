@@ -1026,52 +1026,102 @@ func (ix *Index) Search(query string, k int) []Result {
 // Non-rerank modes (bm25 / semantic / hybrid) record only TotalWall.
 // ModeHybridRerank records Stage1Wall / RerankWall / BlendWall plus
 // the reranker sub-breakdown (via NeuralReranker.RerankWithTelemetry).
-func (ix *Index) SearchModeWithTelemetry(query string, k int, mode Mode) ([]Result, Mode, Telemetry) {
-	tel := Telemetry{}
-	t0 := time.Now()
+// resolveMode applies the capability downgrades every Search* entry point
+// shares: semantic/hybrid/rerank against a bm25-only index (no flat/model)
+// falls back to ModeBM25; ModeHybridRerank with no attached reranker downgrades
+// to ModeHybrid. Both are "downgrade rather than panic/error" — see SearchMode.
+func (ix *Index) resolveMode(mode Mode) Mode {
+	if mode != ModeBM25 && (ix.flat == nil || ix.model == nil) {
+		mode = ModeBM25
+	}
+	if mode == ModeHybridRerank && ix.reranker == nil {
+		mode = ModeHybrid
+	}
+	return mode
+}
 
-	// Reuse the existing dispatch when there's nothing extra to time.
-	// For ModeHybridRerank we run an instrumented duplicate of the
-	// hot path below; everything else delegates to SearchMode.
-	if mode != ModeHybridRerank || ix.reranker == nil {
-		results, effMode := ix.SearchMode(query, k, mode)
-		tel.TotalWall = time.Since(t0)
-		return results, effMode, tel
+// collectResults builds up to k tombstone-free Results by walking n candidates
+// and mapping each to (chunkIndex, score) via at. Every retriever branch shares
+// this "over-fetch, skip tombstoned, stop at k" shape; the differences are only
+// the hit type's index field (ann.Hit.Index / rankedItem.idx / bm25 .Doc). Pass
+// k=n to collect all non-tombstoned (the rerank path truncates after re-scoring).
+func (ix *Index) collectResults(n, k int, at func(i int) (idx int, score float64)) []Result {
+	out := make([]Result, 0, k)
+	for i := 0; i < n; i++ {
+		idx, score := at(i)
+		c := ix.chunks[idx]
+		if c.Tombstoned {
+			continue
+		}
+		out = append(out, Result{Chunk: c, Score: score})
+		if len(out) >= k {
+			break
+		}
 	}
-	if ix.flat == nil || ix.model == nil {
-		// Same defensive downgrade as SearchMode.
-		results, effMode := ix.SearchMode(query, k, ModeBM25)
-		tel.TotalWall = time.Since(t0)
-		return results, effMode, tel
+	return out
+}
+
+// searchCore is the shared retrieval body behind SearchMode and
+// SearchWithQVec*. Capability downgrades are the CALLER's job (via resolveMode);
+// qVec is the dense query vector (ignored for ModeBM25 — the caller need not
+// even compute it there), predicted the transform-#2 identifier expansion (nil
+// for the plain entry points).
+func (ix *Index) searchCore(query string, qVec []float32, predicted []string, k int, mode Mode) []Result {
+	overFetch := k + ix.tombstoneCount()
+	switch mode {
+	case ModeSemantic:
+		// semble search_semantic: cosine similarity, no rerank.
+		hits := ix.flat.Query(qVec, overFetch)
+		return ix.collectResults(len(hits), k, func(i int) (int, float64) { return hits[i].Index, hits[i].Score })
+	case ModeHybrid:
+		// Over-fetch by tombstoneCount (audit §11 / code review §4):
+		// hybridSearch does NOT filter Tombstoned and collectResults trims to k
+		// AFTER dropping them, so without the headroom a tombstoned top-k hit
+		// leaves the result short of k.
+		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, overFetch, -1, predicted)
+		return ix.collectResults(len(ranked), k, func(i int) (int, float64) { return ranked[i].idx, ranked[i].score })
+	case ModeHybridRerank:
+		// M4: deep over-fetch (rerankN) from stage-1 hybrid, tombstone-filter
+		// BEFORE the neural pass (don't spend rerank budget on dropped chunks),
+		// then truncate to k AFTER rerank so k<rerankN keeps the reordering.
+		fetch := max(ix.rerankCfg.rerankN, k)
+		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, fetch, -1, predicted)
+		results := ix.collectResults(len(ranked), len(ranked), func(i int) (int, float64) { return ranked[i].idx, ranked[i].score })
+		results = applyReranker(ix.reranker, query, results, ix.rerankCfg)
+		if len(results) > k {
+			results = results[:k]
+		}
+		return results
+	default: // ModeBM25 — raw lexical (Stage 1 behavior, no rerank; qVec ignored)
+		hits := ix.bm.TopK(bm25.Tokenize(query), overFetch)
+		return ix.collectResults(len(hits), k, func(i int) (int, float64) { return hits[i].Doc, hits[i].Score })
 	}
+}
+
+// searchRerankTelemetryCore is the instrumented ModeHybridRerank body shared by
+// SearchModeWithTelemetry and SearchWithQVecPredictedTelemetry. Preconditions
+// (caller-checked before delegating here): mode == ModeHybridRerank and
+// reranker/flat/model are all non-nil. t0 is the entry timestamp for TotalWall.
+func (ix *Index) searchRerankTelemetryCore(query string, qVec []float32, predicted []string, k int, t0 time.Time) ([]Result, Mode, Telemetry) {
+	tel := Telemetry{}
 
 	// Stage 1: hybrid retrieval (instrumented).
 	fetch := max(ix.rerankCfg.rerankN, k)
 	s1 := time.Now()
-	ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, fetch, -1, nil)
-	results := make([]Result, 0, len(ranked))
-	for _, r := range ranked {
-		c := ix.chunks[r.idx]
-		if c.Tombstoned {
-			continue
-		}
-		results = append(results, Result{Chunk: c, Score: r.score})
-	}
+	ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, fetch, -1, predicted)
+	results := ix.collectResults(len(ranked), len(ranked), func(i int) (int, float64) { return ranked[i].idx, ranked[i].score })
 	tel.Stage1Wall = time.Since(s1)
 
-	// Stage 2: neural rerank (instrumented via the reranker's
-	// optional RerankWithTelemetry method when supported).
+	// Stage 2: neural rerank (instrumented via the reranker's optional
+	// RerankWithTelemetry method when supported).
 	s2 := time.Now()
 	results = applyRerankerWithTelemetry(ix.reranker, query, results, ix.rerankCfg, &tel)
-	// applyRerankerWithTelemetry's wall is mostly the rerank model
-	// work; the blend (sort + minmax) is a tiny tail. Bookkeep:
+	// applyRerankerWithTelemetry's wall is mostly the rerank model work; the
+	// blend (sort + minmax) is a tiny tail. BlendWall = outer rerank wall minus
+	// the reranker-internal compute (pipelined max of query/candidate encode).
 	tel.RerankWall = time.Since(s2)
-	// BlendWall is the difference between the outer rerank wall and
-	// the reranker-internal compute time, if available.
 	if tel.RerankerQueryEncode > 0 || tel.RerankerCandidateEncode > 0 {
-		modelWall := max(tel.RerankerCandidateEncode,
-			// pipelined max, not sum
-			tel.RerankerQueryEncode)
+		modelWall := max(tel.RerankerCandidateEncode, tel.RerankerQueryEncode)
 		if tel.RerankWall > modelWall {
 			tel.BlendWall = tel.RerankWall - modelWall
 		}
@@ -1082,6 +1132,20 @@ func (ix *Index) SearchModeWithTelemetry(query string, k int, mode Mode) ([]Resu
 	}
 	tel.TotalWall = time.Since(t0)
 	return results, ModeHybridRerank, tel
+}
+
+func (ix *Index) SearchModeWithTelemetry(query string, k int, mode Mode) ([]Result, Mode, Telemetry) {
+	t0 := time.Now()
+	// Nothing extra to time unless we're actually going to neural-rerank.
+	if mode != ModeHybridRerank || ix.reranker == nil {
+		results, effMode := ix.SearchMode(query, k, mode)
+		return results, effMode, Telemetry{TotalWall: time.Since(t0)}
+	}
+	if ix.flat == nil || ix.model == nil {
+		results, effMode := ix.SearchMode(query, k, ModeBM25)
+		return results, effMode, Telemetry{TotalWall: time.Since(t0)}
+	}
+	return ix.searchRerankTelemetryCore(query, ix.model.Encode(query), nil, k, t0)
 }
 
 // SearchMode runs Search with the supplied mode override. Returns the
@@ -1102,99 +1166,14 @@ func (ix *Index) SearchModeWithTelemetry(query string, k int, mode Mode) ([]Resu
 // returns; over-fetch by the tombstone count so the filtered result
 // still hits k on indices with edit churn.
 func (ix *Index) SearchMode(query string, k int, mode Mode) ([]Result, Mode) {
-	if mode != ModeBM25 && (ix.flat == nil || ix.model == nil) {
-		// Capability downgrade: requested semantic/hybrid but no
-		// flat/model. Fall back to BM25 so the caller gets results
-		// rather than a panic. Both checks are defensive: BuildIndex
-		// sets flat + model atomically today, but a future construction
-		// path that sets one without the other (e.g. LoadSerializedIndex
-		// with model==nil — caught earlier by ErrModelRequired in v0.8.3,
-		// but defense-in-depth here) shouldn't panic.
-		mode = ModeBM25
+	mode = ix.resolveMode(mode)
+	// Encode the query only when a dense arm actually runs — ModeBM25 (incl. a
+	// downgrade to it) needs no vector, and model may be nil there.
+	var qVec []float32
+	if mode != ModeBM25 {
+		qVec = ix.model.Encode(query)
 	}
-	// M4: ModeHybridRerank ⇒ ModeHybrid when no reranker is attached,
-	// same "downgrade rather than error" ethos as the no-model case
-	// above. The rerank plan (docs/internal/results/ken-rerank-plan.md) §9.3 calls this out explicitly: "transparently
-	// downgrade … mirroring the existing model-missing downgrade pattern."
-	if mode == ModeHybridRerank && ix.reranker == nil {
-		mode = ModeHybrid
-	}
-	overFetch := k + ix.tombstoneCount()
-	switch mode {
-	case ModeSemantic:
-		// semble search_semantic: cosine similarity, no rerank.
-		hits := ix.flat.Query(ix.model.Encode(query), overFetch)
-		out := make([]Result, 0, k)
-		for _, h := range hits {
-			c := ix.chunks[h.Index]
-			if c.Tombstoned {
-				continue
-			}
-			out = append(out, Result{Chunk: c, Score: h.Score})
-			if len(out) >= k {
-				break
-			}
-		}
-		return out, mode
-	case ModeHybrid:
-		// Over-fetch by tombstoneCount like the semantic/bm25 branches
-		// (code review §4): hybridSearch does NOT filter Tombstoned, and the
-		// out-loop below trims to exactly k *after* dropping tombstoned hits
-		// — so without the headroom, a tombstoned chunk in the top-k would
-		// leave the result short of k. (Latent while compaction precedes
-		// every publish, but the branch must not assume that.)
-		ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, overFetch, -1, nil)
-		out := make([]Result, 0, k)
-		for _, r := range ranked {
-			c := ix.chunks[r.idx]
-			if c.Tombstoned {
-				continue
-			}
-			out = append(out, Result{Chunk: c, Score: r.score})
-			if len(out) >= k {
-				break
-			}
-		}
-		return out, mode
-	case ModeHybridRerank:
-		// M4: deep over-fetch (rerankN, default 50) from stage-1 hybrid,
-		// then neural rerank + score-blend (β=0.25 per M0). Truncate to
-		// k AFTER the rerank so the user's k can be smaller than rerankN
-		// without losing the reranker's reordering effect on positions
-		// 1..k. The reranker pre-check above already downgraded if nil,
-		// so ix.reranker is guaranteed non-nil here.
-		fetch := max(ix.rerankCfg.rerankN, k)
-		ranked := hybridSearch(query, ix.model.Encode(query), ix.flat, ix.bm, ix.chunks, fetch, -1, nil)
-		// Tombstone-filter BEFORE the neural pass so the rerank
-		// budget isn't spent encoding chunks that'll be dropped.
-		results := make([]Result, 0, len(ranked))
-		for _, r := range ranked {
-			c := ix.chunks[r.idx]
-			if c.Tombstoned {
-				continue
-			}
-			results = append(results, Result{Chunk: c, Score: r.score})
-		}
-		results = applyReranker(ix.reranker, query, results, ix.rerankCfg)
-		if len(results) > k {
-			results = results[:k]
-		}
-		return results, mode
-	default: // ModeBM25 — raw lexical (Stage 1 behavior, no rerank)
-		hits := ix.bm.TopK(bm25.Tokenize(query), overFetch)
-		out := make([]Result, 0, k)
-		for _, h := range hits {
-			c := ix.chunks[h.Doc]
-			if c.Tombstoned {
-				continue
-			}
-			out = append(out, Result{Chunk: c, Score: h.Score})
-			if len(out) >= k {
-				break
-			}
-		}
-		return out, mode
-	}
+	return ix.searchCore(query, qVec, nil, k, mode), mode
 }
 
 // SearchWithQVec runs the same retrieval pipeline as SearchMode but
@@ -1236,77 +1215,8 @@ func (ix *Index) SearchWithQVec(query string, qVec []float32, k int, mode Mode) 
 // default `hybrid+rerank` config is "pull more relevant chunks into
 // the stage-1 shortlist" — the HyDE Phase B analysis established this.
 func (ix *Index) SearchWithQVecPredicted(query string, qVec []float32, predicted []string, k int, mode Mode) ([]Result, Mode) {
-	if mode != ModeBM25 && (ix.flat == nil || ix.model == nil) {
-		mode = ModeBM25
-	}
-	if mode == ModeHybridRerank && ix.reranker == nil {
-		mode = ModeHybrid
-	}
-	overFetch := k + ix.tombstoneCount()
-	switch mode {
-	case ModeSemantic:
-		hits := ix.flat.Query(qVec, overFetch)
-		out := make([]Result, 0, k)
-		for _, h := range hits {
-			c := ix.chunks[h.Index]
-			if c.Tombstoned {
-				continue
-			}
-			out = append(out, Result{Chunk: c, Score: h.Score})
-			if len(out) >= k {
-				break
-			}
-		}
-		return out, mode
-	case ModeHybrid:
-		// Over-fetch by the tombstone count (audit §11): the loop below
-		// filters tombstones AFTER retrieval, so passing bare k here would
-		// return fewer than k results on a tombstone-carrying index — the
-		// exact bug SearchMode's hybrid branch documents fixing.
-		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, overFetch, -1, predicted)
-		out := make([]Result, 0, k)
-		for _, r := range ranked {
-			c := ix.chunks[r.idx]
-			if c.Tombstoned {
-				continue
-			}
-			out = append(out, Result{Chunk: c, Score: r.score})
-			if len(out) >= k {
-				break
-			}
-		}
-		return out, mode
-	case ModeHybridRerank:
-		fetch := max(ix.rerankCfg.rerankN, k)
-		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, fetch, -1, predicted)
-		results := make([]Result, 0, len(ranked))
-		for _, r := range ranked {
-			c := ix.chunks[r.idx]
-			if c.Tombstoned {
-				continue
-			}
-			results = append(results, Result{Chunk: c, Score: r.score})
-		}
-		results = applyReranker(ix.reranker, query, results, ix.rerankCfg)
-		if len(results) > k {
-			results = results[:k]
-		}
-		return results, mode
-	default: // ModeBM25 — qVec ignored
-		hits := ix.bm.TopK(bm25.Tokenize(query), overFetch)
-		out := make([]Result, 0, k)
-		for _, h := range hits {
-			c := ix.chunks[h.Doc]
-			if c.Tombstoned {
-				continue
-			}
-			out = append(out, Result{Chunk: c, Score: h.Score})
-			if len(out) >= k {
-				break
-			}
-		}
-		return out, mode
-	}
+	mode = ix.resolveMode(mode)
+	return ix.searchCore(query, qVec, predicted, k, mode), mode
 }
 
 // SearchWithQVecTelemetry mirrors SearchModeWithTelemetry but uses a
@@ -1330,48 +1240,16 @@ func (ix *Index) SearchWithQVecTelemetry(query string, qVec []float32, k int, mo
 // SearchWithQVecPredicted). nil/empty predicted reduces to
 // SearchWithQVecTelemetry semantics.
 func (ix *Index) SearchWithQVecPredictedTelemetry(query string, qVec []float32, predicted []string, k int, mode Mode) ([]Result, Mode, Telemetry) {
-	tel := Telemetry{}
 	t0 := time.Now()
-
 	if mode != ModeHybridRerank || ix.reranker == nil {
 		results, effMode := ix.SearchWithQVecPredicted(query, qVec, predicted, k, mode)
-		tel.TotalWall = time.Since(t0)
-		return results, effMode, tel
+		return results, effMode, Telemetry{TotalWall: time.Since(t0)}
 	}
 	if ix.flat == nil || ix.model == nil {
 		results, effMode := ix.SearchWithQVecPredicted(query, qVec, predicted, k, ModeBM25)
-		tel.TotalWall = time.Since(t0)
-		return results, effMode, tel
+		return results, effMode, Telemetry{TotalWall: time.Since(t0)}
 	}
-
-	fetch := max(ix.rerankCfg.rerankN, k)
-	s1 := time.Now()
-	ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, fetch, -1, predicted)
-	results := make([]Result, 0, len(ranked))
-	for _, r := range ranked {
-		c := ix.chunks[r.idx]
-		if c.Tombstoned {
-			continue
-		}
-		results = append(results, Result{Chunk: c, Score: r.score})
-	}
-	tel.Stage1Wall = time.Since(s1)
-
-	s2 := time.Now()
-	results = applyRerankerWithTelemetry(ix.reranker, query, results, ix.rerankCfg, &tel)
-	tel.RerankWall = time.Since(s2)
-	if tel.RerankerQueryEncode > 0 || tel.RerankerCandidateEncode > 0 {
-		modelWall := max(tel.RerankerCandidateEncode, tel.RerankerQueryEncode)
-		if tel.RerankWall > modelWall {
-			tel.BlendWall = tel.RerankWall - modelWall
-		}
-	}
-
-	if len(results) > k {
-		results = results[:k]
-	}
-	tel.TotalWall = time.Since(t0)
-	return results, ModeHybridRerank, tel
+	return ix.searchRerankTelemetryCore(query, qVec, predicted, k, t0)
 }
 
 // tombstoneCount returns how many entries in ix.chunks have

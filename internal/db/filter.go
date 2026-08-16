@@ -15,6 +15,7 @@ package db
 
 import (
 	"slices"
+	"sort"
 	"strings"
 )
 
@@ -36,6 +37,22 @@ var mysqlSystemSchemas = map[string]bool{
 	"performance_schema": true,
 	"sys":                true,
 }
+
+// mysqlSystemSchemaSQLParen renders mysqlSystemSchemas as a parenthesized,
+// quoted, comma-joined SQL list — `('information_schema', 'mysql', ...)` — for
+// the `... NOT IN (...)` clauses in mysql.go's introspection queries. Deriving
+// it from the map keeps the SQL and the programmatic filter on ONE policy
+// source (the query literals used to be copy-pasted, free to drift). Sorted so
+// the rendered fragment is deterministic (and byte-identical to the old
+// alphabetical literals).
+var mysqlSystemSchemaSQLParen = func() string {
+	names := make([]string, 0, len(mysqlSystemSchemas))
+	for s := range mysqlSystemSchemas {
+		names = append(names, "'"+s+"'")
+	}
+	sort.Strings(names)
+	return "(" + strings.Join(names, ", ") + ")"
+}()
 
 // filterSchema reports whether a schema name should be indexed under
 // opts. Resolution order (matches ADR-019):

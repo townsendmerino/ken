@@ -345,7 +345,7 @@ func introspectMySQL(ctx context.Context, conn *sql.DB, opts Options) (*schemaSn
 // (the helper rejects the same names but the WHERE clause keeps the
 // network traffic small on big servers).
 func mysqlListTablesAndColumns(ctx context.Context, conn *sql.DB, opts Options) ([]tableInfo, error) {
-	const q = `
+	q := `
 SELECT
     t.table_schema,
     t.table_name,
@@ -359,7 +359,7 @@ JOIN information_schema.columns c
   ON c.table_schema = t.table_schema
  AND c.table_name   = t.table_name
 WHERE t.table_type = 'BASE TABLE'
-  AND t.table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+  AND t.table_schema NOT IN ` + mysqlSystemSchemaSQLParen + `
 ORDER BY t.table_schema, t.table_name, c.ordinal_position;
 `
 	rows, err := conn.QueryContext(ctx, q)
@@ -424,7 +424,7 @@ ORDER BY t.table_schema, t.table_name, c.ordinal_position;
 // key_column_usage + referential_constraints.
 func mysqlAnnotateConstraints(ctx context.Context, conn *sql.DB, tables map[string]*tableInfo, opts Options) error {
 	// PK + UNIQUE markers.
-	const q1 = `
+	q1 := `
 SELECT
     tc.table_schema,
     tc.table_name,
@@ -436,7 +436,7 @@ JOIN information_schema.key_column_usage kcu
  AND kcu.constraint_name   = tc.constraint_name
  AND kcu.table_schema      = tc.table_schema
  AND kcu.table_name        = tc.table_name
-WHERE tc.table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+WHERE tc.table_schema NOT IN ` + mysqlSystemSchemaSQLParen + `
   AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE');
 `
 	if err := func() error {
@@ -474,7 +474,7 @@ WHERE tc.table_schema NOT IN ('information_schema', 'mysql', 'performance_schema
 	}
 
 	// FK targets.
-	const q2 = `
+	q2 := `
 SELECT
     kcu.table_schema,
     kcu.table_name,
@@ -484,7 +484,7 @@ SELECT
     kcu.referenced_column_name
 FROM information_schema.key_column_usage kcu
 WHERE kcu.referenced_table_name IS NOT NULL
-  AND kcu.table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys');
+  AND kcu.table_schema NOT IN ` + mysqlSystemSchemaSQLParen + `;
 `
 	rows2, err := conn.QueryContext(ctx, q2)
 	if err != nil {
@@ -518,7 +518,7 @@ WHERE kcu.referenced_table_name IS NOT NULL
 func mysqlAnnotateIndexes(ctx context.Context, conn *sql.DB, tables map[string]*tableInfo, opts Options) error {
 	// non_unique = 0 → UNIQUE, = 1 → not unique. PRIMARY index name is
 	// skipped (the PK columns already carry the marker).
-	const q = `
+	q := `
 SELECT
     table_schema,
     table_name,
@@ -527,7 +527,7 @@ SELECT
     column_name,
     seq_in_index
 FROM information_schema.statistics
-WHERE table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+WHERE table_schema NOT IN ` + mysqlSystemSchemaSQLParen + `
   AND index_name <> 'PRIMARY'
 ORDER BY table_schema, table_name, index_name, seq_in_index;
 `
@@ -598,7 +598,7 @@ ORDER BY table_schema, table_name, index_name, seq_in_index;
 // is FK-referenced BY <other>(col)"). The MySQL key_column_usage view
 // already names both sides, so this is one query.
 func mysqlAnnotateFKReferences(ctx context.Context, conn *sql.DB, tables map[string]*tableInfo, opts Options) error {
-	const q = `
+	q := `
 SELECT
     kcu.referenced_table_schema,
     kcu.referenced_table_name,
@@ -607,7 +607,7 @@ SELECT
     kcu.column_name
 FROM information_schema.key_column_usage kcu
 WHERE kcu.referenced_table_name IS NOT NULL
-  AND kcu.table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys');
+  AND kcu.table_schema NOT IN ` + mysqlSystemSchemaSQLParen + `;
 `
 	rows, err := conn.QueryContext(ctx, q)
 	if err != nil {
@@ -639,13 +639,13 @@ WHERE kcu.referenced_table_name IS NOT NULL
 // mysqlListViews lists views with their definitions. Truncation happens
 // at render time (maxViewBodyLines).
 func mysqlListViews(ctx context.Context, conn *sql.DB, opts Options) ([]viewInfo, error) {
-	const q = `
+	q := `
 SELECT
     table_schema,
     table_name,
     view_definition
 FROM information_schema.views
-WHERE table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+WHERE table_schema NOT IN ` + mysqlSystemSchemaSQLParen + `
 ORDER BY table_schema, table_name;
 `
 	rows, err := conn.QueryContext(ctx, q)
@@ -677,14 +677,14 @@ ORDER BY table_schema, table_name;
 // to the Postgres policy: signature is the high-signal target).
 func mysqlListRoutines(ctx context.Context, conn *sql.DB, opts Options) ([]functionInfo, error) {
 	// Routines (header rows) — one per procedure/function.
-	const qRoutines = `
+	qRoutines := `
 SELECT
     routine_schema,
     routine_name,
     routine_type,
     dtd_identifier
 FROM information_schema.routines
-WHERE routine_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+WHERE routine_schema NOT IN ` + mysqlSystemSchemaSQLParen + `
 ORDER BY routine_schema, routine_name;
 `
 	rows, err := conn.QueryContext(ctx, qRoutines)
@@ -721,7 +721,7 @@ ORDER BY routine_schema, routine_name;
 	// Params — one row per parameter; ordinal_position 0 is the FUNCTION's
 	// implicit return slot (which we ignore — we already have dtd_identifier
 	// for that). Aggregated into the routine's argument signature.
-	const qParams = `
+	qParams := `
 SELECT
     specific_schema,
     specific_name,
@@ -729,7 +729,7 @@ SELECT
     dtd_identifier,
     ordinal_position
 FROM information_schema.parameters
-WHERE specific_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+WHERE specific_schema NOT IN ` + mysqlSystemSchemaSQLParen + `
   AND ordinal_position > 0
 ORDER BY specific_schema, specific_name, ordinal_position;
 `
@@ -928,11 +928,11 @@ func sampleWorkers() int {
 // by MySQL's stats infrastructure / `ANALYZE TABLE`). Same shape as the
 // Postgres queryApproxRowCounts helper.
 func mysqlApproxRowCounts(ctx context.Context, conn *sql.DB) (map[string]float64, error) {
-	const q = `
+	q := `
 SELECT table_schema, table_name, COALESCE(table_rows, 0)
 FROM information_schema.tables
 WHERE table_type = 'BASE TABLE'
-  AND table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys');
+  AND table_schema NOT IN ` + mysqlSystemSchemaSQLParen + `;
 `
 	rows, err := conn.QueryContext(ctx, q)
 	if err != nil {
