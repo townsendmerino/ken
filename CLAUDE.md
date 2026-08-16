@@ -32,6 +32,7 @@ go fix ./...                                      # Go 1.26 modernizers (SplitSe
 
 go run ./cmd/ken index  <path>  [--watch|--no-watch] [--write-snapshot] [--chunker=regex|treesitter|line] [--mode=bm25|semantic|hybrid] [--model=DIR]
 go run ./cmd/ken search <path> <query>...  [-k N] [--chunker=...] [--mode=...] [--model=...]
+go run ./cmd/ken doctor [--json] [--verbose]       # health check + recommendations (folds status/savings/rerank-cache/config into advice)
 go run ./cmd/ken-mcp                               # stdio MCP server (env-configured; see MCP section)
 ```
 

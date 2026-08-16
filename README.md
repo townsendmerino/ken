@@ -62,6 +62,8 @@ Or skip the model and use lexical-only mode (BM25-only costs ~14 pp recall@10 vs
 ken search /path/to/myrepo "validateToken" --mode bm25
 ```
 
+Not sure your setup is right? **`ken doctor`** checks model availability, rerank-cache warmth, enrichment, token-savings tracking, and ken-mcp config, and prints prioritized recommendations (e.g. "no model — run `ken download-model`").
+
 Pre-built binaries for **macOS, Linux, and Windows** (amd64/arm64) are attached to each [release](https://github.com/townsendmerino/ken/releases) — `.tar.gz` for macOS/Linux, `.zip` for Windows.
 
 As of v0.3, `ken index <path>` defaults to **watch mode** — it stays alive and re-indexes on change (2 s debounce); `--no-watch` restores build-once-and-exit. `ken-mcp` always watches, so an agent editing the repo mid-session sees its own changes without a restart. ken also respects **nested `.gitignore`** files (per-directory, matching git).

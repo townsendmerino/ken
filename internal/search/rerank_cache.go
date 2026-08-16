@@ -230,6 +230,48 @@ func LoadCacheFromFile(r *NeuralReranker, path, expectedScopeKey string, expecte
 	return len(keys), nil
 }
 
+// PeekRerankCacheCount reads ONLY the KNRC header of the on-disk rerank cache
+// and returns its entry count, without loading the vectors or verifying the
+// CRC. It's a cheap "is the cache warm?" probe for diagnostics (ken doctor):
+// reading the whole file (up to ~3 GB) just to answer "how many entries" would
+// be wasteful, so this reads a small header window instead. A missing file
+// returns the wrapped os.ErrNotExist; a malformed header returns ErrCacheCorrupt.
+func PeekRerankCacheCount(path string) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	// The header is tiny (magic + version + two short LP strings + embedDim +
+	// entryCount ≈ 60 bytes); 4 KiB is comfortably enough.
+	var buf [4096]byte
+	n, _ := f.Read(buf[:])
+	b := buf[:n]
+	// magic(4) + version(4) + LP(kenVer) + LP(scope) + embedDim(4) + entryCount(4)
+	if len(b) < 4+4+4+4+4+4 {
+		return 0, fmt.Errorf("%w: header too small", ErrCacheCorrupt)
+	}
+	if string(b[:4]) != rerankCacheMagic {
+		return 0, fmt.Errorf("%w: magic mismatch", ErrCacheCorrupt)
+	}
+	p := 8 // skip magic + formatVersion
+	_, adv, err := binfmt.ReadLPStringAt(b[p:])
+	if err != nil {
+		return 0, fmt.Errorf("%w: kenVersion: %v", ErrCacheCorrupt, err)
+	}
+	p += adv
+	_, adv, err = binfmt.ReadLPStringAt(b[p:])
+	if err != nil {
+		return 0, fmt.Errorf("%w: scopeKey: %v", ErrCacheCorrupt, err)
+	}
+	p += adv
+	if len(b)-p < 8 {
+		return 0, fmt.Errorf("%w: truncated header", ErrCacheCorrupt)
+	}
+	// skip embedDim(4), read entryCount(4)
+	return int(binary.LittleEndian.Uint32(b[p+4:])), nil
+}
+
 // The KNRC magic/version/LP-string/CRC framing shares its low-level primitives
 // with the KEN1 and KMAN formats via internal/binfmt (see that package's doc).
 

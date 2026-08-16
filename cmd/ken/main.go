@@ -126,6 +126,7 @@ usage:
   ken download-model                     [--rerank] [--model ORG/NAME] [--to DIR] [--force]
   ken savings                            [--verbose] [--path FILE]    # render token-savings summary
   ken status                             [--json] [--verbose]         # build identity, models, enrichment, savings
+  ken doctor                             [--json] [--verbose]         # health check + recommendations (model, rerank cache, config)
 
 ken index --watch (default in v0.3+) keeps the process alive and re-indexes
 files on change; --no-watch is the v0.2 behavior (build once, print, exit).
@@ -278,10 +279,84 @@ func main() {
 		os.Exit(cmdSavings(os.Args[2:]))
 	case "status":
 		os.Exit(cmdStatus(os.Args[2:]))
+	case "doctor":
+		os.Exit(cmdDoctor(os.Args[2:]))
 	default:
 		usage()
 		os.Exit(2)
 	}
+}
+
+// cmdDoctor is the advisory health check: it folds the model / rerank-cache /
+// usage / enrichment / config surfaces (each separately reported by `status`,
+// `savings`, and the rerank cache) into one prioritized set of recommendations
+// — "no model, run download-model"; "caching disabled, raise KEN_MCP_CACHE_SIZE".
+// Read-only. Always exits 0 (advisory, not a gate).
+//
+//	--json     machine-readable JSON instead of text
+//	--verbose  also list the healthy (✓) checks
+func cmdDoctor(args []string) int {
+	var jsonOut, verbose bool
+	for _, a := range args {
+		switch a {
+		case "--json":
+			jsonOut = true
+		case "--verbose", "-v":
+			verbose = true
+		case "-h", "--help":
+			fmt.Println("Usage: ken doctor [--json] [--verbose]")
+			fmt.Println("  Health check + recommendations: model availability, rerank cache")
+			fmt.Println("  warmth, Arm B enrichment, token-savings tracking, and ken-mcp config.")
+			return 0
+		default:
+			fmt.Fprintf(os.Stderr, "ken doctor: unknown flag %q\n", a)
+			return 2
+		}
+	}
+
+	st := status.Build(status.BuildOptions{})
+
+	// Probe the on-disk rerank cache (per-quant file). Report the warmest of the
+	// two variants — the operator may have used either f32 or int8.
+	rerankEntries := -1
+	for _, q := range []string{"int8", "f32"} {
+		if p := resolveRerankCachePath(q); p != "" {
+			if c, err := search.PeekRerankCacheCount(p); err == nil && c > rerankEntries {
+				rerankEntries = c
+			}
+		}
+	}
+
+	findings := status.Advise(status.AdviseInputs{
+		Status:             st,
+		RerankCacheEntries: rerankEntries,
+		MCPMode:            strings.TrimSpace(os.Getenv("KEN_MCP_MODE")),
+		CachingDisabled:    strings.TrimSpace(os.Getenv("KEN_MCP_CACHE_SIZE")) == "0",
+		AutoFetchDisabled:  isFalseyEnv(os.Getenv("KEN_MCP_AUTO_FETCH")),
+	})
+
+	if jsonOut {
+		out, err := status.RenderAdviceJSON(findings)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ken doctor: %v\n", err)
+			return 1
+		}
+		fmt.Println(string(out))
+		return 0
+	}
+	fmt.Print(status.RenderAdvice(findings, verbose))
+	return 0
+}
+
+// isFalseyEnv reports whether an env value explicitly disables a
+// default-on knob ("0", "false", "no", "off", case-insensitive). Empty/unset
+// is NOT falsey (the default stays on).
+func isFalseyEnv(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "false", "no", "off":
+		return true
+	}
+	return false
 }
 
 // cmdStatus renders the ken status overview: build identity, model
