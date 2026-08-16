@@ -10,7 +10,7 @@ package db
 // pins this.
 //
 // Engine routing happens in IndexSchema based on the DSN scheme. This
-// file mirrors introspect.go's tableInfo / viewInfo / functionInfo
+// file mirrors introspect.go's tableDef / viewDef / functionDef
 // shape so the renderers in emit.go can be reused unchanged — the
 // SQLite path produces the same chunk shape as Postgres modulo the
 // "engine@host" portion of the freshness header.
@@ -177,7 +177,7 @@ func introspectSQLite(ctx context.Context, conn *sql.DB, opts Options) (*schemaS
 	if err != nil {
 		return nil, fmt.Errorf("list tables: %w", err)
 	}
-	tableMap := make(map[string]*tableInfo, len(tables))
+	tableMap := make(map[string]*tableDef, len(tables))
 	for i := range tables {
 		t := &tables[i]
 		tableMap[qualifiedKey(t.schema, t.name)] = t
@@ -225,7 +225,7 @@ func introspectSQLite(ctx context.Context, conn *sql.DB, opts Options) (*schemaS
 // the Postgres sense — the schema field is left empty ("public"-style
 // rendering omits it via qualifiedName) and only the table name is
 // meaningful.
-func sqliteListTables(ctx context.Context, conn *sql.DB) ([]tableInfo, error) {
+func sqliteListTables(ctx context.Context, conn *sql.DB) ([]tableDef, error) {
 	const q = `
 SELECT name FROM sqlite_schema
 WHERE type = 'table'
@@ -236,22 +236,22 @@ ORDER BY name;`
 		return nil, err
 	}
 	defer rows.Close()
-	var out []tableInfo
+	var out []tableDef
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
-		out = append(out, tableInfo{name: name})
+		out = append(out, tableDef{name: name})
 	}
 	return out, rows.Err()
 }
 
-// sqliteFillColumns populates tableInfo.columns from PRAGMA table_info.
+// sqliteFillColumns populates tableDef.columns from PRAGMA table_info.
 // pg_get_expr's analogue is PRAGMA table_info itself (returns
 // dflt_value, notnull, pk, type — everything we need for column-level
 // modifiers).
-func sqliteFillColumns(ctx context.Context, conn *sql.DB, t *tableInfo) error {
+func sqliteFillColumns(ctx context.Context, conn *sql.DB, t *tableDef) error {
 	// PRAGMA arguments are unsafe with parameters; identifier injection
 	// is the concern, but `name` came from sqlite_schema (trusted source)
 	// and is quoted for safety.
@@ -273,7 +273,7 @@ func sqliteFillColumns(ctx context.Context, conn *sql.DB, t *tableInfo) error {
 		if err := rows.Scan(&cid, &colName, &colType, &notnull, &dflt, &pk); err != nil {
 			return err
 		}
-		col := columnInfo{
+		col := columnDef{
 			name:         colName,
 			dataType:     strings.ToLower(strings.TrimSpace(colType)),
 			notNull:      notnull != 0,
@@ -287,10 +287,10 @@ func sqliteFillColumns(ctx context.Context, conn *sql.DB, t *tableInfo) error {
 	return rows.Err()
 }
 
-// sqliteFillIndexes populates tableInfo.indexes from PRAGMA index_list
+// sqliteFillIndexes populates tableDef.indexes from PRAGMA index_list
 // + PRAGMA index_info. We render the index columns into the
 // indexdef-shaped string emit.go consumes via extractIndexColumns.
-func sqliteFillIndexes(ctx context.Context, conn *sql.DB, t *tableInfo) error {
+func sqliteFillIndexes(ctx context.Context, conn *sql.DB, t *tableDef) error {
 	q1 := fmt.Sprintf("PRAGMA index_list(%s)", sqliteQuoteIdent(t.name))
 	rows, err := conn.QueryContext(ctx, q1)
 	if err != nil {
@@ -358,7 +358,7 @@ func sqliteFillIndexes(ctx context.Context, conn *sql.DB, t *tableInfo) error {
 		}
 		indexdef := fmt.Sprintf("CREATE%s INDEX %s ON %s (%s)",
 			uniqueKW, m.name, t.name, strings.Join(cols, ", "))
-		t.indexes = append(t.indexes, indexInfo{
+		t.indexes = append(t.indexes, indexDef{
 			name:     m.name,
 			unique:   m.unique,
 			indexdef: indexdef,
@@ -370,7 +370,7 @@ func sqliteFillIndexes(ctx context.Context, conn *sql.DB, t *tableInfo) error {
 // sqliteFillForeignKeys populates the column-level fkTarget AND the
 // inverse fkReferenced list on the referenced table, mirroring what
 // annotateConstraints + annotateFKReferences do for Postgres.
-func sqliteFillForeignKeys(ctx context.Context, conn *sql.DB, t *tableInfo, tableMap map[string]*tableInfo) error {
+func sqliteFillForeignKeys(ctx context.Context, conn *sql.DB, t *tableDef, tableMap map[string]*tableDef) error {
 	q := fmt.Sprintf("PRAGMA foreign_key_list(%s)", sqliteQuoteIdent(t.name))
 	rows, err := conn.QueryContext(ctx, q)
 	if err != nil {
@@ -431,7 +431,7 @@ func sqliteFillForeignKeys(ctx context.Context, conn *sql.DB, t *tableInfo, tabl
 }
 
 // sqliteListViews returns user views with their definitions.
-func sqliteListViews(ctx context.Context, conn *sql.DB) ([]viewInfo, error) {
+func sqliteListViews(ctx context.Context, conn *sql.DB) ([]viewDef, error) {
 	const q = `
 SELECT name, sql FROM sqlite_schema
 WHERE type = 'view'
@@ -441,13 +441,13 @@ ORDER BY name;`
 		return nil, err
 	}
 	defer rows.Close()
-	var out []viewInfo
+	var out []viewDef
 	for rows.Next() {
 		var name, body sql.NullString
 		if err := rows.Scan(&name, &body); err != nil {
 			return nil, err
 		}
-		v := viewInfo{name: name.String}
+		v := viewDef{name: name.String}
 		if body.Valid {
 			// Strip the leading "CREATE VIEW <name> AS " preamble so the
 			// rendered chunk shows just the body — matches the Postgres

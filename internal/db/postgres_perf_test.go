@@ -166,10 +166,10 @@ func pgPerfBuildFixture(ctx context.Context, conn *pgx.Conn) error {
 func pgPerfRunSampleLoop(ctx context.Context, conn *pgx.Conn) time.Duration {
 	snap := &schemaSnapshot{}
 	for i := 0; i < pgPerfTables; i++ {
-		snap.tables = append(snap.tables, tableInfo{
+		snap.tables = append(snap.tables, tableDef{
 			schema: pgPerfSchema,
 			name:   fmt.Sprintf("t%03d", i),
-			columns: []columnInfo{
+			columns: []columnDef{
 				{name: "id", isPrimaryKey: true},
 			},
 		})

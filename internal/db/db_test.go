@@ -179,18 +179,18 @@ func TestIndexSchema_EmptyDSN(t *testing.T) {
 func TestColumnModifiers(t *testing.T) {
 	cases := []struct {
 		name string
-		c    columnInfo
+		c    columnDef
 		want string
 	}{
-		{"plain", columnInfo{name: "x"}, ""},
-		{"PK only", columnInfo{name: "id", isPrimaryKey: true}, "PK"},
-		{"NOT NULL only", columnInfo{name: "x", notNull: true}, "NOT NULL"},
-		{"PK + NOT NULL", columnInfo{name: "id", isPrimaryKey: true, notNull: true}, "PK NOT NULL"},
-		{"UNIQUE not redundant with PK", columnInfo{name: "id", isPrimaryKey: true, isUnique: true}, "PK"},
-		{"UNIQUE standalone", columnInfo{name: "email", notNull: true, isUnique: true}, "NOT NULL UNIQUE"},
-		{"with default", columnInfo{name: "x", notNull: true, defaultExpr: "now()"}, "NOT NULL DEFAULT now()"},
-		{"with FK", columnInfo{name: "user_id", notNull: true, fkTarget: "users(id)"}, "NOT NULL → users(id)"},
-		{"PK + NOT NULL + DEFAULT + FK", columnInfo{name: "x", isPrimaryKey: true, notNull: true, defaultExpr: "0", fkTarget: "a(b)"}, "PK NOT NULL DEFAULT 0 → a(b)"},
+		{"plain", columnDef{name: "x"}, ""},
+		{"PK only", columnDef{name: "id", isPrimaryKey: true}, "PK"},
+		{"NOT NULL only", columnDef{name: "x", notNull: true}, "NOT NULL"},
+		{"PK + NOT NULL", columnDef{name: "id", isPrimaryKey: true, notNull: true}, "PK NOT NULL"},
+		{"UNIQUE not redundant with PK", columnDef{name: "id", isPrimaryKey: true, isUnique: true}, "PK"},
+		{"UNIQUE standalone", columnDef{name: "email", notNull: true, isUnique: true}, "NOT NULL UNIQUE"},
+		{"with default", columnDef{name: "x", notNull: true, defaultExpr: "now()"}, "NOT NULL DEFAULT now()"},
+		{"with FK", columnDef{name: "user_id", notNull: true, fkTarget: "users(id)"}, "NOT NULL → users(id)"},
+		{"PK + NOT NULL + DEFAULT + FK", columnDef{name: "x", isPrimaryKey: true, notNull: true, defaultExpr: "0", fkTarget: "a(b)"}, "PK NOT NULL DEFAULT 0 → a(b)"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -204,16 +204,16 @@ func TestColumnModifiers(t *testing.T) {
 // TestRenderTableChunk exercises chunk emission end-to-end with a
 // synthetic snapshot — no DB needed.
 func TestRenderTableChunk(t *testing.T) {
-	tab := tableInfo{
+	tab := tableDef{
 		schema: "public",
 		name:   "users",
-		columns: []columnInfo{
+		columns: []columnDef{
 			{name: "id", dataType: "bigint", isPrimaryKey: true, notNull: true},
 			{name: "email", dataType: "varchar(255)", notNull: true, isUnique: true},
 			{name: "role", dataType: "varchar(32)", notNull: true, defaultExpr: "'guest'"},
 			{name: "created_at", dataType: "timestamp", notNull: true, defaultExpr: "now()"},
 		},
-		indexes: []indexInfo{
+		indexes: []indexDef{
 			{name: "users_email_idx", unique: false, indexdef: "CREATE INDEX users_email_idx ON public.users USING btree (email)"},
 		},
 		fkReferenced: []fkRef{
@@ -248,7 +248,7 @@ func TestRenderViewChunk_Truncation(t *testing.T) {
 	for range 200 {
 		b.WriteString("SELECT 1\n")
 	}
-	v := viewInfo{schema: "public", name: "big_view", definition: b.String()}
+	v := viewDef{schema: "public", name: "big_view", definition: b.String()}
 	c := renderViewChunk(v, "-- header", "db://h")
 	if !strings.Contains(c.Text, "view body truncated") {
 		t.Errorf("expected truncation notice in oversized view; got:\n%s", c.Text[:200])
@@ -261,7 +261,7 @@ func TestRenderViewChunk_Truncation(t *testing.T) {
 
 // TestRenderFunctionChunk pins the signature-only rendering.
 func TestRenderFunctionChunk(t *testing.T) {
-	f := functionInfo{
+	f := functionDef{
 		schema:  "public",
 		name:    "greet",
 		argSig:  "(name text)",
@@ -297,8 +297,8 @@ func TestDBChunkPath(t *testing.T) {
 // with the same schema+name but different arg signatures must not collide
 // on Chunk.File.
 func TestRenderFunctionChunk_OverloadsDistinctPaths(t *testing.T) {
-	a := renderFunctionChunk(functionInfo{schema: "public", name: "upsert_user", argSig: "(integer)"}, "-- h", "db://h")
-	b := renderFunctionChunk(functionInfo{schema: "public", name: "upsert_user", argSig: "(text)"}, "-- h", "db://h")
+	a := renderFunctionChunk(functionDef{schema: "public", name: "upsert_user", argSig: "(integer)"}, "-- h", "db://h")
+	b := renderFunctionChunk(functionDef{schema: "public", name: "upsert_user", argSig: "(text)"}, "-- h", "db://h")
 	if a.File == b.File {
 		t.Errorf("overloaded functions collided on File = %q", a.File)
 	}
@@ -338,7 +338,7 @@ func TestNormalizeType(t *testing.T) {
 }
 
 func TestSortTables(t *testing.T) {
-	ts := []tableInfo{
+	ts := []tableDef{
 		{schema: "public", name: "users"},
 		{schema: "audit", name: "events"},
 		{schema: "public", name: "sessions"},

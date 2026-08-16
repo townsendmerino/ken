@@ -200,10 +200,10 @@ func perfRunSampleLoop(ctx context.Context, conn *sql.DB) time.Duration {
 	// Build a minimal schemaSnapshot with the fixture tables.
 	snap := &schemaSnapshot{}
 	for i := 0; i < perfTables; i++ {
-		snap.tables = append(snap.tables, tableInfo{
+		snap.tables = append(snap.tables, tableDef{
 			schema: perfSchema,
 			name:   fmt.Sprintf("t%03d", i),
-			columns: []columnInfo{
+			columns: []columnDef{
 				{name: "id", isPrimaryKey: true},
 			},
 		})

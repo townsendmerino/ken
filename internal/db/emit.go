@@ -32,7 +32,7 @@ func dbChunkPath(pathPrefix, schema, name string) string {
 // PK / NOT NULL / UNIQUE / DEFAULT / FK keywords composed in a stable
 // order so successive reindexes produce byte-identical output for the
 // same schema (modulo freshness header).
-func renderTableChunk(t tableInfo, header, pathPrefix string) chunk.Chunk {
+func renderTableChunk(t tableDef, header, pathPrefix string) chunk.Chunk {
 	var b strings.Builder
 	b.WriteString(header)
 	b.WriteByte('\n')
@@ -128,7 +128,7 @@ func formatApproxCount(n float64) string {
 // in a stable order. Order chosen for readability: PK first (visually
 // distinct), then nullability, then uniqueness, then default, then FK
 // arrow.
-func columnModifiers(c columnInfo) string {
+func columnModifiers(c columnDef) string {
 	var parts []string
 	if c.isPrimaryKey {
 		parts = append(parts, "PK")
@@ -168,7 +168,7 @@ func extractIndexColumns(indexdef string) string {
 
 // renderViewChunk produces a VIEW chunk with the body truncated at
 // maxViewBodyLines.
-func renderViewChunk(v viewInfo, header, pathPrefix string) chunk.Chunk {
+func renderViewChunk(v viewDef, header, pathPrefix string) chunk.Chunk {
 	body := strings.TrimSpace(v.definition)
 	lines := strings.Split(body, "\n")
 	truncated := false
@@ -197,7 +197,7 @@ func renderViewChunk(v viewInfo, header, pathPrefix string) chunk.Chunk {
 // renderFunctionChunk produces a one-line-ish FUNCTION chunk: signature
 // only, no body. The signature is the high-signal target for an agent
 // searching for "function that authenticates users by token".
-func renderFunctionChunk(f functionInfo, header, pathPrefix string) chunk.Chunk {
+func renderFunctionChunk(f functionDef, header, pathPrefix string) chunk.Chunk {
 	var b strings.Builder
 	b.WriteString(header)
 	b.WriteByte('\n')

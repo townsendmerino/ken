@@ -91,7 +91,7 @@ func samplePostgresParallel(ctx context.Context, opts Options, snap *schemaSnaps
 // (defense against pgx returning weird types) and a per-table error
 // swallow. The querier is a *pgxpool.Pool under the parallel sampler, so
 // each call runs on its own pooled connection.
-func sampleOne(ctx context.Context, conn pgxQuerier, t *tableInfo, opts Options) {
+func sampleOne(ctx context.Context, conn pgxQuerier, t *tableDef, opts Options) {
 	defer func() {
 		if r := recover(); r != nil {
 			warn(opts, "panic sampling %s: %v", t.schema+"."+t.name, r)
@@ -138,7 +138,7 @@ func sampleOne(ctx context.Context, conn pgxQuerier, t *tableInfo, opts Options)
 // Prefers the table's first PK column; falls back to "ORDER BY 1" which
 // orders by the first column (whatever it is) for stable cross-run
 // output even on tables without a PK.
-func orderByClauseFor(t *tableInfo) string {
+func orderByClauseFor(t *tableDef) string {
 	for _, c := range t.columns {
 		if c.isPrimaryKey {
 			return "ORDER BY " + quoteIdent(c.name)

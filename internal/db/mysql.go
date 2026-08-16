@@ -302,7 +302,7 @@ func introspectMySQL(ctx context.Context, conn *sql.DB, opts Options) (*schemaSn
 	// Build a lookup keyed by (schema, table) so the FK annotation pass
 	// can find the referenced table when populating fkReferenced. Same
 	// shape as introspect.go's `tables` map.
-	tableMap := make(map[string]*tableInfo, len(tables))
+	tableMap := make(map[string]*tableDef, len(tables))
 	for i := range tables {
 		t := &tables[i]
 		tableMap[qualifiedKey(t.schema, t.name)] = t
@@ -344,7 +344,7 @@ func introspectMySQL(ctx context.Context, conn *sql.DB, opts Options) (*schemaSn
 // SQL excludes the system-schema set up front as a defense-in-depth
 // (the helper rejects the same names but the WHERE clause keeps the
 // network traffic small on big servers).
-func mysqlListTablesAndColumns(ctx context.Context, conn *sql.DB, opts Options) ([]tableInfo, error) {
+func mysqlListTablesAndColumns(ctx context.Context, conn *sql.DB, opts Options) ([]tableDef, error) {
 	q := `
 SELECT
     t.table_schema,
@@ -368,7 +368,7 @@ ORDER BY t.table_schema, t.table_name, c.ordinal_position;
 	}
 	defer rows.Close()
 
-	tmp := map[string]*tableInfo{}
+	tmp := map[string]*tableDef{}
 	var order []string
 	for rows.Next() {
 		var (
@@ -384,11 +384,11 @@ ORDER BY t.table_schema, t.table_name, c.ordinal_position;
 		key := schema + "." + name
 		t, ok := tmp[key]
 		if !ok {
-			t = &tableInfo{schema: schema, name: name}
+			t = &tableDef{schema: schema, name: name}
 			tmp[key] = t
 			order = append(order, key)
 		}
-		col := columnInfo{
+		col := columnDef{
 			name:     colName,
 			dataType: normalizeMySQLIntType(strings.ToLower(colType)),
 			notNull:  !strings.EqualFold(isNullable, "YES"),
@@ -412,7 +412,7 @@ ORDER BY t.table_schema, t.table_name, c.ordinal_position;
 		return nil, err
 	}
 
-	out := make([]tableInfo, 0, len(order))
+	out := make([]tableDef, 0, len(order))
 	for _, key := range order {
 		out = append(out, *tmp[key])
 	}
@@ -422,7 +422,7 @@ ORDER BY t.table_schema, t.table_name, c.ordinal_position;
 // mysqlAnnotateConstraints attaches PK / UNIQUE markers and FK targets
 // to columns. Two passes: PK/UNIQUE from table_constraints, FK from
 // key_column_usage + referential_constraints.
-func mysqlAnnotateConstraints(ctx context.Context, conn *sql.DB, tables map[string]*tableInfo, opts Options) error {
+func mysqlAnnotateConstraints(ctx context.Context, conn *sql.DB, tables map[string]*tableDef, opts Options) error {
 	// PK + UNIQUE markers.
 	q1 := `
 SELECT
@@ -514,8 +514,8 @@ WHERE kcu.referenced_table_name IS NOT NULL
 
 // mysqlAnnotateIndexes attaches per-index metadata via
 // information_schema.statistics, which has one row per (index, column).
-// We aggregate to one indexInfo per index name.
-func mysqlAnnotateIndexes(ctx context.Context, conn *sql.DB, tables map[string]*tableInfo, opts Options) error {
+// We aggregate to one indexDef per index name.
+func mysqlAnnotateIndexes(ctx context.Context, conn *sql.DB, tables map[string]*tableDef, opts Options) error {
 	// non_unique = 0 → UNIQUE, = 1 → not unique. PRIMARY index name is
 	// skipped (the PK columns already carry the marker).
 	q := `
@@ -585,7 +585,7 @@ ORDER BY table_schema, table_name, index_name, seq_in_index;
 		// back out via extractIndexColumns + emit "INDEX <name> ON (<cols>)".
 		indexdef := fmt.Sprintf("CREATE%s INDEX %s ON %s (%s)",
 			uniqueKW, k.name, k.table, strings.Join(a.cols, ", "))
-		t.indexes = append(t.indexes, indexInfo{
+		t.indexes = append(t.indexes, indexDef{
 			name:     k.name,
 			unique:   a.unique,
 			indexdef: indexdef,
@@ -597,7 +597,7 @@ ORDER BY table_schema, table_name, index_name, seq_in_index;
 // mysqlAnnotateFKReferences populates the inverse FK list ("this table
 // is FK-referenced BY <other>(col)"). The MySQL key_column_usage view
 // already names both sides, so this is one query.
-func mysqlAnnotateFKReferences(ctx context.Context, conn *sql.DB, tables map[string]*tableInfo, opts Options) error {
+func mysqlAnnotateFKReferences(ctx context.Context, conn *sql.DB, tables map[string]*tableDef, opts Options) error {
 	q := `
 SELECT
     kcu.referenced_table_schema,
@@ -638,7 +638,7 @@ WHERE kcu.referenced_table_name IS NOT NULL
 
 // mysqlListViews lists views with their definitions. Truncation happens
 // at render time (maxViewBodyLines).
-func mysqlListViews(ctx context.Context, conn *sql.DB, opts Options) ([]viewInfo, error) {
+func mysqlListViews(ctx context.Context, conn *sql.DB, opts Options) ([]viewDef, error) {
 	q := `
 SELECT
     table_schema,
@@ -653,7 +653,7 @@ ORDER BY table_schema, table_name;
 		return nil, err
 	}
 	defer rows.Close()
-	var out []viewInfo
+	var out []viewDef
 	for rows.Next() {
 		var schema, name string
 		var def sql.NullString
@@ -663,7 +663,7 @@ ORDER BY table_schema, table_name;
 		if !filterSchema(schema, "mysql", opts) {
 			continue
 		}
-		v := viewInfo{schema: schema, name: name}
+		v := viewDef{schema: schema, name: name}
 		if def.Valid {
 			v.definition = def.String
 		}
@@ -675,7 +675,7 @@ ORDER BY table_schema, table_name;
 // mysqlListRoutines lists stored procedures + functions with their
 // parameter / return signatures. Body deliberately NOT indexed (parallel
 // to the Postgres policy: signature is the high-signal target).
-func mysqlListRoutines(ctx context.Context, conn *sql.DB, opts Options) ([]functionInfo, error) {
+func mysqlListRoutines(ctx context.Context, conn *sql.DB, opts Options) ([]functionDef, error) {
 	// Routines (header rows) — one per procedure/function.
 	qRoutines := `
 SELECT
@@ -763,10 +763,10 @@ ORDER BY specific_schema, specific_name, ordinal_position;
 		return nil, err
 	}
 
-	out := make([]functionInfo, 0, len(metas))
+	out := make([]functionDef, 0, len(metas))
 	for _, m := range metas {
 		sig := "(" + strings.Join(argSigs[key{m.schema, m.name}], ", ") + ")"
-		out = append(out, functionInfo{
+		out = append(out, functionDef{
 			schema:  m.schema,
 			name:    m.name,
 			argSig:  sig,

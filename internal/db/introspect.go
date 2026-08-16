@@ -15,16 +15,16 @@ import (
 // constraints, indexes, and FK relationships. The renderers in emit.go
 // consume this struct to produce chunks.
 type schemaSnapshot struct {
-	tables    []tableInfo
-	views     []viewInfo
-	functions []functionInfo
+	tables    []tableDef
+	views     []viewDef
+	functions []functionDef
 }
 
-type tableInfo struct {
+type tableDef struct {
 	schema       string
 	name         string
-	columns      []columnInfo
-	indexes      []indexInfo
+	columns      []columnDef
+	indexes      []indexDef
 	fkReferenced []fkRef // FKs from other tables pointing AT this one
 
 	// approxRowCount is pg_class.reltuples — Postgres' best estimate of
@@ -37,7 +37,7 @@ type tableInfo struct {
 	sampleRows [][]string
 }
 
-type columnInfo struct {
+type columnDef struct {
 	name         string
 	dataType     string // human-friendly, e.g. "varchar(255)" not "character varying"
 	notNull      bool
@@ -47,7 +47,7 @@ type columnInfo struct {
 	fkTarget     string // empty if not a FK; "<schema>.<table>(<col>)" otherwise
 }
 
-type indexInfo struct {
+type indexDef struct {
 	name     string
 	unique   bool
 	indexdef string // raw pg_indexes.indexdef (the CREATE INDEX statement Postgres would emit to recreate it)
@@ -59,13 +59,13 @@ type fkRef struct {
 	fromColumn string
 }
 
-type viewInfo struct {
+type viewDef struct {
 	schema     string
 	name       string
 	definition string // truncated by renderer if too long
 }
 
-type functionInfo struct {
+type functionDef struct {
 	schema  string
 	name    string
 	argSig  string // "(arg_t1, arg_t2)" — argument types only, no names; body NOT indexed in v0.7.0
@@ -103,7 +103,7 @@ func introspect(ctx context.Context, conn *pgx.Conn, opts Options) (*schemaSnaps
 	}
 
 	// Materialize tables map into a sorted slice for stable output.
-	tableList := make([]tableInfo, 0, len(tables))
+	tableList := make([]tableDef, 0, len(tables))
 	for _, t := range tables {
 		tableList = append(tableList, *t)
 	}
@@ -140,7 +140,7 @@ func introspect(ctx context.Context, conn *pgx.Conn, opts Options) (*schemaSnaps
 //
 // Returns a map keyed by "schema.name" for O(1) annotation by the
 // follow-on queries (which join back to tables by their natural keys).
-func queryTablesAndColumns(ctx context.Context, conn *pgx.Conn, opts Options) (map[string]*tableInfo, error) {
+func queryTablesAndColumns(ctx context.Context, conn *pgx.Conn, opts Options) (map[string]*tableDef, error) {
 	const q = `
 SELECT
     t.table_schema,
@@ -173,7 +173,7 @@ ORDER BY t.table_schema, t.table_name, c.ordinal_position;
 	}
 	defer rows.Close()
 
-	out := map[string]*tableInfo{}
+	out := map[string]*tableDef{}
 	for rows.Next() {
 		var schema, name, colName, dataType string
 		var notNull bool
@@ -187,10 +187,10 @@ ORDER BY t.table_schema, t.table_name, c.ordinal_position;
 		key := schema + "." + name
 		t, ok := out[key]
 		if !ok {
-			t = &tableInfo{schema: schema, name: name}
+			t = &tableDef{schema: schema, name: name}
 			out[key] = t
 		}
-		col := columnInfo{
+		col := columnDef{
 			name:     colName,
 			dataType: normalizeType(dataType),
 			notNull:  notNull,
@@ -208,7 +208,7 @@ ORDER BY t.table_schema, t.table_name, c.ordinal_position;
 
 // annotateConstraints attaches PK / UNIQUE / FK markers + FK targets to
 // the columns of tables collected by queryTablesAndColumns.
-func annotateConstraints(ctx context.Context, conn *pgx.Conn, tables map[string]*tableInfo) error {
+func annotateConstraints(ctx context.Context, conn *pgx.Conn, tables map[string]*tableDef) error {
 	// PK + UNIQUE: information_schema.table_constraints joined to
 	// key_column_usage gives us (table, column, constraint_type).
 	const q1 = `
@@ -301,7 +301,7 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
 // annotateIndexes attaches pg_indexes.indexdef rows to each table.
 // We let Postgres tell us how the index was created (raw indexdef) so we
 // don't have to re-render it.
-func annotateIndexes(ctx context.Context, conn *pgx.Conn, tables map[string]*tableInfo) error {
+func annotateIndexes(ctx context.Context, conn *pgx.Conn, tables map[string]*tableDef) error {
 	const q = `
 SELECT
     schemaname,
@@ -328,7 +328,7 @@ WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
 		}
 		// "CREATE UNIQUE INDEX ..." vs "CREATE INDEX ..." discriminates uniqueness.
 		unique := strings.Contains(strings.ToUpper(indexdef), "CREATE UNIQUE INDEX")
-		t.indexes = append(t.indexes, indexInfo{
+		t.indexes = append(t.indexes, indexDef{
 			name:     name,
 			unique:   unique,
 			indexdef: indexdef,
@@ -337,7 +337,7 @@ WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
 	return rows.Err()
 }
 
-// annotateFKReferences populates tableInfo.fkReferenced with the
+// annotateFKReferences populates tableDef.fkReferenced with the
 // "this table is FK-referenced BY <other>(col)" relationships, the
 // inverse of what annotateConstraints captured per-column. Surfacing
 // both directions is the prompt's stated requirement.
@@ -348,7 +348,7 @@ WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
 // referenced-side filter is already enforced by table-map membership
 // (tables map only contains schemas that passed filterSchema), so we
 // only need to filter the from-side here.
-func annotateFKReferences(ctx context.Context, conn *pgx.Conn, tables map[string]*tableInfo, opts Options) error {
+func annotateFKReferences(ctx context.Context, conn *pgx.Conn, tables map[string]*tableDef, opts Options) error {
 	const q = `
 SELECT
     ccu.table_schema  AS ref_schema,
@@ -395,7 +395,7 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
 // queryViews lists every user view with its definition. The definition
 // may be long (analytics CTEs etc.); the renderer truncates if needed.
 // v0.7.2: respects opts.IncludeSchemas / ExcludeSchemas via filterSchema.
-func queryViews(ctx context.Context, conn *pgx.Conn, opts Options) ([]viewInfo, error) {
+func queryViews(ctx context.Context, conn *pgx.Conn, opts Options) ([]viewDef, error) {
 	const q = `
 SELECT
     table_schema,
@@ -411,9 +411,9 @@ ORDER BY table_schema, table_name;
 		return nil, err
 	}
 	defer rows.Close()
-	var out []viewInfo
+	var out []viewDef
 	for rows.Next() {
-		var v viewInfo
+		var v viewDef
 		var def *string
 		if err := rows.Scan(&v.schema, &v.name, &def); err != nil {
 			return nil, err
@@ -435,7 +435,7 @@ ORDER BY table_schema, table_name;
 // Python via plpython3u) and the signature is the high-signal indexing
 // target. Body indexing is a v0.x+ refinement.
 // v0.7.2: respects opts.IncludeSchemas / ExcludeSchemas via filterSchema.
-func queryFunctions(ctx context.Context, conn *pgx.Conn, opts Options) ([]functionInfo, error) {
+func queryFunctions(ctx context.Context, conn *pgx.Conn, opts Options) ([]functionDef, error) {
 	const q = `
 SELECT
     n.nspname AS schema,
@@ -459,9 +459,9 @@ ORDER BY n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.o
 		return nil, err
 	}
 	defer rows.Close()
-	var out []functionInfo
+	var out []functionDef
 	for rows.Next() {
-		var f functionInfo
+		var f functionDef
 		var result *string
 		if err := rows.Scan(&f.schema, &f.name, &f.argSig, &result); err != nil {
 			return nil, err
@@ -506,7 +506,7 @@ func normalizeType(t string) string {
 // deterministic across runs. Fed to slices.SortFunc by the three engines
 // (audit §15 — was a hand-rolled O(n²) insertion sort over map-iteration
 // order, ~seconds + ~GB of struct memmove on a 4k-table server).
-func compareTable(a, b tableInfo) int {
+func compareTable(a, b tableDef) int {
 	if c := cmp.Compare(a.schema, b.schema); c != 0 {
 		return c
 	}
