@@ -57,12 +57,12 @@ func handleStatus(ctx context.Context, cfg *Config, args StatusArgs) (*sdk.CallT
 	return renderStatusResult(status.Build(opts), args)
 }
 
-// handleStatusRun is the mcp.Run path's status handler. Embedded-
+// runStatus is the mcp.Run path's status handler. Embedded-
 // corpus servers don't have a Cache (no on-demand repos) but DO have
 // a single live Index via the atomic pointer. Surface that as the
 // IndexInfo so users still see "what's loaded right now" without
 // having to pass a repo argument.
-func handleStatusRun(ix *search.Index, args StatusArgs) (*sdk.CallToolResult, any, error) {
+func runStatus(ix *search.Index, args StatusArgs) (*sdk.CallToolResult, any, error) {
 	opts := status.BuildOptions{}
 	if ix != nil {
 		opts.LiveIndex = liveIndexInfo("(embedded corpus)", ix)

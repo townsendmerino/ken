@@ -1,5 +1,6 @@
-// Command ken is the CLI. Stage 1 exposes a working lexical (BM25) search
-// over a directory; semantic + hybrid modes arrive with later stages.
+// Command ken is the CLI: lexical (BM25), semantic (Model2Vec), and hybrid
+// (RRF-fused, the default) code search over a directory, plus index/search/
+// download-model/bench subcommands.
 package main
 
 import (
@@ -875,7 +876,7 @@ func cmdSearch(args []string) int {
 			for _, r := range prelim {
 				fmt.Printf("%.4f  %s:%d-%d  %s\n",
 					r.Score, r.Chunk.File, r.Chunk.StartLine, r.Chunk.EndLine,
-					firstLine(r.Chunk.Text))
+					previewLine(r.Chunk.Text))
 			}
 			fmt.Println("[reranked]")
 		}
@@ -916,7 +917,7 @@ func cmdSearch(args []string) int {
 	for _, r := range results {
 		fmt.Printf("%.4f  %s:%d-%d  %s\n",
 			r.Score, r.Chunk.File, r.Chunk.StartLine, r.Chunk.EndLine,
-			firstLine(r.Chunk.Text))
+			previewLine(r.Chunk.Text))
 	}
 	if sa.verbose {
 		printTelemetry(os.Stderr, &tel)
@@ -1089,8 +1090,8 @@ func cmdBench(args []string) int {
 	return 0
 }
 
-// firstLine returns the first non-blank line, trimmed, for a one-line preview.
-func firstLine(s string) string {
+// previewLine returns the first non-blank line, trimmed, for a one-line preview.
+func previewLine(s string) string {
 	for ln := range strings.SplitSeq(s, "\n") {
 		if t := strings.TrimSpace(ln); t != "" {
 			if len(t) > 100 {

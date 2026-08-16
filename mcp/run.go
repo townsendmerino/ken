@@ -421,7 +421,7 @@ func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db D
 			"embedded-corpus index (chunk count, mode, chunker). Pass `output: 'json'` " +
 			"for a machine-parsable response.",
 	}, func(_ context.Context, _ *sdk.CallToolRequest, args StatusArgs) (*sdk.CallToolResult, any, error) {
-		return handleStatusRun(ixPtr.Load(), args)
+		return runStatus(ixPtr.Load(), args)
 	})
 
 	// v0.8.0 Part 2 + Part 3 (ADR-020): reindex_db tool. Same
