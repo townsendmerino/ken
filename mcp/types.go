@@ -74,13 +74,22 @@ type SearchArgs struct {
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default; same string format semble uses) or 'json' (structured response with query/mode/results/filter fields — see SearchResponse)."`
 }
 
+// repoArg carries the shared `repo` tool argument. The git-URL-or-local-path
+// description was copy-pasted identically across find_related and the
+// structural tools; embedding it (jsonschema-go inlines anonymous embedded
+// structs, verified) keeps the wording from drifting tool-by-tool. SearchArgs
+// keeps its own longer, search-specific `repo` description.
+type repoArg struct {
+	Repo string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+}
+
 // FindRelatedArgs is the argument schema for `find_related`.
 type FindRelatedArgs struct {
 	FilePath string `json:"file_path" jsonschema:"Path to the file as stored in the index (use file_path from a search result)."`
 	Line     int    `json:"line" jsonschema:"Line number (1-indexed)."`
-	Repo     string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
-	TopK     int    `json:"top_k,omitempty" jsonschema:"Number of similar chunks to return."`
-	Output   string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with anchor/results — see FindRelatedResponse)."`
+	repoArg
+	TopK   int    `json:"top_k,omitempty" jsonschema:"Number of similar chunks to return."`
+	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with anchor/results — see FindRelatedResponse)."`
 }
 
 // ReindexDBArgs is the argument schema for the v0.8.0 reindex_db tool.
@@ -119,7 +128,7 @@ type ReindexDBArgs struct{}
 // (not confidence-weighted) for stage-1 honesty.
 type DefinitionArgs struct {
 	Symbol string `json:"symbol" jsonschema:"The symbol name to locate (function or class name as written in source — exact match; no fuzzy matching, no qualification)."`
-	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+	repoArg
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with symbol/definitions — see DefinitionResponse)."`
 }
 
@@ -130,7 +139,7 @@ type DefinitionArgs struct {
 // resolution.
 type ReferencesArgs struct {
 	Symbol string `json:"symbol" jsonschema:"The name to find references for (function, class, or any identifier — exact match)."`
-	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+	repoArg
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with symbol/references/totals — see ReferencesResponse)."`
 }
 
@@ -139,8 +148,8 @@ type ReferencesArgs struct {
 // classes, and their methods). For directory paths, returns the
 // outline for every indexed file under the directory.
 type OutlineArgs struct {
-	Path   string `json:"path" jsonschema:"File path (relative to repo root) or directory path. A file returns just that file's outline; a directory returns outlines for every indexed file under it."`
-	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+	Path string `json:"path" jsonschema:"File path (relative to repo root) or directory path. A file returns just that file's outline; a directory returns outlines for every indexed file under it."`
+	repoArg
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with path/entries — see OutlineResponse)."`
 	Offset int    `json:"offset,omitempty" jsonschema:"Directory paths only: skip this many files before listing (for paging past a truncated result). Default 0."`
 	Limit  int    `json:"limit,omitempty" jsonschema:"Directory paths only: max files to outline in one call (default and hard cap 500). Narrow with 'path' or page with 'offset' when truncated."`
@@ -150,8 +159,8 @@ type OutlineArgs struct {
 // Returns every top-level symbol (function or class) defined in
 // the repo, optionally filtered to a subdirectory prefix.
 type SymbolsArgs struct {
-	Path   string `json:"path,omitempty" jsonschema:"Optional path prefix (relative to repo root) to filter the symbol list. Empty/omitted returns every top-level symbol in the repo."`
-	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+	Path string `json:"path,omitempty" jsonschema:"Optional path prefix (relative to repo root) to filter the symbol list. Empty/omitted returns every top-level symbol in the repo."`
+	repoArg
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with path_prefix/symbols — see SymbolsResponse)."`
 	Offset int    `json:"offset,omitempty" jsonschema:"Skip this many symbols before listing (for paging past a truncated result). Default 0."`
 	Limit  int    `json:"limit,omitempty" jsonschema:"Max symbols to return in one call (default and hard cap 2000). Narrow with 'path' or page with 'offset' when truncated."`
@@ -195,7 +204,7 @@ type StatusArgs struct {
 // function B") would need a richer index; deferred.
 type CallersArgs struct {
 	Symbol string `json:"symbol" jsonschema:"The function name whose callers you want (exact match, no qualification — pass 'Login' not 'User.Login'). Returns files that contain a call to this name."`
-	Repo   string `json:"repo,omitempty" jsonschema:"https:// or http:// git URL or local directory path. Required when no default index was configured at startup."`
+	repoArg
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with symbol/files — see CallersResponse)."`
 }
 

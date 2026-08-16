@@ -81,20 +81,33 @@ func structuralUnavailableResult(bundle *RepoBundle, outputMode string) *sdk.Cal
 			"(a repo with no supported source files has no structural index).")
 }
 
+// resolveStructuralIndex is the shared preamble for every structural handler:
+// resolve the repo bundle, then build/fetch its StructuralIndex, nil-checking
+// both. On any failure it returns a nil index plus a ready-to-return MCP error
+// result (the caller returns it as `errResult, nil, nil`); on success errResult
+// is nil. Handlers use only the returned index — the bundle is consumed here.
+func resolveStructuralIndex(ctx context.Context, cfg *Config, repoArg, outputMode string) (*structural.Index, *sdk.CallToolResult) {
+	bundle, errResult := resolveBundleForTool(ctx, cfg, repoArg, outputMode)
+	if errResult != nil {
+		return nil, errResult
+	}
+	// Builds the structural symbol index on first use (lazy — cold-start M0);
+	// nil on unsupported corpus or build failure.
+	sidx := bundle.StructuralIndex(ctx)
+	if sidx == nil {
+		return nil, structuralUnavailableResult(bundle, outputMode)
+	}
+	return sidx, nil
+}
+
 // handleDefinition implements the `definition` tool: given a
 // symbol name, return the file(s) where it's defined. Tree-sitter-
 // grade: collisions return all sites (ordered alphabetically by
 // file path); ambiguity is NOT resolved by type.
 func handleDefinition(ctx context.Context, cfg *Config, args DefinitionArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo, args.Output)
+	sidx, errResult := resolveStructuralIndex(ctx, cfg, args.Repo, args.Output)
 	if errResult != nil {
 		return errResult, nil, nil
-	}
-	// Builds the structural symbol index on first use (lazy — cold-start M0);
-	// nil on unsupported corpus or build failure, handled just below.
-	sidx := bundle.StructuralIndex(ctx)
-	if sidx == nil {
-		return structuralUnavailableResult(bundle, args.Output), nil, nil
 	}
 	sym := strings.TrimSpace(args.Symbol)
 	if sym == "" {
@@ -151,15 +164,9 @@ func renderDefinitionMarkdown(r DefinitionResponse) string {
 // file both show up; tooling that needs semantic precision should
 // use an LSP, not ken's structural index.
 func handleReferences(ctx context.Context, cfg *Config, args ReferencesArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo, args.Output)
+	sidx, errResult := resolveStructuralIndex(ctx, cfg, args.Repo, args.Output)
 	if errResult != nil {
 		return errResult, nil, nil
-	}
-	// Builds the structural symbol index on first use (lazy — cold-start M0);
-	// nil on unsupported corpus or build failure, handled just below.
-	sidx := bundle.StructuralIndex(ctx)
-	if sidx == nil {
-		return structuralUnavailableResult(bundle, args.Output), nil, nil
 	}
 	sym := strings.TrimSpace(args.Symbol)
 	if sym == "" {
@@ -228,15 +235,9 @@ func renderReferencesMarkdown(r ReferencesResponse) string {
 // LSP — ken's structural index doesn't track caller-function
 // scopes today.
 func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo, args.Output)
+	sidx, errResult := resolveStructuralIndex(ctx, cfg, args.Repo, args.Output)
 	if errResult != nil {
 		return errResult, nil, nil
-	}
-	// Builds the structural symbol index on first use (lazy — cold-start M0);
-	// nil on unsupported corpus or build failure, handled just below.
-	sidx := bundle.StructuralIndex(ctx)
-	if sidx == nil {
-		return structuralUnavailableResult(bundle, args.Output), nil, nil
 	}
 	sym := strings.TrimSpace(args.Symbol)
 	if sym == "" {
@@ -303,15 +304,9 @@ func agreeVerb(cond bool, a, b string) string {
 // classes, methods). Given a directory path, return the outline of
 // every indexed file under that directory.
 func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo, args.Output)
+	sidx, errResult := resolveStructuralIndex(ctx, cfg, args.Repo, args.Output)
 	if errResult != nil {
 		return errResult, nil, nil
-	}
-	// Builds the structural symbol index on first use (lazy — cold-start M0);
-	// nil on unsupported corpus or build failure, handled just below.
-	sidx := bundle.StructuralIndex(ctx)
-	if sidx == nil {
-		return structuralUnavailableResult(bundle, args.Output), nil, nil
 	}
 	rawPath := strings.TrimSpace(args.Path)
 	if rawPath == "" {
@@ -416,15 +411,9 @@ func convertOutlineEntries(file string, entries []structural.OutlineEntry) []Out
 // defined under it. Useful as a "what's in this repo?" or "what's
 // in this package?" overview.
 func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.CallToolResult, any, error) {
-	bundle, errResult := resolveBundleForTool(ctx, cfg, args.Repo, args.Output)
+	sidx, errResult := resolveStructuralIndex(ctx, cfg, args.Repo, args.Output)
 	if errResult != nil {
 		return errResult, nil, nil
-	}
-	// Builds the structural symbol index on first use (lazy — cold-start M0);
-	// nil on unsupported corpus or build failure, handled just below.
-	sidx := bundle.StructuralIndex(ctx)
-	if sidx == nil {
-		return structuralUnavailableResult(bundle, args.Output), nil, nil
 	}
 	path := strings.TrimSpace(args.Path)
 	var names []string

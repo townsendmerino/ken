@@ -30,6 +30,42 @@ func kenMCPBin() string {
 	return "ken-mcp"
 }
 
+// The ken-mcp binary is identical across every TestBinary_StdoutIsCleanJSONRPC*
+// variant (same package, no varying build tags), so build it ONCE per test
+// process instead of re-linking it in each of the nine tests. TestMain removes
+// the shared dir.
+var (
+	kenMCPBinOnce sync.Once
+	kenMCPBinPath string
+	kenMCPBinDir  string
+	kenMCPBinErr  error
+	kenMCPBinOut  []byte
+)
+
+func buildKenMCPOnce(t *testing.T) string {
+	t.Helper()
+	kenMCPBinOnce.Do(func() {
+		kenMCPBinDir, kenMCPBinErr = os.MkdirTemp("", "ken-mcp-bin")
+		if kenMCPBinErr != nil {
+			return
+		}
+		kenMCPBinPath = filepath.Join(kenMCPBinDir, kenMCPBin())
+		kenMCPBinOut, kenMCPBinErr = exec.Command("go", "build", "-o", kenMCPBinPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
+	})
+	if kenMCPBinErr != nil {
+		t.Fatalf("go build ken-mcp: %v\n%s", kenMCPBinErr, kenMCPBinOut)
+	}
+	return kenMCPBinPath
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if kenMCPBinDir != "" {
+		_ = os.RemoveAll(kenMCPBinDir)
+	}
+	os.Exit(code)
+}
+
 // sqliteFileDSN builds a cross-platform `sqlite:///<abs path>` DSN from a
 // filesystem path: on Unix `/tmp/x.db` → `sqlite:///tmp/x.db`; on Windows
 // `C:\…\x.db` → `sqlite:///C:/…/x.db` (forward slashes; resolveSQLiteDSN
@@ -513,12 +549,7 @@ func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 		t.Skip("skipping subprocess MCP test in -short mode")
 	}
 
-	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, kenMCPBin())
-	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
-	}
+	binPath := buildKenMCPOnce(t)
 
 	// Repo root is two levels up from cmd/ken-mcp/.
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
@@ -671,12 +702,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithRerank(t *testing.T) {
 		}
 	}
 
-	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, kenMCPBin())
-	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
-	}
+	binPath := buildKenMCPOnce(t)
 
 	fixture := filepath.Join(repoRoot, "testdata", "repo")
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -756,12 +782,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithDB(t *testing.T) {
 		t.Skip("KEN_DB_TEST_DSN not set; see internal/db/integration_test.go for setup")
 	}
 
-	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, kenMCPBin())
-	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
-	}
+	binPath := buildKenMCPOnce(t)
 
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -835,12 +856,7 @@ func TestBinary_PrintListenScript_StdoutIsScript(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping subprocess subcommand test in -short mode")
 	}
-	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, kenMCPBin())
-	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
-	}
+	binPath := buildKenMCPOnce(t)
 
 	var stdout, stderr bytes.Buffer
 	cmd := exec.Command(binPath, "print-listen-script")
@@ -888,12 +904,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithListen(t *testing.T) {
 		t.Skip("KEN_DB_TEST_DSN not set; see internal/db/integration_test.go for setup")
 	}
 
-	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, kenMCPBin())
-	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
-	}
+	binPath := buildKenMCPOnce(t)
 
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -987,12 +998,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithReindexDB(t *testing.T) {
 		t.Skip("KEN_DB_TEST_DSN not set; see internal/db/integration_test.go for setup")
 	}
 
-	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, kenMCPBin())
-	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
-	}
+	binPath := buildKenMCPOnce(t)
 
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -1073,12 +1079,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithMySQL(t *testing.T) {
 		t.Skip("KEN_DB_MYSQL_TEST_DSN not set; see internal/db/mysql_integration_test.go for setup")
 	}
 
-	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, kenMCPBin())
-	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
-	}
+	binPath := buildKenMCPOnce(t)
 
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -1156,12 +1157,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithMariaDB(t *testing.T) {
 		t.Skip("KEN_DB_MARIADB_TEST_DSN not set; see internal/db/mysql_integration_test.go for setup")
 	}
 
-	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, kenMCPBin())
-	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
-	}
+	binPath := buildKenMCPOnce(t)
 
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -1243,12 +1239,7 @@ func TestBinary_StdoutIsCleanJSONRPC_WithSQLite(t *testing.T) {
 		_ = conn.Close()
 	}
 
-	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, kenMCPBin())
-	out, err := exec.Command("go", "build", "-o", binPath, "github.com/townsendmerino/ken/cmd/ken-mcp").CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
-	}
+	binPath := buildKenMCPOnce(t)
 
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
