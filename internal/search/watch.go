@@ -201,6 +201,12 @@ func (w *WatchedIndex) EmbedModel() *embed.StaticModel { return w.model }
 // load. Never returns nil after NewWatchedIndex succeeds.
 func (w *WatchedIndex) Load() *Index { return w.ix.Load() }
 
+// Root is the directory this index was built from. For a local-path repo it's
+// the path the caller passed; for a URL repo it's the temp clone dir the cache
+// materialized. Immutable after construction. Used by ken-mcp's
+// recently_changed to open the git working tree behind a URL-form repo.
+func (w *WatchedIndex) Root() string { return w.root }
+
 // setReconcileHook installs a hook fired inside reconcileCorpusLocked after
 // appends and before publish (test-only; see onReconcileAppended). The hook
 // receives the batch and returns true to consume itself. Set under corpusMu so

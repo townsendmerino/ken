@@ -214,6 +214,9 @@ type RecentlyChangedResponse struct {
 	PathPrefix string                  `json:"path_prefix,omitempty"`
 	Considered int                     `json:"considered"`
 	Commits    []RecentlyChangedCommit `json:"commits"`
+	// Note carries a caveat when set — currently the shallow-clone warning for
+	// URL-form repos (history limited to the tip commit). Empty for local repos.
+	Note string `json:"note,omitempty"`
 }
 
 // RecentlyChangedCommit is one commit in the recently_changed list.

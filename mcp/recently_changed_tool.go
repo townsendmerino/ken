@@ -39,16 +39,28 @@ func handleRecentlyChanged(ctx context.Context, cfg *Config, args RecentlyChange
 	if err != nil {
 		return errorResult(args.Output, err.Error()), nil, nil
 	}
+	// gitDir is the working tree recently_changed reads. For a local-path repo
+	// that's `source`; for a URL repo it's the temp clone dir the cache already
+	// materialized — reached via the cache (WatchedIndex.Root()), NOT by
+	// recomputing the clone path. Note the shallow-clone caveat: ken clones URL
+	// repos depth-1, so their git history is typically just the tip commit.
+	gitDir := source
+	shallowNote := ""
 	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
-		return errorResult(args.Output,
-			"recently_changed needs a local repo path. URL-form repos are "+
-				"cached into a temp clone for retrieval but ken doesn't expose "+
-				"that path through this tool yet. Clone the repo locally and "+
-				"pass the directory path, or use git log directly via your "+
-				"shell.",
-		), nil, nil
+		if cfg.Cache == nil {
+			return errorResult(args.Output,
+				"recently_changed: this server can't resolve URL repos (no cache); clone the repo locally and pass its path.",
+			), nil, nil
+		}
+		bundle, berr := cfg.Cache.GetBundle(ctx, source)
+		if berr != nil {
+			return errorResult(args.Output, fmt.Sprintf(
+				"recently_changed: failed to prepare %s: %v", source, berr)), nil, nil
+		}
+		gitDir = bundle.Index.Root()
+		shallowNote = "_Note: URL repos are indexed from a shallow (depth-1) clone, so git history here is limited to the most recent commit(s). Clone the repo locally and pass its path for full history._"
 	}
-	if st, err := os.Stat(source); err != nil || !st.IsDir() {
+	if st, err := os.Stat(gitDir); err != nil || !st.IsDir() {
 		return errorResult(args.Output, fmt.Sprintf(
 			"recently_changed: %q is not a directory. Pass a local path containing a git working tree.",
 			source)), nil, nil
@@ -62,7 +74,7 @@ func handleRecentlyChanged(ctx context.Context, cfg *Config, args RecentlyChange
 		n = MaxRecentlyChangedCommits
 	}
 
-	repo, err := git.PlainOpen(source)
+	repo, err := git.PlainOpen(gitDir)
 	if err != nil {
 		return errorResult(args.Output, fmt.Sprintf(
 			"recently_changed: %q is not a git repository: %v. Pass a directory that "+
@@ -133,6 +145,7 @@ func handleRecentlyChanged(ctx context.Context, cfg *Config, args RecentlyChange
 		PathPrefix: pathFilter,
 		Considered: considered,
 		Commits:    make([]RecentlyChangedCommit, 0, len(rows)),
+		Note:       strings.Trim(shallowNote, "_"),
 	}
 	for _, r := range rows {
 		resp.Commits = append(resp.Commits, RecentlyChangedCommit{
@@ -155,6 +168,9 @@ func handleRecentlyChanged(ctx context.Context, cfg *Config, args RecentlyChange
 				"No commits in the last %d touched %q. Try a larger n or a less-specific path.",
 				considered, pathFilter)
 		}
+		if shallowNote != "" {
+			msg = shallowNote + "\n\n" + msg
+		}
 		return dispatchOutput(args.Output, resp, msg)
 	}
 
@@ -164,6 +180,9 @@ func handleRecentlyChanged(ctx context.Context, cfg *Config, args RecentlyChange
 		suffix = fmt.Sprintf(" touching %q (of %d considered)", pathFilter, considered)
 	}
 	fmt.Fprintf(&b, "# Recent commits (%d shown%s)\n\n", len(rows), suffix)
+	if shallowNote != "" {
+		fmt.Fprintf(&b, "%s\n\n", shallowNote)
+	}
 	for i, r := range rows {
 		fmt.Fprintf(&b, "## %d. `%s` — %s\n", i+1, r.ShortHash, r.Subject)
 		fmt.Fprintf(&b, "_%s, %s_\n\n", r.AuthorName, relativeTime(now, r.When))

@@ -12,6 +12,8 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/townsendmerino/ken/internal/search"
 )
 
 // extractText returns the .Text field of the first TextContent in a
@@ -218,7 +220,12 @@ func TestRecentlyChanged_PathFilter(t *testing.T) {
 // TestRecentlyChanged_URLReturnsHelpfulError pins that https:// URL
 // repos get a friendly error message rather than a confusing
 // PlainOpen failure.
-func TestRecentlyChanged_URLReturnsHelpfulError(t *testing.T) {
+// TestRecentlyChanged_URLNoCacheReturnsHelpfulError: URL repos now resolve
+// through the cache's clone dir, so a server with NO cache configured returns a
+// clear "can't resolve URL repos" message rather than silently failing. (The
+// happy path — URL resolved via the cache — is covered end-to-end by the
+// subprocess binary tests.)
+func TestRecentlyChanged_URLNoCacheReturnsHelpfulError(t *testing.T) {
 	res, _, err := handleRecentlyChanged(context.Background(), &Config{}, RecentlyChangedArgs{
 		Repo: "https://github.com/org/repo",
 	})
@@ -226,8 +233,42 @@ func TestRecentlyChanged_URLReturnsHelpfulError(t *testing.T) {
 		t.Fatal(err)
 	}
 	txt := extractText(t, res)
-	if !strings.Contains(txt, "URL-form") && !strings.Contains(txt, "local repo path") {
-		t.Errorf("expected URL-not-supported message, got:\n%s", txt)
+	if !strings.Contains(txt, "URL repos") || !strings.Contains(txt, "no cache") {
+		t.Errorf("expected a 'no cache for URL repos' message, got:\n%s", txt)
+	}
+}
+
+// TestRecentlyChanged_URLResolvesViaCache: a URL repo resolves through the
+// cache to its (clone) working tree — WatchedIndex.Root() — and the log is
+// read from there, with the shallow-clone caveat surfaced.
+func TestRecentlyChanged_URLResolvesViaCache(t *testing.T) {
+	dir, repo := makeTempRepo(t)
+	commitFile(t, dir, repo, "a.txt", "hello", "add a", time.Now())
+
+	wi, err := search.NewWatchedIndex(dir, search.ModeBM25, "line", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = wi.Close() }()
+	bundle := &RepoBundle{Index: wi}
+
+	cache := NewCache(4, func(_ context.Context, _ string) (*RepoBundle, func(), error) {
+		return bundle, nil, nil // stand in for the clone+index the real Builder does
+	})
+	defer cache.Close()
+
+	res, _, err := handleRecentlyChanged(context.Background(), &Config{Cache: cache}, RecentlyChangedArgs{
+		Repo: "https://github.com/org/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	txt := extractText(t, res)
+	if !strings.Contains(txt, "add a") {
+		t.Errorf("expected the commit subject from the resolved clone dir; got:\n%s", txt)
+	}
+	if !strings.Contains(txt, "shallow") {
+		t.Errorf("expected the shallow-clone caveat for a URL repo; got:\n%s", txt)
 	}
 }
 

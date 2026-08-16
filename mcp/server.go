@@ -325,8 +325,9 @@ func NewServer(cfg Config) *sdk.Server {
 			"Sourced from git history via go-git PlainOpen on the working tree. " +
 			"Pass `n` (default 10, max 100) for how far back to look; pass `path` to filter to " +
 			"commits that touched a path prefix (e.g. 'src/api'). " +
-			"LOCAL REPO PATHS ONLY in this version — https:// URLs return a helpful error; " +
-			"clone manually first if you need git history for a remote repo. " +
+			"Works for local paths and https:// URLs — a URL repo reads from ken's shallow " +
+			"(depth-1) clone, so its history is limited to the most recent commit(s); clone " +
+			"locally and pass the path for full history. " +
 			"Use this to understand `what's been worked on recently` or `who is touching this area` " +
 			"without shelling out to git log.",
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args RecentlyChangedArgs) (*sdk.CallToolResult, any, error) {
