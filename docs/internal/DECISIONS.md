@@ -4,6 +4,8 @@ Architecture Decision Records for `ken`, in chronological order. Each entry capt
 
 ADR statuses: **Proposed** (documenting design alternatives; no implementation decision yet), **Accepted**, **Superseded** (replaced by a later ADR), **Deprecated** (no longer applies but kept for history).
 
+> Not every code comment's citation is an `ADR-NNN`. Tags like `(audit §27)`, `(R4-6)`, or `(audit N4)` cite ken's internal engineering-audit passes rather than an ADR — see [`audit-legend.md`](audit-legend.md) for what each family means and how to resolve one via `git log`.
+
 | # | Decision | Status |
 |---|---|---|
 | [ADR-001](#adr-001-pure-go-no-cgo) | Pure-Go runtime, no cgo | Accepted |
