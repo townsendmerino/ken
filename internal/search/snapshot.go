@@ -21,7 +21,7 @@
 //	    int64      size (bytes)
 //	uint32     CRC32 IEEE over every preceding byte
 //
-// "string LP" = uint32 LE length prefix + UTF-8 bytes (appendLPString).
+// "string LP" = uint32 LE length prefix + UTF-8 bytes (binfmt.AppendLPString).
 
 package search
 
@@ -38,6 +38,7 @@ import (
 	"strings"
 
 	"github.com/townsendmerino/aikit/embed"
+	"github.com/townsendmerino/ken/internal/binfmt"
 	"github.com/townsendmerino/ken/internal/repo"
 )
 
@@ -314,10 +315,10 @@ func (m SnapshotManifest) Encode() []byte {
 	body := make([]byte, 0, 4+4+4+len(m.ConfigKey)+4+len(m.Files)*(4+24))
 	body = append(body, manifestMagic...)
 	body = binary.LittleEndian.AppendUint32(body, manifestFormatVersion)
-	body = appendLPString(body, m.ConfigKey)
+	body = binfmt.AppendLPString(body, m.ConfigKey)
 	body = binary.LittleEndian.AppendUint32(body, uint32(len(m.Files)))
 	for _, f := range m.Files {
-		body = appendLPString(body, f.File)
+		body = binfmt.AppendLPString(body, f.File)
 		body = binary.LittleEndian.AppendUint64(body, uint64(f.MTimeNano))
 		body = binary.LittleEndian.AppendUint64(body, uint64(f.Size))
 	}
@@ -348,7 +349,7 @@ func DecodeManifest(data []byte) (SnapshotManifest, error) {
 	if ver != manifestFormatVersion {
 		return m, fmt.Errorf("%w: format version %d", ErrManifestCorrupt, ver)
 	}
-	key, n, err := readLPStringAt(data[pos:])
+	key, n, err := binfmt.ReadLPStringAt(data[pos:])
 	if err != nil {
 		return m, fmt.Errorf("%w: config key: %v", ErrManifestCorrupt, err)
 	}
@@ -367,7 +368,7 @@ func DecodeManifest(data []byte) (SnapshotManifest, error) {
 	}
 	m.Files = make([]FileStamp, 0, numFiles)
 	for i := uint32(0); i < numFiles; i++ {
-		file, n, err := readLPStringAt(data[pos:])
+		file, n, err := binfmt.ReadLPStringAt(data[pos:])
 		if err != nil {
 			return m, fmt.Errorf("%w: file %d path: %v", ErrManifestCorrupt, i, err)
 		}

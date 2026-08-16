@@ -40,6 +40,7 @@ import (
 	"testing"
 
 	"github.com/townsendmerino/aikit/chunk"
+	"github.com/townsendmerino/ken/internal/binfmt"
 )
 
 // crcTrailerLE returns the 4-byte little-endian CRC32 (IEEE) of body — the
@@ -136,21 +137,21 @@ func checkIndexNoPanic(t *testing.T, data []byte) {
 func rerankSeedBodies() [][]byte {
 	header := func(scope string, embedDim, entryCount uint32) []byte {
 		b := []byte(rerankCacheMagic)
-		b = appendU32(b, rerankCacheFormatVersion)
-		b = appendLPString(b, rerankCacheKenVersion)
-		b = appendLPString(b, scope)
-		b = appendU32(b, embedDim)
-		b = appendU32(b, entryCount)
+		b = binfmt.AppendU32(b, rerankCacheFormatVersion)
+		b = binfmt.AppendLPString(b, rerankCacheKenVersion)
+		b = binfmt.AppendLPString(b, scope)
+		b = binfmt.AppendU32(b, embedDim)
+		b = binfmt.AppendU32(b, entryCount)
 		return b
 	}
 
 	empty := header("", 0, 0)
 
 	oneEntry := header("model|int8|3", 3, 1)
-	oneEntry = appendU64(oneEntry, 0xDEADBEEF) // key
-	oneEntry = appendI64(oneEntry, 0)          // lastAccessUnix (reserved)
+	oneEntry = binfmt.AppendU64(oneEntry, 0xDEADBEEF) // key
+	oneEntry = binfmt.AppendI64(oneEntry, 0)          // lastAccessUnix (reserved)
 	for _, f := range []float32{0.5, -0.25, 0} {
-		oneEntry = appendU32(oneEntry, math.Float32bits(f))
+		oneEntry = binfmt.AppendU32(oneEntry, math.Float32bits(f))
 	}
 
 	return [][]byte{empty, oneEntry}

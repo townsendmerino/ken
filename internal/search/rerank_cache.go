@@ -55,10 +55,11 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
-	"io"
 	"math"
 	"os"
 	"path/filepath"
+
+	"github.com/townsendmerino/ken/internal/binfmt"
 )
 
 const (
@@ -156,25 +157,25 @@ func SaveCacheToFile(r *NeuralReranker, path, scopeKey string, embedDim int) err
 	body := make([]byte, 0, headerLen+len(keys)*entryLen)
 
 	body = append(body, []byte(rerankCacheMagic)...)
-	body = appendU32(body, rerankCacheFormatVersion)
-	body = appendLPString(body, rerankCacheKenVersion)
-	body = appendLPString(body, scopeKey)
-	body = appendU32(body, uint32(embedDim))
-	body = appendU32(body, uint32(len(keys)))
+	body = binfmt.AppendU32(body, rerankCacheFormatVersion)
+	body = binfmt.AppendLPString(body, rerankCacheKenVersion)
+	body = binfmt.AppendLPString(body, scopeKey)
+	body = binfmt.AppendU32(body, uint32(embedDim))
+	body = binfmt.AppendU32(body, uint32(len(keys)))
 
 	for i, k := range keys {
 		v := vecs[i]
 		if len(v) != embedDim {
 			return fmt.Errorf("search: SaveCacheToFile entry %d has %d-dim vec, want %d", i, len(v), embedDim)
 		}
-		body = appendU64(body, k)
-		body = appendI64(body, 0) // lastAccessUnix reserved; LRU order is positional
+		body = binfmt.AppendU64(body, k)
+		body = binfmt.AppendI64(body, 0) // lastAccessUnix reserved; LRU order is positional
 		for _, x := range v {
-			body = appendU32(body, math.Float32bits(x))
+			body = binfmt.AppendU32(body, math.Float32bits(x))
 		}
 	}
 	crc := crc32.ChecksumIEEE(body)
-	body = appendU32(body, crc)
+	body = binfmt.AppendU32(body, crc)
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("search: SaveCacheToFile mkdir: %w", err)
@@ -229,6 +230,9 @@ func LoadCacheFromFile(r *NeuralReranker, path, expectedScopeKey string, expecte
 	return len(keys), nil
 }
 
+// The KNRC magic/version/LP-string/CRC framing shares its low-level primitives
+// with the KEN1 and KMAN formats via internal/binfmt (see that package's doc).
+
 // decodeRerankCache parses the binary blob and returns the LRU entries
 // (oldest-first ordering). Factored from LoadCacheFromFile so tests can
 // drive corner cases without touching the filesystem.
@@ -258,13 +262,13 @@ func decodeRerankCache(data []byte, expectedScopeKey string, expectedEmbedDim in
 		return nil, nil, fmt.Errorf("%w: file version %d, this ken speaks %d", ErrCacheFormatVersion, version, rerankCacheFormatVersion)
 	}
 
-	_, n, err := readLPStringAt(body[p:])
+	_, n, err := binfmt.ReadLPStringAt(body[p:])
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: kenVersion: %v", ErrCacheCorrupt, err)
 	}
 	p += n
 
-	gotScope, n, err := readLPStringAt(body[p:])
+	gotScope, n, err := binfmt.ReadLPStringAt(body[p:])
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: scopeKey: %v", ErrCacheCorrupt, err)
 	}
@@ -311,43 +315,4 @@ func decodeRerankCache(data []byte, expectedScopeKey string, expectedEmbedDim in
 		vecs = append(vecs, v)
 	}
 	return keys, vecs, nil
-}
-
-// ── encoding helpers (mirror internal/search/index_serialize.go's
-// equivalents but kept local to keep that file's surface stable) ────
-
-func appendU32(b []byte, v uint32) []byte {
-	var tmp [4]byte
-	binary.LittleEndian.PutUint32(tmp[:], v)
-	return append(b, tmp[:]...)
-}
-
-func appendU64(b []byte, v uint64) []byte {
-	var tmp [8]byte
-	binary.LittleEndian.PutUint64(tmp[:], v)
-	return append(b, tmp[:]...)
-}
-
-func appendI64(b []byte, v int64) []byte {
-	return appendU64(b, uint64(v))
-}
-
-func appendLPString(b []byte, s string) []byte {
-	b = appendU32(b, uint32(len(s)))
-	return append(b, s...)
-}
-
-// readLPStringAt reads a uint32-LE length-prefixed UTF-8 string from
-// the front of buf and returns the string + bytes consumed. Distinct
-// from index_serialize.go's readLPString (which takes *bytes.Reader);
-// this slice-offset variant fits the CRC-then-scan flow above.
-func readLPStringAt(buf []byte) (string, int, error) {
-	if len(buf) < 4 {
-		return "", 0, io.ErrUnexpectedEOF
-	}
-	n := binary.LittleEndian.Uint32(buf[:4])
-	if uint64(4)+uint64(n) > uint64(len(buf)) {
-		return "", 0, fmt.Errorf("string length %d exceeds remaining buffer %d", n, len(buf)-4)
-	}
-	return string(buf[4 : 4+n]), int(4 + n), nil
 }

@@ -68,6 +68,7 @@ import (
 
 	"github.com/townsendmerino/aikit/chunk"
 	"github.com/townsendmerino/aikit/embed"
+	"github.com/townsendmerino/ken/internal/binfmt"
 )
 
 const (
@@ -259,12 +260,12 @@ func serializeIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, chunkerNa
 
 	// --- Header ---
 	buf.WriteString(serializeMagic)
-	writeU32(&buf, serializeFormatVersion)
-	writeLPString(&buf, serializedKenVersion)
+	binfmt.WriteU32(&buf, serializeFormatVersion)
+	binfmt.WriteLPString(&buf, serializedKenVersion)
 	buf.WriteByte(byte(mode))
-	writeLPString(&buf, chunkerName)
-	writeU32(&buf, uint32(len(chunks)))
-	writeU32(&buf, embedDim)
+	binfmt.WriteLPString(&buf, chunkerName)
+	binfmt.WriteU32(&buf, uint32(len(chunks)))
+	binfmt.WriteU32(&buf, embedDim)
 
 	// --- Chunks section ---
 	// Write the body DIRECTLY into buf and back-patch its length, instead
@@ -272,7 +273,7 @@ func serializeIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, chunkerNa
 	// §21): the separate bodies doubled peak memory (chunksBody + vecsBody
 	// alive simultaneously alongside the growing buf).
 	chunksLenOff := buf.Len()
-	writeU32(&buf, 0) // length placeholder, back-patched below
+	binfmt.WriteU32(&buf, 0) // length placeholder, back-patched below
 	chunksStart := buf.Len()
 	for i, c := range chunks {
 		// L4 (defensive bound): line numbers are 1-based per the
@@ -285,21 +286,21 @@ func serializeIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, chunkerNa
 			return nil, fmt.Errorf("search: serializeIndex: chunk[%d] has negative line numbers (StartLine=%d EndLine=%d)",
 				i, c.StartLine, c.EndLine)
 		}
-		writeLPString(&buf, c.File)
-		writeU32(&buf, uint32(c.StartLine))
-		writeU32(&buf, uint32(c.EndLine))
+		binfmt.WriteLPString(&buf, c.File)
+		binfmt.WriteU32(&buf, uint32(c.StartLine))
+		binfmt.WriteU32(&buf, uint32(c.EndLine))
 		if c.Tombstoned {
 			buf.WriteByte(1)
 		} else {
 			buf.WriteByte(0)
 		}
-		writeLPString(&buf, c.Text)
+		binfmt.WriteLPString(&buf, c.Text)
 	}
 	binary.LittleEndian.PutUint32(buf.Bytes()[chunksLenOff:], uint32(buf.Len()-chunksStart))
 
 	// --- Vecs section --- (empty body iff mode == ModeBM25)
 	vecsLenOff := buf.Len()
-	writeU32(&buf, 0) // length placeholder
+	binfmt.WriteU32(&buf, 0) // length placeholder
 	vecsStart := buf.Len()
 	if mode != ModeBM25 {
 		// Write one row at a time through a ~1 KB reusable scratch (audit §21):
@@ -325,7 +326,7 @@ func serializeIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, chunkerNa
 
 	// --- CRC32 trailer ---
 	crc := crc32.ChecksumIEEE(buf.Bytes())
-	writeU32(&buf, crc)
+	binfmt.WriteU32(&buf, crc)
 
 	return buf.Bytes(), nil
 }
@@ -372,7 +373,7 @@ func deserializeCorpus(data []byte, opts LoadOptions) ([]chunk.Chunk, [][]float3
 	}
 
 	// --- Format version ---
-	formatVer, err := readU32(r)
+	formatVer, err := binfmt.ReadU32(r)
 	if err != nil {
 		return nil, nil, 0, nil, fmt.Errorf("%w: read format version: %v", ErrCorrupt, err)
 	}
@@ -382,7 +383,7 @@ func deserializeCorpus(data []byte, opts LoadOptions) ([]chunk.Chunk, [][]float3
 	}
 
 	// --- Ken version (informational) ---
-	if _, err := readLPString(r); err != nil {
+	if _, err := binfmt.ReadLPString(r); err != nil {
 		return nil, nil, 0, nil, fmt.Errorf("%w: read ken version: %v", ErrCorrupt, err)
 	}
 
@@ -397,17 +398,17 @@ func deserializeCorpus(data []byte, opts LoadOptions) ([]chunk.Chunk, [][]float3
 	}
 
 	// --- Chunker ---
-	chunkerName, err := readLPString(r)
+	chunkerName, err := binfmt.ReadLPString(r)
 	if err != nil {
 		return nil, nil, 0, nil, fmt.Errorf("%w: read chunker name: %v", ErrCorrupt, err)
 	}
 
 	// --- NumChunks + EmbedDim ---
-	numChunks, err := readU32(r)
+	numChunks, err := binfmt.ReadU32(r)
 	if err != nil {
 		return nil, nil, 0, nil, fmt.Errorf("%w: read numChunks: %v", ErrCorrupt, err)
 	}
-	embedDim, err := readU32(r)
+	embedDim, err := binfmt.ReadU32(r)
 	if err != nil {
 		return nil, nil, 0, nil, fmt.Errorf("%w: read embedDim: %v", ErrCorrupt, err)
 	}
@@ -433,7 +434,7 @@ func deserializeCorpus(data []byte, opts LoadOptions) ([]chunk.Chunk, [][]float3
 	}
 
 	// --- Chunks section ---
-	chunksLen, err := readU32(r)
+	chunksLen, err := binfmt.ReadU32(r)
 	if err != nil {
 		return nil, nil, 0, nil, fmt.Errorf("%w: read chunks section length: %v", ErrCorrupt, err)
 	}
@@ -462,7 +463,7 @@ func deserializeCorpus(data []byte, opts LoadOptions) ([]chunk.Chunk, [][]float3
 	}
 
 	// --- Vecs section ---
-	vecsLen, err := readU32(r)
+	vecsLen, err := binfmt.ReadU32(r)
 	if err != nil {
 		return nil, nil, 0, nil, fmt.Errorf("%w: read vecs section length: %v", ErrCorrupt, err)
 	}
@@ -546,15 +547,15 @@ func deserializeChunks(body []byte, expectedN int) ([]chunk.Chunk, error) {
 	r := bytes.NewReader(body)
 	chunks := make([]chunk.Chunk, 0, expectedN)
 	for r.Len() > 0 {
-		file, err := readLPString(r)
+		file, err := binfmt.ReadLPString(r)
 		if err != nil {
 			return nil, fmt.Errorf("%w: chunk[%d] file: %v", ErrCorrupt, len(chunks), err)
 		}
-		startLine, err := readU32(r)
+		startLine, err := binfmt.ReadU32(r)
 		if err != nil {
 			return nil, fmt.Errorf("%w: chunk[%d] startLine: %v", ErrCorrupt, len(chunks), err)
 		}
-		endLine, err := readU32(r)
+		endLine, err := binfmt.ReadU32(r)
 		if err != nil {
 			return nil, fmt.Errorf("%w: chunk[%d] endLine: %v", ErrCorrupt, len(chunks), err)
 		}
@@ -565,7 +566,7 @@ func deserializeChunks(body []byte, expectedN int) ([]chunk.Chunk, error) {
 		if tombByte != 0 && tombByte != 1 {
 			return nil, fmt.Errorf("%w: chunk[%d] tombstoned byte = %d (want 0 or 1)", ErrCorrupt, len(chunks), tombByte)
 		}
-		text, err := readLPString(r)
+		text, err := binfmt.ReadLPString(r)
 		if err != nil {
 			return nil, fmt.Errorf("%w: chunk[%d] text: %v", ErrCorrupt, len(chunks), err)
 		}
@@ -598,44 +599,8 @@ func deserializeVecs(body []byte, numChunks, embedDim int) [][]float32 {
 	return vecs
 }
 
-// --- Binary primitives ---
-
-func writeU32(buf *bytes.Buffer, v uint32) {
-	var b [4]byte
-	binary.LittleEndian.PutUint32(b[:], v)
-	buf.Write(b[:])
-}
-
-func readU32(r *bytes.Reader) (uint32, error) {
-	var b [4]byte
-	if _, err := io.ReadFull(r, b[:]); err != nil {
-		return 0, err
-	}
-	return binary.LittleEndian.Uint32(b[:]), nil
-}
-
-func writeLPString(buf *bytes.Buffer, s string) {
-	writeU32(buf, uint32(len(s)))
-	buf.WriteString(s)
-}
-
-func readLPString(r *bytes.Reader) (string, error) {
-	n, err := readU32(r)
-	if err != nil {
-		return "", err
-	}
-	if n > uint32(r.Len()) {
-		return "", fmt.Errorf("len-prefix %d > remaining %d", n, r.Len())
-	}
-	if n == 0 {
-		return "", nil
-	}
-	b := make([]byte, n)
-	if _, err := io.ReadFull(r, b); err != nil {
-		return "", err
-	}
-	return string(b), nil
-}
+// The KEN1 magic/version/LP-string/CRC framing shares its low-level primitives
+// with the KNRC and KMAN formats via internal/binfmt (see that package's doc).
 
 // estimatedSize is a rough hint for bytes.Buffer.Grow. Doesn't need to
 // be exact — wrong estimates just cost an extra realloc.
