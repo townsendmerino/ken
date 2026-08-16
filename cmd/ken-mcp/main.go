@@ -55,6 +55,7 @@ import (
 	_ "github.com/townsendmerino/aikit/chunk/markdown"
 	_ "github.com/townsendmerino/aikit/chunk/treesitter"
 	"github.com/townsendmerino/ken/internal/embedcache"
+	"github.com/townsendmerino/ken/internal/envcfg"
 	"github.com/townsendmerino/ken/internal/modelfetch"
 	"github.com/townsendmerino/ken/internal/search"
 	"github.com/townsendmerino/ken/internal/structural"
@@ -333,7 +334,7 @@ func main() {
 	// a bad KEN_MCP_LOG_LEVEL itself (chicken-and-egg: we need the logger
 	// to log that the level was invalid). Then bump it once validated.
 	logger := kenmcp.NewLogger(os.Stderr, kenmcp.LogWarn)
-	logLevelStr := envEnum("KEN_MCP_LOG_LEVEL", kenmcp.LogLevelNames(), "warn", logger)
+	logLevelStr := envcfg.EnvEnum("KEN_MCP_LOG_LEVEL", kenmcp.LogLevelNames(), "warn", logger)
 	logger.Level = kenmcp.ParseLogLevel(logLevelStr)
 
 	// M2 (memory campaign): apply the long-lived-server GC policy — a lower
@@ -347,7 +348,7 @@ func main() {
 	// path deterministic. Must run before the first index build.
 	setupEnrichBudget(logger)
 
-	size := envInt("KEN_MCP_CACHE_SIZE", kenmcp.DefaultCacheSize, logger)
+	size := envcfg.EnvInt("KEN_MCP_CACHE_SIZE", kenmcp.DefaultCacheSize, logger)
 	if size < 0 {
 		logger.Logf(kenmcp.LogWarn, "KEN_MCP_CACHE_SIZE=%d: must be non-negative — using default %d",
 			size, kenmcp.DefaultCacheSize)
@@ -357,9 +358,9 @@ func main() {
 		logger.Logf(kenmcp.LogInfo, "cache disabled via KEN_MCP_CACHE_SIZE=0")
 	}
 
-	chunker := envEnum("KEN_MCP_CHUNKER", chunk.Names(), "regex", logger)
-	modeStr := envEnum("KEN_MCP_MODE", search.ModeNames(), "hybrid", logger)
-	modelDir := envPath("KEN_MCP_MODEL_DIR", logger)
+	chunker := envcfg.EnvEnum("KEN_MCP_CHUNKER", chunk.Names(), "regex", logger)
+	modeStr := envcfg.EnvEnum("KEN_MCP_MODE", search.ModeNames(), "hybrid", logger)
+	modelDir := envcfg.EnvPath("KEN_MCP_MODEL_DIR", logger)
 	// Onboarding: when KEN_MCP_MODEL_DIR is unset, fall back to the
 	// canonical end-user location ~/.ken/model (where `ken download-model`
 	// writes), matching the CLI's resolution order. A user who ran
@@ -370,21 +371,21 @@ func main() {
 			modelDir = d
 		}
 	}
-	defaultRepo := envPathOrURL("KEN_MCP_DEFAULT_REPO", logger)
+	defaultRepo := envcfg.EnvPathOrURL("KEN_MCP_DEFAULT_REPO", logger)
 	// v0.7.1: KEN_SQL_NO_AUTO_MIGRATIONS=1 disables Tier-1 migration
 	// folding (sql.FoldMigrations). Default is "folding enabled".
-	noAutoMigrations := envBool("KEN_SQL_NO_AUTO_MIGRATIONS", false, logger)
+	noAutoMigrations := envcfg.EnvBool("KEN_SQL_NO_AUTO_MIGRATIONS", false, logger)
 
 	// Cold-start M1 (ADR-039): persist the built index to <repo>/.ken/ and
 	// load-with-drift-scan on boot instead of rebuilding. Default on; only
 	// applies to local-path repos (http sources are throwaway temp clones).
-	snapshotEnabled := envBool("KEN_MCP_SNAPSHOT", true, logger)
+	snapshotEnabled := envcfg.EnvBool("KEN_MCP_SNAPSHOT", true, logger)
 
 	// Cold-start M2 (opt-in, default off): defer Arm B enrichment off the
 	// cold-build path — serve a raw BM25/dense index for a fast first query,
 	// then enrich + republish in the background. Only bites on a true cold
 	// build; a snapshot load (M1) is already enriched.
-	lazyEnrich := envBool("KEN_MCP_LAZY_ENRICH", false, logger)
+	lazyEnrich := envcfg.EnvBool("KEN_MCP_LAZY_ENRICH", false, logger)
 	if lazyEnrich {
 		logger.Logf(kenmcp.LogInfo, "lazy enrichment on (KEN_MCP_LAZY_ENRICH): cold builds serve pre-enrichment, enrich in background")
 	}
@@ -394,15 +395,15 @@ func main() {
 	// chunk text. Second line of defense behind M1 (a snapshot load skips
 	// embedding); helps recurring full rebuilds. First build is slightly slower
 	// (warming the cache), hence opt-in.
-	embedCacheEnabled := envBool("KEN_MCP_EMBED_CACHE", false, logger)
-	embedCacheMax := envInt("KEN_MCP_EMBED_CACHE_MAX", embedcache.DefaultMaxEntries, logger)
+	embedCacheEnabled := envcfg.EnvBool("KEN_MCP_EMBED_CACHE", false, logger)
+	embedCacheMax := envcfg.EnvInt("KEN_MCP_EMBED_CACHE_MAX", embedcache.DefaultMaxEntries, logger)
 
 	// Cold-start M4 (opt-in, default off): staged readiness — serve BM25
 	// (lexical-only) instantly on a cold hybrid build, embed in the background,
 	// then upgrade to hybrid. Tool responses carry "semantic":"warming" until
 	// the upgrade lands. Takes precedence over lazy enrichment (both defer
 	// background work; keep them exclusive to avoid two background passes).
-	staged := envBool("KEN_MCP_STAGED", false, logger)
+	staged := envcfg.EnvBool("KEN_MCP_STAGED", false, logger)
 	if staged && lazyEnrich {
 		logger.Logf(kenmcp.LogWarn, "KEN_MCP_STAGED and KEN_MCP_LAZY_ENRICH both set — using staged (it also serves before enrichment via inline enrich)")
 		lazyEnrich = false
@@ -426,7 +427,7 @@ func main() {
 	// downgrades to bm25 and (with KEN_MCP_AUTO_FETCH on) marks the model
 	// dir for a background fetch + later upgrade. sm.want* records the
 	// requested mode so the auto-fetch goroutine knows the upgrade target.
-	autoFetch := envBool("KEN_MCP_AUTO_FETCH", true, logger)
+	autoFetch := envcfg.EnvBool("KEN_MCP_AUTO_FETCH", true, logger)
 	sm := resolveStartupMode(modeStr, modelDir, modelAvailable(modelDir), autoFetch, logger)
 
 	// buildState is the live mode/model the cache Builder reads; the
@@ -539,7 +540,7 @@ func main() {
 	//     change.
 	// Either gate enables collection in the search code path; both off
 	// means the zero-config path (no time.Now bookkeeping).
-	telemetryInResponse := envBool("KEN_MCP_RERANK_TELEMETRY", false, logger)
+	telemetryInResponse := envcfg.EnvBool("KEN_MCP_RERANK_TELEMETRY", false, logger)
 	var telemetryLog func(query string, t search.Telemetry)
 	if lazyReranker != nil && logger.Level <= kenmcp.LogInfo {
 		telemetryLog = func(query string, t search.Telemetry) {
@@ -558,7 +559,7 @@ func main() {
 	// Privacy: internal/usage NEVER records query text or file paths.
 	// Only ts + call type + result count + char counts are persisted.
 	var usageRecorder *usage.Recorder
-	if envBool("KEN_NO_USAGE_STATS", false, logger) {
+	if envcfg.EnvBool("KEN_NO_USAGE_STATS", false, logger) {
 		logger.Logf(kenmcp.LogInfo, "usage stats: tracking disabled via KEN_NO_USAGE_STATS=1")
 	} else {
 		usagePath := strings.TrimSpace(os.Getenv("KEN_USAGE_STATS_PATH"))
@@ -673,7 +674,7 @@ func main() {
 		// exit so shutdown can't hang, and register a fresh signal channel so
 		// a SECOND signal always force-quits (NotifyContext no longer delivers
 		// after the first — the first signal already used its channel).
-		grace := envDuration("KEN_MCP_SHUTDOWN_GRACE", defaultShutdownGrace, logger)
+		grace := envcfg.EnvDuration("KEN_MCP_SHUTDOWN_GRACE", defaultShutdownGrace, logger)
 		logger.Logf(kenmcp.LogInfo, "shutdown signal received; draining in-flight requests (grace %s)…", grace)
 
 		sigCh := make(chan os.Signal, 1)
@@ -889,7 +890,7 @@ type startupMode struct {
 func resolveStartupMode(modeStr, modelDir string, modelPresent, autoFetch bool, logger *kenmcp.Logger) startupMode {
 	mode, err := search.ParseMode(modeStr)
 	if err != nil {
-		// modeStr already passed envEnum(ModeNames()), so this is
+		// modeStr already passed envcfg.EnvEnum(ModeNames()), so this is
 		// unreachable today; kept so a future ModeNames/ParseMode skew is
 		// caught rather than silently mis-served.
 		logger.Logf(kenmcp.LogError, "internal: KEN_MCP_MODE=%q passed envEnum but failed ParseMode: %v — defaulting to bm25",
@@ -1032,13 +1033,13 @@ func resolveRerankCachePath(quant string) string {
 // LRU under the scope/dim Load() recorded. Mirrors wireDBTier2's shape:
 // reads env, logs, returns the wired components.
 func setupReranker(logger *kenmcp.Logger) (*search.LazyReranker, *rerankerLoader, []search.RerankerOption, bool) {
-	if !envBool("KEN_MCP_RERANK", false, logger) {
+	if !envcfg.EnvBool("KEN_MCP_RERANK", false, logger) {
 		return nil, nil, nil, false
 	}
-	modelDir := envPath("KEN_MCP_RERANK_MODEL_DIR", logger)
-	topN := envInt("KEN_MCP_RERANK_TOP_N", 50, logger)
-	cacheSize := envInt("KEN_MCP_RERANK_CACHE_SIZE", search.DefaultRerankerCacheSize, logger)
-	beta := envFloat("KEN_MCP_RERANK_BETA", 0.25, logger)
+	modelDir := envcfg.EnvPath("KEN_MCP_RERANK_MODEL_DIR", logger)
+	topN := envcfg.EnvInt("KEN_MCP_RERANK_TOP_N", 50, logger)
+	cacheSize := envcfg.EnvInt("KEN_MCP_RERANK_CACHE_SIZE", search.DefaultRerankerCacheSize, logger)
+	beta := envcfg.EnvFloat("KEN_MCP_RERANK_BETA", 0.25, logger)
 	// Validate before wiring (audit §22): cmd/ken validates these but the
 	// MCP side passed them straight to search.WithRerankN / WithRerankBlendBeta,
 	// so KEN_MCP_RERANK_TOP_N=-5 or a beta outside [0,1] reached the reranker
@@ -1053,7 +1054,7 @@ func setupReranker(logger *kenmcp.Logger) (*search.LazyReranker, *rerankerLoader
 	}
 	// Default int8: aikit ≥v1.5.0's q8 reranker reaches f32 latency parity at
 	// ~21× less runtime memory + ¼ weight storage, cosine 0.997 unchanged.
-	quant := envEnum("KEN_MCP_RERANK_QUANT", []string{"f32", "int8"}, "int8", logger)
+	quant := envcfg.EnvEnum("KEN_MCP_RERANK_QUANT", []string{"f32", "int8"}, "int8", logger)
 	adaptiveThreshold, adaptiveMinN := parseRerankAdaptive(logger)
 
 	if modelDir == "" {
@@ -1129,26 +1130,26 @@ func setupReranker(logger *kenmcp.Logger) (*search.LazyReranker, *rerankerLoader
 //     refresher started — agents shouldn't get stale empty chunks if
 //     the DB was never reachable).
 func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache, defaultRepo string, extras *dbExtras) (*mcpdb.Refresher, func()) {
-	dsn := envDSN("KEN_DB_DSN", logger)
+	dsn := envcfg.EnvDSN("KEN_DB_DSN", logger)
 	if dsn == "" {
 		return nil, nil
 	}
-	sampleRows := envInt("KEN_DB_SAMPLE_ROWS", 0, logger)
+	sampleRows := envcfg.EnvInt("KEN_DB_SAMPLE_ROWS", 0, logger)
 	if sampleRows < 0 {
 		logger.Logf(kenmcp.LogWarn, "KEN_DB_SAMPLE_ROWS=%d: must be non-negative — using 0", sampleRows)
 		sampleRows = 0
 	}
-	reindex := envDuration("KEN_DB_REINDEX_INTERVAL", 0, logger)
+	reindex := envcfg.EnvDuration("KEN_DB_REINDEX_INTERVAL", 0, logger)
 	// Bound the startup introspection so an unreachable DSN can't hang the
 	// server before it serves JSON-RPC (audit db/mcp §3).
-	startupTimeout := envDuration("KEN_DB_STARTUP_TIMEOUT", 30*time.Second, logger)
+	startupTimeout := envcfg.EnvDuration("KEN_DB_STARTUP_TIMEOUT", 30*time.Second, logger)
 
 	// v0.7.2 (ADR-019) schema filtering: KEN_DB_SCHEMAS (allow-list) +
 	// KEN_DB_EXCLUDE_SCHEMAS (deny-list). When both are set the allow-
 	// list wins — log a warn here (before passing to internal/db so the
 	// library-level fallback in filterSchema is also explicit).
-	includeSchemas := envCommaList("KEN_DB_SCHEMAS")
-	excludeSchemas := envCommaList("KEN_DB_EXCLUDE_SCHEMAS")
+	includeSchemas := envcfg.EnvCommaList("KEN_DB_SCHEMAS")
+	excludeSchemas := envcfg.EnvCommaList("KEN_DB_EXCLUDE_SCHEMAS")
 	if len(includeSchemas) > 0 && len(excludeSchemas) > 0 {
 		logger.Logf(kenmcp.LogWarn,
 			"KEN_DB_SCHEMAS and KEN_DB_EXCLUDE_SCHEMAS both set; allow-list wins, deny-list ignored")
@@ -1189,7 +1190,7 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 		return nil, nil
 	}
 
-	enableListen := envBool("KEN_DB_LISTEN", false, logger)
+	enableListen := envcfg.EnvBool("KEN_DB_LISTEN", false, logger)
 	if enableListen {
 		logger.Logf(kenmcp.LogInfo, "Tier 2: KEN_DB_LISTEN=1 (Postgres LISTEN/NOTIFY)")
 	}

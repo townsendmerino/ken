@@ -1,18 +1,22 @@
-package main
-
-// Env-var validation helpers for ken-mcp.
+// Package envcfg holds the validated KEN_MCP_* / KEN_DB_* environment-variable
+// parsers ken-mcp uses at startup. Extracted from cmd/ken-mcp (package main) so
+// the helpers — and their table-driven tests — live in a small importable
+// package instead of being reachable only through the large ken-mcp test
+// binary, and so cmd/ken-mcp-docs (or any future server binary) can reuse the
+// same warn-and-fall-back-to-default behavior.
 //
-// Why this file exists: every KEN_MCP_* env var used to be parsed with
-// a fire-and-forget pattern (`strconv.Atoi(envOr(...))` discarding the
-// error; `parseLevel` falling through to "warn" on unknown input). The
-// failure mode was silent: an operator typo like `KEN_MCP_CACHE_SIZE=of`
-// produced size=0, the cache was effectively disabled, and the only
-// symptom was "why is ken-mcp re-indexing every query?" These helpers
-// validate up-front, log a stderr warning on bad input, and fall back to
-// the documented default — so the operator gets the signal at startup.
+// Why validate at all: every KEN_MCP_* var used to be parsed with a
+// fire-and-forget pattern (strconv.Atoi(...) discarding the error; parseLevel
+// falling through to "warn" on unknown input). The failure mode was silent — an
+// operator typo like KEN_MCP_CACHE_SIZE=of produced size=0, the cache was
+// effectively disabled, and the only symptom was "why is ken-mcp re-indexing
+// every query?" These helpers validate up-front, log a stderr warning on bad
+// input, and fall back to the documented default, so the operator gets the
+// signal at startup.
 //
-// All warnings go to stderr via the leveled logger (LogWarn), preserving
-// the stdout/stderr contract from main.go: stdout is JSON-RPC only.
+// All warnings go to stderr via the leveled logger (LogWarn), preserving the
+// stdout/stderr contract from cmd/ken-mcp/main.go: stdout is JSON-RPC only.
+package envcfg
 
 import (
 	"net/url"
@@ -24,11 +28,11 @@ import (
 	kenmcp "github.com/townsendmerino/ken/mcp"
 )
 
-// envInt parses an integer env var. Empty/unset returns fallback;
+// EnvInt parses an integer env var. Empty/unset returns fallback;
 // invalid input warns and returns fallback. Negative values are
 // passed through unchanged — the caller decides whether to reject (e.g.
 // CACHE_SIZE rejects negatives but allows 0 for "no caching").
-func envInt(name string, fallback int, l *kenmcp.Logger) int {
+func EnvInt(name string, fallback int, l *kenmcp.Logger) int {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return fallback
@@ -41,19 +45,19 @@ func envInt(name string, fallback int, l *kenmcp.Logger) int {
 	return n
 }
 
-// envEnum returns the env var value if it exactly matches one of allowed
+// EnvEnum returns the env var value if it exactly matches one of allowed
 // (case-sensitive); empty/unset returns fallback; any mismatch warns and
 // returns fallback. Thin wrapper around kenmcp.ValidateEnum so the warn
 // format stays identical across env-var and Options.Mode validation.
-func envEnum(name string, allowed []string, fallback string, l *kenmcp.Logger) string {
+func EnvEnum(name string, allowed []string, fallback string, l *kenmcp.Logger) string {
 	return kenmcp.ValidateEnum(name, os.Getenv(name), allowed, fallback, l)
 }
 
-// envFloat parses a float64 env var. Empty/unset returns fallback;
+// EnvFloat parses a float64 env var. Empty/unset returns fallback;
 // invalid input warns and returns fallback. Range-checking is the
 // caller's responsibility (KEN_MCP_RERANK_BETA clamps to [0,1] via
 // search.WithRerankBlendBeta, for example).
-func envFloat(name string, fallback float64, l *kenmcp.Logger) float64 {
+func EnvFloat(name string, fallback float64, l *kenmcp.Logger) float64 {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return fallback
@@ -66,12 +70,12 @@ func envFloat(name string, fallback float64, l *kenmcp.Logger) float64 {
 	return v
 }
 
-// envPath returns the env var unchanged but warns if it is set and not
+// EnvPath returns the env var unchanged but warns if it is set and not
 // a readable directory. The downstream caller still gets the value so
 // any existing auto-downgrade logic (e.g. KEN_MCP_MODEL_DIR missing ⇒
 // downgrade to bm25) runs as before; the warn is just the early signal
 // that the path is wrong.
-func envPath(name string, l *kenmcp.Logger) string {
+func EnvPath(name string, l *kenmcp.Logger) string {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return raw
@@ -87,10 +91,10 @@ func envPath(name string, l *kenmcp.Logger) string {
 	return raw
 }
 
-// envPathOrURL is envPath plus an http(s) URL escape hatch. KEN_MCP_DEFAULT_REPO
+// EnvPathOrURL is EnvPath plus an http(s) URL escape hatch. KEN_MCP_DEFAULT_REPO
 // is allowed to name either a local directory or a remote URL (cloned
 // on first request); we accept either, warn on neither.
-func envPathOrURL(name string, l *kenmcp.Logger) string {
+func EnvPathOrURL(name string, l *kenmcp.Logger) string {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return raw
@@ -105,14 +109,14 @@ func envPathOrURL(name string, l *kenmcp.Logger) string {
 	return raw
 }
 
-// envBool parses a boolean env var. Accepted truthy values (case-
+// EnvBool parses a boolean env var. Accepted truthy values (case-
 // insensitive): "1", "true", "yes", "y", "on". Accepted falsy values:
 // "0", "false", "no", "n", "off". Empty/unset returns fallback; any
 // other value warns and returns fallback. Matches the warn-and-fallback
 // pattern the rest of this file uses.
 //
 // v0.7.1: introduced for KEN_SQL_NO_AUTO_MIGRATIONS.
-func envBool(name string, fallback bool, l *kenmcp.Logger) bool {
+func EnvBool(name string, fallback bool, l *kenmcp.Logger) bool {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return fallback
@@ -128,11 +132,11 @@ func envBool(name string, fallback bool, l *kenmcp.Logger) bool {
 	return fallback
 }
 
-// envDuration parses a Go time.Duration env var (e.g. "5m", "1h30m").
+// EnvDuration parses a Go time.Duration env var (e.g. "5m", "1h30m").
 // Empty/unset returns fallback; invalid input warns and returns
 // fallback. Used by v0.7.0's KEN_DB_REINDEX_INTERVAL (fallback: 0 =
 // disabled, no periodic reindex).
-func envDuration(name string, fallback time.Duration, l *kenmcp.Logger) time.Duration {
+func EnvDuration(name string, fallback time.Duration, l *kenmcp.Logger) time.Duration {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return fallback
@@ -153,7 +157,7 @@ func envDuration(name string, fallback time.Duration, l *kenmcp.Logger) time.Dur
 // Postgres URL forms from v0.7.0, the SQLite forms added in v0.7.1,
 // and the MySQL URL form added in v0.7.2. The native go-sql-driver
 // MySQL DSN (user:pass@tcp(host:port)/db) is also accepted via a
-// separate substring detection — see envDSN.
+// separate substring detection — see EnvDSN.
 var dsnAcceptedSchemes = map[string]bool{
 	"postgres":   true,
 	"postgresql": true,
@@ -162,7 +166,7 @@ var dsnAcceptedSchemes = map[string]bool{
 	"mysql":      true,
 }
 
-// envDSN parses a database DSN env var. Accepts the URL form for any
+// EnvDSN parses a database DSN env var. Accepts the URL form for any
 // engine ken supports as of v0.7.2: postgres://, postgresql://,
 // sqlite://, sqlite3://, mysql://. Also accepts the native go-sql-driver
 // MySQL form (user:pass@tcp(host:port)/db or @unix(/sock)/db) detected
@@ -174,7 +178,7 @@ var dsnAcceptedSchemes = map[string]bool{
 // rejection at startup rather than a silent connection-time failure
 // later). SQLite URLs do NOT require a host (`sqlite:///abs/path.db`
 // and `sqlite://./rel/path.db` are both valid).
-func envDSN(name string, l *kenmcp.Logger) string {
+func EnvDSN(name string, l *kenmcp.Logger) string {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return raw
@@ -212,7 +216,7 @@ func envDSN(name string, l *kenmcp.Logger) string {
 	return raw
 }
 
-// envCommaList parses a comma-separated list env var. Empty/unset
+// EnvCommaList parses a comma-separated list env var. Empty/unset
 // returns nil. Whitespace around each element is trimmed; empty
 // elements (from "a,,b" or trailing commas) are dropped silently so
 // operators can paste lists copy-and-paste-style without worrying
@@ -223,7 +227,7 @@ func envDSN(name string, l *kenmcp.Logger) string {
 // formed by construction; non-existent schema names are NOT errors
 // per ADR-019 (operators may pre-configure for schemas that don't yet
 // exist).
-func envCommaList(name string) []string {
+func EnvCommaList(name string) []string {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return nil
