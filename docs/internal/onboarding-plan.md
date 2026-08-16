@@ -78,7 +78,7 @@ behavior) and belongs in DECISIONS.md as its own ADR, with:
 `cmd/ken-mcp` + a small `search.WatchedIndex` upgrade method.
 
 1. New env `KEN_MCP_AUTO_FETCH` (default on) via the existing
-   `envEnum`/`envInt` helpers in `cmd/ken-mcp/env.go`.
+   `EnvEnum`/`EnvInt` helpers in `internal/envcfg` (was `cmd/ken-mcp/env.go`).
 2. At the current downgrade site (`main.go:378`): if mode needs a model,
    model is absent, and auto-fetch is enabled and `KEN_MCP_MODEL_DIR`
    isn't a user-pinned-but-broken path — start serving BM25 (current

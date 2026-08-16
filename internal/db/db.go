@@ -53,7 +53,7 @@ type Options struct {
 	// DSN is the Postgres connection string (postgres:// or
 	// postgresql:// URL form). Empty disables Tier 2 entirely. Format
 	// must be parseable by pgx.ParseConfig (rejected at startup if
-	// not — see cmd/ken-mcp/env.go's envDSN).
+	// not — see internal/envcfg's EnvDSN).
 	DSN string
 
 	// SampleRows is the number of rows-per-table to include in each

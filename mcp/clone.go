@@ -161,7 +161,7 @@ func isPrivateAddr(ip net.IP) bool {
 // privateCloneAllowed reads the opt-out env var. Truthy values
 // ("1", "true", "yes", case-insensitive) disable the guard;
 // anything else keeps it on. Matches the existing KEN_DB_LISTEN
-// truthy-parse pattern in cmd/ken-mcp/env.go.
+// truthy-parse pattern in internal/envcfg (EnvBool).
 func privateCloneAllowed() bool {
 	switch v := os.Getenv(envAllowPrivateClone); v {
 	case "1", "true", "TRUE", "True", "yes", "YES", "Yes":
