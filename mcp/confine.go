@@ -78,6 +78,25 @@ func resolveSymlinksLenient(path string) string {
 	}
 }
 
+// RepoConfinementWarning returns a startup security warning to log when
+// agent-supplied local-path repo arguments are UNCONFINED (envAllowedRepoRoots
+// unset), or "" when confinement is active. Unconfined, a prompt-injected agent
+// — one steered by untrusted content it also handled this session — can make the
+// long-lived server index, and return the contents of, arbitrary local paths
+// (/etc, ~/.ssh, ...). ken-mcp logs this at WARN on startup so that risky
+// deployment shape is visible rather than silent; the mitigation is to set
+// KEN_MCP_ALLOWED_REPO_ROOTS (which also silences the warning).
+func RepoConfinementWarning() string {
+	if len(allowedRepoRoots()) > 0 {
+		return ""
+	}
+	return "SECURITY: KEN_MCP_ALLOWED_REPO_ROOTS is not set — an agent-supplied `repo` argument can " +
+		"point at ANY local path (e.g. /etc, ~/.ssh), so an agent steered by untrusted content could " +
+		"read arbitrary files. Set KEN_MCP_ALLOWED_REPO_ROOTS to the directory(ies) ken-mcp may index " +
+		"(OS-path-list-separated) to confine it. Safe to ignore only if this session's agent never " +
+		"handles untrusted input."
+}
+
 // confineLocalRepo enforces envAllowedRepoRoots on an agent-supplied repo
 // argument. No-op when confinement is disabled (env unset), when the argument is
 // an http(s) URL (remote clones are guarded separately by clone.go's SSRF

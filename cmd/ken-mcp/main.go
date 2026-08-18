@@ -455,6 +455,14 @@ func main() {
 	logger.Logf(kenmcp.LogInfo, "starting (mode=%s chunker=%s cache_size=%d default_repo=%q fold_migrations=%v rerank=%s)",
 		sm.modeStr, chunker, size, defaultRepo, !noAutoMigrations, rerankStatus)
 
+	// Loud security warning when agent-supplied local-path repos are unconfined
+	// (KEN_MCP_ALLOWED_REPO_ROOTS unset). ken-mcp is long-lived and an agent can
+	// pass any local `repo`, so an injection-steered agent could read arbitrary
+	// files. Setting the env var confines it and silences this.
+	if w := kenmcp.RepoConfinementWarning(); w != "" {
+		logger.Logf(kenmcp.LogWarn, "%s", w)
+	}
+
 	// Builder: clone http(s) URLs to a temp dir; index local paths
 	// in-place. mcp.NormalizeKey hands us either a canonical URL or an
 	// absolute path — we discriminate on the scheme prefix here.

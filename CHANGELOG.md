@@ -13,6 +13,24 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [1.4.1] — 2026-08-18 — startup warning for unconfined local-path repos
+
+A security-hygiene follow-up to 1.4.0's `KEN_MCP_ALLOWED_REPO_ROOTS` confinement.
+
+### Security
+
+- **ken-mcp now logs a loud WARN-level startup warning when
+  `KEN_MCP_ALLOWED_REPO_ROOTS` is unset.** The confinement added in 1.4.0 is
+  opt-in and off by default, so a long-lived server whose agent *also* handles
+  untrusted content (a web page, a hostile repo) could be steered by prompt
+  injection into indexing — and returning the contents of — arbitrary local
+  paths via the `repo` argument (`/etc`, `~/.ssh`, …). The behavior is unchanged;
+  the risky deployment shape is now *visible* instead of silent. Setting
+  `KEN_MCP_ALLOWED_REPO_ROOTS` (the mitigation) also silences the warning. The
+  check is exposed as `mcp.RepoConfinementWarning()` for embedders. Only affects
+  the multi-repo/untrusted-agent deployment; a pinned single-repo server or a
+  trusted-agent session is unaffected in practice.
+
 ## [1.4.0] — 2026-08-16 — search controls, `ken doctor`, +5 chunker languages
 
 A feature release: new agent-facing search controls, two opt-in operator guards,

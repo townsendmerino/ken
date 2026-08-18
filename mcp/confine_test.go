@@ -1,10 +1,29 @@
 package mcp
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestRepoConfinementWarning(t *testing.T) {
+	// Unconfined (env unset) → a warning is emitted.
+	os.Unsetenv(envAllowedRepoRoots)
+	w := RepoConfinementWarning()
+	if w == "" {
+		t.Fatal("expected a security warning when confinement is unset")
+	}
+	if !strings.Contains(w, "KEN_MCP_ALLOWED_REPO_ROOTS") || !strings.Contains(w, "SECURITY") {
+		t.Errorf("warning should name the env var + be flagged SECURITY; got %q", w)
+	}
+
+	// Confined → no warning.
+	t.Setenv(envAllowedRepoRoots, t.TempDir())
+	if got := RepoConfinementWarning(); got != "" {
+		t.Errorf("confinement active should silence the warning; got %q", got)
+	}
+}
 
 func TestConfineLocalRepo_DisabledByDefault(t *testing.T) {
 	// Env unset ⇒ any local path is allowed (historical behavior).
