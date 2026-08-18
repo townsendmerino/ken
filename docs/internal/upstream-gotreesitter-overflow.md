@@ -1,13 +1,34 @@
 # Upstream issue — gotreesitter stack overflow on large files
 
-**Status: FILED 2026-06-11 as [odvcencio/gotreesitter#110](https://github.com/odvcencio/gotreesitter/issues/110)** (roadmap #18c).
-Filed against **[odvcencio/gotreesitter](https://github.com/odvcencio/gotreesitter)**.
-Captured from the ken crash investigation (2026-06-05); the in-tree
-mitigation is the `maxEnrichBytes` guard in
-`internal/structural/extract_file.go` (commit `ea6a869`). When the upstream
-fix lands (`Parse` returns through its `(tree, err)` / stop-reason contract
-instead of `fatal error`), the guard can be removed. The original draft is
-retained below as the filed text.
+**Status: RESOLVED upstream in gotreesitter [v0.20.6](https://github.com/odvcencio/gotreesitter/releases/tag/v0.20.6); verified fixed at ken's pinned v0.48.1 (2026-08-18).**
+Filed 2026-06-06 as [odvcencio/gotreesitter#110](https://github.com/odvcencio/gotreesitter/issues/110) (roadmap #18c), against **[odvcencio/gotreesitter](https://github.com/odvcencio/gotreesitter)**; captured from the ken crash investigation (2026-06-05).
+
+The maintainer traced the unbounded recursion to Go result-compatibility
+normalization (`normalizeGoDotLeafChildren` → `finalizeResultRoot` →
+`buildResultFromNodes`), fixed it (parser/recovery work from #105), and
+**released the fix in v0.20.6** with an opt-in cobra large-file regression
+test. ken now pins **v0.48.1** (`go.mod`), far past the fix.
+
+**Verification (2026-08-18):** the two exact crashers from this report —
+`spf13/cobra@61968e8` `completions_test.go` (117,138 B) and
+`command_test.go` (80,115 B) — both now parse to `stop=accepted`,
+`root=source_file` under ken's pinned gotreesitter, no crash. A committed
+always-on regression guard, `TestParse_LargeTableDrivenGo_NoFatalOverflow`
+in `internal/structural/overflow_regression_test.go`, parses a synthetic
+large table-driven Go file (the crasher shape, > the 117 KB real crasher)
+directly through the parser; a future gotreesitter downgrade that
+reintroduces the fatal overflow makes that test's process die (loud CI
+failure). The test also accepts `KEN_GTS_COBRA_DIR` pointing at a
+`spf13/cobra@61968e8` checkout to validate against the real crashers.
+
+**Guard status:** the `maxEnrichBytes` 64 KiB ceiling in
+`internal/structural/extract_file.go` is **retained as cheap
+defense-in-depth**, not as the primary mitigation — the crash class it was
+added for is gone. It can be raised or removed if enrichment coverage on
+large (64 KiB–2 MiB) source files matters more than the belt-and-suspenders
+bound; that is a retrieval-quality tuning decision, not a safety one.
+
+The original filed text is retained below for the record.
 
 ---
 

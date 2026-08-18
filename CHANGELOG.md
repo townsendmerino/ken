@@ -13,9 +13,11 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
-## [1.4.1] — 2026-08-18 — startup warning for unconfined local-path repos
+## [1.4.1] — 2026-08-18 — hardening: unconfined-repo warning + parser-overflow regression guard
 
-A security-hygiene follow-up to 1.4.0's `KEN_MCP_ALLOWED_REPO_ROOTS` confinement.
+Two robustness follow-ups: a security-hygiene warning for the 1.4.0
+`KEN_MCP_ALLOWED_REPO_ROOTS` confinement, and a regression guard confirming the
+gotreesitter fatal-stack-overflow class stays fixed. No behavior changes.
 
 ### Security
 
@@ -30,6 +32,21 @@ A security-hygiene follow-up to 1.4.0's `KEN_MCP_ALLOWED_REPO_ROOTS` confinement
   check is exposed as `mcp.RepoConfinementWarning()` for embedders. Only affects
   the multi-repo/untrusted-agent deployment; a pinned single-repo server or a
   trusted-agent session is unaffected in practice.
+
+### Reliability
+
+- **Regression guard for the gotreesitter fatal-stack-overflow class (#110).**
+  A crafted large table-driven source file used to fatally stack-overflow the
+  parser (an uncatchable Go runtime error that killed the whole ken-mcp process,
+  taking down search for every repo/session sharing it). That bug was fixed
+  upstream in gotreesitter **v0.20.6**; ken already pins **v0.48.1**, and the two
+  exact `spf13/cobra` crashers from the original report now parse cleanly — so
+  this was already fixed in shipped ken, not a live hole. Added
+  `TestParse_LargeTableDrivenGo_NoFatalOverflow` so a future gotreesitter
+  downgrade can't silently reintroduce the crash (the test's process dies loudly
+  if it regresses), and re-documented the `maxEnrichBytes` 64 KiB parse ceiling
+  as retained defense-in-depth rather than the primary safeguard. No new
+  dependency and no runtime behavior change.
 
 ## [1.4.0] — 2026-08-16 — search controls, `ken doctor`, +5 chunker languages
 

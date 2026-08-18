@@ -9,8 +9,15 @@ import (
 )
 
 // maxEnrichBytes is the per-file size ceiling for Arm B enrichment. Files
-// larger than this skip gotreesitter parsing (see ExtractFile) to avoid
-// the GLR stack overflow on pathological inputs. 64 KiB.
+// larger than this skip gotreesitter parsing (see ExtractFile). 64 KiB.
+//
+// Originally added as the mitigation for the gotreesitter GLR fatal stack
+// overflow on large table-driven files (#110). That crash was FIXED upstream
+// in gotreesitter v0.20.6 and ken pins v0.48.1 — the exact cobra crashers now
+// parse cleanly (see TestParse_LargeTableDrivenGo_NoFatalOverflow and
+// docs/internal/upstream-gotreesitter-overflow.md). The ceiling is retained as
+// cheap defense-in-depth, not the primary safeguard; it can be raised/removed
+// as a retrieval-quality call if enrichment on large files matters more.
 const maxEnrichBytes = 64 << 10
 
 // ExtractFile parses a single file's bytes via the gotreesitter
@@ -48,16 +55,16 @@ func ExtractFile(rel string, data []byte) *FileStruct {
 // reason, or nil root). The parse tree stays alive across the extractor
 // call because `tree` is reachable until this function returns.
 //
-// Guard 1 — size ceiling. gotreesitter's GLR parser recurses on parse-stack
-// depth; for pathological inputs (huge table-driven test files — cobra's
-// 117 KB completions_test.go, 80 KB command_test.go) that recursion
-// overflows the goroutine stack. A stack overflow is a FATAL runtime error,
-// not an error return, so the err guard on Parse below cannot catch it — it
-// crashes the whole process. 64 KiB clears every crasher observed on the
-// semble corpus while preserving normal source (cobra's 61 KB command.go
-// parses fine). Heuristic, not a formal depth bound — gotreesitter exposes
-// no node/depth cap (only a wall-clock timeout, which a synchronous stack
-// overflow outruns).
+// Guard 1 — size ceiling (defense-in-depth). Historically gotreesitter's GLR
+// parser could recurse unboundedly in Go result-compatibility normalization on
+// huge table-driven files (cobra's 117 KB completions_test.go, 80 KB
+// command_test.go), overflowing the goroutine stack — a FATAL runtime error the
+// err guard on Parse below cannot catch, crashing the whole process (#110).
+// That was FIXED upstream in gotreesitter v0.20.6 (ken pins v0.48.1; the exact
+// crashers now parse clean — TestParse_LargeTableDrivenGo_NoFatalOverflow), so
+// this 64 KiB ceiling is no longer the crash safeguard, just a cheap bound that
+// also caps enrichment cost on very large files. Not a formal depth bound —
+// gotreesitter still exposes no node/depth cap (only a wall-clock timeout).
 //
 // Guard 2 — parse acceptance. gotreesitter returns the partially-built tree
 // on every non-accept stop reason (timeout, cancellation, iteration cap,
