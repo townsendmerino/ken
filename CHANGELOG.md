@@ -45,6 +45,16 @@ default and is completely unaffected.
 
 [#15]: https://github.com/townsendmerino/ken/issues/15
 
+- **Structural (Arm B) enrichment for 3 more languages: Swift, Scala, Elixir.**
+  These already had tree-sitter *chunking*; now their files also get the
+  `# func: … | calls: … | raises: …` structural label that boosts BM25 +
+  embedding signal (16 languages now have extractors, up from 13). **Swift is
+  un-parked**: the gotreesitter v0.20.x grammar failures that shelved it (root=
+  ERROR misparses, 2–6 s hangs) are fixed on the pinned v0.48.1 — a real-corpus
+  survey parses cleanly in <260 ms; newer syntax degrades gracefully to a
+  partial-but-additive label. Zig, Lua, and Haskell stay chunker-only (the
+  func/calls/raises model fits them poorly — deferred pending a measured case).
+
 ### Fixed
 
 - **`ken build-index` / `ken index` are now byte-deterministic regardless of

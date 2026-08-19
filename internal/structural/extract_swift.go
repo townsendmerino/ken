@@ -1,20 +1,14 @@
-//go:build swift
-
-// The extractor below is gated behind the `swift` build tag — it
-// compiles only when explicitly requested (`go build -tags=swift
-// ./...`) and is excluded from the default build. Swift remains
-// parked at the kenLangToTSLang gate because the gotreesitter
-// v0.20.0-rc3 tree-sitter-swift grammar misparses real-world Swift
-// code: a 4-line file whose header comment contains the word "and",
-// "software", "associated", or "Permission" already produces a
-// root=ERROR parse. Cross-corpus survey on 2026-06-03 showed 0% / 2%
-// / 8% / 35% clean-parse rates across Alamofire / swift-nio /
-// swift-collections / Defaults respectively — universal failure.
-//
-// The extractor stays in tree so re-enabling once the grammar fixes
-// land is a two-line change: register `.swift → swift` in
-// kenLangToTSLang and `swift → extractSwift` in langExtractor, drop
-// this build tag, and revert the Swift entry in DESIGN.md §10.
+// Swift structural extractor. Un-parked 2026-08-19 (was gated behind a
+// `//go:build swift` tag): the gotreesitter v0.20.x tree-sitter-swift grammar
+// misparsed real-world Swift (root=ERROR on Alamofire/swift-nio; 0–35% clean;
+// 2–6 s parses that risked hanging the indexer). On the pinned gotreesitter
+// v0.48.1 that class of failure is gone — a real-corpus survey (Alamofire +
+// swift-collections) parses to root=source_file, stop=accepted, in 26–260 ms
+// with no crash/hang. Newer-syntax files still carry localized ERROR *nodes*
+// (the grammar isn't fully current with Swift's evolution), but the parser
+// recovers, so extraction degrades gracefully to a partial-but-additive label
+// rather than failing — the same partial-parse quality the treesitter chunker
+// already ships for Swift.
 
 package structural
 

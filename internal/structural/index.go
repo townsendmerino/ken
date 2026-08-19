@@ -21,17 +21,18 @@
 // This is the same relevance-over-completeness trade ken makes for
 // retrieval; honest in both directions.
 //
-// Stage 8 supports thirteen languages via dedicated extractors:
-// Python, Go, TypeScript, JavaScript, Java, Rust, C, C++, PHP, Ruby,
-// Kotlin, Dart, C# (the last un-parked on gotreesitter v0.20.2, which
-// bounded the namespace-recovery recursion that had OOM'd it). Adding
-// another language is a new extract_<lang>.go file plus a row in the
-// kenLangToTSLang and langExtractor maps; the surface stays the same.
-// Languages whose grammar still fails — Swift (lexer misparses
-// real-world header comments) and bash (pathologically slow) —
-// silently fall through to the chunker's line fallback. Their
-// extractors exist in tree under build-tag gates so re-enabling is a
-// flag flip once upstream grammar fixes land; see DESIGN.md §10.
+// Stage 8 supports sixteen languages via dedicated extractors: Python,
+// Go, TypeScript, JavaScript, Java, Rust, C, C++, PHP, Ruby, Kotlin,
+// Dart, C#, Swift, Scala, Elixir. (C# was un-parked on gotreesitter
+// v0.20.2, which bounded the namespace-recovery recursion that OOM'd it;
+// Swift on v0.48.1, which fixed the v0.20.x root=ERROR misparse + 2–6s
+// hangs — Swift now degrades gracefully to partial-but-additive labels on
+// newer syntax rather than failing. Scala + Elixir added 2026-08-19.)
+// Adding another language is a new extract_<lang>.go file plus a row in
+// the kenLangToTSLang and langExtractor maps; the surface stays the same.
+// Languages whose grammar isn't production-viable — e.g. bash
+// (pathologically slow) — silently fall through to the chunker's line
+// fallback; see DESIGN.md §10.
 package structural
 
 import (
@@ -256,37 +257,39 @@ type EnrichOptions struct {
 // concurrency: read-only after init (extended only by source edits, never
 // at runtime) — safe for concurrent reads.
 var kenLangToTSLang = map[string]string{
-	".py":   "python",
-	".go":   "go",
-	".ts":   "typescript",
-	".tsx":  "typescript",
-	".js":   "javascript",
-	".jsx":  "javascript",
-	".mjs":  "javascript",
-	".cjs":  "javascript",
-	".java": "java",
-	".rs":   "rust",
-	".cpp":  "cpp",
-	".cc":   "cpp",
-	".cxx":  "cpp",
-	".hpp":  "cpp",
-	".hh":   "cpp",
-	".hxx":  "cpp",
-	".c":    "c",
-	".h":    "c",
-	".php":  "php",
-	".rb":   "ruby",
-	".kt":   "kotlin",
-	".kts":  "kotlin",
-	".dart": "dart",
-	".cs":   "c_sharp",
-	// .swift intentionally OMITTED — the gotreesitter v0.20.2
-	// tree-sitter-swift grammar still misparses real-world Swift
-	// (header-comment fix in v0.20.2 lifted Alamofire 0%→35% clean,
-	// but ~65% of files still fail and ~20% take 2–6s per parse —
-	// not production-viable). The extractor at extract_swift.go is
-	// parked behind the `swift` build tag; re-enable once the grammar
-	// improves further. See DESIGN.md §10.
+	".py":    "python",
+	".go":    "go",
+	".ts":    "typescript",
+	".tsx":   "typescript",
+	".js":    "javascript",
+	".jsx":   "javascript",
+	".mjs":   "javascript",
+	".cjs":   "javascript",
+	".java":  "java",
+	".rs":    "rust",
+	".cpp":   "cpp",
+	".cc":    "cpp",
+	".cxx":   "cpp",
+	".hpp":   "cpp",
+	".hh":    "cpp",
+	".hxx":   "cpp",
+	".c":     "c",
+	".h":     "c",
+	".php":   "php",
+	".rb":    "ruby",
+	".kt":    "kotlin",
+	".kts":   "kotlin",
+	".dart":  "dart",
+	".cs":    "c_sharp",
+	".swift": "swift", // un-parked 2026-08-19: gotreesitter v0.48.1 fixed the
+	// v0.20.x root=ERROR misparse + 2–6s hangs (real-corpus survey now parses to
+	// source_file/accepted in <260ms). extractSwift registered below. Newer Swift
+	// syntax still yields localized ERROR nodes → partial-but-additive labels; see
+	// extract_swift.go + DESIGN.md §10.
+	".scala": "scala", // 2026-08-19: good-fit OO+FP (class/object/trait/def/throw).
+	".sc":    "scala",
+	".ex":    "elixir", // 2026-08-19: defmodule≈class, def/defp≈func, raise≈raises.
+	".exs":   "elixir",
 	// .cs (C#) un-parked 2026-06-06: gotreesitter v0.20.2 bounded the
 	// namespace-recovery sub-parses that OOM'd on v0.20.0-rc3 (Dapper
 	// retest: 89% clean, ~3s/156 files, no SIGKILL). extractCsharp is
@@ -317,9 +320,9 @@ var langExtractor = map[string]func([]byte, *gotreesitter.Node, *gotreesitter.La
 	"kotlin":     extractKotlin,
 	"dart":       extractDart,
 	"c_sharp":    extractCsharp,
-	// "swift": extractSwift — registered but parked; see the
-	// kenLangToTSLang block above. Uncomment when the grammar
-	// is fixed upstream.
+	"swift":      extractSwift,  // un-parked 2026-08-19; see kenLangToTSLang above.
+	"scala":      extractScala,  // 2026-08-19
+	"elixir":     extractElixir, // 2026-08-19
 }
 
 // langCache holds the pool + language handle per grammar. Both are
