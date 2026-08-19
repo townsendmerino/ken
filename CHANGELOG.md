@@ -13,11 +13,37 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
-## [1.4.2] — 2026-08-19 — reproducible `ken build-index` (deterministic treesitter chunking)
+## [1.5.0] — 2026-08-19 — remote HTTP transport for ken-mcp + reproducible builds
 
-A reliability fix: index builds are now byte-identical across rebuilds of the
-same corpus. Additive; the aikit default is unchanged and the public 1.0 API is
-untouched.
+A feature release: ken-mcp can now serve MCP over the network (Streamable HTTP)
+for centralized / staging / team-shared deployments, alongside a reproducibility
+fix for index builds. The public 1.0 API surface is unchanged; stdio remains the
+default and is completely unaffected.
+
+### Added
+
+- **Remote Streamable HTTP transport for `ken-mcp` ([#15], ADR-041).** Set
+  `KEN_MCP_TRANSPORT=http` to expose the same tool surface over the network for a
+  centralized dev box, staging server, or team-shared instance — agents already
+  trained on the stdio server work unchanged. Because this is network-exposed,
+  the security model is explicit and fails loud at startup:
+  - **Bearer-token auth is mandatory** (`KEN_MCP_AUTH_TOKEN` or, preferred,
+    `KEN_MCP_AUTH_TOKEN_FILE`) — HTTP mode refuses to start without a token; no
+    insecure default, no localhost exception. Comparison is constant-time and
+    length-leak-free.
+  - **DB row-sampling is hard-rejected** in HTTP mode (`KEN_DB_SAMPLE_ROWS>0` +
+    `transport=http` exits non-zero) — sampled values would be network-searchable.
+  - **Per-client-IP rate limiting** (`KEN_MCP_RATE_LIMIT`, default 100 req/min;
+    `0` disables), outermost so an unauthenticated flood can't DoS the auth check.
+  - **TLS is out of scope by design** — front ken-mcp with a TLS-terminating
+    reverse proxy (`KEN_MCP_ADDR`, default `:8080`). Sessions are stateless
+    (SEP-2567), so no session affinity is needed behind a load balancer.
+
+  stdio stays the default; its six stdout-cleanliness audits still gate it, and a
+  new HTTP test family (middleware unit tests, an in-process authed session, and
+  real-binary fail-loud + serving tests) covers the network path.
+
+[#15]: https://github.com/townsendmerino/ken/issues/15
 
 ### Fixed
 

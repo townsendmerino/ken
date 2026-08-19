@@ -13,13 +13,11 @@ require (
 	github.com/townsendmerino/aikit v1.20.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.22.0
+	golang.org/x/time v0.15.0
 	modernc.org/sqlite v1.56.0
 )
 
-require (
-	github.com/jackc/puddle/v2 v2.2.2 // indirect
-	golang.org/x/time v0.15.0 // indirect
-)
+require github.com/jackc/puddle/v2 v2.2.2 // indirect
 
 require (
 	dario.cat/mergo v1.0.0 // indirect

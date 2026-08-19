@@ -93,6 +93,37 @@ command = "/absolute/path/to/ken-mcp"
 { "mcp": { "ken": { "type": "local", "command": ["/absolute/path/to/ken-mcp"] } } }
 ```
 
+### Remote transport (Streamable HTTP)
+
+The default above runs ken-mcp as a **local subprocess** — the right choice for most setups (the OS-user boundary is the auth boundary; nothing is network-exposed). For a **centralized dev box, staging server, or team-shared instance** — one ken-mcp feeding many agents, or a remote IDE not co-resident with the code — ken-mcp also speaks MCP over **Streamable HTTP** (`KEN_MCP_TRANSPORT=http`, ADR-041). Same tools, same wire format; agents already trained on the stdio server work unchanged.
+
+**This exposes ken-mcp to the network**, so auth is mandatory and several guards fail loud at startup:
+
+```bash
+# On the server (front with a TLS-terminating reverse proxy — ken-mcp does NOT do TLS):
+export KEN_MCP_TRANSPORT=http
+export KEN_MCP_ADDR=:8080                    # default
+export KEN_MCP_AUTH_TOKEN_FILE=/etc/ken/token # preferred (keeps the secret out of the environment)
+export KEN_MCP_DEFAULT_REPO=/srv/code
+export KEN_MCP_RATE_LIMIT=100                 # req/min per client IP (0 disables); default 100
+ken-mcp                                       # exits non-zero if no token is set
+```
+
+Point an agent at it with a bearer token (Claude Code shown; any Streamable-HTTP MCP client works):
+
+```bash
+claude mcp add --transport http ken https://ken.example.com \
+  --header "Authorization: Bearer $TOKEN"
+```
+
+```jsonc
+// Cursor / VS Code mcp.json — remote form (check your editor's remote-MCP docs)
+{ "mcpServers": { "ken": { "url": "https://ken.example.com",
+    "headers": { "Authorization": "Bearer <token>" } } } }
+```
+
+Guards: HTTP mode **refuses to start without a token** (no insecure default, no localhost exception); `KEN_DB_SAMPLE_ROWS>0` is **hard-rejected** in HTTP mode (sampled DB values would be network-searchable); requests are rate-limited per client IP. TLS is out of scope by design — terminate it at a reverse proxy in front of ken-mcp. stdio stays the default and is completely unaffected.
+
 ### Core environment variables
 
 | Variable | Default | Purpose |
@@ -104,6 +135,10 @@ command = "/absolute/path/to/ken-mcp"
 | `KEN_MCP_CHUNKER` | `regex` | `regex` / `treesitter` / `line` / `markdown`. See [Choosing a chunker](#choosing-a-chunker). |
 | `KEN_MCP_CACHE_SIZE` | `16` | LRU bound on the repo→Index cache. |
 | `KEN_MCP_LOG_LEVEL` | `warn` | `debug` / `info` / `warn` / `error`. All logs go to stderr; **stdout is the JSON-RPC channel** ([details](docs/DESIGN.md#hard-rule--stdoutstderr-contract)). |
+| `KEN_MCP_TRANSPORT` | `stdio` | `stdio` (local subprocess, default) or `http` (network Streamable HTTP — see [Remote transport](#remote-transport-streamable-http)). |
+| `KEN_MCP_ADDR` | `:8080` | HTTP bind address (http mode only). No in-process TLS — front with a reverse proxy. |
+| `KEN_MCP_AUTH_TOKEN` / `…_TOKEN_FILE` | (unset) | Bearer token for http mode (`_FILE` preferred). **Required** — http mode won't start without it. |
+| `KEN_MCP_RATE_LIMIT` | `100` | Requests/min per client IP (http mode); `0` disables. `KEN_DB_SAMPLE_ROWS>0` is rejected in http mode. |
 | `KEN_MEMLIMIT` | (unset) | Soft memory limit for the long-lived server (`1GiB`, `512MiB`, or a byte count), applied via `debug.SetMemoryLimit`. Overrides `GOMEMLIMIT` when both are set. ken-mcp also defaults `GOGC=50` (lower steady-state RSS) unless you set `GOGC` yourself. |
 | `KEN_MCP_SHUTDOWN_GRACE` | `5s` | After a SIGINT/SIGTERM, how long to let in-flight tool calls drain before forcing exit (any Go duration). A second signal force-quits immediately. |
 | `KEN_MCP_SNAPSHOT` | `1` | Persist the built index to `<repo>/.ken/` and, on restart, load it + drift-scan (mtime+size) instead of rebuilding when the repo is unchanged — the everyday-cold fast path. `.ken/` is a cache (safe to delete; add it to `.gitignore`). Local-path repos only. `0` disables read+write. |

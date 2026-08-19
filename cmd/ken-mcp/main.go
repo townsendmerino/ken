@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -356,6 +357,13 @@ func main() {
 	// path deterministic. Must run before the first index build.
 	setupEnrichBudget(logger)
 
+	// Transport selection (ADR-041, #15). Resolve + validate BEFORE the
+	// (slow) index build so an insecure/misconfigured remote-HTTP setup fails
+	// loud immediately instead of after a full cold build. stdio (the default)
+	// is unaffected; the http path exits non-zero here on no auth token, an
+	// unreadable token file, or DB row-sampling enabled.
+	transport, httpCfg := resolveTransport(logger)
+
 	size := envcfg.EnvInt("KEN_MCP_CACHE_SIZE", kenmcp.DefaultCacheSize, logger)
 	if size < 0 {
 		logger.Logf(kenmcp.LogWarn, "KEN_MCP_CACHE_SIZE=%d: must be non-negative — using default %d",
@@ -676,7 +684,31 @@ func main() {
 	// here: a ctx-ignoring in-flight build could make that drain arbitrarily
 	// long, and a second signal was previously swallowed by NotifyContext.
 	runDone := make(chan error, 1)
-	go func() { runDone <- srv.Run(ctx, &sdkmcp.StdioTransport{}) }()
+	var httpSrv *http.Server // non-nil only in http transport mode
+	switch transport {
+	case transportHTTP:
+		// Streamable HTTP transport (ADR-041): one shared srv behind ken's
+		// auth + rate-limit middleware, on an http.Server we own so shutdown is
+		// bounded like the stdio path. ReadHeaderTimeout guards slow-header DoS.
+		httpSrv = &http.Server{
+			Addr:              httpCfg.Addr,
+			Handler:           kenmcp.NewHTTPHandler(srv, httpCfg),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		logger.Logf(kenmcp.LogWarn,
+			"serving MCP over HTTP on %s — NETWORK-EXPOSED. Bearer auth is required; TLS is NOT provided "+
+				"(front ken-mcp with a TLS-terminating reverse proxy). Rate limit: %d req/min per client IP.",
+			httpCfg.Addr, httpCfg.RateLimitPerMin)
+		go func() {
+			err := httpSrv.ListenAndServe()
+			if errors.Is(err, http.ErrServerClosed) {
+				err = nil
+			}
+			runDone <- err
+		}()
+	default:
+		go func() { runDone <- srv.Run(ctx, &sdkmcp.StdioTransport{}) }()
+	}
 
 	select {
 	case err := <-runDone:
@@ -692,6 +724,18 @@ func main() {
 		// after the first — the first signal already used its channel).
 		grace := envcfg.EnvDuration("KEN_MCP_SHUTDOWN_GRACE", defaultShutdownGrace, logger)
 		logger.Logf(kenmcp.LogInfo, "shutdown signal received; draining in-flight requests (grace %s)…", grace)
+
+		// Stdio's srv.Run watches ctx and drains on its own; the http.Server does
+		// not, so trigger a bounded graceful shutdown that stops accepting and
+		// drains open connections. It returns ListenAndServe → runDone, which the
+		// grace/second-signal select below already waits on.
+		if httpSrv != nil {
+			go func() {
+				sctx, scancel := context.WithTimeout(context.Background(), grace)
+				defer scancel()
+				_ = httpSrv.Shutdown(sctx)
+			}()
+		}
 
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
