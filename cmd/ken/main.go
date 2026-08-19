@@ -21,8 +21,11 @@ import (
 	// Side-effect imports: register every chunker the CLI exposes.
 	// internal/search blank-imports "regex" (the default); the optional
 	// chunkers are listed here so the binary always exposes them.
+	// treesitter is imported by name (not blank) so init() below can
+	// re-register it with a deterministic parse-timeout policy (#35).
+	"github.com/townsendmerino/aikit/chunk"
 	_ "github.com/townsendmerino/aikit/chunk/markdown"
-	_ "github.com/townsendmerino/aikit/chunk/treesitter"
+	"github.com/townsendmerino/aikit/chunk/treesitter"
 	"github.com/townsendmerino/aikit/encoder"
 	"github.com/townsendmerino/ken/internal/modelfetch"
 	"github.com/townsendmerino/ken/internal/search"
@@ -255,6 +258,20 @@ func extractRerankFlags(args []string) ([]string, rerankFlags, error) {
 		}
 	}
 	return args, rf, nil
+}
+
+// init installs the CLI's treesitter chunker with the per-parse wall-clock
+// timeout DISABLED, so `ken build-index` / `ken index` produce byte-identical
+// indexes on the same corpus regardless of machine load (#35). aikit's default
+// is a 1s wall-clock timeout; under load it flaps borderline files between AST
+// and line chunking, drifting chunk counts across rebuilds. The CLI indexes
+// trusted local repos as a batch step and prefers reproducibility over the
+// per-parse latency guard (bounded input via the 2 MiB walk cap + the #110-fixed
+// grammars keep a runaway parse unlikely). This runs after aikit's treesitter
+// init() (a package dependency) and overwrites its registration; ken-mcp keeps
+// the 1s timeout for the live multi-repo server.
+func init() {
+	chunk.Register("treesitter", treesitter.New(treesitter.WithParseTimeoutMicros(0)))
 }
 
 func main() {

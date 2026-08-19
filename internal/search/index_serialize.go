@@ -198,6 +198,15 @@ type LoadOptions struct {
 //
 // Internally a thin wrapper around walkAndChunkFSWithModel +
 // serializeIndex — propagates any build error verbatim.
+//
+// Reproducibility (ADR-040, #35): with the "treesitter" chunker the output is
+// byte-identical across rebuilds only when the treesitter chunker is registered
+// with the wall-clock parse timeout DISABLED. The `ken build-index` CLI does
+// this (see cmd/ken's init), so the canonical embedded-index path is
+// reproducible. A program calling BuildAndSerializeIndex directly inherits
+// whatever its binary registered — aikit's 1s default unless it registers
+// `treesitter.New(treesitter.WithParseTimeoutMicros(0))` — under which a
+// borderline file can flap between AST and line chunking across loaded rebuilds.
 func BuildAndSerializeIndex(fsys fs.FS, opts BuildOptions) ([]byte, error) {
 	// ModeHybridRerank serializes identically to ModeHybrid (rerank
 	// state is per-process, attached post-load via SetReranker).

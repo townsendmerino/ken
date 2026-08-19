@@ -476,6 +476,8 @@ Design rationale and the five locked sub-decisions are in [`DECISIONS.md` ADR-01
 
 The indexing pipeline is built single-goroutine first and validated deterministically. Worker pools come later, with a golden-output test that asserts identical results regardless of `GOMAXPROCS`. The single most common way concurrent Go projects go wrong is shipping flaky output ordering as "fast."
 
+**Reproducibility contract (ADR-040, #35):** `ken build-index` / `ken index` produce **byte-identical** indexes on the same corpus + config, independent of machine load. The one load-dependent input was the treesitter chunker's 1 s **wall-clock** parse timeout: a borderline file whose parse straddled the budget completed on an idle machine but timed out and fell back to the line chunker (a *different* chunk count) under load. The CLI now registers the treesitter chunker with that timeout **disabled** (`aikit/chunk/treesitter` `WithParseTimeoutMicros(0)`) so parse outcome is a pure function of input bytes; `ken-mcp` keeps the bounded 1 s timeout because the live server prefers a per-parse latency guard over byte-identical rebuilds. The tier is set at each binary's `main` via the chunker registry (the ADR-023 "registry is the seam" rule keeps treesitter out of `internal/search`).
+
 A practical seam: an interface
 
 ```go

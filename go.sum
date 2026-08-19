@@ -115,8 +115,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/townsendmerino/aikit v1.20.0 h1:mswYrXzUyv8jelDR3OIwajYAYM8g94jZnbXCnlyUN/0=
 github.com/townsendmerino/aikit v1.20.0/go.mod h1:nDHW5QeteJ5WD2JnpUeSIe9VpVN7TidgBv0bAmu9d8g=
-github.com/townsendmerino/aikit/chunk/treesitter v1.1.1 h1:2j0T/0SWwc4YutwJC/+X3TLSN+QoUgKnOkumvF+fKlU=
-github.com/townsendmerino/aikit/chunk/treesitter v1.1.1/go.mod h1:+bzbmxKoUhtazBqzxs7CFJiFmyj+qubUo41LHpQS2Ao=
+github.com/townsendmerino/aikit/chunk/treesitter v1.2.0 h1:pqwRl3cIfadQ1aixraw60Hupg3lIC76LG/cpnr+Ya74=
+github.com/townsendmerino/aikit/chunk/treesitter v1.2.0/go.mod h1:+bzbmxKoUhtazBqzxs7CFJiFmyj+qubUo41LHpQS2Ao=
 github.com/xanzy/ssh-agent v0.3.3 h1:+/15pJfg/RsTxqYcX6fHqOXZwwMP+2VyYWJeWM2qQFM=
 github.com/xanzy/ssh-agent v0.3.3/go.mod h1:6dzNDKs0J9rVPHPhaGCukekBHKqfl+L3KghI1Bc68Uw=
 github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=

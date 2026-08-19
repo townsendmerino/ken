@@ -53,7 +53,7 @@ import (
 	// by cmd/ken-mcp-docs. Per ADR-023 the bundle is monolithic at
 	// the embed layer so per-language gating doesn't shrink it.
 	_ "github.com/townsendmerino/aikit/chunk/markdown"
-	_ "github.com/townsendmerino/aikit/chunk/treesitter"
+	"github.com/townsendmerino/aikit/chunk/treesitter"
 	"github.com/townsendmerino/ken/internal/embedcache"
 	"github.com/townsendmerino/ken/internal/envcfg"
 	"github.com/townsendmerino/ken/internal/modelfetch"
@@ -68,6 +68,14 @@ func init() {
 	// Belt + suspenders: any third-party that calls log.Print at import
 	// time would otherwise hit stdout. Redirect before main runs.
 	log.SetOutput(os.Stderr)
+
+	// Register the treesitter chunker with a bounded 1s per-parse wall-clock
+	// timeout — the aikit default, made explicit here to document the tier
+	// choice (#35). The live multi-repo server keeps the per-parse latency
+	// guard so a single pathological file can't stall a watch flush; it does
+	// NOT need the byte-identical-rebuild guarantee the `ken` CLI opts into
+	// (which disables this timeout for reproducible `build-index` output).
+	chunk.Register("treesitter", treesitter.New(treesitter.WithParseTimeoutMicros(1_000_000)))
 }
 
 // defaultShutdownGrace bounds how long, after a shutdown signal, main waits

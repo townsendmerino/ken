@@ -13,6 +13,31 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [1.4.2] — 2026-08-19 — reproducible `ken build-index` (deterministic treesitter chunking)
+
+A reliability fix: index builds are now byte-identical across rebuilds of the
+same corpus. Additive; the aikit default is unchanged and the public 1.0 API is
+untouched.
+
+### Fixed
+
+- **`ken build-index` / `ken index` are now byte-deterministic regardless of
+  machine load ([#35]).** The treesitter chunker parsed under a 1 s **wall-clock**
+  timeout; a borderline file whose parse straddled the budget completed on an
+  idle machine but timed out and fell back to the line chunker (a *different*
+  chunk count) under load, so rebuilds drifted by up to ~0.1% (postgres: 8 chunks
+  / 0.012%). Cited files/line ranges were always stable — no retrieval impact —
+  but the reproducible-embedded-index path SDK authors depend on was not
+  reproducible. The CLI now registers its treesitter chunker with the wall-clock
+  timeout **disabled**, making chunk output a pure function of file bytes; a side
+  effect is that borderline large files that used to *sometimes* degrade to line
+  chunks now *always* get AST chunks (a small quality gain). `ken-mcp` keeps the
+  bounded 1 s timeout — the live server prefers a per-parse latency guard over
+  byte-identical rebuilds. Backed by `aikit/chunk/treesitter` v1.2.0's new
+  `WithParseTimeoutMicros` option; see ADR-040.
+
+[#35]: https://github.com/townsendmerino/ken/issues/35
+
 ## [1.4.1] — 2026-08-18 — hardening: unconfined-repo warning + parser-overflow regression guard
 
 Two robustness follow-ups: a security-hygiene warning for the 1.4.0
