@@ -19,7 +19,12 @@ GOFMT_DIRS := cmd internal mcp bench demos tools
 # golangci-lint is a REQUIRED CI job (see .github/workflows/ci.yml). Pin the
 # same version here so `make lint` / `make check` mirror CI rather than silently
 # skipping the linter — the gap that used to let a lint failure reach `main`.
-GOLANGCI_VERSION := v2.11.4
+# NOTE (go 1.27): install it BUILT WITH go 1.27 — no prebuilt release is yet
+# built with go 1.27 and golangci-lint refuses a module whose go directive
+# exceeds its build-Go. Install via `go install` under Go 1.27:
+#   go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
+# CI does the equivalent via the action's install-mode: goinstall.
+GOLANGCI_VERSION := v2.12.2
 
 help: ## list targets
 	@grep -hE '^[a-z][a-zA-Z0-9_-]*:.*##' $(MAKEFILE_LIST) \

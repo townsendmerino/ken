@@ -117,10 +117,7 @@ type ipRateLimiter struct {
 }
 
 func newIPRateLimiter(perMin int) *ipRateLimiter {
-	burst := perMin
-	if burst < 1 {
-		burst = 1
-	}
+	burst := max(perMin, 1)
 	return &ipRateLimiter{
 		limiters: make(map[string]*rate.Limiter),
 		perSec:   rate.Limit(float64(perMin) / 60.0),

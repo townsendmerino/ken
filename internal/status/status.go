@@ -222,8 +222,8 @@ func Build(opts BuildOptions) Status {
 			GOMAXPROCS: runtime.GOMAXPROCS(0),
 			StartedAt:  now,
 		},
-	}
-	st.SavingsPath = resolveSavingsPath(opts.SavingsPath)
+
+		SavingsPath: resolveSavingsPath(opts.SavingsPath)}
 	if st.SavingsPath != "" {
 		if s, err := usage.BuildSummary(st.SavingsPath); err == nil {
 			st.Savings = s

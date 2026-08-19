@@ -86,9 +86,9 @@ func TestRefresher_Run_ReturnsOnCtxCancel(t *testing.T) {
 // refresh window via a counter the swap callback inspects.
 func TestRefresher_RefreshSerializesConcurrentCalls(t *testing.T) {
 	var (
-		inFlight    int32
+		inFlight    atomic.Int32
 		maxInFlight int32
-		swaps       int32
+		swaps       atomic.Int32
 		releaseMu   sync.Mutex
 		release     = sync.NewCond(&releaseMu)
 		blocked     atomic.Bool
@@ -99,8 +99,8 @@ func TestRefresher_RefreshSerializesConcurrentCalls(t *testing.T) {
 		swap: func(cs []chunk.Chunk) {
 			// Inside swap (called under r.mu) bump the in-flight counter
 			// — should never exceed 1.
-			n := atomic.AddInt32(&inFlight, 1)
-			defer atomic.AddInt32(&inFlight, -1)
+			n := inFlight.Add(1)
+			defer inFlight.Add(-1)
 			if n > atomic.LoadInt32(&maxInFlight) {
 				atomic.StoreInt32(&maxInFlight, n)
 			}
@@ -111,7 +111,7 @@ func TestRefresher_RefreshSerializesConcurrentCalls(t *testing.T) {
 				release.Wait()
 				releaseMu.Unlock()
 			}
-			atomic.AddInt32(&swaps, 1)
+			swaps.Add(1)
 		},
 	}
 

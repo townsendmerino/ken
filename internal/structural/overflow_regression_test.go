@@ -39,7 +39,7 @@ func TestParse_LargeTableDrivenGo_NoFatalOverflow(t *testing.T) {
 	// sized past the 117 KB real crasher.
 	var b strings.Builder
 	b.WriteString("package x\n\nvar cases = []struct {\n\tname string\n\tin   int\n\twant int\n\tsub  []string\n}{\n")
-	for i := 0; i < 5000; i++ {
+	for i := range 5000 {
 		fmt.Fprintf(&b, "\t{name: %q, in: %d, want: %d, sub: []string{%q, %q}},\n",
 			fmt.Sprintf("case_%d", i), i, i*2, fmt.Sprintf("a%d", i), fmt.Sprintf("b%d", i))
 	}

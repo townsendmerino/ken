@@ -52,7 +52,14 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.11.4
+          version: v2.12.2
+          # Build golangci-lint from source with THIS job's Go (1.27, from
+          # go.mod) instead of downloading the prebuilt binary. golangci-lint
+          # refuses to analyze a module whose go directive exceeds the Go it
+          # was built with, and no prebuilt release is yet built with go 1.27
+          # (v2.12.2's binaries are go1.26). Revert to the default binary mode
+          # once a go1.27-built golangci-lint release ships.
+          install-mode: goinstall
 
       - name: go build ./...
         run: go build ./...

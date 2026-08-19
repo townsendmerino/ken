@@ -148,7 +148,7 @@ func TestHTTP_Binary_ServesAuthedSession(t *testing.T) {
 
 	// Wait for the server to build its index and start listening.
 	var sess *sdk.ClientSession
-	for i := 0; i < 150; i++ {
+	for range 150 {
 		cctx, ccancel := context.WithTimeout(ctx, 2*time.Second)
 		s, cerr := sdk.NewClient(&sdk.Implementation{Name: "t", Version: "0"}, nil).
 			Connect(cctx, httpBearerTransport(url, token), nil)

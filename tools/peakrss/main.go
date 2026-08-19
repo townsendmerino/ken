@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -73,11 +74,12 @@ func formatReport(args []string, st *os.ProcessState, wall time.Duration, rssByt
 	if rssBytes > 0 {
 		rss = fmt.Sprintf("\tMaximum resident set size (kbytes): %d\n", rssBytes/1024)
 	}
-	cmdline := args[0]
+	var cmdline strings.Builder
+	cmdline.WriteString(args[0])
 	for _, a := range args[1:] {
-		cmdline += " " + a
+		cmdline.WriteString(" " + a)
 	}
-	return fmt.Sprintf("\tCommand being timed: %q\n", cmdline) +
+	return fmt.Sprintf("\tCommand being timed: %q\n", cmdline.String()) +
 		fmt.Sprintf("\tUser time (seconds): %.2f\n", userS) +
 		fmt.Sprintf("\tSystem time (seconds): %.2f\n", sysS) +
 		fmt.Sprintf("\tElapsed (wall clock) time (seconds): %.2f\n", wall.Seconds()) +

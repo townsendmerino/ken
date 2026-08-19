@@ -133,7 +133,7 @@ func walkSwift(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, en
 
 func recurseChildrenSwift(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclosingClass, enclosingSymbol string, fs *FileStruct) {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		walkSwift(src, n.NamedChild(i), lang, enclosingClass, enclosingSymbol, fs)
 	}
 }
@@ -179,7 +179,7 @@ func extractSwiftClass(src []byte, n *gotreesitter.Node, lang *gotreesitter.Lang
 		return cls
 	}
 	bc := body.NamedChildCount()
-	for i := 0; i < bc; i++ {
+	for i := range bc {
 		c := body.NamedChild(i)
 		if c == nil {
 			continue
@@ -219,7 +219,7 @@ func extractSwiftFunc(src []byte, n *gotreesitter.Node, lang *gotreesitter.Langu
 func extractSwiftParams(src []byte, fn *gotreesitter.Node, lang *gotreesitter.Language) []string {
 	var out []string
 	nc := fn.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := fn.NamedChild(i)
 		if c == nil || c.Type(lang) != "parameter" {
 			continue
@@ -239,7 +239,7 @@ func extractSwiftParams(src []byte, fn *gotreesitter.Node, lang *gotreesitter.La
 func swiftParamName(src []byte, param *gotreesitter.Node, lang *gotreesitter.Language) string {
 	last := ""
 	nc := param.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := param.NamedChild(i)
 		if c == nil {
 			continue
@@ -295,7 +295,7 @@ func swiftNavigationTail(src []byte, n *gotreesitter.Node, lang *gotreesitter.La
 
 func swiftIsThrow(n *gotreesitter.Node, lang *gotreesitter.Language) bool {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c != nil && c.Type(lang) == "throw_keyword" {
 			return true
@@ -306,7 +306,7 @@ func swiftIsThrow(n *gotreesitter.Node, lang *gotreesitter.Language) bool {
 
 func swiftThrowName(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language) string {
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c == nil || c.Type(lang) == "throw_keyword" {
 			continue
@@ -356,7 +356,7 @@ func swiftImportBoundName(src []byte, n *gotreesitter.Node, lang *gotreesitter.L
 	// "import " is the bound name (e.g. "Foundation",
 	// "a.b.C" → last segment "C").
 	nc := n.NamedChildCount()
-	for i := 0; i < nc; i++ {
+	for i := range nc {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue

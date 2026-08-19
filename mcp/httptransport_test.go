@@ -62,7 +62,7 @@ func TestRateLimitMiddleware(t *testing.T) {
 	h := rateLimitMiddleware(perMin, okHandler())
 
 	// Burst of `perMin` from one IP is allowed; the next is throttled.
-	for i := 0; i < perMin; i++ {
+	for i := range perMin {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/", nil)
 		req.RemoteAddr = "192.0.2.10:5555"
