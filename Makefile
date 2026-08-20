@@ -19,7 +19,9 @@ GOFMT_DIRS := cmd internal mcp bench demos tools
 # golangci-lint is a REQUIRED CI job (see .github/workflows/ci.yml). Pin the
 # same version here so `make lint` / `make check` mirror CI rather than silently
 # skipping the linter — the gap that used to let a lint failure reach `main`.
-GOLANGCI_VERSION := v2.11.4
+# v2.13.0 is the first release with go 1.27 support (prebuilt binaries built
+# with go 1.27); earlier versions' staticcheck crashes on the go 1.27 stdlib.
+GOLANGCI_VERSION := v2.13.0
 
 help: ## list targets
 	@grep -hE '^[a-z][a-zA-Z0-9_-]*:.*##' $(MAKEFILE_LIST) \

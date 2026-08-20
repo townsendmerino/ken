@@ -52,7 +52,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.11.4
+          # v2.13.0 (2026-08-19) is the first release with go 1.27 support — its
+          # prebuilt binaries are built with go 1.27, so the default binary mode
+          # works on the go 1.27 module (earlier versions' staticcheck crashed on
+          # go 1.27's Linux internal/poll AST).
+          version: v2.13.0
 
       - name: go build ./...
         run: go build ./...
