@@ -438,6 +438,79 @@ The bench writes `bench/tokens/results/{semble,coir}-tokens.json` — gitignored
 - **CoIR-CSN-Python warning.** The substring-leak artifact that makes BM25 beat hybrid on this corpus (see ["Why BM25 beats hybrid on CSN-Python"](#why-bm25-beats-hybrid-on-csn-python) above) also makes grep more competitive on recall — but not on tokens, because the corpus size makes any grep result set ridiculous. The headline number is semble's bench; CoIR confirms the direction on a different distribution but isn't the cleanest demonstration of ken's value on its own.
 - **Suffix-aware qrel matching.** Recall is computed via the same `path_matches` semble uses (`norm_file == target OR file.endswith("/"+target) OR target.endswith("/"+file)`) — handles the common case where semble's annotations are repo-rooted (`aiohttp/client.py`) but ken's chunk.File is benchmark-root-relative (`client.py`).
 
+## Where the chunkers disagree — traceability vs ranking
+
+[ADR-011](internal/DECISIONS.md) keeps the regex chunker as the default because treesitter's aggregate NDCG delta on the semble bench is inside noise. The [r/Rag thread](internal/rag-thread-followups.md) pushed back: an average over 1,251 queries can hide a real win, and "does a retrieved span map cleanly to one symbol?" is not something NDCG measures at all.
+
+Both halves of that were tested. The short answer: **the objection is right that aggregate NDCG hides something, and wrong about what.**
+
+### Ranking: no hidden slice
+
+`ken bench --dump-per-query` records each query's target ranks and hit list, and `scripts/chunker_disagreement.py` pairs two runs on `(repo, query)`. A disagreement is the thread's own definition — one chunker found the target and the other missed it, or one ranked it ≥5 positions better. (The margin exists because 1–2 positions of churn between two near-identical fused scores is jitter, not a chunking difference.)
+
+| | regex | treesitter |
+|---|---:|---:|
+| NDCG@10 (63 repos, 1,251 queries) | 0.8434 | 0.8403 |
+
+- **98.6% of queries agree** (1,232 of 1,249 shared). Only **17** disagree at all.
+- Of those, regex wins 12 and treesitter 5. At n=17 that is not significant (binomial p≈0.14), so the supportable claim is "no slice favours treesitter", not "regex is better".
+- By category: architecture ties 5–5; semantic goes 7–0 to regex.
+- **Zero symbol-class disagreements**, across all 194 symbol queries. That is a direct answer to the thread's cross-file-symbol question: chunker choice does not move identifier lookups. The lexical arm's exact match dominates, which is independently consistent with the flat α_symbol curve in the [α-sensitivity section](#α-sensitivity--is-03-05-actually-the-right-pair).
+
+### Traceability: a 3.2× difference NDCG cannot see
+
+`bench/chunkdiff` measures two query-independent properties by joining chunk spans against the definition spans `structural.ExtractFile` already extracts:
+
+- **SPLIT** — a definition no single chunk fully contains. Retrieval can still surface it, but no one result shows the whole thing; the agent gets half a function. Measured over **leaf** definitions (functions + methods).
+- **MIXED** — a chunk containing the start of ≥2 definitions, so the span doesn't map to one symbol. Measured over **top-level** definitions only (top-level functions + classes), deliberately: a chunk holding a whole class with five methods *does* map to one symbol, and counting its five method starts as mixing would penalize the outcome the metric exists to reward.
+
+Over all 63 repos — 31,571 files, 276,745 definitions:
+
+| chunker | files | chunks | defs | split | split rate | mixed rate |
+|---|---:|---:|---:|---:|---:|---:|
+| regex | 31,571 | 140,834 | 276,745 | 22,769 | 0.082 | 0.575 |
+| treesitter | 31,571 | 154,466 | 276,745 | 7,241 | **0.026** | 0.580 |
+
+**treesitter cuts the definition-split rate by 3.2×**, and it holds in all 13 languages with enough definitions to read:
+
+| language | files | regex split | treesitter split | Δ |
+|---|---:|---:|---:|---:|
+| kotlin | 3,772 | 0.140 | 0.040 | −0.100 |
+| swift | 397 | 0.150 | 0.051 | −0.099 |
+| php | 2,877 | 0.117 | 0.022 | −0.095 |
+| java | 2,032 | 0.100 | 0.026 | −0.074 |
+| cpp | 785 | 0.110 | 0.038 | −0.073 |
+| elixir | 350 | 0.058 | 0.010 | −0.048 |
+| ruby | 3,443 | 0.055 | 0.008 | −0.047 |
+| python | 1,825 | 0.097 | 0.051 | −0.046 |
+| typescript | 2,093 | 0.098 | 0.058 | −0.041 |
+| c | 10,825 | 0.060 | 0.021 | −0.039 |
+| scala | 1,664 | 0.050 | 0.011 | −0.039 |
+| rust | 1,303 | 0.062 | 0.034 | −0.028 |
+| go | 203 | 0.051 | 0.048 | −0.004 |
+
+The **mixed** rate is flat (0.575 vs 0.580), so this is specifically about keeping definitions whole, not about chunk composition generally.
+
+### Why both results are true at once
+
+A split definition costs the **agent** a follow-up read; it does not cost the **ranker** a position. NDCG asks whether the right file surfaced, and it did either way — so the metric is blind to the difference by construction. The cost lands in the token economy instead, which is why the [token-budget bench](#token-budget-recall--agent-side-efficiency) is where this would show up, and why it does not appear here.
+
+**ADR-011 stands on ranking grounds.** There is now a measured argument on the other side that did not exist before, but it is an argument about span quality, not retrieval quality, and acting on it would need the token-budget number to move.
+
+### Reproduce
+
+```bash
+# Two benchmark runs, ~10 min each; they write to separate result files.
+python3 bench/semble/run_ken.py --ken /tmp/ken --mode hybrid --chunker regex      --dump-per-query
+python3 bench/semble/run_ken.py --ken /tmp/ken --mode hybrid --chunker treesitter --dump-per-query
+python3 scripts/chunker_disagreement.py     bench/semble/results/ken-hybrid.json bench/semble/results/ken-hybrid-treesitter.json
+
+# Traceability over the same corpus (~40 min; KEN_TRACE_REPO_LIMIT=N for a quick look).
+go test -tags=bench ./bench/chunkdiff/ -run TestTraceability_SembleCorpus -v -timeout 90m
+```
+
+Note the traceability harness sets `KEN_ENRICH_FILE_BUDGET_MS=500` unless you override it. The library default is off (ADR-040 keeps `ken build-index` byte-identical), which leaves the structural parse unbounded — and an unbounded sweep spins forever on a pathological file. Skipped files are counted and reported next to the table rather than silently dropped.
+
 ## α sensitivity — is (0.3, 0.5) actually the right pair?
 
 ken inherits semble's two adaptive fusion weights verbatim: **α_symbol = 0.3** (identifier-shaped queries lean BM25) and **α_NL = 0.5** (natural-language queries balance the two arms). α is the semantic arm's weight in the RRF fuse; BM25 gets 1 − α. The [r/Rag thread](internal/rag-thread-followups.md) asked the fair question — were those ever swept, or just inherited?

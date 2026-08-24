@@ -62,7 +62,7 @@ Methodology lessons the plan didn't anticipate:
 
 **Estimate:** medium-small. No new benchmark runs needed if existing result JSONs for both chunkers are current; the work is the disagreement classifier and the definition-span join. **[Correction: new runs ARE needed — see above. Both runs are ~10 min each now that indexing is the only real cost.]**
 
-### As built (in progress, 2026-08-24)
+### As built (2026-08-24) — objection half-right: 3.2× traceability win, zero ranking win
 
 The definition-span join landed first, as `bench/chunkdiff` (build tag `bench`), because it answers the commenter's *traceability* question directly and needs no query data at all:
 
@@ -73,6 +73,22 @@ Spans come from `structural.ExtractFile` — the same extractor Arm B enrichment
 
 - **Overlap-aware containment.** The line chunker emits overlapping windows precisely so a definition straddling one boundary still appears whole in a neighbour. Containment therefore asks "does *any* chunk cover this", not "does the chunk containing its start line"; the naive version punishes a chunker for the feature that fixes the defect being measured.
 - **All-chunkers-or-none per file.** A file analyzed under regex but skipped under treesitter would make the two columns describe different corpora. Files with no registered extractor, or no spanned definitions, are skipped entirely — scoring them as perfectly traceable would dilute every rate with files that never had a symbol in them.
+
+**Results** (full write-up: [`docs/BENCH.md` → "Where the chunkers disagree"](../BENCH.md#where-the-chunkers-disagree--traceability-vs-ranking)):
+
+| | regex | treesitter |
+|---|---:|---:|
+| NDCG@10 (1,251 queries) | 0.8434 | 0.8403 |
+| definition split rate (276,745 defs) | 0.082 | **0.026** |
+| chunk mixed rate | 0.575 | 0.580 |
+| queries where they disagree | — | 17 of 1,249 (98.6% agree) |
+| symbol-query disagreements | — | **0 of 194** |
+
+**The commenter was right that aggregate NDCG hides something, and wrong about what it hides.** treesitter is 3.2× better at keeping definitions whole, consistently across all 13 languages. That buys nothing in ranking: 98.6% of queries agree, no slice favours treesitter (regex wins the 17 disagreements 12–5, not significant at that n), and their specific cross-file-symbol hypothesis produces **zero** disagreements across all 194 symbol queries — the lexical arm's exact match dominates, which independently matches item 1's flat α_symbol curve.
+
+Both are true because a split definition costs the **agent** a follow-up read, not the **ranker** a position. NDCG asks whether the right file surfaced; it did either way. The cost lands in the token economy, so the token-budget bench is where it would show up — ADR-011 stands on ranking grounds, and acting on the traceability argument would need that number to move.
+
+**Unplanned finding — a user-facing hang.** Running the traceability sweep uncovered that `ken index` appears to hang on C# files: gotreesitter v0.51.0 takes **250 s** on 11 KB of valid C# (`BuiltinResolver.cs`) and still returns `root=ERROR`, with six such files in one repo. `.cs` is now parked out of `kenLangToTSLang` (deterministic, matching the bash precedent; a wall-clock budget would trade the hang for the reproducibility bug ADR-040 closed). ken-mcp was never exposed — it sets a 500 ms budget. See DESIGN.md §10. Upstream report pending.
 
 ---
 
@@ -131,6 +147,6 @@ So: a 12-hex `index.build_id` on the **JSON** responses only (always present, no
 ## Report-back checklist (the thread reply, when items land)
 
 1. ~~α sweep curve + holdout result, and whether "flat around the middle" held.~~ **Ready to report:** yes, essentially. α_symbol is flat (argmax 0.3/0.3/0.4 across three splits, top points within 0.0005). α_NL's curve is a broad plateau whose lower edge is about where 0.5 sits — a held-out gain from 0.6 of +0.004 to +0.010, material on one split of three and flat on an independent resample. Constants kept. Curves in [`docs/BENCH.md`](../BENCH.md#α-sensitivity--is-03-05-actually-the-right-pair).
-2. Chunker-disagreement table, the boundary-failure share, and an answer to the cross-file-symbol question.
+2. ~~Chunker-disagreement table, the boundary-failure share, and an answer to the cross-file-symbol question.~~ **Ready to report:** 98.6% of queries agree; the 17 that don't go 12–5 to regex (not significant); **zero** symbol-query disagreements answers the cross-file-symbol question directly. The boundary share was replaced by a stronger, query-independent measurement — treesitter cuts the definition-split rate 3.2× (0.082 → 0.026) across 276,745 definitions in 13 languages, which is the traceability win NDCG can't see.
 3. Rename-survival numbers — what recall the semantic arm retains when the lexical anchor disappears.
 4. ~~"Every bench JSON now carries commit/chunker/config provenance" — one sentence, links to the harness.~~ **Ready to report:** every bench result file now carries commit, chunker, mode, α pair, model digest, corpus revisions and `KEN_*` env — schema + example in [`docs/BENCH.md` → "Result provenance"](../BENCH.md#result-provenance), builder in `bench/internal/provenance`.
