@@ -1,10 +1,6 @@
 package structural
 
-import (
-	"os"
-	"path/filepath"
-	"testing"
-)
+import "testing"
 
 // TestBuild_CsharpBasics confirms the C# extractor lights up on classes,
 // interfaces, methods, constructors, params, invocation + object-creation
@@ -18,8 +14,15 @@ import (
 // this shape drove unbounded namespace-recovery recursion to SIGKILL;
 // v0.20.2 bounds it. If this test ever hangs or OOMs, the grammar
 // regressed.
+//
+// NOTE: .cs is currently PARKED out of kenLangToTSLang for a SECOND,
+// unrelated grammar defect (the collection-initializer parse blowup —
+// see the map's trailing comment and TestCsharpIsParkedFromTheLangMap).
+// So this drives extractGuarded directly rather than Build: the
+// extractor and its grammar coverage stay tested, so re-enabling the
+// map row is a one-line change that lands on green tests rather than
+// on untested code.
 func TestBuild_CsharpBasics(t *testing.T) {
-	dir := t.TempDir()
 	src := `using System.Collections.Generic;
 
 namespace Auth.Core
@@ -50,17 +53,9 @@ namespace Auth.Core
     }
 }
 `
-	if err := os.WriteFile(filepath.Join(dir, "session.cs"), []byte(src), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	ix, err := Build(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fs := ix.File("session.cs")
+	fs := extractGuarded("c_sharp", "session.cs", []byte(src))
 	if fs == nil {
-		t.Fatal("session.cs not indexed — is .cs registered in kenLangToTSLang and c_sharp in langExtractor?")
+		t.Fatal("c_sharp extraction returned nil — is c_sharp registered in langExtractor?")
 	}
 
 	// Functions: Login + Authenticate (interface signature) + the
@@ -119,23 +114,43 @@ namespace Auth.Core
 		t.Errorf("Imports missing %q; have %v", "Generic", fs.Imports)
 	}
 
-	// Definition lookups.
-	if defs := ix.Definition("SessionManager"); len(defs) < 1 {
-		t.Errorf("Definition(SessionManager) = empty, want at least the class")
-	} else {
-		hasClass := false
-		for _, d := range defs {
-			if d.Kind == DefinitionKindClass {
-				hasClass = true
-			}
-		}
-		if !hasClass {
-			t.Errorf("Definition(SessionManager) lacks Class kind; got %+v", defs)
-		}
+	// The corpus-level Definition() lookups this test used to make are
+	// dropped rather than ported: they exercise the index layer, not the
+	// C# extractor, and Build() no longer indexes .cs while the grammar
+	// is parked. Definition() stays covered by the non-parked languages
+	// (extract_go_test.go, extract_java_test.go, and friends).
+}
+
+// TestCsharpIsParkedFromTheLangMap pins the 2026-08-24 mitigation in
+// place so re-enabling C# is a deliberate act, not a merge accident.
+//
+// The defect: on gotreesitter v0.51.0 the c_sharp grammar's parse of a
+// collection initializer built from `{ typeof(T), X.Instance }` entries
+// grows explosively with the entry count. MessagePack's
+// BuiltinResolver.cs (11 KB, 211 lines) does not finish parsing in two
+// minutes, and `ken index` over a directory containing it hung outright.
+// Reproduced against raw gotreesitter with no ken code in the path.
+//
+// Why a map row rather than a timeout: ADR-040 keeps the CLI's parse
+// budget off so `ken build-index` stays byte-identical across runs, and
+// a wall-clock guard would make enrichment load-dependent — trading a
+// hang for the reproducibility bug ADR-040 closed. Parking is
+// deterministic, and it matches the standing precedent for the bash
+// grammar.
+//
+// When upstream fixes the grammar: bump the gotreesitter pin, delete
+// this test, restore `".cs": "c_sharp"` in kenLangToTSLang, and re-run
+// the traceability sweep (bench/chunkdiff) over messagepack-csharp to
+// confirm it completes.
+func TestCsharpIsParkedFromTheLangMap(t *testing.T) {
+	if gram, ok := kenLangToTSLang[".cs"]; ok {
+		t.Fatalf(".cs is mapped to %q again. If that is deliberate, confirm the "+
+			"gotreesitter c_sharp collection-initializer blowup is fixed upstream first — "+
+			"`ken index` hangs forever on an 11 KB file otherwise. See this test's doc comment.", gram)
 	}
-	if defs := ix.Definition("SessionManager.Login"); len(defs) != 1 {
-		t.Errorf("Definition(SessionManager.Login) = %+v, want one method site", defs)
-	} else if defs[0].Kind != DefinitionKindMethod {
-		t.Errorf("Definition(SessionManager.Login) kind = %v, want Method", defs[0].Kind)
+	// The extractor itself stays registered and tested, so restoring the
+	// map row is genuinely one line.
+	if _, ok := langExtractor["c_sharp"]; !ok {
+		t.Error("c_sharp extractor was unregistered — parking should keep it available for re-enabling")
 	}
 }

@@ -12,11 +12,14 @@ package chunkdiff
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	// Side-effect imports: register the chunkers under test. regex is
 	// the default; treesitter is the challenger ADR-011 rejected on
@@ -49,10 +52,27 @@ func TestTraceability_SembleCorpus(t *testing.T) {
 		byLang[name] = map[string]*Totals{}
 	}
 
+	// Optional repo cap for a fast first look; 0 = the whole corpus.
+	limit := 0
+	if v := os.Getenv("KEN_TRACE_REPO_LIMIT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			t.Fatalf("invalid KEN_TRACE_REPO_LIMIT=%q", v)
+		}
+		limit = n
+	}
+
+	// Progress goes to stderr, not t.Logf: the testing package buffers
+	// t.Log until the test returns, which makes a 20-minute corpus
+	// sweep completely silent and indistinguishable from a hang.
+	start := time.Now()
 	repos := 0
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
+		}
+		if limit > 0 && repos >= limit {
+			break
 		}
 		root := filepath.Join(corpusRoot, e.Name())
 		files, werr := repo.WalkFS(os.DirFS(root), repo.Options{})
@@ -87,6 +107,8 @@ func TestTraceability_SembleCorpus(t *testing.T) {
 				byLang[rep.Chunker][lang].Add(rep)
 			}
 		}
+		fmt.Fprintf(os.Stderr, "[%d] %-24s files=%d defs=%d (%.0fs elapsed)\n",
+			repos, e.Name(), totals["regex"].Files, totals["regex"].LeafDefs, time.Since(start).Seconds())
 	}
 
 	if totals["regex"].Files == 0 {

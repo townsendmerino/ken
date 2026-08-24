@@ -257,30 +257,30 @@ type EnrichOptions struct {
 // concurrency: read-only after init (extended only by source edits, never
 // at runtime) — safe for concurrent reads.
 var kenLangToTSLang = map[string]string{
-	".py":    "python",
-	".go":    "go",
-	".ts":    "typescript",
-	".tsx":   "typescript",
-	".js":    "javascript",
-	".jsx":   "javascript",
-	".mjs":   "javascript",
-	".cjs":   "javascript",
-	".java":  "java",
-	".rs":    "rust",
-	".cpp":   "cpp",
-	".cc":    "cpp",
-	".cxx":   "cpp",
-	".hpp":   "cpp",
-	".hh":    "cpp",
-	".hxx":   "cpp",
-	".c":     "c",
-	".h":     "c",
-	".php":   "php",
-	".rb":    "ruby",
-	".kt":    "kotlin",
-	".kts":   "kotlin",
-	".dart":  "dart",
-	".cs":    "c_sharp",
+	".py":   "python",
+	".go":   "go",
+	".ts":   "typescript",
+	".tsx":  "typescript",
+	".js":   "javascript",
+	".jsx":  "javascript",
+	".mjs":  "javascript",
+	".cjs":  "javascript",
+	".java": "java",
+	".rs":   "rust",
+	".cpp":  "cpp",
+	".cc":   "cpp",
+	".cxx":  "cpp",
+	".hpp":  "cpp",
+	".hh":   "cpp",
+	".hxx":  "cpp",
+	".c":    "c",
+	".h":    "c",
+	".php":  "php",
+	".rb":   "ruby",
+	".kt":   "kotlin",
+	".kts":  "kotlin",
+	".dart": "dart",
+	// .cs (C#) is PARKED — see the note at the bottom of this map.
 	".swift": "swift", // un-parked 2026-08-19: gotreesitter v0.48.1 fixed the
 	// v0.20.x root=ERROR misparse + 2–6s hangs (real-corpus survey now parses to
 	// source_file/accepted in <260ms). extractSwift registered below. Newer Swift
@@ -290,10 +290,33 @@ var kenLangToTSLang = map[string]string{
 	".sc":    "scala",
 	".ex":    "elixir", // 2026-08-19: defmodule≈class, def/defp≈func, raise≈raises.
 	".exs":   "elixir",
-	// .cs (C#) un-parked 2026-06-06: gotreesitter v0.20.2 bounded the
-	// namespace-recovery sub-parses that OOM'd on v0.20.0-rc3 (Dapper
-	// retest: 89% clean, ~3s/156 files, no SIGKILL). extractCsharp is
-	// registered below; see DESIGN.md §10.
+	// .cs (C#) — un-parked 2026-06-06 after gotreesitter v0.20.2 bounded
+	// the namespace-recovery sub-parses that OOM'd on v0.20.0-rc3, then
+	// RE-PARKED 2026-08-24 for a different defect in the same grammar.
+	//
+	// On gotreesitter v0.51.0 the c_sharp grammar parses a collection
+	// initializer of `{ typeof(T), X.Instance }` entries in time that
+	// grows explosively with the entry count. MessagePack's
+	// BuiltinResolver.cs — 11 KB, 211 lines — does not finish parsing in
+	// two minutes; bisecting its prefixes gives 53 lines → 0.13s, 79 →
+	// 3.8s, 85 → 5.4s, 88 → 7.6s, 89 → no completion. Six files in that
+	// one repo exceed a 30s cap. Reproduced against raw gotreesitter with
+	// no ken code in the path, so it is the grammar, not extractCsharp.
+	//
+	// This is NOT the v0.20.x OOM: RSS stays flat (~400 MB) while a core
+	// spins, so neither the 64 KiB size guard (the file is 11 KB) nor the
+	// old memory symptom catches it.
+	//
+	// Why parking rather than a timeout: ADR-040 keeps the CLI's parse
+	// budget OFF so `ken build-index` stays byte-identical across runs,
+	// and a wall-clock budget would make enrichment load-dependent —
+	// trading a hang for the reproducibility bug that ADR closed. Parking
+	// is deterministic and matches the existing precedent for the bash
+	// grammar. ken-mcp was never exposed (it sets a 500 ms budget), but
+	// `ken index` / `ken build-index` hung outright.
+	//
+	// extractCsharp stays registered below and keeps its tests, so
+	// re-enabling is this one line once upstream fixes the grammar.
 }
 
 // langExtractor maps a gotreesitter grammar name to its AST-walking

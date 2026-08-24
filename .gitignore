@@ -43,6 +43,10 @@ testdata/parity.jsonl
 # corpus + annotations live in MinishLab/semble's checkout, not here).
 bench/semble/results/
 
+# Chunker traceability output (regenerated via
+# `go test -tags=bench ./bench/chunkdiff/`).
+bench/chunkdiff/results/
+
 # NDCG result files (regenerated via `go test -tags=bench ./bench/ndcg/`).
 # Same rule as the two above: docs/BENCH.md holds the committed numbers,
 # these carry the provenance block that ties one run back to its commit.
