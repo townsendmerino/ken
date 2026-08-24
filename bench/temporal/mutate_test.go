@@ -141,3 +141,26 @@ func TestApplySplit_RejectsOutOfRange(t *testing.T) {
 		}
 	}
 }
+
+// The rename arm exists to strip the lexical arm's exact-match anchor
+// so the semantic arm has to carry the query alone. A replacement that
+// shares any BM25 token leaves the anchor in place and the whole
+// measurement becomes an artifact — this is exactly what a "Renamed"+q
+// prefix did, silently reporting 96% lexical survival.
+func TestDisjointRename_SharesNoTokenWithTheOriginal(t *testing.T) {
+	for _, symbol := range []string{
+		"getUser", "parse_config", "HTTPServer", "_handler", "Session", "readInt32",
+	} {
+		replacement := DisjointRename(symbol)
+		if SharesToken(symbol, replacement) {
+			t.Errorf("DisjointRename(%q) = %q, which still shares a BM25 token", symbol, replacement)
+		}
+		if replacement != DisjointRename(symbol) {
+			t.Errorf("DisjointRename(%q) is not deterministic", symbol)
+		}
+	}
+	// Guard the guard: the naive prefix must be detected as sharing.
+	if !SharesToken("getUser", "RenamedgetUser") {
+		t.Error("SharesToken failed to catch the prefix case it exists for")
+	}
+}

@@ -21,12 +21,15 @@
 package temporal
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/townsendmerino/aikit/bm25"
 )
 
 // Mutation is one applied change plus the ground truth needed to
@@ -83,6 +86,46 @@ func (m Mutation) Resolve(target string) []string {
 		add(p)
 	}
 	return out
+}
+
+// DisjointRename returns a replacement identifier that shares NO BM25
+// token with symbol.
+//
+// This is load-bearing, and the obvious approach breaks it. Prefixing
+// ("getUser" -> "RenamedgetUser") looks like a rename but ken's
+// identifier-aware tokenizer splits both: [getuser get user] vs
+// [renamedgetuser renamedget user]. The token `user` survives, so BM25
+// keeps an exact-match anchor and the experiment silently measures
+// nothing — it reported 0.96 lexical survival, which is the artifact,
+// not the finding.
+//
+// So: derive letters from a hash of the symbol. Letters only, because
+// digits are their own tokens; a single opaque run shares nothing with
+// any camel/snake decomposition of the original. Deterministic, so a
+// rerun mutates identically.
+func DisjointRename(symbol string) string {
+	sum := sha256.Sum256([]byte(symbol))
+	var b strings.Builder
+	b.WriteString("Zq")
+	for _, c := range sum[:6] {
+		b.WriteByte(byte('a' + c%26))
+	}
+	return b.String()
+}
+
+// SharesToken reports whether two identifiers share any BM25 token —
+// the check that keeps a "rename" from leaving the lexical arm armed.
+func SharesToken(a, b string) bool {
+	seen := map[string]bool{}
+	for _, tok := range bm25.Tokenize(a) {
+		seen[tok] = true
+	}
+	for _, tok := range bm25.Tokenize(b) {
+		if seen[tok] {
+			return true
+		}
+	}
+	return false
 }
 
 // identRe matches a whole-word identifier occurrence. Word boundaries

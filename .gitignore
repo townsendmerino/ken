@@ -96,3 +96,7 @@ testdata/encoder-model
 # local multi-module dev workspace (never commit)
 go.work
 go.work.sum
+
+# Temporal-drift harness output (regenerated via
+# `go test -tags=bench ./bench/temporal/`).
+bench/temporal/results/

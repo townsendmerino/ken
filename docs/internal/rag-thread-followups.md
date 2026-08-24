@@ -1,6 +1,6 @@
 # r/Rag thread follow-ups: α sweep, chunker traceability, temporal eval, result provenance
 
-**Status:** item 4 landed (2026-08-24); items 1–3 scoped, not started · **Origin:** community feedback on the Aug 2026 r/Rag post ([thread](https://www.reddit.com/r/Rag/comments/1vwpm6t/)) · **Promise made:** "will investigate and report back" — the deliverable of every item below is a paragraph in a thread reply, backed by a reproducible number in `docs/BENCH.md`.
+**Status:** all four items landed (2026-08-24); Phase B of item 3 deferred · **Origin:** community feedback on the Aug 2026 r/Rag post ([thread](https://www.reddit.com/r/Rag/comments/1vwpm6t/)) · **Promise made:** "will investigate and report back" — the deliverable of every item below is a paragraph in a thread reply, backed by a reproducible number in `docs/BENCH.md`.
 
 Two commenters, four work items. One asked for an α sweep done properly (held-out split, not tuned on the reporting set). The other pushed back on "AST chunking doesn't help": aggregate NDCG may hide value in *traceability* (does a retrieved span map cleanly to one symbol?) and *change sensitivity* (do results survive refactors?), asked for boundary-failure slicing by query intent and a temporal eval, and pointed out that results without commit/chunker/config provenance are hard to reproduce once the codebase moves.
 
@@ -105,6 +105,31 @@ Both are true because a split definition costs the **agent** a follow-up read, n
 
 **Estimate:** the largest item — the only genuinely new harness. Phase A is bounded (three mutation types, small repo set); do not gold-plate the mutation engine, `gofmt`-valid text-level rewrites are enough.
 
+### As built (2026-08-24) — Phase A done; rename is where the semantic arm earns its keep
+
+Numbers and method: [`docs/BENCH.md` → "Temporal stability"](../BENCH.md#temporal-stability--does-retrieval-survive-the-codebase-moving).
+
+| mutation | bm25 survival | hybrid survival | gap |
+|---|---:|---:|---:|
+| move | 1.00 (67/67) | 1.00 (73/73) | — |
+| split | 0.95 (72/76) | 0.99 (83/84) | +0.04 |
+| **rename** | **0.84** (46/55) | **0.95** (56/59) | **+0.11** |
+
+Renaming the exact identifier a symbol query searches for destroys the lexical arm's exact match. BM25 alone loses 16% of the answers it previously found; hybrid loses 5%. The **+0.11** gap is the semantic arm carrying queries whose anchor is gone — close to the +0.13 static recall lift, but measured on the case that lift is *for*. Move and split are nearly free: both preserve the text, only its location changes.
+
+Staleness: a query issued immediately after a write returns the pre-edit result, and the index converges in **2.01 s** — the ADR-012 debounce plus a negligible rebuild. That stale window is the debounce working as designed (one rebuild per burst, not per keystroke); the harness fails only if convergence never happens or exceeds 15 s.
+
+Two bugs the harness caught in itself, both of which produced publishable-looking nonsense first:
+
+- **The prefix rename didn't rename anything, lexically.** `getUser` → `RenamedgetUser` tokenizes to `[renamedgetuser renamedget user]` — the token `user` survives, so BM25 kept its anchor and the arm reported 0.96 survival, i.e. "renames are harmless". That was a property of the mutation, not of retrieval. `DisjointRename` derives a letters-only name from a hash (digits tokenize separately and would leak too) and a test asserts zero shared tokens, including that the naive prefix is still detected as sharing.
+- **A silently dropped repo.** semble writes qrel targets as bare strings *or* `{path, start_line, end_line}` objects; assuming strings made `requests` unmarshal to nothing, which reads as "no queries here" rather than as a parse failure. `semblecorpus.Target` now accepts both, with a test.
+
+Also worth carrying forward: an n=5 pilot showed rename at 0.80 vs 1.00, a much larger gap than the real 0.84 vs 0.95. It pointed the right way but the magnitude was noise — the same lesson item 1's splits taught.
+
+**Phase B (replay real git history, measure rank churn) is deferred, not abandoned.** The plan said to cut it if Phase A came back clean; Phase A instead produced the rename result, which is the finding worth reporting.
+
+**Shared loaders:** `bench/internal/semblecorpus` now holds the repos.json / annotations readers and semble's suffix-aware `path_matches`, extracted when this became the third consumer.
+
 ---
 
 ## 4. Result provenance — log commit, chunker, and config with every result
@@ -148,5 +173,5 @@ So: a 12-hex `index.build_id` on the **JSON** responses only (always present, no
 
 1. ~~α sweep curve + holdout result, and whether "flat around the middle" held.~~ **Ready to report:** yes, essentially. α_symbol is flat (argmax 0.3/0.3/0.4 across three splits, top points within 0.0005). α_NL's curve is a broad plateau whose lower edge is about where 0.5 sits — a held-out gain from 0.6 of +0.004 to +0.010, material on one split of three and flat on an independent resample. Constants kept. Curves in [`docs/BENCH.md`](../BENCH.md#α-sensitivity--is-03-05-actually-the-right-pair).
 2. ~~Chunker-disagreement table, the boundary-failure share, and an answer to the cross-file-symbol question.~~ **Ready to report:** 98.6% of queries agree; the 17 that don't go 12–5 to regex (not significant); **zero** symbol-query disagreements answers the cross-file-symbol question directly. The boundary share was replaced by a stronger, query-independent measurement — treesitter cuts the definition-split rate 3.2× (0.082 → 0.026) across 276,745 definitions in 13 languages, which is the traceability win NDCG can't see.
-3. Rename-survival numbers — what recall the semantic arm retains when the lexical anchor disappears.
+3. ~~Rename-survival numbers — what recall the semantic arm retains when the lexical anchor disappears.~~ **Ready to report:** renaming the queried symbol drops bm25 survival to **0.84** while hybrid holds **0.95** — a **+0.11** gap that is the semantic arm carrying queries whose exact-match anchor no longer exists, closely tracking the +0.13 static lift. Move and split are essentially free (1.00/1.00 and 0.95/0.99). Watch mode converges in 2.01 s. [`docs/BENCH.md`](../BENCH.md#temporal-stability--does-retrieval-survive-the-codebase-moving).
 4. ~~"Every bench JSON now carries commit/chunker/config provenance" — one sentence, links to the harness.~~ **Ready to report:** every bench result file now carries commit, chunker, mode, α pair, model digest, corpus revisions and `KEN_*` env — schema + example in [`docs/BENCH.md` → "Result provenance"](../BENCH.md#result-provenance), builder in `bench/internal/provenance`.

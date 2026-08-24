@@ -438,6 +438,51 @@ The bench writes `bench/tokens/results/{semble,coir}-tokens.json` — gitignored
 - **CoIR-CSN-Python warning.** The substring-leak artifact that makes BM25 beat hybrid on this corpus (see ["Why BM25 beats hybrid on CSN-Python"](#why-bm25-beats-hybrid-on-csn-python) above) also makes grep more competitive on recall — but not on tokens, because the corpus size makes any grep result set ridiculous. The headline number is semble's bench; CoIR confirms the direction on a different distribution but isn't the cleanest demonstration of ken's value on its own.
 - **Suffix-aware qrel matching.** Recall is computed via the same `path_matches` semble uses (`norm_file == target OR file.endswith("/"+target) OR target.endswith("/"+file)`) — handles the common case where semble's annotations are repo-rooted (`aiohttp/client.py`) but ken's chunk.File is benchmark-root-relative (`client.py`).
 
+## Temporal stability — does retrieval survive the codebase moving?
+
+Every number above scores one frozen snapshot. But a coding agent edits the repo mid-session and watch mode re-indexes behind it, so the question the [r/Rag thread](internal/rag-thread-followups.md) raised is whether quality survives renames, moved functions and split files at all — something a static benchmark cannot see.
+
+`bench/temporal` measures it by mutation. Each repo is copied to a scratch directory and mutated there (the synced corpus is never written to), and **every query is scored twice — once against the pristine copy, once against the mutated one** — so the result is a delta on identical inputs rather than two runs that might differ for unrelated reasons. Mutation targets are chosen from the *queries*: mutating code nothing asks about would measure nothing.
+
+### Recall under drift (14 repos)
+
+Survival = found after the mutation, among queries that found their target before it. A query that never worked can say nothing about drift, so it isn't in the denominator.
+
+| mutation | bm25 survival | hybrid survival | gap |
+|---|---:|---:|---:|
+| move a function to another file | 1.00 (67/67) | 1.00 (73/73) | — |
+| split a file in half | 0.95 (72/76) | **0.99** (83/84) | +0.04 |
+| **rename the queried symbol** | **0.84** (46/55) | **0.95** (56/59) | **+0.11** |
+
+**Move and split are nearly free.** Both preserve the text; only its location changes, and suffix-aware qrel matching plus a mutation-aware remap follow it. Split costs bm25 a little because halving a file changes term-frequency normalization.
+
+**Rename is where the arms separate, and it is the direct measurement of what the semantic lift is for.** Renaming the exact identifier a symbol query searches for destroys the lexical arm's exact match — there is no term left to match. BM25 alone loses 16% of the answers it previously found; hybrid loses 5%. That **+0.11** gap is the semantic arm catching queries whose lexical anchor no longer exists, and it sits close to the +0.13 static recall lift reported [above](#default-mode-hybrid-recall--the-number-that-matters) — now measured on the case that lift exists for, rather than on a frozen corpus.
+
+> **A methodology trap worth recording.** The first version renamed `getUser` → `RenamedgetUser` and reported 0.96 bm25 survival, which looked like "renames are harmless". They aren't — the *rename* was. ken's identifier-aware tokenizer splits both names, `[getuser get user]` versus `[renamedgetuser renamedget user]`, so the token `user` survived and BM25 kept its anchor. The measurement was an artifact of the mutation, not a property of retrieval. `DisjointRename` now derives a letters-only name from a hash of the symbol (digits tokenize separately, so they'd leak too), and a unit test asserts the replacement shares no BM25 token with the original — including a check that the naive prefix is still *detected* as sharing.
+
+### Staleness — the window where the index is behind
+
+Watch mode re-indexes 2 s after a change ([ADR-012](internal/DECISIONS.md)), so there is a window in which a query sees the old world.
+
+| measurement | value |
+|---|---|
+| query issued immediately after a write | stale — returns the pre-edit result |
+| time to converge on the new content | **2.01 s** |
+
+The debounce exists so a burst of edits triggers one rebuild rather than one per keystroke, so a stale read immediately after a write is correct behavior, not a defect. What would be a defect is never converging, or converging so late that an agent editing a file keeps getting the old version — the harness fails if convergence exceeds 15 s. Companion tests cover the drift shapes a real editor rename produces: a new path becoming searchable, a deleted path's content disappearing (tombstones applied), and an untouched file surviving both.
+
+### Reproduce
+
+```bash
+# Phase A: mutations + recall under drift (~2 min, needs a model for the hybrid arm).
+go test -tags=bench ./bench/temporal/ -run TestTemporal_RecallUnderDrift -v -timeout 90m
+
+# Staleness: synthetic repo, bm25, no model needed (~6 s).
+go test -tags=bench ./bench/temporal/ -run TestTemporal_Watch -v
+```
+
+Phase B of the plan — replaying real git history and measuring rank churn — stays a stretch goal. It was to be cut if Phase A came back clean; Phase A instead produced the rename result above, which is the finding worth reporting, so Phase B is deferred rather than abandoned.
+
 ## Where the chunkers disagree — traceability vs ranking
 
 [ADR-011](internal/DECISIONS.md) keeps the regex chunker as the default because treesitter's aggregate NDCG delta on the semble bench is inside noise. The [r/Rag thread](internal/rag-thread-followups.md) pushed back: an average over 1,251 queries can hide a real win, and "does a retrieved span map cleanly to one symbol?" is not something NDCG measures at all.

@@ -46,7 +46,7 @@ vet: ## go vet ./...
 # absent, which is the case in CI.
 vet-bench: ## go vet + cheap unit tests for the //go:build bench harnesses
 	go vet -tags=bench ./bench/...
-	go test -tags=bench ./bench/internal/... ./bench/tokens/ ./bench/chunkdiff/ -run 'TestSchema|TestCollect|TestInspectModel|TestRedact|TestKenEnv|TestDetect|TestCount|TestWriteRecords|TestKsLabel|TestAnalyze|TestContainedInSome|TestDefinitionSpans'
+	go test -tags=bench ./bench/internal/... ./bench/tokens/ ./bench/chunkdiff/ ./bench/temporal/ -run 'TestSchema|TestCollect|TestInspectModel|TestRedact|TestKenEnv|TestDetect|TestCount|TestWriteRecords|TestKsLabel|TestAnalyze|TestContainedInSome|TestDefinitionSpans|TestTarget|TestPathMatches|TestApply|TestResolve|TestDisjoint'
 
 fmt: ## format the tree in place (gofmt -w)
 	gofmt -w $(GOFMT_DIRS)
