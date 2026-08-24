@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/townsendmerino/ken/bench/internal/provenance"
 	"github.com/townsendmerino/ken/internal/search"
 )
 
@@ -103,6 +104,13 @@ func TestTokens_Semble(t *testing.T) {
 	}
 
 	records := make([]PerQueryRecord, 0, 1500)
+	// One provenance corpus entry per repo actually scored (skipped
+	// repos are left out, so the block describes the run rather than
+	// the wish-list). Detect asks git rather than trusting
+	// repos.json's pin: sync_repos.py is supposed to check that
+	// revision out, but a corpus checkout that has drifted or picked
+	// up local edits is exactly the thing provenance exists to catch.
+	corpora := make([]provenance.Corpus, 0, len(repos))
 	tStart := time.Now()
 
 	for ri, repo := range repos {
@@ -135,6 +143,12 @@ func TestTokens_Semble(t *testing.T) {
 			t.Logf("[%s] skipped — index build: %v", repo.Name, err)
 			continue
 		}
+
+		corpusPin := provenance.Detect(repo.Name, benchDir)
+		if corpusPin.Revision == "" {
+			corpusPin.Revision = repo.Revision // repos.json pin, when git can't answer
+		}
+		corpora = append(corpora, corpusPin)
 
 		for _, task := range tasks {
 			targets := append([]string(nil), task.Relevant...)
@@ -171,7 +185,23 @@ func TestTokens_Semble(t *testing.T) {
 		t.Fatal(err)
 	}
 	outPath := filepath.Join(outDir, "semble-tokens.json")
-	if err := writeRecords(outPath, records); err != nil {
+	prov := provenance.Collect(provenance.Options{
+		Harness:    "bench/tokens/TestTokens_Semble",
+		Corpora:    corpora,
+		Mode:       modeLabel(tokMode),
+		Chunker:    "regex",
+		TopK:       MaxK(),
+		QueryCount: len(records),
+		ModelDir:   tokModelDir,
+		Extra: map[string]string{
+			"ks":               KsLabel(),
+			"semble_checkout":  semblePath,
+			"corpus_root":      corpusRoot,
+			"repos_scored":     strconv.Itoa(len(corpora)),
+			"repos_configured": strconv.Itoa(len(repos)),
+		},
+	})
+	if err := writeRecords(outPath, prov, records); err != nil {
 		t.Fatalf("write results: %v", err)
 	}
 	t.Logf("wrote %d records to %s", len(records), outPath)

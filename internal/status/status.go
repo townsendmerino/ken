@@ -82,6 +82,12 @@ type Status struct {
 
 // Versions identifies what's running.
 type Versions struct {
+	// Version is the main module's version from
+	// debug.ReadBuildInfo — a semver tag for a `go install`ed
+	// binary, "(devel)" for a local `go build`, empty when build
+	// info is unavailable.
+	Version string
+
 	// VcsRevision is the git commit SHA at build time, from
 	// debug.ReadBuildInfo's vcs.revision setting. Empty for
 	// `go run` (no VCS info) or `go install` without -trimpath.
@@ -250,6 +256,7 @@ func discoverVersions() Versions {
 	if !ok {
 		return v
 	}
+	v.Version = info.Main.Version
 	for _, s := range info.Settings {
 		switch s.Key {
 		case "vcs.revision":

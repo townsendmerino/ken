@@ -438,6 +438,54 @@ The bench writes `bench/tokens/results/{semble,coir}-tokens.json` — gitignored
 - **CoIR-CSN-Python warning.** The substring-leak artifact that makes BM25 beat hybrid on this corpus (see ["Why BM25 beats hybrid on CSN-Python"](#why-bm25-beats-hybrid-on-csn-python) above) also makes grep more competitive on recall — but not on tokens, because the corpus size makes any grep result set ridiculous. The headline number is semble's bench; CoIR confirms the direction on a different distribution but isn't the cleanest demonstration of ken's value on its own.
 - **Suffix-aware qrel matching.** Recall is computed via the same `path_matches` semble uses (`norm_file == target OR file.endswith("/"+target) OR target.endswith("/"+file)`) — handles the common case where semble's annotations are repo-rooted (`aiohttp/client.py`) but ken's chunk.File is benchmark-root-relative (`client.py`).
 
+## Result provenance
+
+Every result file a bench harness writes carries a `provenance` block: the commit, the chunker, the mode, the α pair, the model's content digest, the corpus revisions, and the `KEN_*` environment. Without it a published number can't be reproduced once the tree moves — six months later a regression and a config change look identical, and there is no way to tell which commit produced which figure. (Raised in the [r/Rag thread follow-ups](internal/rag-thread-followups.md), item 4.)
+
+The block looks like this — trimmed, with the semble bench's 63 corpus entries collapsed to one:
+
+```json
+{
+  "harness": "bench/semble/run_ken.py",
+  "captured_at": "2026-08-24T15:43:35Z",
+  "ken": {
+    "version": "v1.5.1-0.20260824152625-b03cac12d625",
+    "commit": "b03cac12d625faf5588ea6baac6ab6cd1324e8b8",
+    "dirty": false,
+    "go_version": "go1.27.0",
+    "goos": "linux", "goarch": "amd64", "gomaxprocs": 16,
+    "deps": {
+      "github.com/townsendmerino/aikit": "v1.24.0",
+      "github.com/odvcencio/gotreesitter": "v0.51.0"
+    }
+  },
+  "corpora": [
+    { "name": "aiohttp", "path": "…/aiohttp", "repo": "…/aiohttp",
+      "revision": "3ca0e2…", "dirty": false }
+  ],
+  "config": {
+    "mode": "hybrid", "chunker": "regex",
+    "alpha_symbol": 0.3, "alpha_nl": 0.5, "alpha_override": null,
+    "top_k": 10, "query_count": 1251,
+    "model": { "dir": "~/.ken/model", "sha256": "…", "size_bytes": 33554688 },
+    "rerank_model": { "dir": "", "sha256": "", "size_bytes": 0 },
+    "extra": { "latency_runs": "5" }
+  },
+  "env": { "KEN_ENRICH": "on" }
+}
+```
+
+Four details worth knowing when reading one:
+
+- **`config.alpha_*` is read from the code, not written down.** `search.DefaultAlphas()` supplies the pair, so a result can't claim an α the fusion didn't apply. `alpha_override` is `null` for the shipped adaptive behavior and a number when a harness pins a single α — `null` and `0.0` are different states, which matters for the α sweep.
+- **Models are identified by content.** Two machines' `~/.ken/model` can hold different weights at the same path, and that difference moves every semantic number, so the digest is the identity and the path is context. An all-zero block means no model was involved (a bm25 run), not that the field was forgotten.
+- **`corpora[].repo` is recorded next to `revision`.** A *generated* corpus (`testdata/bench/coir-csn-python/`, materialized by `scripts/bench_coir.py`) sits inside the ken checkout, so its `revision` is ken's HEAD rather than an upstream pin — only `repo` makes that visible.
+- **Credential-shaped env values are redacted.** `KEN_MCP_AUTH_TOKEN` and anything matching `TOKEN`/`SECRET`/`PASSWORD`/`API_KEY` become `[redacted]`, so a result file is safe to paste into an issue.
+
+The Go harnesses share `bench/internal/provenance` (build tag `bench`). `bench/semble/run_ken.py` is Python permanently by design — it reuses semble's own NDCG implementation, see [`bench/semble/README.md`](../bench/semble/README.md) — so it hand-builds the same block, and `bench/internal/provenance/schema_test.go` reflects over the Go struct and fails if the two field sets disagree. `make vet-bench` (also a CI step) runs that check along with `go vet -tags=bench ./bench/...`, so the bench tree can't quietly stop compiling either.
+
+Adding a field means editing both `bench/internal/provenance/provenance.go` and `_PROVENANCE_SCHEMA` in `run_ken.py`; the schema test names whichever side is behind.
+
 ## Files
 
 semble bench (this doc's primary reference):
@@ -451,6 +499,7 @@ CoIR-CSN-Python external bench:
 - `scripts/bench_coir.py` — downloads corpus + queries + qrels into `testdata/bench/coir-csn-python/`.
 - `bench/ndcg/ndcg.go` + `ndcg_test.go` — pure-Go NDCG@10 helper, unit-tested against the Wikipedia worked example.
 - `bench/ndcg/coir_test.go` (build tag `bench`) — the harness.
+- `bench/ndcg/results/coir-<chunker>.json` — per-mode NDCG rows + provenance, written per run. Gitignored.
 - `testdata/bench/coir-csn-python/` — corpus (280k `.py` files), `queries.jsonl`, `qrels.jsonl`, `summary.json`. Gitignored; ~1 GB on disk.
 
 Token-budget bench (agent-side efficiency vs grep):
@@ -460,4 +509,9 @@ Token-budget bench (agent-side efficiency vs grep):
 - `bench/tokens/grep_baseline.go` (build tag `bench`) — `CorpusCache` pre-tokenizes the corpus once; per-query in-memory grep scan, 20K-token per-file cap.
 - `bench/tokens/coir_test.go` + `semble_test.go` (build tag `bench`) — per-bench harnesses.
 - `bench/tokens/results/{semble,coir}-tokens.json` — written per run. Gitignored.
-- `scripts/plot_token_budget.py` — read JSON, emit the markdown tables in this section.
+- `scripts/plot_token_budget.py` — read JSON, emit the markdown tables in this section (plus a one-line provenance footer; it also still reads pre-provenance result files, which were a bare JSON array).
+
+Provenance (all harnesses):
+
+- `bench/internal/provenance/` (build tag `bench`) — the shared block builder; `schema_test.go` pins `run_ken.py`'s copy to it.
+- `make vet-bench` — vets the bench tree and runs the provenance + schema tests. A CI step.

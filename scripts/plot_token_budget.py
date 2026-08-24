@@ -136,11 +136,49 @@ def render_headline(records: list[dict], bench: str) -> str:
     return f"**{bench} headline:**\n" + "\n".join(bits) + "\n"
 
 
+def load_records(path: Path) -> tuple[list[dict], dict]:
+    """Read a token-budget result file, returning (records, provenance).
+
+    Two shapes exist. Current files are
+    ``{"provenance": {...}, "records": [...]}`` (item 4 of
+    docs/internal/rag-thread-followups.md — a result you can't tie back
+    to a commit/chunker/mode can't be reproduced). Files written before
+    that change are a bare list of records; they still plot, just
+    without the provenance footer."""
+    data = json.loads(path.read_text())
+    if isinstance(data, list):
+        return data, {}
+    return data.get("records", []), data.get("provenance", {})
+
+
+def render_provenance(prov: dict) -> str:
+    """One-line footer identifying the run behind the table above."""
+    if not prov:
+        return "_(no provenance block — result file predates it; re-run the harness)_\n"
+    ken = prov.get("ken", {})
+    cfg = prov.get("config", {})
+    commit = (ken.get("commit") or "")[:12] or "unknown"
+    if ken.get("dirty"):
+        commit += "-dirty"
+    model = cfg.get("model", {}).get("sha256", "")
+    bits = [
+        f"ken {commit}",
+        f"mode={cfg.get('mode', '?')}",
+        f"chunker={cfg.get('chunker', '?')}",
+        f"α=({cfg.get('alpha_symbol', '?')}, {cfg.get('alpha_nl', '?')})",
+        f"n={cfg.get('query_count', '?')} queries",
+    ]
+    if model:
+        bits.append(f"model={model[:12]}")
+    bits.append(prov.get("captured_at", ""))
+    return "_Provenance: " + " · ".join(b for b in bits if b) + "._\n"
+
+
 def process(name: str) -> str:
     path = RESULTS_DIR / f"{name}-tokens.json"
     if not path.exists():
         return f"_(missing {path}; run the harness first)_\n"
-    data = json.loads(path.read_text())
+    data, prov = load_records(path)
     title_map = {
         "coir": "CoIR-CSN-Python",
         "semble": "semble bench (63-repo cross-language)",
@@ -148,7 +186,7 @@ def process(name: str) -> str:
     title = title_map.get(name, name)
     table = render_table(data, title)
     headline = render_headline(data, title)
-    return f"{table}\n{headline}\n"
+    return f"{table}\n{headline}\n{render_provenance(prov)}\n"
 
 
 def main() -> None:

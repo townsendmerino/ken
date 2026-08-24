@@ -3,6 +3,8 @@
 package tokens
 
 import (
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/townsendmerino/ken/internal/search"
@@ -41,6 +43,24 @@ func anyTargetMatches(filePath string, targets []string) bool {
 // tokens-per-extra-result slope.
 var Ks = []int{1, 3, 5, 10}
 
+// MaxK is the deepest cutoff measured — the retrieval depth every
+// query is actually run at, since MeasureKen searches once at MaxK
+// and slices down. Exported so the provenance block can record the
+// depth without restating the Ks literal.
+func MaxK() int {
+	return slices.Max(Ks)
+}
+
+// KsLabel renders Ks as "1,3,5,10" for the provenance block's Extra
+// map, which is string-valued so the schema stays flat and diffable.
+func KsLabel() string {
+	parts := make([]string, len(Ks))
+	for i, k := range Ks {
+		parts[i] = strconv.Itoa(k)
+	}
+	return strings.Join(parts, ",")
+}
+
 // KenAtK is one row of the per-query measurement. Tokens counts the
 // cl100k_base BPE size of the formatted-output string an agent would
 // see over MCP for ken.Search(query, K). Recall is boolean: did the
@@ -72,12 +92,7 @@ func MeasureKen(ix *search.Index, query, header string, targets []string) []KenA
 	// Note: this means K=1 tokens DO count just the first result's
 	// fenced block, because FormatResults is called on results[:K]
 	// below.
-	maxK := 0
-	for _, k := range Ks {
-		if k > maxK {
-			maxK = k
-		}
-	}
+	maxK := MaxK()
 	all := ix.Search(query, maxK)
 
 	out := make([]KenAtK, len(Ks))
@@ -106,4 +121,21 @@ func anyMatch(results []search.Result, targets []string) bool {
 		}
 	}
 	return false
+}
+
+// modeLabel names a search.Mode for the provenance block. search.Mode
+// has no String method (it's an internal enum), and the token harness
+// needs the same spelling the ndcg harness and run_ken.py use.
+func modeLabel(m search.Mode) string {
+	switch m {
+	case search.ModeBM25:
+		return "bm25"
+	case search.ModeSemantic:
+		return "semantic"
+	case search.ModeHybrid:
+		return "hybrid"
+	case search.ModeHybridRerank:
+		return "hybrid-rerank"
+	}
+	return "?"
 }

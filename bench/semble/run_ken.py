@@ -26,6 +26,7 @@ than ±0.005 on any one row points the diagnosis at a specific subsystem
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import statistics
@@ -34,6 +35,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -252,6 +254,240 @@ def run_repo(
 # ──────────────────────────────────────────────────────────────────────────
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Result provenance (docs/internal/rag-thread-followups.md item 4).
+#
+# Every bench result JSON records what produced it: commit, chunker,
+# mode, α pair, model digest, corpus revisions, KEN_* env. Without it a
+# number can't be reproduced once the codebase moves, and a regression
+# is indistinguishable from a config change.
+#
+# The Go harnesses (bench/ndcg, bench/tokens) share
+# bench/internal/provenance. This harness stays Python by design (see
+# README.md — it reuses semble's own NDCG implementation), so it
+# hand-builds the same block. _PROVENANCE_SCHEMA is the contract:
+# bench/internal/provenance/schema_test.go reflects over the Go struct
+# and fails if these paths and its json tags disagree, so the two
+# can't drift apart silently. Adding a field means editing both sides.
+#
+# Build identity comes from `ken status --json` rather than from this
+# checkout: run_ken.py benchmarks whatever binary --ken points at,
+# which may not be built from the working tree.
+# ──────────────────────────────────────────────────────────────────────────
+
+_PROVENANCE_SCHEMA = (
+    "captured_at",
+    "config.alpha_nl",
+    "config.alpha_override",
+    "config.alpha_symbol",
+    "config.chunker",
+    "config.extra",
+    "config.mode",
+    "config.model.dir",
+    "config.model.sha256",
+    "config.model.size_bytes",
+    "config.query_count",
+    "config.rerank_model.dir",
+    "config.rerank_model.sha256",
+    "config.rerank_model.size_bytes",
+    "config.top_k",
+    "corpora[].dirty",
+    "corpora[].name",
+    "corpora[].path",
+    "corpora[].repo",
+    "corpora[].revision",
+    "env",
+    "harness",
+    "ken.commit",
+    "ken.deps",
+    "ken.dirty",
+    "ken.go_version",
+    "ken.goarch",
+    "ken.gomaxprocs",
+    "ken.goos",
+    "ken.version",
+)
+
+# Credential-shaped env names are blanked before they reach a result
+# file someone might paste into a benchmark thread. Mirrors
+# provenance.redactEnvValue.
+_REDACT_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "APIKEY", "API_KEY")
+
+
+def _git(dirpath: Path, *args: str) -> str:
+    """git output in dirpath, or "" when git fails (not a repo, no git)."""
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=str(dirpath), capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _detect_corpus(name: str, path: Path, revision: str = "") -> dict:
+    """Pin one corpus. `repo` is recorded separately from `revision` so a
+    generated corpus sitting inside some other checkout is visible as such.
+
+    git wins over the passed-in `revision` (semble's repos.json pin):
+    sync_repos.py is supposed to have checked that revision out, and a
+    checkout that drifted or picked up local edits is exactly what
+    provenance exists to catch. The pin is the fallback when the corpus
+    isn't a git work tree at all. Mirrors provenance.Detect."""
+    entry = {"name": name, "path": str(path), "repo": "", "revision": revision, "dirty": False}
+    if not path.exists():
+        return entry
+    top = _git(path, "rev-parse", "--show-toplevel")
+    if not top:
+        return entry
+    entry["repo"] = top
+    entry["revision"] = _git(path, "rev-parse", "HEAD") or revision
+    entry["dirty"] = bool(_git(path, "status", "--porcelain"))
+    return entry
+
+
+def _inspect_model(model_dir: Path | None) -> dict:
+    """Identify a model snapshot by content: two machines' ~/.ken/model can
+    hold different weights under the same path, and that moves every
+    semantic number."""
+    if model_dir is None:
+        return {"dir": "", "sha256": "", "size_bytes": 0}
+    blob = model_dir / "model.safetensors"
+    out = {"dir": str(model_dir), "sha256": "", "size_bytes": 0}
+    if not blob.exists():
+        return out
+    out["size_bytes"] = blob.stat().st_size
+    h = hashlib.sha256()
+    with blob.open("rb") as f:
+        for block in iter(lambda: f.read(4 << 20), b""):
+            h.update(block)
+    out["sha256"] = h.hexdigest()
+    return out
+
+
+def _ken_build(ken_bin: str) -> dict:
+    """Build identity of the ken binary under test, via `ken status --json`.
+
+    Falls back to an all-empty block if that fails — a partial provenance
+    block beats aborting a 40-minute benchmark over it."""
+    build = {
+        "version": "",
+        "commit": "",
+        "dirty": False,
+        "go_version": "",
+        "goos": "",
+        "goarch": "",
+        "gomaxprocs": 0,
+        "deps": {},
+    }
+    try:
+        proc = subprocess.run(
+            [ken_bin, "status", "--json"], capture_output=True, text=True, check=False
+        )
+        if proc.returncode != 0:
+            raise ValueError(proc.stderr.strip() or f"exit {proc.returncode}")
+        status = json.loads(proc.stdout)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"  warn: provenance: `{ken_bin} status --json` failed ({exc}); "
+                         "build identity will be blank\n")
+        return build
+    versions = status.get("Versions", {})
+    process = status.get("Process", {})
+    build["version"] = versions.get("Version", "") or ""
+    build["commit"] = versions.get("VcsRevision", "") or ""
+    build["dirty"] = bool(versions.get("VcsDirty", False))
+    build["go_version"] = versions.get("GoVersion", "") or ""
+    build["goos"] = process.get("GOOS", "") or ""
+    build["goarch"] = process.get("GOARCH", "") or ""
+    build["gomaxprocs"] = int(process.get("GOMAXPROCS", 0) or 0)
+    for path_, key in (
+        ("github.com/townsendmerino/aikit", "AikitVersion"),
+        ("github.com/odvcencio/gotreesitter", "GotreesitterVersion"),
+    ):
+        if versions.get(key):
+            build["deps"][path_] = versions[key]
+    return build
+
+
+def _schema_paths(node: object, declared: frozenset[str], prefix: str = "") -> list[str]:
+    """Dotted paths of a provenance dict, matching the Go reflection walk in
+    bench/internal/provenance/schema_test.go: structs descend, lists of
+    structs descend under "[]", and a free-form mapping (env, ken.deps,
+    config.extra) is a leaf because its keys are data, not schema.
+
+    Python dicts carry no type distinction between a struct and a map, so
+    `declared` supplies it: a path that _PROVENANCE_SCHEMA lists is a leaf
+    and we stop there."""
+    if prefix and prefix in declared:
+        return [prefix]
+    if isinstance(node, dict):
+        if not node:
+            return [prefix] if prefix else []
+        out: list[str] = []
+        for key, value in node.items():
+            path = f"{prefix}.{key}" if prefix else key
+            out.extend(_schema_paths(value, declared, path))
+        return out
+    if isinstance(node, list):
+        if not node:
+            return []
+        return _schema_paths(node[0], declared, f"{prefix}[]")
+    return [prefix]
+
+
+def collect_provenance(
+    *,
+    ken_bin: str,
+    mode: str,
+    chunker: str,
+    model_dir: Path | None,
+    rerank_model: Path | None,
+    top_k: int,
+    query_count: int,
+    corpora: list[dict],
+    extra: dict[str, str],
+) -> dict:
+    prov = {
+        "harness": "bench/semble/run_ken.py",
+        "captured_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "ken": _ken_build(ken_bin),
+        "corpora": corpora,
+        "config": {
+            "mode": mode,
+            "chunker": chunker,
+            # α is adaptive per query class; this harness never pins it.
+            # The pair is the shipped semble-parity default that
+            # docs/BENCH.md's "don't tune ken's constants" rule fixes —
+            # item 1's sweep is the thing that will set alpha_override.
+            "alpha_symbol": 0.3,
+            "alpha_nl": 0.5,
+            "alpha_override": None,
+            "top_k": top_k,
+            "query_count": query_count,
+            "model": _inspect_model(model_dir),
+            "rerank_model": _inspect_model(rerank_model),
+            "extra": extra,
+        },
+        "env": {
+            k: ("[redacted]" if v and any(m in k.upper() for m in _REDACT_MARKERS) else v)
+            for k, v in sorted(os.environ.items())
+            if k.startswith("KEN_")
+        },
+    }
+    # Self-check: a block that doesn't match the declared schema is a bug
+    # here, and the Go side only sees _PROVENANCE_SCHEMA, not this dict.
+    # `corpora` and the free-form maps are skipped when empty (no shape
+    # to walk), so compare only what's present.
+    declared = frozenset(_PROVENANCE_SCHEMA)
+    present = set(_schema_paths(prov, declared))
+    unexpected = present - declared
+    if unexpected:
+        raise AssertionError(
+            f"provenance block has fields absent from _PROVENANCE_SCHEMA: {sorted(unexpected)}"
+        )
+    return prov
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="Run ken against the semble NDCG@10 benchmark (drop-in for the verbatim-port check)."
@@ -401,7 +637,41 @@ def main() -> int:
     out_dir = Path(__file__).resolve().parent / "results"
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / f"ken-{args.mode}.json"
+
+    # One corpus entry per scored repo. semble's RepoSpec may already
+    # carry the pinned revision sync_repos.py checked out; fall back to
+    # asking git in the checkout when it doesn't.
+    corpora = [
+        _detect_corpus(
+            o.repo,
+            Path(repo_specs[o.repo].benchmark_dir),
+            revision=str(getattr(repo_specs[o.repo], "revision", "") or ""),
+        )
+        for o in outcomes
+    ]
+    extra = {"latency_runs": str(args.latency_runs)}
+    if args.mode == "hybrid-rerank":
+        if args.rerank_top_n is not None:
+            extra["rerank_top_n"] = str(args.rerank_top_n)
+        if args.rerank_beta is not None:
+            extra["rerank_beta"] = str(args.rerank_beta)
+    if args.repo:
+        extra["repo_filter"] = ",".join(args.repo)
+    if args.language:
+        extra["language_filter"] = ",".join(args.language)
+
     summary = {
+        "provenance": collect_provenance(
+            ken_bin=args.ken,
+            mode=args.mode,
+            chunker=args.chunker,
+            model_dir=model_dir,
+            rerank_model=rerank_model,
+            top_k=args.top_k,
+            query_count=sum(o.n_tasks for o in outcomes),
+            corpora=corpora,
+            extra=extra,
+        ),
         "method": f"ken-{args.mode}",
         "mode": args.mode,
         "chunker": args.chunker,

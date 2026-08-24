@@ -41,6 +41,15 @@ jobs:
       - name: go vet ./...
         run: go vet ./...
 
+      # `go vet ./...` skips every //go:build bench package, so the bench
+      # harnesses could stop compiling without CI noticing. This also runs
+      # the provenance helper's tests — including the schema mirror that
+      # pins bench/semble/run_ken.py's provenance block to the Go struct
+      # (docs/internal/rag-thread-followups.md item 4). The corpus-backed
+      # harnesses skip themselves; no benchmark corpora are downloaded here.
+      - name: go vet -tags=bench ./bench/... + bench unit tests
+        run: make vet-bench
+
       # golangci-lint with the conservative config at .golangci.yml.
       # Conservative posture: errcheck + govet + ineffassign +
       # staticcheck + unused + gosimple (no QF1001/QF1003 stylistic

@@ -28,6 +28,9 @@ func RenderText(s Status, verbose bool) string {
 	// ---------- Versions ----------
 	fmt.Fprintln(&b, "Build")
 	v := s.Versions
+	if v.Version != "" {
+		fmt.Fprintf(&b, "  version:       %s\n", v.Version)
+	}
 	if v.VcsRevision != "" {
 		commit := v.VcsRevision
 		if len(commit) > 12 {

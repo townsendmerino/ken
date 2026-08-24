@@ -40,6 +40,7 @@ import (
 	// transitively pulls in optional chunkers.
 	_ "github.com/townsendmerino/aikit/chunk/treesitter"
 	"github.com/townsendmerino/aikit/encoder"
+	"github.com/townsendmerino/ken/bench/internal/provenance"
 	"github.com/townsendmerino/ken/internal/search"
 )
 
@@ -139,13 +140,7 @@ func TestCoIR_CSNPython(t *testing.T) {
 	}
 	t.Logf("chunker: %s", chunker)
 
-	type result struct {
-		Mode      string
-		Avg       float64
-		WallSec   float64
-		NumChunks int
-	}
-	var results []result
+	var results []modeResult
 
 	// M6: optional hybrid-rerank row. Skipped unless a CodeRankEmbed
 	// snapshot is resolvable AND the user explicitly opts in via
@@ -225,7 +220,7 @@ func TestCoIR_CSNPython(t *testing.T) {
 			perQuery = append(perQuery, AtK(ranked, qrelsByQuery[q.QueryID], 10))
 		}
 		avg := Average(perQuery)
-		results = append(results, result{
+		results = append(results, modeResult{
 			Mode:      modeStr,
 			Avg:       avg,
 			WallSec:   time.Since(tBuild).Seconds(),
@@ -245,6 +240,73 @@ func TestCoIR_CSNPython(t *testing.T) {
 		sb.WriteString(fmt.Sprintf("| %-19s | %7.4f | %14.1f |\n", r.Mode, r.Avg, r.WallSec))
 	}
 	t.Log(sb.String())
+
+	// Persist the table as JSON next to the log. This harness used to
+	// emit numbers to stderr only, which made a published NDCG
+	// impossible to tie back to the commit / chunker / model that
+	// produced it — item 4 of docs/internal/rag-thread-followups.md.
+	// The provenance block is also what item 2's chunker-disagreement
+	// slicing needs to know which two runs it is comparing.
+	extra := map[string]string{
+		"candidates_per_query": strconv.Itoa(candidatesPerQuery),
+		"ndcg_k":               "10",
+	}
+	if rerankEnabled {
+		extra["rerank_top_n"] = strconv.Itoa(rerankTopN)
+		extra["rerank_beta"] = strconv.FormatFloat(rerankBeta, 'g', -1, 64)
+	}
+	rerankDir := ""
+	if rerankEnabled {
+		rerankDir = rerankModelDir
+	}
+	doc := ndcgResultDocument{
+		Provenance: provenance.Collect(provenance.Options{
+			Harness:        "bench/ndcg/TestCoIR_CSNPython",
+			Corpora:        []provenance.Corpus{provenance.Detect("coir-csn-python", corpusDir)},
+			Mode:           "all",
+			Chunker:        chunker,
+			TopK:           candidatesPerQuery,
+			QueryCount:     len(keep),
+			ModelDir:       modelDir,
+			RerankModelDir: rerankDir,
+			Extra:          extra,
+		}),
+		Benchmark: "coir-csn-python",
+		Modes:     results,
+	}
+	if err := writeNDCGResults(filepath.Join("results", "coir-"+chunker+".json"), doc); err != nil {
+		t.Errorf("write results: %v", err)
+	}
+}
+
+// modeResult is one row of the NDCG table — hoisted out of the test
+// body so it can carry json tags for the result file.
+type modeResult struct {
+	Mode      string  `json:"mode"`
+	Avg       float64 `json:"ndcg10"`
+	WallSec   float64 `json:"wall_s"`
+	NumChunks int     `json:"num_chunks"`
+}
+
+// ndcgResultDocument is the on-disk shape of an NDCG result file.
+type ndcgResultDocument struct {
+	Provenance provenance.Provenance `json:"provenance"`
+	Benchmark  string                `json:"benchmark"`
+	Modes      []modeResult          `json:"modes"`
+}
+
+func writeNDCGResults(path string, doc ndcgResultDocument) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	return enc.Encode(doc)
 }
 
 // aggregateByDoc converts a chunk-level ranking into a doc-level

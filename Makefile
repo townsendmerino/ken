@@ -14,7 +14,7 @@ GOFMT_DIRS := cmd internal mcp bench demos tools
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test vet fmt lint check hooks clean clean-bench clean-all
+.PHONY: help build test vet vet-bench fmt lint check hooks clean clean-bench clean-all
 
 # golangci-lint is a REQUIRED CI job (see .github/workflows/ci.yml). Pin the
 # same version here so `make lint` / `make check` mirror CI rather than silently
@@ -38,6 +38,16 @@ test: ## run the full test suite
 vet: ## go vet ./...
 	go vet ./...
 
+# The bench harnesses are //go:build bench, so a plain `go vet ./...` skips
+# them entirely — a compile error under bench/ can reach main unnoticed. This
+# target compiles and vets them, and runs the cheap bench-tagged unit tests
+# (the provenance helper + its schema mirror against bench/semble/run_ken.py).
+# The heavy corpus-backed harnesses skip themselves when their corpora are
+# absent, which is the case in CI.
+vet-bench: ## go vet + cheap unit tests for the //go:build bench harnesses
+	go vet -tags=bench ./bench/...
+	go test -tags=bench ./bench/internal/... ./bench/tokens/ -run 'TestSchema|TestCollect|TestInspectModel|TestRedact|TestKenEnv|TestDetect|TestCount|TestWriteRecords|TestKsLabel'
+
 fmt: ## format the tree in place (gofmt -w)
 	gofmt -w $(GOFMT_DIRS)
 
@@ -52,7 +62,7 @@ lint: ## run golangci-lint (the exact linter CI requires, pinned $(GOLANGCI_VERS
 	  exit 1; }
 	golangci-lint run ./...
 
-check: gofmt-check lint ## pre-push gate: gofmt-clean + golangci-lint + vet + tests (run as `GOWORK=off make check` to mirror CI)
+check: gofmt-check lint vet-bench ## pre-push gate: gofmt-clean + golangci-lint + vet (incl. bench tag) + tests (run as `GOWORK=off make check` to mirror CI)
 	go vet ./...
 	go test ./...
 
@@ -68,6 +78,6 @@ clean: ## remove build products: the binaries, dist/, bin/, test scratch
 	go clean ./...
 
 clean-bench: ## remove heavy bench scratch (bench_out/ + bench results — can be tens of GB)
-	rm -rf bench_out bench/semble/results bench/tokens/results
+	rm -rf bench_out bench/semble/results bench/tokens/results bench/ndcg/results
 
 clean-all: clean clean-bench ## everything regeneratable above (leaves per-machine models/fixtures + go.work intact)

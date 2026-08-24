@@ -32,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/townsendmerino/ken/bench/internal/provenance"
 	"github.com/townsendmerino/ken/internal/search"
 )
 
@@ -127,6 +128,33 @@ func TestCoIR_ExportShortlist(t *testing.T) {
 		}
 	}
 	t.Logf("wrote %s (%d queries) in %.1fs", outPath, len(keep), time.Since(tQuery).Seconds())
+
+	// Provenance goes in a sidecar rather than a header line: the
+	// shortlist is JSONL that downstream rerank scripts read one
+	// record per line, and a differently-shaped first line would
+	// break every one of them.
+	provPath := filepath.Join(benchDir, "shortlist.provenance.json")
+	prov := provenance.Collect(provenance.Options{
+		Harness:    "bench/ndcg/TestCoIR_ExportShortlist",
+		Corpora:    []provenance.Corpus{provenance.Detect("coir-csn-python", corpusDir)},
+		Mode:       "hybrid",
+		Chunker:    "regex",
+		TopK:       maxCand,
+		QueryCount: len(keep),
+		ModelDir:   modelDir,
+		Extra:      map[string]string{"shortlist": outPath},
+	})
+	pf, err := os.Create(provPath)
+	if err != nil {
+		t.Errorf("create %s: %v", provPath, err)
+		return
+	}
+	defer pf.Close()
+	penc := json.NewEncoder(pf)
+	penc.SetIndent("", "  ")
+	if err := penc.Encode(prov); err != nil {
+		t.Errorf("write %s: %v", provPath, err)
+	}
 }
 
 // docIDFromFile mirrors coir_test.go::aggregateByDoc so the export joins

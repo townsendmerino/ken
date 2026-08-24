@@ -50,3 +50,15 @@ func resolveAlpha(query string, override float64) float64 {
 	}
 	return alphaNL
 }
+
+// DefaultAlphas returns the two adaptive-α constants — the semantic
+// blend weight applied to a symbol-class query and to an NL-class
+// query respectively — as resolveAlpha would apply them when no
+// override is given.
+//
+// Exported for the bench provenance block (docs/internal/rag-thread-followups.md
+// item 4): a result JSON has to record the α pair it was produced at,
+// and hardcoding 0.3/0.5 in the harness would let the recorded value
+// drift away from the value actually used. Read-only; nothing in the
+// search path calls it.
+func DefaultAlphas() (symbol, nl float64) { return alphaSymbol, alphaNL }

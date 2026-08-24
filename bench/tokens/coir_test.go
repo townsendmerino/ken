@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/townsendmerino/ken/bench/internal/provenance"
 	"github.com/townsendmerino/ken/internal/search"
 )
 
@@ -161,7 +162,19 @@ func TestTokens_CoIR(t *testing.T) {
 		t.Fatal(err)
 	}
 	outPath := filepath.Join(outDir, "coir-tokens.json")
-	if err := writeRecords(outPath, records); err != nil {
+	prov := provenance.Collect(provenance.Options{
+		Harness:    "bench/tokens/TestTokens_CoIR",
+		Corpora:    []provenance.Corpus{provenance.Detect("coir-csn-python", coirCorpusDir)},
+		Mode:       "bm25",
+		Chunker:    "regex",
+		TopK:       MaxK(),
+		QueryCount: len(records),
+		Extra: map[string]string{
+			"ks":          KsLabel(),
+			"query_limit": strconv.Itoa(lim),
+		},
+	})
+	if err := writeRecords(outPath, prov, records); err != nil {
 		t.Fatalf("write results: %v", err)
 	}
 	t.Logf("wrote %d records to %s", len(records), outPath)
@@ -220,7 +233,20 @@ func loadCoirQrels(t *testing.T, path string) map[string]map[string]float64 {
 	return out
 }
 
-func writeRecords(path string, recs []PerQueryRecord) error {
+// resultDocument is the on-disk shape of a token-budget result file.
+//
+// The records used to be the whole document (a bare JSON array). They
+// moved under a "records" key so a "provenance" sibling could exist —
+// item 4 of docs/internal/rag-thread-followups.md: a result nobody can
+// tie back to a commit, chunker, mode and corpus revision can't be
+// reproduced once the tree moves. scripts/plot_token_budget.py reads
+// both shapes so result files written before the change still plot.
+type resultDocument struct {
+	Provenance provenance.Provenance `json:"provenance"`
+	Records    []PerQueryRecord      `json:"records"`
+}
+
+func writeRecords(path string, prov provenance.Provenance, recs []PerQueryRecord) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -228,7 +254,7 @@ func writeRecords(path string, recs []PerQueryRecord) error {
 	defer f.Close()
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	return enc.Encode(recs)
+	return enc.Encode(resultDocument{Provenance: prov, Records: recs})
 }
 
 // printAggregate emits a per-query-class summary table to the test log

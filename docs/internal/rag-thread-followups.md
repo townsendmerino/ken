@@ -1,6 +1,6 @@
 # r/Rag thread follow-ups: α sweep, chunker traceability, temporal eval, result provenance
 
-**Status:** scoped, not started · **Origin:** community feedback on the Aug 2026 r/Rag post ([thread](https://www.reddit.com/r/Rag/comments/1vwpm6t/)) · **Promise made:** "will investigate and report back" — the deliverable of every item below is a paragraph in a thread reply, backed by a reproducible number in `docs/BENCH.md`.
+**Status:** item 4 landed (2026-08-24); items 1–3 scoped, not started · **Origin:** community feedback on the Aug 2026 r/Rag post ([thread](https://www.reddit.com/r/Rag/comments/1vwpm6t/)) · **Promise made:** "will investigate and report back" — the deliverable of every item below is a paragraph in a thread reply, backed by a reproducible number in `docs/BENCH.md`.
 
 Two commenters, four work items. One asked for an α sweep done properly (held-out split, not tuned on the reporting set). The other pushed back on "AST chunking doesn't help": aggregate NDCG may hide value in *traceability* (does a retrieved span map cleanly to one symbol?) and *change sensitivity* (do results survive refactors?), asked for boundary-failure slicing by query intent and a temporal eval, and pointed out that results without commit/chunker/config provenance are hard to reproduce once the codebase moves.
 
@@ -70,6 +70,27 @@ Ordering: item 4 (provenance) first — it's small and items 2–3 want it in pl
 
 **Estimate:** small for the bench side; the server-side ADR is a page.
 
+### As built (2026-08-24) — bench side done, server side still open
+
+`bench/internal/provenance` (build tag `bench`) is the shared block builder; the schema is documented with an example in [`docs/BENCH.md` → "Result provenance"](../BENCH.md#result-provenance). Wired into every harness that writes a result file:
+
+| Harness | File | Change |
+|---|---|---|
+| `bench/semble/run_ken.py` | `bench/semble/results/ken-<mode>.json` | `provenance` key added to the existing summary object |
+| `bench/tokens/{semble,coir}_test.go` | `bench/tokens/results/*-tokens.json` | document reshaped from a bare array to `{provenance, records}` |
+| `bench/ndcg/coir_test.go` | `bench/ndcg/results/coir-<chunker>.json` | **new** — the harness previously emitted its table to stderr only |
+| `bench/ndcg/coir_export_test.go` | `testdata/bench/…/shortlist.provenance.json` | sidecar (the shortlist is JSONL; a header line would break its readers) |
+
+Decisions worth carrying into items 1–3:
+
+- **α comes from the code.** `search.DefaultAlphas()` was exported for this; the harness cannot record an α the fusion didn't apply. `alpha_override` is `null` for adaptive and a number when pinned — item 1's sweep sets it, and `null ≠ 0.0` is load-bearing there since α=0.0 is a real sweep point.
+- **Models are identified by digest, not path.** `~/.ken/model` is per-machine; the path alone doesn't identify weights.
+- **`corpora` is plural, with `repo` separate from `revision`.** The semble bench spans 63 independently-pinned repos, and a generated corpus inside the ken checkout would otherwise report ken's HEAD as if it were an upstream pin.
+- **The Python harness is pinned by a test, not by discipline.** `bench/internal/provenance/schema_test.go` reflects the Go struct's json tags into dotted paths and compares them to `_PROVENANCE_SCHEMA` in `run_ken.py`; either side gaining a field fails the test by name. `run_ken.py` takes build identity from `ken status --json` of the binary under `--ken`, not from the working tree, because it benchmarks whatever binary it was pointed at. (`status.Versions` gained a `Version` field — it was reporting a commit but not a version.)
+- **`make vet-bench` is now a CI step.** `go vet ./...` skips every `//go:build bench` package, so until now the bench tree could stop compiling unnoticed. The target vets `./bench/...` under the tag and runs the provenance + schema tests; the corpus-backed harnesses skip themselves, so CI downloads nothing.
+
+**Still open:** the server-side question — whether ken-mcp tool responses should carry an optional provenance line behind `KEN_MCP_PROVENANCE=1`. It touches the wire format the semble drop-in promise covers and costs tokens on every agent call, so it needs its own ADR before any code. Not started.
+
 ---
 
 ## Report-back checklist (the thread reply, when items land)
@@ -77,4 +98,4 @@ Ordering: item 4 (provenance) first — it's small and items 2–3 want it in pl
 1. α sweep curve + holdout result, and whether "flat around the middle" held.
 2. Chunker-disagreement table, the boundary-failure share, and an answer to the cross-file-symbol question.
 3. Rename-survival numbers — what recall the semantic arm retains when the lexical anchor disappears.
-4. "Every bench JSON now carries commit/chunker/config provenance" — one sentence, links to the harness.
+4. ~~"Every bench JSON now carries commit/chunker/config provenance" — one sentence, links to the harness.~~ **Ready to report:** every bench result file now carries commit, chunker, mode, α pair, model digest, corpus revisions and `KEN_*` env — schema + example in [`docs/BENCH.md` → "Result provenance"](../BENCH.md#result-provenance), builder in `bench/internal/provenance`.

@@ -43,6 +43,11 @@ testdata/parity.jsonl
 # corpus + annotations live in MinishLab/semble's checkout, not here).
 bench/semble/results/
 
+# NDCG result files (regenerated via `go test -tags=bench ./bench/ndcg/`).
+# Same rule as the two above: docs/BENCH.md holds the committed numbers,
+# these carry the provenance block that ties one run back to its commit.
+bench/ndcg/results/
+
 # CoIR-CSN-Python external benchmark corpus + queries + qrels.
 # Downloaded per-machine via scripts/bench_coir.py (~140 MB compressed,
 # ~1 GB after materializing 280k corpus files). Never committed.
