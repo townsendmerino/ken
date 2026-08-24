@@ -39,17 +39,58 @@ func isSymbolQuery(query string) bool {
 	return symbolQueryRE.MatchString(strings.TrimSpace(query))
 }
 
-// resolveAlpha returns the semantic blend weight. override<0 means
-// auto-detect from query type (semble ranking/weighting.resolve_alpha).
-func resolveAlpha(query string, override float64) float64 {
-	if override >= 0 {
-		return override
-	}
+// AlphaPair pins the adaptive-α constants for a single search. A
+// NEGATIVE component means "use the shipped constant for that query
+// class", so [AdaptiveAlphas] reproduces the default behavior and a
+// pinned α of 0.0 stays distinguishable from "not pinned" — which
+// matters, because 0.0 (pure BM25) is a real point on the sweep the
+// α-sensitivity harness walks.
+//
+// Both classes are carried together rather than as one override
+// because the classifier picks which constant applies per query: a
+// sweep over the symbol-class weight has to hold the NL-class weight
+// at its default while [isSymbolQuery] routes each query.
+type AlphaPair struct {
+	// Symbol is the semantic weight for identifier-shaped queries
+	// (shipped default 0.3 — lean BM25 for exact keyword matching).
+	Symbol float64
+	// NL is the semantic weight for natural-language queries
+	// (shipped default 0.5 — balanced semantic + BM25).
+	NL float64
+}
+
+// AdaptiveAlphas is the shipped behavior: resolve both classes from
+// the constants above. Every production entry point passes this; only
+// the α-sensitivity bench pins anything else.
+var AdaptiveAlphas = AlphaPair{Symbol: -1, NL: -1}
+
+// resolveAlpha returns the semantic blend weight for query, honoring
+// any pinned component of a (semble ranking/weighting.resolve_alpha,
+// extended with the per-class pin).
+func resolveAlpha(query string, a AlphaPair) float64 {
 	if isSymbolQuery(query) {
+		if a.Symbol >= 0 {
+			return a.Symbol
+		}
 		return alphaSymbol
+	}
+	if a.NL >= 0 {
+		return a.NL
 	}
 	return alphaNL
 }
+
+// IsSymbolQuery reports whether query looks like a bare or
+// namespace-qualified identifier — semble's is_symbol_query, the
+// classifier that decides WHICH α constant applies.
+//
+// Exported for the α-sensitivity harness, which has to bucket queries
+// by the same rule the fusion uses. Note this is NOT interchangeable
+// with bench/tokens' ClassifyQuery: that one deliberately models what
+// a heuristic agent router would do (short, single-token, identifier-
+// shaped), while this one is semble's regex and is the only classifier
+// that actually selects an α.
+func IsSymbolQuery(query string) bool { return isSymbolQuery(query) }
 
 // DefaultAlphas returns the two adaptive-α constants — the semantic
 // blend weight applied to a symbol-class query and to an NL-class

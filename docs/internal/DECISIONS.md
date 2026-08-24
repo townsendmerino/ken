@@ -49,6 +49,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-039](#adr-039-persistent-index-snapshot--reconcile-on-boot-cold-start-m1) | Persistent index snapshot + reconcile-on-boot (cold-start M1) | Accepted (in progress) |
 | [ADR-040](#adr-040-two-tier-treesitter-parse-timeout--disabled-for-reproducible-cli-builds-bounded-for-the-live-server) | Two-tier treesitter parse-timeout — disabled for reproducible CLI builds, bounded for the live server | Accepted |
 | [ADR-041](#adr-041-remote-streamable-http-transport-for-ken-mcp-bearer-auth-stateless-plain-http-behind-a-proxy) | Remote Streamable HTTP transport for ken-mcp (bearer auth, stateless, plain HTTP behind a proxy) | Accepted |
+| [ADR-042](#adr-042-result-provenance-for-ken-mcp--a-per-response-index-build-id-in-json-full-detail-in-status-markdown-untouched) | Result provenance for ken-mcp — a per-response index build id in JSON, full detail in `status`; markdown untouched | Accepted (design; not yet implemented) |
 
 ---
 

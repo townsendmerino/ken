@@ -47,13 +47,15 @@ func TestCollect_RecordsLiveAlphasAndFixedShape(t *testing.T) {
 
 func TestCollect_AlphaOverrideIsDistinctFromZero(t *testing.T) {
 	zero := 0.0
-	p := Collect(Options{AlphaOverride: &zero})
+	p := Collect(Options{AlphaOverride: &AlphaOverride{Symbol: &zero}})
 	blob, err := json.Marshal(p.Config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(blob, []byte(`"alpha_override":0`)) {
-		t.Errorf("α=0 must serialize as 0, not null (item 1's sweep pins α=0.0 as a real value):\n%s", blob)
+	// α=0.0 (pure BM25) is a real grid point in the item-1 sweep, so it
+	// must survive as 0 rather than collapsing into the "adaptive" null.
+	if !bytes.Contains(blob, []byte(`"alpha_override":{"symbol":0,"nl":null}`)) {
+		t.Errorf("pinned α=0 lost its distinction from unset:\n%s", blob)
 	}
 }
 

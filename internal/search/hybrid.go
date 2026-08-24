@@ -31,7 +31,9 @@ import (
 const candidateOverfetch = 5
 
 // hybridSearch runs the full semble hybrid pipeline and returns ranked
-// (chunkIndex, score) pairs. alphaOverride < 0 ⇒ auto-detect from query.
+// (chunkIndex, score) pairs. Pass [AdaptiveAlphas] for the shipped
+// per-class weights; a non-negative component of alphas pins that
+// class (see [AlphaPair]).
 //
 // predicted, when non-empty, is the Stage-7a transform #2 vocab-gap
 // expansion: identifiers predicted from the NL query (oracle, PRF,
@@ -45,10 +47,10 @@ func hybridSearch(
 	bm *bm25.Index,
 	chunks []chunk.Chunk,
 	topK int,
-	alphaOverride float64,
+	alphas AlphaPair,
 	predicted []string,
 ) []rankedItem {
-	alpha := resolveAlpha(query, alphaOverride)
+	alpha := resolveAlpha(query, alphas)
 	candidateCount := topK * candidateOverfetch
 
 	// Semantic candidates (cosine similarity, already sorted desc).

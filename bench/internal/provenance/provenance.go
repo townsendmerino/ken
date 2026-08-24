@@ -134,9 +134,11 @@ type Config struct {
 	AlphaNL     float64 `json:"alpha_nl"`
 
 	// AlphaOverride is nil for the shipped adaptive behavior and set
-	// when a harness pins a single α (the item-1 sweep). A null here
-	// means "adaptive", which is not the same as 0.
-	AlphaOverride *float64 `json:"alpha_override"`
+	// when a harness pins the weights (the item-1 sweep). Null means
+	// "adaptive", which is not the same as 0. Per class, because the
+	// sweep pins one class at a time — holding α_NL at its default
+	// while walking α_symbol is the whole shape of the experiment.
+	AlphaOverride *AlphaOverride `json:"alpha_override"`
 
 	// TopK / QueryCount describe the evaluation shape: retrieval
 	// depth and how many queries were actually scored after
@@ -151,6 +153,14 @@ type Config struct {
 	// (rerank β, grep baseline variant, mutation type). String
 	// values so the schema stays flat and diffable.
 	Extra map[string]string `json:"extra"`
+}
+
+// AlphaOverride records pinned fusion weights. A nil component is that
+// class left on its shipped constant, so (0.4, nil) is a readable
+// record of "symbol pinned to 0.4, NL adaptive".
+type AlphaOverride struct {
+	Symbol *float64 `json:"symbol"`
+	NL     *float64 `json:"nl"`
 }
 
 // Model identifies a model snapshot by content, not by path: two
@@ -189,7 +199,7 @@ type Options struct {
 	Corpora       []Corpus
 	Mode          string
 	Chunker       string
-	AlphaOverride *float64
+	AlphaOverride *AlphaOverride
 	TopK          int
 	QueryCount    int
 

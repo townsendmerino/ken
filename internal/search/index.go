@@ -1069,7 +1069,7 @@ func (ix *Index) collectResults(n, k int, at func(i int) (idx int, score float64
 // qVec is the dense query vector (ignored for ModeBM25 — the caller need not
 // even compute it there), predicted the transform-#2 identifier expansion (nil
 // for the plain entry points).
-func (ix *Index) searchCore(query string, qVec []float32, predicted []string, k int, mode Mode) []Result {
+func (ix *Index) searchCore(query string, qVec []float32, predicted []string, k int, mode Mode, alphas AlphaPair) []Result {
 	overFetch := k + ix.tombstoneCount()
 	switch mode {
 	case ModeSemantic:
@@ -1081,14 +1081,14 @@ func (ix *Index) searchCore(query string, qVec []float32, predicted []string, k 
 		// hybridSearch does NOT filter Tombstoned and collectResults trims to k
 		// AFTER dropping them, so without the headroom a tombstoned top-k hit
 		// leaves the result short of k.
-		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, overFetch, -1, predicted)
+		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, overFetch, alphas, predicted)
 		return ix.collectResults(len(ranked), k, func(i int) (int, float64) { return ranked[i].idx, ranked[i].score })
 	case ModeHybridRerank:
 		// M4: deep over-fetch (rerankN) from stage-1 hybrid, tombstone-filter
 		// BEFORE the neural pass (don't spend rerank budget on dropped chunks),
 		// then truncate to k AFTER rerank so k<rerankN keeps the reordering.
 		fetch := max(ix.rerankCfg.rerankN, k)
-		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, fetch, -1, predicted)
+		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, fetch, alphas, predicted)
 		results := ix.collectResults(len(ranked), len(ranked), func(i int) (int, float64) { return ranked[i].idx, ranked[i].score })
 		results = applyReranker(ix.reranker, query, results, ix.rerankCfg)
 		if len(results) > k {
@@ -1111,7 +1111,7 @@ func (ix *Index) searchRerankTelemetryCore(query string, qVec []float32, predict
 	// Stage 1: hybrid retrieval (instrumented).
 	fetch := max(ix.rerankCfg.rerankN, k)
 	s1 := time.Now()
-	ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, fetch, -1, predicted)
+	ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, fetch, AdaptiveAlphas, predicted)
 	results := ix.collectResults(len(ranked), len(ranked), func(i int) (int, float64) { return ranked[i].idx, ranked[i].score })
 	tel.Stage1Wall = time.Since(s1)
 
@@ -1176,7 +1176,33 @@ func (ix *Index) SearchMode(query string, k int, mode Mode) ([]Result, Mode) {
 	if mode != ModeBM25 {
 		qVec = ix.model.Encode(query)
 	}
-	return ix.searchCore(query, qVec, nil, k, mode), mode
+	return ix.searchCore(query, qVec, nil, k, mode, AdaptiveAlphas), mode
+}
+
+// SearchModeAlphas is [Index.SearchMode] with the adaptive-α constants
+// replaced by alphas. Pass [AdaptiveAlphas] for identical behavior;
+// pinning a component swaps the semantic/BM25 blend weight for that
+// query class and changes nothing else in the pipeline (α is a fusion
+// input, not an indexing or boost parameter).
+//
+// This exists for the α-sensitivity harness
+// (docs/internal/rag-thread-followups.md item 1), which sweeps one
+// class's weight while holding the other at its default. It is NOT a
+// tuning knob for callers: docs/BENCH.md's "don't tune ken's
+// constants" rule makes α=(0.3, 0.5) the verbatim-parity reference,
+// and changing the shipped pair would need its own ADR.
+//
+// α only participates in the hybrid fusion, so pinning it has no
+// effect under ModeBM25 or ModeSemantic — those branches ignore
+// alphas entirely, and this method still returns their normal results
+// rather than erroring.
+func (ix *Index) SearchModeAlphas(query string, k int, mode Mode, alphas AlphaPair) ([]Result, Mode) {
+	mode = ix.resolveMode(mode)
+	var qVec []float32
+	if mode != ModeBM25 {
+		qVec = ix.model.Encode(query)
+	}
+	return ix.searchCore(query, qVec, nil, k, mode, alphas), mode
 }
 
 // SearchWithQVec runs the same retrieval pipeline as SearchMode but
@@ -1219,7 +1245,7 @@ func (ix *Index) SearchWithQVec(query string, qVec []float32, k int, mode Mode) 
 // the stage-1 shortlist" — the HyDE Phase B analysis established this.
 func (ix *Index) SearchWithQVecPredicted(query string, qVec []float32, predicted []string, k int, mode Mode) ([]Result, Mode) {
 	mode = ix.resolveMode(mode)
-	return ix.searchCore(query, qVec, predicted, k, mode), mode
+	return ix.searchCore(query, qVec, predicted, k, mode, AdaptiveAlphas), mode
 }
 
 // SearchWithQVecTelemetry mirrors SearchModeWithTelemetry but uses a

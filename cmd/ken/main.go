@@ -122,7 +122,7 @@ usage:
   ken index           <path>           [--watch|--no-watch] [--write-snapshot] [--chunker regex|treesitter|line] [--mode bm25|semantic|hybrid|hybrid-rerank] [--model DIR]
   ken search          <path> <query>...  [-k N] [--json] [--verbose] [--stream] [--no-stats] [--chunker ...] [--mode ...] [--model DIR]
                                          [--rerank-model DIR] [--rerank-top-n N] [--rerank-beta β] [--rerank-quant f32|int8] [--rerank-adaptive THRESHOLD:MINN]
-  ken bench           <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR]
+  ken bench           <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR] [--alpha-symbol F] [--alpha-nl F]
                                          [--rerank-model DIR] [--rerank-top-n N] [--rerank-beta β] [--rerank-quant f32|int8] [--rerank-adaptive THRESHOLD:MINN]
   ken perf            <subcmd> [args]    (index|search|watch — see 'ken perf' for full usage)
   ken build-index     <corpus>         -o <path> [--chunker ...] [--mode ...] [--model DIR]
@@ -146,6 +146,13 @@ ken bench reads queries from stdin (one per line; lines starting with '#'
 ignored) and emits one JSON record per query to stdout against a single
 in-process index. Designed for the semble benchmark harness; see
 docs/BENCH.md.
+
+--alpha-symbol / --alpha-nl pin the hybrid fusion's semantic blend weight
+for one query class (0..1; unset = the shipped adaptive 0.3 / 0.5). Bench
+only — they exist for the alpha-sensitivity sweep and are deliberately
+absent from 'ken search'; docs/BENCH.md's "don't tune ken's constants"
+rule keeps (0.3, 0.5) the verbatim-parity reference. Pinned runs report
+zero telemetry timings.
 
 ken perf is the speed/memory measurement harness (sibling to ken bench;
 they share no state). Each invocation emits one JSON record on stdout
@@ -1117,6 +1124,16 @@ func cmdBench(args []string) int {
 		return 2
 	}
 	rerankModel, rerankTopN, rerankBeta, rerankQuant, rerankAdaptive := rf.model, rf.topN, rf.beta, rf.quant, rf.adaptive
+	// α pinning for the α-sensitivity sweep (bench/semble/run_ken.py
+	// --alpha-sweep; docs/internal/rag-thread-followups.md item 1).
+	// Bench-only: `ken search` deliberately has no such flag, because
+	// docs/BENCH.md's "don't tune ken's constants" rule makes
+	// α=(0.3, 0.5) the verbatim-parity reference. Unset ⇒ adaptive.
+	rest, alphas, err := extractAlphaFlags(rest)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+		return 2
+	}
 	k, err := strconv.Atoi(kStr)
 	if err != nil || k < 0 {
 		fmt.Fprintln(os.Stderr, "ken: -k expects a non-negative integer")
@@ -1144,6 +1161,10 @@ func cmdBench(args []string) int {
 	defer saveCache()
 	fmt.Fprintf(os.Stderr, "ken bench: indexed %d chunks from %s (mode=%s chunker=%s)\n",
 		ix.Len(), rest[0], modeStr, chunker)
+	if alphas != search.AdaptiveAlphas {
+		fmt.Fprintf(os.Stderr, "ken bench: alpha pinned (symbol=%s nl=%s)\n",
+			alphaLabel(alphas.Symbol), alphaLabel(alphas.NL))
+	}
 
 	type record struct {
 		Query   string       `json:"query"`
@@ -1157,6 +1178,12 @@ func cmdBench(args []string) int {
 		// search.Telemetry. Populated for hybrid-rerank queries; mostly
 		// zeros for non-rerank modes (just total_wall_us is meaningful).
 		Telemetry search.Telemetry `json:"telemetry"`
+		// SymbolQuery is semble's is_symbol_query verdict — the
+		// classifier that decides WHICH adaptive α applies. Emitted so
+		// the α-sensitivity sweep buckets queries by the same rule the
+		// fusion used instead of re-deriving the regex in Python.
+		// Additive; the semble adapter is the only consumer.
+		SymbolQuery bool `json:"symbol_query"`
 	}
 
 	enc := json.NewEncoder(os.Stdout)
@@ -1168,9 +1195,28 @@ func cmdBench(args []string) int {
 			continue
 		}
 		started := time.Now()
-		results, _, tel := ix.SearchModeWithTelemetry(q, k, mode)
+		var (
+			results []search.Result
+			tel     search.Telemetry
+		)
+		if alphas == search.AdaptiveAlphas {
+			results, _, tel = ix.SearchModeWithTelemetry(q, k, mode)
+		} else {
+			// The telemetry path has no α-pinning variant (rerank
+			// stage-1 always runs adaptive), and the sweep doesn't
+			// read telemetry — so pinned runs report zero timings
+			// rather than pretend the adaptive numbers apply.
+			results, _ = ix.SearchModeAlphas(q, k, mode, alphas)
+		}
 		ms := float64(time.Since(started).Microseconds()) / 1000.0
-		if err := enc.Encode(record{Query: q, Results: toJSONResults(results), QueryMS: ms, Telemetry: tel}); err != nil {
+		rec := record{
+			Query:       q,
+			Results:     toJSONResults(results),
+			QueryMS:     ms,
+			Telemetry:   tel,
+			SymbolQuery: search.IsSymbolQuery(q),
+		}
+		if err := enc.Encode(rec); err != nil {
 			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 			return 1
 		}
@@ -1180,6 +1226,50 @@ func cmdBench(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// extractAlphaFlags pulls --alpha-symbol / --alpha-nl off args and
+// returns the resulting [search.AlphaPair]. An absent flag leaves that
+// class adaptive (negative sentinel), so `--alpha-symbol=0.4` alone
+// sweeps the symbol class while NL keeps its shipped 0.5. Values must
+// be in [0, 1] — α is a blend weight, and a value outside that range
+// is a typo, not a configuration.
+func extractAlphaFlags(args []string) ([]string, search.AlphaPair, error) {
+	out := search.AdaptiveAlphas
+	rest, symStr, err := extractFlag(args, "alpha-symbol", "")
+	if err != nil {
+		return nil, out, err
+	}
+	rest, nlStr, err := extractFlag(rest, "alpha-nl", "")
+	if err != nil {
+		return nil, out, err
+	}
+	for _, f := range []struct {
+		name, val string
+		dst       *float64
+	}{
+		{"--alpha-symbol", symStr, &out.Symbol},
+		{"--alpha-nl", nlStr, &out.NL},
+	} {
+		if f.val == "" {
+			continue
+		}
+		v, perr := strconv.ParseFloat(f.val, 64)
+		if perr != nil || v < 0 || v > 1 {
+			return nil, out, fmt.Errorf("%s expects a number in [0,1], got %q", f.name, f.val)
+		}
+		*f.dst = v
+	}
+	return rest, out, nil
+}
+
+// alphaLabel renders one AlphaPair component for the startup log:
+// "adaptive" for the negative sentinel, the number otherwise.
+func alphaLabel(v float64) string {
+	if v < 0 {
+		return "adaptive"
+	}
+	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
 // previewLine returns the first non-blank line, trimmed, for a one-line preview.

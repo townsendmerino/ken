@@ -34,7 +34,8 @@ func TestSchemaPaths_Snapshot(t *testing.T) {
 	want := []string{
 		"captured_at",
 		"config.alpha_nl",
-		"config.alpha_override",
+		"config.alpha_override.nl",
+		"config.alpha_override.symbol",
 		"config.alpha_symbol",
 		"config.chunker",
 		"config.extra",

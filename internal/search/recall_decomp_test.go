@@ -237,7 +237,7 @@ func decompPoolHit(ix *Index, qVec []float32, query string, targets []string, n 
 // recall@10 is purely the path-penalty + file-saturation cost.
 func decompPenaltyOffTop10Hit(ix *Index, query string, qVec []float32, targets []string) bool {
 	const topK = 10
-	alpha := resolveAlpha(query, -1)
+	alpha := resolveAlpha(query, AdaptiveAlphas)
 	candidateCount := topK * 5
 
 	var semOrder []int

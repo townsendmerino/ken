@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -151,6 +152,9 @@ def run_repo(
     rerank_model: Path | None = None,
     rerank_top_n: int | None = None,
     rerank_beta: float | None = None,
+    alpha_symbol: float | None = None,
+    alpha_nl: float | None = None,
+    per_task: list[dict] | None = None,
 ) -> RepoOutcome:
     """Run all queries for one repo through ken bench; return per-task NDCG@10 + median p50."""
     # Send each query latency_runs times so we can take the median of warm-
@@ -185,6 +189,12 @@ def run_repo(
         args.extend(["--rerank-top-n", str(rerank_top_n)])
     if rerank_beta is not None:
         args.extend(["--rerank-beta", str(rerank_beta)])
+    # α pinning for the sensitivity sweep. Unset ⇒ ken uses its shipped
+    # adaptive constants, which is every non-sweep run.
+    if alpha_symbol is not None:
+        args.extend(["--alpha-symbol", str(alpha_symbol)])
+    if alpha_nl is not None:
+        args.extend(["--alpha-nl", str(alpha_nl)])
 
     proc = subprocess.run(
         args,
@@ -231,6 +241,24 @@ def run_repo(
         ndcg10_sum += q_ndcg
         category_ndcg10[task.category or "unknown"].append(q_ndcg)
 
+        # per_task, when the caller supplies a list, collects the
+        # query-level detail the α sweep aggregates on: NDCG, whether
+        # any relevant chunk landed in the top-k (recall@k), and the
+        # query's class as ken's own classifier judged it. The class
+        # comes from the ken record rather than a Python copy of
+        # semble's _SYMBOL_QUERY_RE — it must be the same verdict that
+        # selected the α under test.
+        if per_task is not None:
+            per_task.append({
+                "repo": spec.name,
+                "language": spec.language,
+                "query": task.query,
+                "category": task.category or "unknown",
+                "symbol_query": bool(runs[0].get("symbol_query", False)),
+                "ndcg10": q_ndcg,
+                "recall": any(1 <= r <= top_k for r in relevant_ranks),
+            })
+
         if verbose:
             sys.stderr.write(
                 f"    ndcg@10={q_ndcg:.3f}  ranks={relevant_ranks}  "
@@ -252,6 +280,403 @@ def run_repo(
 # ──────────────────────────────────────────────────────────────────────────
 # Top-level driver
 # ──────────────────────────────────────────────────────────────────────────
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# α-sensitivity sweep (docs/internal/rag-thread-followups.md item 1).
+#
+# Claim under test: the inherited fusion weights (α_symbol=0.3, α_NL=0.5)
+# are near-optimal, and RRF is flat around the middle anyway. A sweep is
+# only evidence if it's tuned and reported on DIFFERENT data, so:
+#
+#   1. Split by REPO, not by query. Queries from one repo share an index,
+#      so a per-query split would leak corpus statistics across the
+#      boundary and flatter the tuned α.
+#   2. Sweep α on the tune half only, per query class.
+#   3. Take the per-class argmax and evaluate that ONE pair on the
+#      holdout half, against the (0.3, 0.5) baseline on the same half.
+#
+# The parity constraint stands regardless of the outcome: α=(0.3, 0.5)
+# remains the reference the ken-vs-semble comparison is run at, per
+# docs/BENCH.md's "don't tune ken's constants" rule. A tuned pair is a
+# labelled experiment, not a new default — that would need its own ADR.
+#
+# One run per α value scores BOTH curves. α_symbol only affects symbol
+# queries and α_NL only affects NL queries, so a run pinned at (a, a)
+# yields the symbol-class point at `a` from its symbol queries and the
+# NL-class point at `a` from its NL queries. 11 runs, not 22.
+#
+# Aggregation is a QUERY-level mean within a half, not the per-repo mean
+# the headline table uses: the class slices have very uneven per-repo
+# counts, and a 3-query repo shouldn't weigh as much as a 40-query one.
+# Sweep numbers are therefore comparable within the sweep, not against
+# the published per-language table.
+# ──────────────────────────────────────────────────────────────────────────
+
+ALPHA_GRID = tuple(round(0.1 * i, 1) for i in range(11))  # 0.0 … 1.0
+
+# Materiality threshold, NOT a noise floor: ken's retrieval is
+# deterministic, so re-running the same α on the same corpus reproduces
+# the same NDCG exactly — there is no run-to-run jitter to average out.
+# The uncertainty that matters is SAMPLING: which repos landed in the
+# holdout half and which queries they carry. 0.005 is the tightest
+# agreement band docs/BENCH.md reports anywhere (per-language Python vs
+# semble), so a delta under it is not worth acting on regardless of
+# sign. The paired standard error computed below is the statistic that
+# actually says whether a delta is distinguishable from zero — and on a
+# few-hundred-query holdout it is typically LARGER than this threshold,
+# which is the point.
+ALPHA_NOISE_FLOOR = 0.005
+
+
+def _split_repos(repo_names: list[str], tune_fraction: float = 0.6) -> tuple[list[str], list[str]]:
+    """Split repo names into (tune, holdout), deterministically and stratified.
+
+    Deterministic: ordering is by md5 of the repo name, so the split is
+    reproducible across machines and runs and doesn't depend on dict or
+    filesystem order. Not `hash()`, which is salted per process.
+
+    Stratification happens in the caller, which groups by language before
+    calling this — the goal is both halves keeping a similar mix rather
+    than an exact ratio, so each stratum is split at the same fraction
+    and the remainders fall where the hash order puts them.
+    """
+    ordered = sorted(repo_names, key=lambda n: hashlib.md5(n.encode()).hexdigest())
+    cut = round(len(ordered) * tune_fraction)
+    # With a single-repo stratum, round() can send it entirely to one
+    # side; keep at least one repo per side whenever there are ≥2.
+    if len(ordered) >= 2:
+        cut = min(max(cut, 1), len(ordered) - 1)
+    return ordered[:cut], ordered[cut:]
+
+
+def _stratified_split(
+    grouped: dict[str, list[Task]], repo_specs: dict[str, RepoSpec], tune_fraction: float = 0.6
+) -> tuple[list[str], list[str]]:
+    """Split repos into tune/holdout, stratified by language.
+
+    Language is the stratum rather than the symbol/NL mix directly: query
+    class correlates strongly with language (a Rust repo's annotations
+    skew differently from a Python one's), and language is knowable
+    before any ken run. The realized symbol/NL balance of both halves is
+    reported next to the split so a bad draw is visible rather than
+    silent.
+    """
+    by_language: dict[str, list[str]] = defaultdict(list)
+    for repo_name in grouped:
+        by_language[repo_specs[repo_name].language].append(repo_name)
+    tune: list[str] = []
+    holdout: list[str] = []
+    for language in sorted(by_language):
+        t, h = _split_repos(by_language[language], tune_fraction)
+        tune.extend(t)
+        holdout.extend(h)
+    return sorted(tune), sorted(holdout)
+
+
+def _run_half(
+    *,
+    repo_names: list[str],
+    grouped: dict[str, list[Task]],
+    repo_specs: dict[str, RepoSpec],
+    args: argparse.Namespace,
+    model_dir: Path | None,
+    alpha_symbol: float | None,
+    alpha_nl: float | None,
+) -> list[dict]:
+    """Run every query in one half at a pinned α pair; return per-task rows."""
+    rows: list[dict] = []
+    for repo_name in repo_names:
+        run_repo(
+            ken_bin=args.ken,
+            spec=repo_specs[repo_name],
+            tasks=grouped[repo_name],
+            mode=args.mode,
+            chunker=args.chunker,
+            model_dir=model_dir,
+            top_k=args.top_k,
+            # Latency is not part of this experiment, and running each
+            # query 5× would quintuple a 22-pass grid for nothing.
+            latency_runs=1,
+            verbose=False,
+            alpha_symbol=alpha_symbol,
+            alpha_nl=alpha_nl,
+            per_task=rows,
+        )
+    return rows
+
+
+def _paired_delta(tuned_rows: list[dict], baseline_rows: list[dict]) -> dict[str, dict[str, float]]:
+    """Paired per-query NDCG difference (tuned − baseline), per class.
+
+    Both arms score the SAME queries, so the paired difference is the
+    right statistic: it cancels the between-query variance that
+    dominates an unpaired comparison (queries differ enormously in
+    difficulty; α does not move most of them at all). Reported as the
+    mean difference with its standard error, plus how many queries α
+    actually moved — on a flat curve most pairs are exactly 0, and a
+    mean over mostly-zeros with a couple of large movers is a very
+    different claim from a broad shift.
+
+    Rows are paired on (repo, query). A query present in only one arm is
+    dropped, which shouldn't happen — both arms run the same repo list —
+    but silently averaging an unpaired set would be worse than losing it.
+    """
+    def key(r: dict) -> tuple[str, str]:
+        return (r["repo"], r["query"])
+
+    baseline_by_key = {key(r): r for r in baseline_rows}
+    out: dict[str, dict[str, float]] = {}
+    buckets: dict[str, list[float]] = {"symbol": [], "nl": [], "overall": []}
+    for row in tuned_rows:
+        base = baseline_by_key.get(key(row))
+        if base is None:
+            continue
+        d = row["ndcg10"] - base["ndcg10"]
+        buckets["overall"].append(d)
+        buckets["symbol" if row["symbol_query"] else "nl"].append(d)
+
+    for name, diffs in buckets.items():
+        n = len(diffs)
+        if n == 0:
+            out[name] = {"n": 0, "mean": 0.0, "stderr": 0.0, "moved": 0, "t": 0.0}
+            continue
+        mean = sum(diffs) / n
+        if n > 1:
+            var = sum((d - mean) ** 2 for d in diffs) / (n - 1)
+            stderr = math.sqrt(var / n)
+        else:
+            stderr = 0.0
+        out[name] = {
+            "n": n,
+            "mean": mean,
+            "stderr": stderr,
+            # How many queries α moved at all — the denominator that
+            # makes a small mean interpretable.
+            "moved": sum(1 for d in diffs if abs(d) > 1e-9),
+            # Paired t. |t| < 2 ⇒ indistinguishable from zero at the
+            # usual bar; reported rather than turned into a p-value,
+            # since the queries are not an i.i.d. sample of anything.
+            "t": mean / stderr if stderr > 0 else 0.0,
+        }
+    return out
+
+
+def _class_means(rows: list[dict]) -> dict[str, dict[str, float]]:
+    """Mean NDCG@10 + recall@k per query class, plus the overall row."""
+    out: dict[str, dict[str, float]] = {}
+    buckets = {
+        "symbol": [r for r in rows if r["symbol_query"]],
+        "nl": [r for r in rows if not r["symbol_query"]],
+        "overall": rows,
+    }
+    for name, bucket in buckets.items():
+        if not bucket:
+            out[name] = {"n": 0, "ndcg10": 0.0, "recall": 0.0}
+            continue
+        out[name] = {
+            "n": len(bucket),
+            "ndcg10": sum(r["ndcg10"] for r in bucket) / len(bucket),
+            "recall": sum(1.0 for r in bucket if r["recall"]) / len(bucket),
+        }
+    return out
+
+
+def run_alpha_sweep(args: argparse.Namespace, model_dir: Path | None, grouped: dict[str, list[Task]],
+                    repo_specs: dict[str, RepoSpec]) -> dict:
+    """Tune α on one repo half, evaluate the winner once on the other."""
+    if args.mode == "bm25":
+        sys.exit("--alpha-sweep needs a fusion mode; α does nothing under --mode=bm25.")
+
+    tune, holdout = _stratified_split(grouped, repo_specs, args.tune_fraction)
+    if not tune or not holdout:
+        sys.exit(f"split produced an empty half (tune={len(tune)} holdout={len(holdout)}) — need ≥2 repos.")
+
+    n_tune_q = sum(len(grouped[r]) for r in tune)
+    n_hold_q = sum(len(grouped[r]) for r in holdout)
+    sys.stderr.write(
+        f"α sweep: {len(tune)} tune repos ({n_tune_q} queries) / "
+        f"{len(holdout)} holdout repos ({n_hold_q} queries)\n"
+        f"  tune:    {', '.join(tune)}\n"
+        f"  holdout: {', '.join(holdout)}\n\n"
+    )
+
+    # ── Sweep on the tune half ────────────────────────────────────────
+    #
+    # Skippable via --alpha-argmax: the tune sweep is 11 full passes and
+    # the holdout evaluation is 2, so re-checking a known pair (or
+    # recomputing a statistic that needs the per-query rows) shouldn't
+    # cost two hours. The split is deterministic, so the holdout half is
+    # identical either way.
+    if args.alpha_argmax is not None:
+        best = {"symbol": args.alpha_argmax[0], "nl": args.alpha_argmax[1]}
+        curves = {"symbol": [], "nl": []}
+        saturated: list[str] = []
+        sys.stderr.write(
+            f"skipping the tune sweep (--alpha-argmax): evaluating "
+            f"α_symbol={best['symbol']} α_NL={best['nl']} on the holdout half only\n\n"
+        )
+        return _alpha_holdout(args, model_dir, grouped, repo_specs, tune, holdout,
+                              n_tune_q, n_hold_q, best, curves, saturated)
+
+    curves: dict[str, list[dict]] = {"symbol": [], "nl": []}
+    sys.stderr.write(f"{'α':>5}  {'symbol NDCG':>12} {'n':>5}  {'NL NDCG':>9} {'n':>5}\n")
+    sys.stderr.write(f"{'-' * 5}  {'-' * 12} {'-' * 5}  {'-' * 9} {'-' * 5}\n")
+    for a in ALPHA_GRID:
+        rows = _run_half(
+            repo_names=tune, grouped=grouped, repo_specs=repo_specs, args=args,
+            model_dir=model_dir, alpha_symbol=a, alpha_nl=a,
+        )
+        means = _class_means(rows)
+        for cls in ("symbol", "nl"):
+            curves[cls].append({"alpha": a, **means[cls]})
+        sys.stderr.write(
+            f"{a:>5.1f}  {means['symbol']['ndcg10']:>12.4f} {means['symbol']['n']:>5}  "
+            f"{means['nl']['ndcg10']:>9.4f} {means['nl']['n']:>5}\n"
+        )
+
+    shipped = {"symbol": 0.3, "nl": 0.5}
+    best = {}
+    for cls in ("symbol", "nl"):
+        if not any(p["n"] for p in curves[cls]):
+            sys.exit(f"tune half has no {cls}-class queries — the split is unusable for this sweep.")
+        # Ties go to the α nearest the shipped constant. This matters more
+        # than it looks: the symbol class saturates at NDCG 1.0 on some
+        # splits, and an every-point-equal curve otherwise hands the
+        # argmax to whichever extreme the sort visited first — reporting
+        # α=0.0 as "tuned" on the strength of no evidence at all. A tie is
+        # not a reason to move off the default.
+        best[cls] = max(
+            curves[cls], key=lambda p: (p["ndcg10"], -abs(p["alpha"] - shipped[cls]))
+        )["alpha"]
+    saturated = [cls for cls in ("symbol", "nl")
+                 if len({round(p["ndcg10"], 4) for p in curves[cls]}) == 1]
+    sys.stderr.write(f"\ntune argmax: α_symbol={best['symbol']} α_NL={best['nl']}\n")
+    for cls in saturated:
+        sys.stderr.write(
+            f"  note: the {cls} curve is flat to 4dp across the whole grid — α is inert for "
+            f"this class on the tune half, and the argmax is the shipped {shipped[cls]} by tie-break.\n"
+        )
+    sys.stderr.write("\n")
+
+    return _alpha_holdout(args, model_dir, grouped, repo_specs, tune, holdout,
+                          n_tune_q, n_hold_q, best, curves, saturated)
+
+
+def _alpha_holdout(args, model_dir, grouped, repo_specs, tune, holdout,
+                   n_tune_q, n_hold_q, best, curves, saturated) -> dict:
+    """Evaluate one α pair against the shipped baseline on the holdout half.
+
+    Split out of run_alpha_sweep so --alpha-argmax can reach it without
+    the 11-pass tune sweep. Nothing here reads the tune half — that is
+    the point of the experiment.
+    """
+    # ── Single holdout evaluation: tuned pair vs the shipped baseline ──
+    sys.stderr.write("holdout evaluation (one run each — no tuning happens here)\n")
+    tuned_rows = _run_half(
+        repo_names=holdout, grouped=grouped, repo_specs=repo_specs, args=args,
+        model_dir=model_dir, alpha_symbol=best["symbol"], alpha_nl=best["nl"],
+    )
+    # The baseline is run with α UNPINNED rather than pinned to
+    # (0.3, 0.5): that exercises the shipped adaptive path itself, so
+    # the comparison can't be corrupted by the pinning plumbing.
+    baseline_rows = _run_half(
+        repo_names=holdout, grouped=grouped, repo_specs=repo_specs, args=args,
+        model_dir=model_dir, alpha_symbol=None, alpha_nl=None,
+    )
+    tuned, baseline = _class_means(tuned_rows), _class_means(baseline_rows)
+    paired = _paired_delta(tuned_rows, baseline_rows)
+
+    sys.stderr.write(
+        f"\n{'Class':<8} {'n':>5}  {'baseline':>9} {'tuned':>9}  {'Δ NDCG':>8} {'±SE':>7} {'t':>6} "
+        f"{'moved':>6}  {'base rec':>9} {'tuned rec':>10}\n"
+    )
+    sys.stderr.write(
+        f"{'-' * 8} {'-' * 5}  {'-' * 9} {'-' * 9}  {'-' * 8} {'-' * 7} {'-' * 6} {'-' * 6}  "
+        f"{'-' * 9} {'-' * 10}\n"
+    )
+    for cls in ("symbol", "nl", "overall"):
+        pd = paired[cls]
+        sys.stderr.write(
+            f"{cls:<8} {tuned[cls]['n']:>5}  {baseline[cls]['ndcg10']:>9.4f} "
+            f"{tuned[cls]['ndcg10']:>9.4f}  {pd['mean']:>+8.4f} {pd['stderr']:>7.4f} "
+            f"{pd['t']:>6.2f} {pd['moved']:>6}  "
+            f"{baseline[cls]['recall']:>9.3f} {tuned[cls]['recall']:>10.3f}\n"
+        )
+
+    # Direction matters. A tuned pair that LOSES on held-out data is not
+    # "a signal worth chasing" — it's the tune-half argmax failing to
+    # transfer, which is itself evidence the curve is noise-dominated and
+    # the shipped constants should stand.
+    # Two independent bars: is the delta big enough to matter, and is it
+    # distinguishable from zero at all? A delta can clear the first and
+    # fail the second — that's the usual outcome of tuning a flat curve
+    # on a few hundred queries, and reporting only the point estimate
+    # would turn sampling scatter into a finding.
+    overall = paired["overall"]
+    delta, stderr, tstat = overall["mean"], overall["stderr"], overall["t"]
+    pinned = f"α_symbol={best['symbol']}, α_NL={best['nl']}"
+    significant = abs(tstat) >= 2.0
+    if abs(delta) < ALPHA_NOISE_FLOOR:
+        verdict = (
+            f"flat — the tuned pair ({pinned}) moves holdout NDCG@10 by {delta:+.4f} "
+            f"(±{stderr:.4f} SE, t={tstat:.2f}), inside the ±{ALPHA_NOISE_FLOOR} materiality "
+            f"threshold and on only {overall['moved']}/{overall['n']} queries. "
+            "Sweeping found nothing; keep semble's constants."
+        )
+    elif not significant:
+        verdict = (
+            f"not distinguishable from zero — Δ={delta:+.4f} clears the ±{ALPHA_NOISE_FLOOR} "
+            f"threshold but not its own error bar (±{stderr:.4f} SE, t={tstat:.2f}, "
+            f"{overall['moved']}/{overall['n']} queries moved). Keep semble's constants."
+        )
+    elif delta < 0:
+        verdict = (
+            f"did not transfer — the tune-half argmax ({pinned}) is {abs(delta):.4f} "
+            f"±{stderr:.4f} WORSE than the shipped pair on the holdout (t={tstat:.2f}). "
+            "Tuning α overfits the tune half; keep semble's constants."
+        )
+    else:
+        verdict = (
+            f"held up — the tuned pair ({pinned}) beats the shipped pair by {delta:.4f} "
+            f"±{stderr:.4f} (t={tstat:.2f}) on data it was not tuned on. Changing the shipped "
+            "default would still need an ADR amending the verbatim-port framing (docs/BENCH.md)."
+        )
+    sys.stderr.write(f"\nverdict: {verdict}\n")
+
+    return {
+        "experiment": "alpha-sensitivity",
+        "shipped_alphas": {"symbol": 0.3, "nl": 0.5},
+        "grid": list(ALPHA_GRID),
+        "noise_floor": ALPHA_NOISE_FLOOR,
+        "split": {
+            "tune_fraction": args.tune_fraction,
+            "stratified_by": "language",
+            "order": "md5(repo_name)",
+            "tune_repos": tune,
+            "holdout_repos": holdout,
+            "tune_queries": n_tune_q,
+            "holdout_queries": n_hold_q,
+        },
+        "tune_curves": curves,
+        "tune_argmax": best,
+        "saturated_classes": saturated,
+        "holdout": {
+            "baseline": baseline,
+            "tuned": tuned,
+            # Paired per-query differences — the statistic the verdict
+            # is based on. delta_ndcg10 is kept as the unpaired point
+            # estimate for readers comparing against the means above.
+            "paired_delta": paired,
+            "delta_ndcg10": {c: tuned[c]["ndcg10"] - baseline[c]["ndcg10"]
+                             for c in ("symbol", "nl", "overall")},
+            # Per-query rows for both arms, so any further statistic
+            # (per-language slices, a different significance bar) can be
+            # computed offline without re-running the holdout.
+            "per_query": {"baseline": baseline_rows, "tuned": tuned_rows},
+        },
+        "verdict": verdict,
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -278,7 +703,8 @@ def run_repo(
 _PROVENANCE_SCHEMA = (
     "captured_at",
     "config.alpha_nl",
-    "config.alpha_override",
+    "config.alpha_override.nl",
+    "config.alpha_override.symbol",
     "config.alpha_symbol",
     "config.chunker",
     "config.extra",
@@ -420,6 +846,12 @@ def _schema_paths(node: object, declared: frozenset[str], prefix: str = "") -> l
     and we stop there."""
     if prefix and prefix in declared:
         return [prefix]
+    if node is None:
+        # A null stands in for an object we can't walk (a nullable block
+        # like config.alpha_override, which the Go side declares by its
+        # components because reflection sees through the nil pointer).
+        # Nothing to check; the declared component paths cover it.
+        return [] if any(d.startswith(prefix + ".") for d in declared) else [prefix]
     if isinstance(node, dict):
         if not node:
             return [prefix] if prefix else []
@@ -446,6 +878,7 @@ def collect_provenance(
     query_count: int,
     corpora: list[dict],
     extra: dict[str, str],
+    alpha_override: dict | None = None,
 ) -> dict:
     prov = {
         "harness": "bench/semble/run_ken.py",
@@ -455,13 +888,15 @@ def collect_provenance(
         "config": {
             "mode": mode,
             "chunker": chunker,
-            # α is adaptive per query class; this harness never pins it.
             # The pair is the shipped semble-parity default that
-            # docs/BENCH.md's "don't tune ken's constants" rule fixes —
-            # item 1's sweep is the thing that will set alpha_override.
+            # docs/BENCH.md's "don't tune ken's constants" rule fixes.
+            # alpha_override is non-null only when --alpha-symbol /
+            # --alpha-nl pinned a class (the item-1 sweep, or a manual
+            # pinned run); a pinned run is a labelled experiment, never
+            # a new default.
             "alpha_symbol": 0.3,
             "alpha_nl": 0.5,
-            "alpha_override": None,
+            "alpha_override": alpha_override,
             "top_k": top_k,
             "query_count": query_count,
             "model": _inspect_model(model_dir),
@@ -538,7 +973,45 @@ def main() -> int:
     p.add_argument("--repo", action="append", default=[], help="limit to one or more repo names (repeatable).")
     p.add_argument("--language", action="append", default=[], help="limit to one or more languages (repeatable).")
     p.add_argument("--verbose", action="store_true", help="print per-query NDCG to stderr.")
+    # α-sensitivity sweep (docs/internal/rag-thread-followups.md item 1).
+    p.add_argument(
+        "--alpha-sweep", action="store_true",
+        help="run the α-sensitivity experiment instead of the plain benchmark: sweep α on a "
+             "repo-split tune half, then evaluate the argmax pair once on the holdout half.",
+    )
+    p.add_argument(
+        "--alpha-argmax", default=None, metavar="SYMBOL,NL",
+        help="skip the tune sweep and evaluate this α pair on the holdout half "
+             "(e.g. '0.3,0.4'). Same deterministic split; 2 passes instead of 13.",
+    )
+    p.add_argument(
+        "--tune-fraction", type=float, default=0.6,
+        help="fraction of repos in the tune half of the --alpha-sweep split (default: 0.6).",
+    )
+    p.add_argument(
+        "--alpha-symbol", type=float, default=None,
+        help="pin the symbol-class fusion weight for a plain run (0..1). Default: ken's adaptive 0.3. "
+             "Ignored under --alpha-sweep, which sets it per grid point.",
+    )
+    p.add_argument(
+        "--alpha-nl", type=float, default=None,
+        help="pin the NL-class fusion weight for a plain run (0..1). Default: ken's adaptive 0.5. "
+             "Ignored under --alpha-sweep.",
+    )
     args = p.parse_args()
+    if not 0.1 <= args.tune_fraction <= 0.9:
+        sys.exit(f"--tune-fraction must be in [0.1, 0.9], got {args.tune_fraction}")
+    if args.alpha_argmax is not None:
+        try:
+            parts = [float(x) for x in args.alpha_argmax.split(",")]
+        except ValueError:
+            parts = []
+        if len(parts) != 2 or not all(0.0 <= v <= 1.0 for v in parts):
+            sys.exit(f"--alpha-argmax expects SYMBOL,NL with both in [0,1], got {args.alpha_argmax!r}")
+        args.alpha_argmax = (parts[0], parts[1])
+    for name, value in (("--alpha-symbol", args.alpha_symbol), ("--alpha-nl", args.alpha_nl)):
+        if value is not None and not 0.0 <= value <= 1.0:
+            sys.exit(f"{name} must be in [0, 1], got {value}")
 
     model_dir: Path | None
     if args.mode == "bm25":
@@ -577,6 +1050,35 @@ def main() -> int:
         sys.exit("no benchmark tasks matched the requested --repo/--language filters.")
 
     grouped = grouped_tasks(tasks)
+
+    if args.alpha_sweep:
+        sweep = run_alpha_sweep(args, model_dir, grouped, repo_specs)
+        out_dir = Path(__file__).resolve().parent / "results"
+        out_dir.mkdir(exist_ok=True)
+        out_path = out_dir / f"alpha-sweep-{args.mode}.json"
+        sweep["provenance"] = collect_provenance(
+            ken_bin=args.ken,
+            mode=args.mode,
+            chunker=args.chunker,
+            model_dir=model_dir,
+            rerank_model=rerank_model,
+            top_k=args.top_k,
+            query_count=sweep["split"]["tune_queries"] + sweep["split"]["holdout_queries"],
+            corpora=[
+                _detect_corpus(name, Path(repo_specs[name].benchmark_dir),
+                               revision=str(getattr(repo_specs[name], "revision", "") or ""))
+                for name in sorted(grouped)
+            ],
+            extra={
+                "experiment": "alpha-sensitivity",
+                "tune_fraction": str(args.tune_fraction),
+                "grid": ",".join(str(a) for a in ALPHA_GRID),
+            },
+        )
+        out_path.write_text(json.dumps(sweep, indent=2) + "\n")
+        sys.stderr.write(f"\nSweep saved to {out_path}\n")
+        return 0
+
     sys.stderr.write(f"ken-{args.mode}  ({len(grouped)} repos, {len(tasks)} tasks)\n")
     sys.stderr.write(
         f"{'Repo':<24} {'Language':<12} {'N':>3}  {'NDCG@10':>8}  {'p50':>7}\n"
@@ -602,6 +1104,8 @@ def main() -> int:
             rerank_model=rerank_model,
             rerank_top_n=args.rerank_top_n,
             rerank_beta=args.rerank_beta,
+            alpha_symbol=args.alpha_symbol,
+            alpha_nl=args.alpha_nl,
         )
         outcomes.append(o)
         sys.stderr.write(
@@ -660,8 +1164,13 @@ def main() -> int:
     if args.language:
         extra["language_filter"] = ",".join(args.language)
 
+    alpha_override = None
+    if args.alpha_symbol is not None or args.alpha_nl is not None:
+        alpha_override = {"symbol": args.alpha_symbol, "nl": args.alpha_nl}
+
     summary = {
         "provenance": collect_provenance(
+            alpha_override=alpha_override,
             ken_bin=args.ken,
             mode=args.mode,
             chunker=args.chunker,
