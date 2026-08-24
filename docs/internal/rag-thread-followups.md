@@ -88,7 +88,7 @@ Spans come from `structural.ExtractFile` — the same extractor Arm B enrichment
 
 Both are true because a split definition costs the **agent** a follow-up read, not the **ranker** a position. NDCG asks whether the right file surfaced; it did either way. The cost lands in the token economy, so the token-budget bench is where it would show up — ADR-011 stands on ranking grounds, and acting on the traceability argument would need that number to move.
 
-**Unplanned finding — a user-facing hang.** Running the traceability sweep uncovered that `ken index` appears to hang on C# files: gotreesitter v0.51.0 takes **250 s** on 11 KB of valid C# (`BuiltinResolver.cs`) and still returns `root=ERROR`, with six such files in one repo. `.cs` is now parked out of `kenLangToTSLang` (deterministic, matching the bash precedent; a wall-clock budget would trade the hang for the reproducibility bug ADR-040 closed). ken-mcp was never exposed — it sets a 500 ms budget. See DESIGN.md §10. Upstream report pending.
+**Unplanned finding — a user-facing hang.** Running the traceability sweep uncovered that `ken index` appears to hang on C# files: gotreesitter v0.51.0 takes **250 s** on 11 KB of valid C# (`BuiltinResolver.cs`) and still returns `root=ERROR`, with six such files in one repo. `.cs` is now parked out of `kenLangToTSLang` (deterministic, matching the bash precedent; a wall-clock budget would trade the hang for the reproducibility bug ADR-040 closed). ken-mcp was never exposed — it sets a 500 ms budget. See DESIGN.md §10; filed upstream as [odvcencio/gotreesitter#972](https://github.com/odvcencio/gotreesitter/issues/972).
 
 ---
 

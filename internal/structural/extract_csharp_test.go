@@ -130,6 +130,7 @@ namespace Auth.Core
 // BuiltinResolver.cs (11 KB, 211 lines) does not finish parsing in two
 // minutes, and `ken index` over a directory containing it hung outright.
 // Reproduced against raw gotreesitter with no ken code in the path.
+// Filed upstream as odvcencio/gotreesitter#972.
 //
 // Why a map row rather than a timeout: ADR-040 keeps the CLI's parse
 // budget off so `ken build-index` stays byte-identical across runs, and

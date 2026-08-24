@@ -303,6 +303,8 @@ var kenLangToTSLang = map[string]string{
 	// one repo exceed a 30s cap. Reproduced against raw gotreesitter with
 	// no ken code in the path, so it is the grammar, not extractCsharp.
 	//
+	// Filed upstream as odvcencio/gotreesitter#972 (2026-08-24).
+	//
 	// This is NOT the v0.20.x OOM: RSS stays flat (~400 MB) while a core
 	// spins, so neither the 64 KiB size guard (the file is 11 KB) nor the
 	// old memory symptom catches it.
