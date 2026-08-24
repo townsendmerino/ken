@@ -26,6 +26,27 @@ Ordering: item 4 (provenance) first — it's small and items 2–3 want it in pl
 
 **Estimate:** small. Full sweep is 11 α values × 2 classes over ~60% of the corpus; at ~30–90 s per full-corpus mode run today, expect the whole grid in well under an hour of machine time (indices build once per repo and are reused across α values, since α only affects fusion, not indexing).
 
+### As built (2026-08-24) — swept; α_symbol confirmed, α_NL marginal, constants kept
+
+Numbers, curves and the full method are in [`docs/BENCH.md` → "α sensitivity"](../BENCH.md#α-sensitivity--is-03-05-actually-the-right-pair). Headline: **"flat around the middle" essentially held.** α_symbol is flat outright — the tune argmax lands on 0.3/0.3/0.4 across three splits with the top three grid points within 0.0005 NDCG, so which one wins is decided in the fourth decimal. α_NL = 0.5 sits at the lower edge of a broad plateau; the held-out gain from 0.6 runs +0.004 to +0.010 and clears materiality on **one of three splits**. Shipped pair stands.
+
+The one split that did clear both bars (+0.0095, t=2.66) survived a chunker-artifact check but not a resampling check — an independent seeded split came back flat (+0.0042, t=1.33). Running that third split is what kept this from being written up as a finding.
+
+Two corrections to the plan above, both worth carrying into items 2–3:
+
+- **"Harness change only, no search-path code" was wrong.** `alphaOverride` existed only on the unexported `hybridSearch`; all three `index.go` call sites hardcoded `-1`. Nothing exported could pin α. Item 1 added `search.AlphaPair` (per-class, negative sentinel so a pinned α=0.0 stays distinguishable from unpinned), `search.SearchModeAlphas`, and `search.IsSymbolQuery`. Production paths all still pass `AdaptiveAlphas`.
+- **The sweep had to be driven from Python, not Go.** semble scores *chunk-level ranks against file-level targets* (`target_rank` + `ndcg_at_k`), a different convention from the CoIR harness's `aggregateByDoc`. Re-deriving it in Go is what `bench/semble/README.md` exists to forbid, so the driver lives in `run_ken.py` and `ken bench` gained `--alpha-symbol` / `--alpha-nl` / `--alpha-pairs`.
+
+Methodology lessons the plan didn't anticipate:
+
+- **The estimate assumed index reuse the harness didn't do.** One `ken bench` per α rebuilt 41 identical indexes eleven times; query time is ~0.4 ms, so essentially the whole 2-hour runtime was rebuilding an index α doesn't affect. `--alpha-pairs` scores every pair against one build — 2 passes instead of 13, ~12 min total, and every curve point sees the byte-identical index.
+- **A saturated curve breaks a naive argmax.** The symbol curve is flat to 4dp on some splits; tie-breaking toward low α then reports α=0.0 as "tuned" on zero evidence (and it lost on holdout). Ties now go to the shipped constant.
+- **There is no run-to-run noise to average.** ken's retrieval is deterministic; the uncertainty is sampling. Since both arms score the same queries the correct statistic is the **paired** per-query difference — reported with SE, t, and how many queries α moved at all, because a mean over mostly-zeros is a different claim from a broad shift.
+- **`--tune-fraction` does not draw a new split.** Changing only the fraction re-cuts one md5 ordering, so the halves nest — the 40/60 tune set is a strict subset of the 60/40 one. That is not a replication. `--split-seed` salts the ordering for a genuine resampling check.
+- **Ask "did the curve move?" before "is the tuned value better?"** The descriptive holdout curve (scored, never fed to an argmax) is what distinguishes "0.6 is right" from "the whole plateau shifted and 0.6 happens to be closer". It costs nothing once the grid rides on one build.
+
+**Unexpected finding worth its own thread:** the α optimum appears **corpus-dependent** — the harder holdout half wants more semantic weight — which is the idea [ADR-013](DECISIONS.md) deprecated. Re-opening it needs a mechanism that predicts α from the corpus *without* peeking at labels; this experiment provides no such thing and did not attempt one.
+
 ---
 
 ## 2. Boundary-failure slicing by query intent
@@ -97,7 +118,7 @@ So: a 12-hex `index.build_id` on the **JSON** responses only (always present, no
 
 ## Report-back checklist (the thread reply, when items land)
 
-1. α sweep curve + holdout result, and whether "flat around the middle" held.
+1. ~~α sweep curve + holdout result, and whether "flat around the middle" held.~~ **Ready to report:** yes, essentially. α_symbol is flat (argmax 0.3/0.3/0.4 across three splits, top points within 0.0005). α_NL's curve is a broad plateau whose lower edge is about where 0.5 sits — a held-out gain from 0.6 of +0.004 to +0.010, material on one split of three and flat on an independent resample. Constants kept. Curves in [`docs/BENCH.md`](../BENCH.md#α-sensitivity--is-03-05-actually-the-right-pair).
 2. Chunker-disagreement table, the boundary-failure share, and an answer to the cross-file-symbol question.
 3. Rename-survival numbers — what recall the semantic arm retains when the lexical anchor disappears.
 4. ~~"Every bench JSON now carries commit/chunker/config provenance" — one sentence, links to the harness.~~ **Ready to report:** every bench result file now carries commit, chunker, mode, α pair, model digest, corpus revisions and `KEN_*` env — schema + example in [`docs/BENCH.md` → "Result provenance"](../BENCH.md#result-provenance), builder in `bench/internal/provenance`.

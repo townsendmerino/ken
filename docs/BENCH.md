@@ -486,9 +486,47 @@ Writes `bench/semble/results/alpha-sweep-<mode>.json`: the tune curves, the argm
 
 Aggregation note: the sweep averages **per query** within a half, not per repo then across repos the way the headline table does — the class slices have very uneven per-repo counts, and a 3-query repo shouldn't weigh as much as a 40-query one. Sweep numbers are comparable within the sweep, not against the published per-language table.
 
-### Results
+### Results (2026-08-24, `--mode hybrid`, regex chunker, 63 repos / 1,251 queries)
 
-_Pending — the full 63-repo sweep is running. This subsection lands with the two tune curves, the holdout comparison, and the verdict._
+**Tune-half curves** (default 60/40 split: 41 repos, 810 queries — 131 symbol, 679 NL):
+
+| α | symbol NDCG@10 | NL NDCG@10 |
+|---:|---:|---:|
+| 0.0 | 0.9636 | 0.8096 |
+| 0.1 | 0.9667 | 0.8208 |
+| 0.2 | 0.9667 | 0.8263 |
+| **0.3** | **0.9669** ← shipped, and the argmax | 0.8312 |
+| 0.4 | 0.9668 | 0.8370 |
+| **0.5** | 0.9635 | **0.8404** ← shipped |
+| 0.6 | 0.9642 | **0.8412** ← argmax |
+| 0.7 | 0.9640 | 0.8377 |
+| 0.8 | 0.9637 | 0.8337 |
+| 0.9 | 0.9595 | 0.8282 |
+| 1.0 | 0.9550 | 0.7985 |
+
+**α_symbol: flat, and 0.3 is never meaningfully beaten.** Across three splits the tune argmax lands on 0.3, 0.3, and 0.4 — but the top three grid points are separated by ≤0.0005 NDCG in every case, so which one "wins" is decided in the fourth decimal. That is what a flat objective looks like, not a preference. α barely matters for identifier queries, which is what you'd expect when the lexical arm already has an exact match to anchor on.
+
+A useful side effect: on the two splits whose argmax *was* 0.3, pinning it reproduced the adaptive holdout result **exactly**, with 0 of 63 and 0 of 116 symbol queries moving. Since the baseline arm runs α unpinned, that is an end-to-end check that the pinning plumbing resolves to the same weights the shipped path does.
+
+**α_NL = 0.5 sits at the lower edge of a broad plateau.** The tune argmax is 0.6 on all three splits. Whether that beats 0.5 out of sample depends on the split:
+
+| split | tune / holdout | tune argmax | holdout Δ NDCG@10 | t | queries moved | verdict |
+|---|---|---|---:|---:|---:|---|
+| A — 60/40, default | 41 / 22 repos | (0.3, 0.6) | **+0.0095 ±0.0036** | 2.66 | 59 / 441 | clears both bars |
+| B — 40/60, *nested re-cut of A* | 22 / 41 repos | (0.3, 0.6) | +0.0044 ±0.0023 | 1.92 | 88 / 819 | flat |
+| C — 60/40, `--split-seed s2` | 41 / 22 repos | (0.4, 0.6) | +0.0042 ±0.0032 | 1.33 | 47 / 431 | flat |
+
+Only split A clears both the materiality and distinguishability bars. B is a **nested re-cut**, not a replication — splits differing only in `--tune-fraction` move the cut point within one `md5(repo_name)` ordering, so B's tune set is a strict subset of A's. C is the genuine resampling check (`--split-seed` salts the ordering; C shares 23 of 41 tune repos and only 4 of 22 holdout repos with A), and it comes back **flat**.
+
+Three checks were run on split A's result before it was written down:
+
+1. **Is it a chunker artifact?** ken's regex chunker natively covers Python/Go/TypeScript/Java/Rust; everything else falls back to the line chunker, and the holdout is heavy with fallback languages. If ragged chunk boundaries were what made extra semantic weight pay, the effect would concentrate there. It doesn't: natively-chunked NL queries gained **+0.0133 ±0.0074** (n=147) versus **+0.0096 ±0.0049** (n=231) for fallback languages — indistinguishable, and native is if anything larger. Per-language the signs go both ways across 19 languages with 1–6 queries moved each: a broad weak effect, not a subgroup artifact.
+2. **Did the curve move, or did the sweep find the right α?** The descriptive holdout curve (full grid, scored but never fed to an argmax) peaks at **0.8**, not 0.6, with a 0.6–0.8 plateau at ~0.799–0.800 against 0.7888 for shipped 0.5. The tune half's plateau is 0.4–0.7. The halves agree 0.5 is at or below the plateau's edge but **disagree on where the peak is**, and 0.6 beat 0.5 by only +0.0008 on the tune half versus +0.0110 on the holdout — a 14× gap. The *direction* replicates; the value 0.6 does not.
+3. **Does it survive resampling?** No — see split C above.
+
+**Verdict: the shipped pair stays, and "flat around the middle" essentially held.** α_symbol is flat outright. α_NL = 0.5 is defensible but marginally conservative: the held-out gain from 0.6 runs +0.004 to +0.010 across splits, clears materiality on only one of three, and rests on an argmax that moves between halves. That is nowhere near enough to amend a verbatim-port constant — and per the parity constraint above it would need its own ADR even if it were.
+
+The more interesting residue is the instability itself: the optimum drifts with the corpus (the harder half wants more semantic weight), which is the corpus-adaptive-α idea [ADR-013](internal/DECISIONS.md) deprecated. Re-opening it would need a mechanism that predicts α from the corpus *without* peeking at the labels — which this experiment neither provides nor attempted.
 
 ## Result provenance
 

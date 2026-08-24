@@ -360,19 +360,27 @@ ALPHA_GRID = tuple(round(0.1 * i, 1) for i in range(11))  # 0.0 … 1.0
 ALPHA_NOISE_FLOOR = 0.005
 
 
-def _split_repos(repo_names: list[str], tune_fraction: float = 0.6) -> tuple[list[str], list[str]]:
+def _split_repos(repo_names: list[str], tune_fraction: float = 0.6,
+                 seed: str = "") -> tuple[list[str], list[str]]:
     """Split repo names into (tune, holdout), deterministically and stratified.
 
     Deterministic: ordering is by md5 of the repo name, so the split is
     reproducible across machines and runs and doesn't depend on dict or
     filesystem order. Not `hash()`, which is salted per process.
 
+    `seed` salts that ordering. Without it, changing only tune_fraction
+    moves the cut point within ONE ordering, so the resulting splits are
+    NESTED — a 40/60 tune set is a strict subset of the 60/40 one — and
+    comparing them is not a replication, just a re-cut of the same
+    ranking. A different seed draws a genuinely different partition,
+    which is what testing whether a result survives resampling needs.
+
     Stratification happens in the caller, which groups by language before
     calling this — the goal is both halves keeping a similar mix rather
     than an exact ratio, so each stratum is split at the same fraction
     and the remainders fall where the hash order puts them.
     """
-    ordered = sorted(repo_names, key=lambda n: hashlib.md5(n.encode()).hexdigest())
+    ordered = sorted(repo_names, key=lambda n: hashlib.md5((seed + n).encode()).hexdigest())
     cut = round(len(ordered) * tune_fraction)
     # With a single-repo stratum, round() can send it entirely to one
     # side; keep at least one repo per side whenever there are ≥2.
@@ -382,7 +390,8 @@ def _split_repos(repo_names: list[str], tune_fraction: float = 0.6) -> tuple[lis
 
 
 def _stratified_split(
-    grouped: dict[str, list[Task]], repo_specs: dict[str, RepoSpec], tune_fraction: float = 0.6
+    grouped: dict[str, list[Task]], repo_specs: dict[str, RepoSpec], tune_fraction: float = 0.6,
+    seed: str = "",
 ) -> tuple[list[str], list[str]]:
     """Split repos into tune/holdout, stratified by language.
 
@@ -399,7 +408,7 @@ def _stratified_split(
     tune: list[str] = []
     holdout: list[str] = []
     for language in sorted(by_language):
-        t, h = _split_repos(by_language[language], tune_fraction)
+        t, h = _split_repos(by_language[language], tune_fraction, seed)
         tune.extend(t)
         holdout.extend(h)
     return sorted(tune), sorted(holdout)
@@ -550,7 +559,7 @@ def run_alpha_sweep(args: argparse.Namespace, model_dir: Path | None, grouped: d
     if args.mode == "bm25":
         sys.exit("--alpha-sweep needs a fusion mode; α does nothing under --mode=bm25.")
 
-    tune, holdout = _stratified_split(grouped, repo_specs, args.tune_fraction)
+    tune, holdout = _stratified_split(grouped, repo_specs, args.tune_fraction, args.split_seed)
     if not tune or not holdout:
         sys.exit(f"split produced an empty half (tune={len(tune)} holdout={len(holdout)}) — need ≥2 repos.")
 
@@ -643,27 +652,41 @@ def _alpha_holdout(args, model_dir, grouped, repo_specs, tune, holdout,
     # can't be corrupted by the pinning plumbing.
     sys.stderr.write("holdout evaluation (no tuning happens here)\n")
     tuned_label = f"{best['symbol']}:{best['nl']}"
+
+    # The holdout pass scores the FULL grid alongside the two arms that
+    # matter. Selection still happens only on the tune half — these
+    # extra points are DESCRIPTIVE and must never feed an argmax, which
+    # is why `best` is fixed before this runs.
+    #
+    # They earn their place by answering the question a two-point
+    # comparison can't: if the tuned pair wins, is that because it found
+    # the right α, or because the whole curve moved between halves? A
+    # holdout peak far from the tuned value means α's optimum is
+    # corpus-dependent, which is a completely different finding from
+    # "0.6 beats 0.5". Since the whole grid rides on one index build,
+    # this costs nothing but the fusion.
+    grid_labels = [f"{a}:{a}" for a in ALPHA_GRID]
+    pairs = ["adaptive"] + [lbl for lbl in grid_labels if lbl != tuned_label]
+    if tuned_label != "0.3:0.5":
+        pairs.append(tuned_label)
+    by_pair = _run_half(
+        repo_names=holdout, grouped=grouped, repo_specs=repo_specs, args=args,
+        model_dir=model_dir, alpha_pairs=pairs,
+    )
+    baseline_rows = by_pair["adaptive"]
     if tuned_label == "0.3:0.5":
-        # The tuned pair IS the shipped pair. Asking ken for both would
-        # be a duplicate --alpha-pairs entry; the adaptive arm already
-        # answers it, and Δ is exactly zero by construction.
-        by_pair = _run_half(
-            repo_names=holdout, grouped=grouped, repo_specs=repo_specs, args=args,
-            model_dir=model_dir, alpha_pairs=["adaptive"],
-        )
-        baseline_rows = by_pair["adaptive"]
+        # The tune argmax IS the shipped pair: Δ is zero by
+        # construction, which is itself the result.
         tuned_rows = baseline_rows
-        sys.stderr.write(
-            "  note: the tune argmax IS the shipped pair — Δ is zero by construction, "
-            "which is itself the result.\n"
-        )
+        sys.stderr.write("  note: the tune argmax IS the shipped pair — Δ is zero by construction.\n")
     else:
-        by_pair = _run_half(
-            repo_names=holdout, grouped=grouped, repo_specs=repo_specs, args=args,
-            model_dir=model_dir, alpha_pairs=["adaptive", tuned_label],
-        )
-        baseline_rows = by_pair["adaptive"]
         tuned_rows = by_pair[tuned_label]
+
+    holdout_curves: dict[str, list[dict]] = {"symbol": [], "nl": []}
+    for a, label in zip(ALPHA_GRID, grid_labels):
+        means = _class_means(by_pair[label])
+        for cls in ("symbol", "nl"):
+            holdout_curves[cls].append({"alpha": a, **means[cls]})
     tuned, baseline = _class_means(tuned_rows), _class_means(baseline_rows)
     paired = _paired_delta(tuned_rows, baseline_rows)
 
@@ -722,6 +745,30 @@ def _alpha_holdout(args, model_dir, grouped, repo_specs, tune, holdout,
             f"±{stderr:.4f} (t={tstat:.2f}) on data it was not tuned on. Changing the shipped "
             "default would still need an ADR amending the verbatim-port framing (docs/BENCH.md)."
         )
+    # Descriptive: where each half's curve actually peaks. A large gap
+    # between the two argmaxes means the sweep is chasing a corpus-
+    # dependent optimum rather than a global one.
+    sys.stderr.write(
+        f"\ndescriptive — holdout curve (NOT used for selection)\n"
+        f"{'α':>5}  {'symbol NDCG':>12}  {'NL NDCG':>9}\n"
+        f"{'-' * 5}  {'-' * 12}  {'-' * 9}\n"
+    )
+    for i, a in enumerate(ALPHA_GRID):
+        sys.stderr.write(
+            f"{a:>5.1f}  {holdout_curves['symbol'][i]['ndcg10']:>12.4f}  "
+            f"{holdout_curves['nl'][i]['ndcg10']:>9.4f}\n"
+        )
+    shift = {}
+    for cls in ("symbol", "nl"):
+        tune_peak = max(curves[cls], key=lambda p: p["ndcg10"])["alpha"] if curves[cls] else None
+        hold_peak = max(holdout_curves[cls], key=lambda p: p["ndcg10"])["alpha"]
+        shift[cls] = {"tune_argmax": tune_peak, "holdout_argmax": hold_peak}
+        if tune_peak is not None:
+            sys.stderr.write(
+                f"  {cls}: tune peak α={tune_peak}, holdout peak α={hold_peak}"
+                f"{'  ← the halves disagree' if abs(tune_peak - hold_peak) > 0.15 else ''}\n"
+            )
+
     sys.stderr.write(f"\nverdict: {verdict}\n")
 
     return {
@@ -732,7 +779,8 @@ def _alpha_holdout(args, model_dir, grouped, repo_specs, tune, holdout,
         "split": {
             "tune_fraction": args.tune_fraction,
             "stratified_by": "language",
-            "order": "md5(repo_name)",
+            "order": "md5(seed + repo_name)",
+            "seed": args.split_seed,
             "tune_repos": tune,
             "holdout_repos": holdout,
             "tune_queries": n_tune_q,
@@ -754,6 +802,11 @@ def _alpha_holdout(args, model_dir, grouped, repo_specs, tune, holdout,
             # (per-language slices, a different significance bar) can be
             # computed offline without re-running the holdout.
             "per_query": {"baseline": baseline_rows, "tuned": tuned_rows},
+            # Descriptive only — the full grid scored on the holdout
+            # half, so a reader can see whether the curve moved between
+            # halves. Never used for selection.
+            "curves_descriptive": holdout_curves,
+            "peak_shift": shift,
         },
         "verdict": verdict,
     }
@@ -1063,6 +1116,12 @@ def main() -> int:
         "--alpha-argmax", default=None, metavar="SYMBOL,NL",
         help="skip the tune sweep and evaluate this α pair on the holdout half "
              "(e.g. '0.3,0.4'). Same deterministic split; 2 passes instead of 13.",
+    )
+    p.add_argument(
+        "--split-seed", default="", metavar="STR",
+        help="salt the repo-split ordering. Changing only --tune-fraction re-cuts the SAME "
+             "ordering (nested splits); a new seed draws a different partition, which is what "
+             "a replication check needs.",
     )
     p.add_argument(
         "--tune-fraction", type=float, default=0.6,
