@@ -13,6 +13,61 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [1.5.1] — 2026-08-24 — fix an apparent hang when indexing C#
+
+A patch release with one user-facing fix. The 1.0 public API surface is
+unchanged.
+
+### Fixed
+
+- **`ken index` / `ken build-index` no longer appear to hang on C# sources
+  ([gotreesitter#972]).** On gotreesitter `v0.51.0` the `c_sharp` grammar takes
+  **250 seconds** to parse an 11 KB / 211-line file of *valid* C# and still
+  returns `root=ERROR`. The trigger is a collection initializer built from
+  `{ typeof(T), Expr }` entries — a common .NET registration-table idiom — where
+  parse time roughly doubles for every 8 entries added. One real repo
+  (MessagePack-CSharp) has six files over 30 s and 58 over 1 s, so indexing it
+  produced no output for many minutes and looked like a freeze.
+
+  ken now leaves `.cs` out of its structural-extraction language map, matching
+  the standing treatment of the bash grammar. Reproduced against raw
+  gotreesitter with no ken code in the path, and **filed upstream**; the
+  extractor and its tests stay in the tree, so re-enabling is a one-line change
+  once the grammar is fixed.
+
+  **This is a trade, not a pure win.** C# repos lose Arm B structural
+  enrichment, worth roughly +0.02–0.03 NDCG@10 — C# search quality drops in
+  exchange for terminating. `ken-mcp` was never affected (it sets a 500 ms parse
+  budget), so a server deployment that wants the enrichment back can keep it.
+
+  Distinct from the C# OOM fixed in gotreesitter v0.20.2: RSS stays flat
+  (~400 MB) while one core spins, so neither the old memory symptom nor ken's
+  64 KiB size guard catches it.
+
+### Added
+
+- `ken status` now reports the main module version alongside the commit — a
+  `go install`ed binary could previously show a commit but no version.
+- `ken bench` gains `--alpha-symbol` / `--alpha-nl` / `--alpha-pairs` for the
+  α-sensitivity harness. Bench-only by design: `ken search` deliberately has no
+  α knob, per `docs/BENCH.md`'s "don't tune ken's constants" rule.
+
+### Documentation
+
+- `docs/BENCH.md` gains two measured sections from the
+  [r/Rag thread follow-ups](docs/internal/rag-thread-followups.md): an
+  **α-sensitivity** study (swept on a held-out repo split — the shipped
+  (0.3, 0.5) constants stand) and a **chunker traceability vs ranking**
+  comparison (treesitter cuts the definition-split rate 3.2× across 276,745
+  definitions while leaving ranking flat, so ADR-011 stands on ranking grounds).
+- Every benchmark result file now carries a `provenance` block — commit,
+  chunker, mode, α pair, model digest, corpus revisions, `KEN_*` env — so a
+  published number can be traced back to what produced it.
+- New ADR-042 records the decision on server-side response provenance
+  (a per-response index build id in JSON only; markdown untouched).
+
+[gotreesitter#972]: https://github.com/odvcencio/gotreesitter/issues/972
+
 ## [1.5.0] — 2026-08-19 — remote HTTP transport for ken-mcp + reproducible builds
 
 A feature release: ken-mcp can now serve MCP over the network (Streamable HTTP)
