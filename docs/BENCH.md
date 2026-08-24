@@ -447,7 +447,8 @@ They were inherited. This section sweeps them, and the point of the design is th
 ### Method
 
 - **Split by repo, not by query.** Every query from one repo is answered from that repo's index, so a per-query split would put queries from the same corpus on both sides of the boundary and let corpus statistics leak into the "held-out" half. The split is deterministic (`md5(repo_name)` ordering — not Python's `hash()`, which is salted per process), **stratified by language**, at a 60/40 tune/holdout ratio. Language is the stratum because query class correlates with it and it is knowable before any run; the realized symbol/NL balance of both halves is printed next to the split so a bad draw is visible rather than silent.
-- **Two 1-D sweeps, not a 2-D grid.** The classes use separate constants and `isSymbolQuery` picks per query, so α_symbol and α_NL never interact. A single run pinned at (a, a) therefore yields *both* curve points at a — its symbol queries score the symbol curve, its NL queries the NL curve. That's 11 passes over the tune half instead of 22.
+- **Two 1-D sweeps, not a 2-D grid.** The classes use separate constants and `isSymbolQuery` picks per query, so α_symbol and α_NL never interact. A single run pinned at (a, a) therefore yields *both* curve points at a — its symbol queries score the symbol curve, its NL queries the NL curve. That's 11 evaluations over the tune half instead of 22.
+- **One index build for the whole grid.** α participates only in the fusion — it changes nothing about walking, chunking, or embedding — so `ken bench --alpha-pairs` scores every α against a single build (`--alpha-pairs adaptive,0.0:0.0,…,1.0:1.0`). The earlier shape, one `ken bench` process per α, rebuilt 41 identical indexes eleven times: query time is ~0.4 ms, so essentially the entire run was rebuilding an index that didn't change. Two passes over the corpus, not thirteen — and every curve point sees the byte-identical index, so a curve can't pick up drift between two builds. Verified against the slow path: identical curves and holdout numbers.
 - **Then one holdout evaluation.** Take the per-class argmax from the tune half, run that one pair on the holdout half, and compare against the shipped pair on the same half. The baseline arm runs α **unpinned**, exercising the shipped adaptive path itself, so the comparison can't be corrupted by the pinning plumbing.
 - **Ties go to the shipped constant.** The symbol curve saturates outright on some splits (every grid point identical to 4dp). Without this rule, an every-point-equal curve hands the argmax to whichever extreme the sort visited first, and the report claims α=0.0 was "tuned" on the strength of no evidence at all.
 
@@ -470,10 +471,11 @@ The harness reports Δ, its paired SE, the t statistic, and — the number that 
 # One-time: semble checkout + the 63-repo corpus (see "Bootstrap the corpus").
 go build -o /tmp/ken ./cmd/ken
 
-# Full experiment: 11 tune passes + 2 holdout passes. ~2 h on a 16-core box.
+# Full experiment: one pass over the tune half (all 11 α against one
+# index build) + one over the holdout (both arms, likewise).
 python3 bench/semble/run_ken.py --ken /tmp/ken --mode hybrid --alpha-sweep
 
-# Re-evaluate a known pair on the same deterministic holdout — 2 passes, not 13.
+# Re-evaluate a known pair on the same deterministic holdout — skips the tune pass.
 python3 bench/semble/run_ken.py --ken /tmp/ken --mode hybrid --alpha-sweep --alpha-argmax 0.3,0.4
 
 # A single pinned run, scored like any other benchmark run.

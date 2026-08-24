@@ -1134,6 +1134,17 @@ func cmdBench(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
+	// --alpha-pairs evaluates SEVERAL α settings against ONE index
+	// build, emitting a record per (query, pair). α is a fusion input —
+	// it changes nothing about indexing — so the sweep was rebuilding an
+	// identical index once per grid point. On the 63-repo semble corpus
+	// that is ~11 minutes of rebuild to change one float; this collapses
+	// the whole experiment from 13 passes to 2.
+	rest, alphaPairs, err := extractAlphaPairs(rest, alphas)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+		return 2
+	}
 	k, err := strconv.Atoi(kStr)
 	if err != nil || k < 0 {
 		fmt.Fprintln(os.Stderr, "ken: -k expects a non-negative integer")
@@ -1161,9 +1172,11 @@ func cmdBench(args []string) int {
 	defer saveCache()
 	fmt.Fprintf(os.Stderr, "ken bench: indexed %d chunks from %s (mode=%s chunker=%s)\n",
 		ix.Len(), rest[0], modeStr, chunker)
-	if alphas != search.AdaptiveAlphas {
+	if len(alphaPairs) > 1 {
+		fmt.Fprintf(os.Stderr, "ken bench: %d alpha pairs against one index\n", len(alphaPairs))
+	} else if alphaPairs[0] != search.AdaptiveAlphas {
 		fmt.Fprintf(os.Stderr, "ken bench: alpha pinned (symbol=%s nl=%s)\n",
-			alphaLabel(alphas.Symbol), alphaLabel(alphas.NL))
+			alphaLabel(alphaPairs[0].Symbol), alphaLabel(alphaPairs[0].NL))
 	}
 
 	type record struct {
@@ -1184,6 +1197,11 @@ func cmdBench(args []string) int {
 		// fusion used instead of re-deriving the regex in Python.
 		// Additive; the semble adapter is the only consumer.
 		SymbolQuery bool `json:"symbol_query"`
+		// AlphaSymbol / AlphaNL label which α pair produced this
+		// record, present only under --alpha-pairs (see the loop
+		// below). "adaptive" means the shipped per-class constants.
+		AlphaSymbol string `json:"alpha_symbol,omitempty"`
+		AlphaNL     string `json:"alpha_nl,omitempty"`
 	}
 
 	enc := json.NewEncoder(os.Stdout)
@@ -1194,31 +1212,41 @@ func cmdBench(args []string) int {
 		if q == "" || strings.HasPrefix(q, "#") {
 			continue
 		}
-		started := time.Now()
-		var (
-			results []search.Result
-			tel     search.Telemetry
-		)
-		if alphas == search.AdaptiveAlphas {
-			results, _, tel = ix.SearchModeWithTelemetry(q, k, mode)
-		} else {
-			// The telemetry path has no α-pinning variant (rerank
-			// stage-1 always runs adaptive), and the sweep doesn't
-			// read telemetry — so pinned runs report zero timings
-			// rather than pretend the adaptive numbers apply.
-			results, _ = ix.SearchModeAlphas(q, k, mode, alphas)
-		}
-		ms := float64(time.Since(started).Microseconds()) / 1000.0
-		rec := record{
-			Query:       q,
-			Results:     toJSONResults(results),
-			QueryMS:     ms,
-			Telemetry:   tel,
-			SymbolQuery: search.IsSymbolQuery(q),
-		}
-		if err := enc.Encode(rec); err != nil {
-			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-			return 1
+		symbolQuery := search.IsSymbolQuery(q)
+		for _, a := range alphaPairs {
+			started := time.Now()
+			var (
+				results []search.Result
+				tel     search.Telemetry
+			)
+			if a == search.AdaptiveAlphas {
+				results, _, tel = ix.SearchModeWithTelemetry(q, k, mode)
+			} else {
+				// The telemetry path has no α-pinning variant (rerank
+				// stage-1 always runs adaptive), and the sweep doesn't
+				// read telemetry — so pinned runs report zero timings
+				// rather than pretend the adaptive numbers apply.
+				results, _ = ix.SearchModeAlphas(q, k, mode, a)
+			}
+			ms := float64(time.Since(started).Microseconds()) / 1000.0
+			rec := record{
+				Query:       q,
+				Results:     toJSONResults(results),
+				QueryMS:     ms,
+				Telemetry:   tel,
+				SymbolQuery: symbolQuery,
+			}
+			// Only stamped in multi-pair mode: a single-pair run keeps
+			// the exact record shape the semble adapter has always
+			// consumed, so nothing downstream has to learn a new field.
+			if len(alphaPairs) > 1 {
+				rec.AlphaSymbol = alphaLabel(a.Symbol)
+				rec.AlphaNL = alphaLabel(a.NL)
+			}
+			if err := enc.Encode(rec); err != nil {
+				fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+				return 1
+			}
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -1259,6 +1287,61 @@ func extractAlphaFlags(args []string) ([]string, search.AlphaPair, error) {
 			return nil, out, fmt.Errorf("%s expects a number in [0,1], got %q", f.name, f.val)
 		}
 		*f.dst = v
+	}
+	return rest, out, nil
+}
+
+// extractAlphaPairs parses --alpha-pairs into the list of α settings to
+// evaluate per query. Each comma-separated entry is either "adaptive"
+// (the shipped per-class constants) or "SYMBOL:NL". Absent, the result
+// is the single pair the --alpha-symbol/--alpha-nl flags produced, so
+// the default path is exactly one evaluation per query.
+//
+// Example — the whole tune sweep plus the holdout baseline in one pass:
+//
+//	--alpha-pairs adaptive,0.0:0.0,0.1:0.1,...,1.0:1.0
+func extractAlphaPairs(args []string, single search.AlphaPair) ([]string, []search.AlphaPair, error) {
+	rest, spec, err := extractFlag(args, "alpha-pairs", "")
+	if err != nil {
+		return nil, nil, err
+	}
+	if spec == "" {
+		return rest, []search.AlphaPair{single}, nil
+	}
+	if single != search.AdaptiveAlphas {
+		return nil, nil, fmt.Errorf("--alpha-pairs conflicts with --alpha-symbol/--alpha-nl; use one or the other")
+	}
+	var out []search.AlphaPair
+	seen := map[search.AlphaPair]bool{}
+	for _, entry := range strings.Split(spec, ",") {
+		entry = strings.TrimSpace(entry)
+		pair := search.AdaptiveAlphas
+		if entry != "adaptive" {
+			sym, nl, ok := strings.Cut(entry, ":")
+			if !ok {
+				return nil, nil, fmt.Errorf("--alpha-pairs entry %q: want \"adaptive\" or \"SYMBOL:NL\"", entry)
+			}
+			for _, f := range []struct {
+				raw string
+				dst *float64
+			}{{sym, &pair.Symbol}, {nl, &pair.NL}} {
+				v, perr := strconv.ParseFloat(strings.TrimSpace(f.raw), 64)
+				if perr != nil || v < 0 || v > 1 {
+					return nil, nil, fmt.Errorf("--alpha-pairs entry %q: %q is not a number in [0,1]", entry, f.raw)
+				}
+				*f.dst = v
+			}
+		}
+		// Duplicates would silently double a curve point's weight in
+		// whatever aggregates the records downstream.
+		if seen[pair] {
+			return nil, nil, fmt.Errorf("--alpha-pairs lists %q more than once", entry)
+		}
+		seen[pair] = true
+		out = append(out, pair)
+	}
+	if len(out) == 0 {
+		return nil, nil, fmt.Errorf("--alpha-pairs is empty")
 	}
 	return rest, out, nil
 }

@@ -154,6 +154,7 @@ def run_repo(
     rerank_beta: float | None = None,
     alpha_symbol: float | None = None,
     alpha_nl: float | None = None,
+    alpha_pairs: list[str] | None = None,
     per_task: list[dict] | None = None,
 ) -> RepoOutcome:
     """Run all queries for one repo through ken bench; return per-task NDCG@10 + median p50."""
@@ -195,6 +196,11 @@ def run_repo(
         args.extend(["--alpha-symbol", str(alpha_symbol)])
     if alpha_nl is not None:
         args.extend(["--alpha-nl", str(alpha_nl)])
+    # α is a fusion input, so every pair can be scored against ONE index
+    # build. Passing the whole grid here instead of re-invoking ken per
+    # α is the difference between 13 passes over the corpus and 2.
+    if alpha_pairs:
+        args.extend(["--alpha-pairs", ",".join(alpha_pairs)])
 
     proc = subprocess.run(
         args,
@@ -215,19 +221,34 @@ def run_repo(
             continue
         records.append(json.loads(line))
 
-    if len(records) != len(stdin_lines):
+    # With --alpha-pairs ken emits one record per (query, pair), so the
+    # expected count scales with the number of pairs.
+    expected = len(stdin_lines) * max(1, len(alpha_pairs or []))
+    if len(records) != expected:
         sys.stderr.write(
-            f"  warn: {spec.name}: expected {len(stdin_lines)} records, got {len(records)}\n"
+            f"  warn: {spec.name}: expected {expected} records, got {len(records)}\n"
         )
+
+    # With --alpha-pairs, ken emits one record per (query, pair) rather
+    # than one per query, so a "run" of a task is latency_runs ×
+    # len(alpha_pairs) consecutive records. The per-pair rows go to
+    # per_task (which is what the α sweep aggregates); the RepoOutcome
+    # NDCG below is computed from the FIRST pair only, so a plain run —
+    # where there is exactly one pair — is unchanged.
+    pairs_per_query = max(1, len(alpha_pairs or []))
+    stride = latency_runs * pairs_per_query
 
     ndcg10_sum = 0.0
     median_latencies: list[float] = []
     category_ndcg10: dict[str, list[float]] = defaultdict(list)
 
     for i, task in enumerate(tasks):
-        runs = records[i * latency_runs : (i + 1) * latency_runs]
-        if not runs:
+        block = records[i * stride : (i + 1) * stride]
+        if not block:
             continue
+        # Records within a block cycle pair-major per latency run; take
+        # every pairs_per_query-th entry to recover one pair's runs.
+        runs = block[0::pairs_per_query]
         # Same query, same index ⇒ deterministic results; any run will do
         # for NDCG. Take run 0 for results and median over all runs for ms.
         results = _shim(runs[0]["results"])
@@ -249,15 +270,25 @@ def run_repo(
         # semble's _SYMBOL_QUERY_RE — it must be the same verdict that
         # selected the α under test.
         if per_task is not None:
-            per_task.append({
-                "repo": spec.name,
-                "language": spec.language,
-                "query": task.query,
-                "category": task.category or "unknown",
-                "symbol_query": bool(runs[0].get("symbol_query", False)),
-                "ndcg10": q_ndcg,
-                "recall": any(1 <= r <= top_k for r in relevant_ranks),
-            })
+            # One row per α pair. The first latency run of each pair is
+            # representative: same query, same index ⇒ deterministic.
+            for offset in range(pairs_per_query):
+                rec = block[offset]
+                pair_results = _shim(rec["results"])
+                pair_ranks = [
+                    rank for t in task.all_relevant
+                    if (rank := target_rank(pair_results, t)) is not None
+                ]
+                per_task.append({
+                    "repo": spec.name,
+                    "language": spec.language,
+                    "query": task.query,
+                    "category": task.category or "unknown",
+                    "symbol_query": bool(rec.get("symbol_query", False)),
+                    "alpha": _pair_label(rec),
+                    "ndcg10": ndcg_at_k(pair_ranks, n_relevant, top_k),
+                    "recall": any(1 <= r <= top_k for r in pair_ranks),
+                })
 
         if verbose:
             sys.stderr.write(
@@ -374,6 +405,24 @@ def _stratified_split(
     return sorted(tune), sorted(holdout)
 
 
+def _pair_label(rec: dict) -> str:
+    """Label the α pair a ken bench record was produced under.
+
+    "adaptive" is the shipped per-class behavior; otherwise "sym:nl".
+    Absent fields mean a single-pair run, which is adaptive unless the
+    caller pinned it — and the sweep never does that via this path.
+    """
+    sym = rec.get("alpha_symbol", "adaptive")
+    nl = rec.get("alpha_nl", "adaptive")
+    if sym == "adaptive" and nl == "adaptive":
+        return "adaptive"
+    # Canonicalize through float: Go formats 0.0 as "0" and Python as
+    # "0.0", so the raw strings don't compare equal even though the
+    # values do. Round-tripping both sides through float makes the
+    # label a reliable dict key.
+    return f"{float(sym)}:{float(nl)}"
+
+
 def _run_half(
     *,
     repo_names: list[str],
@@ -381,10 +430,18 @@ def _run_half(
     repo_specs: dict[str, RepoSpec],
     args: argparse.Namespace,
     model_dir: Path | None,
-    alpha_symbol: float | None,
-    alpha_nl: float | None,
-) -> list[dict]:
-    """Run every query in one half at a pinned α pair; return per-task rows."""
+    alpha_pairs: list[str],
+) -> dict[str, list[dict]]:
+    """Score every query in one half at every α pair, in ONE pass.
+
+    Returns {pair_label: rows}. The whole point is that each repo's index
+    is built once and every α pair is fused against it — α participates
+    only in the fusion, so rebuilding per pair measured nothing and cost
+    ~11 minutes a point on the 63-repo corpus.
+
+    A side benefit beyond speed: every pair sees the byte-identical
+    index, so a curve can't pick up drift from two different builds.
+    """
     rows: list[dict] = []
     for repo_name in repo_names:
         run_repo(
@@ -395,15 +452,20 @@ def _run_half(
             chunker=args.chunker,
             model_dir=model_dir,
             top_k=args.top_k,
-            # Latency is not part of this experiment, and running each
-            # query 5× would quintuple a 22-pass grid for nothing.
+            # Latency is not part of this experiment; running each query
+            # 5× would multiply the pass for nothing.
             latency_runs=1,
             verbose=False,
-            alpha_symbol=alpha_symbol,
-            alpha_nl=alpha_nl,
+            alpha_pairs=alpha_pairs,
             per_task=rows,
         )
-    return rows
+    by_pair: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        by_pair[row["alpha"]].append(row)
+    missing = [p for p in alpha_pairs if p not in by_pair]
+    if missing:
+        sys.exit(f"ken bench returned no records for α pair(s) {missing} — record/pair alignment is off.")
+    return by_pair
 
 
 def _paired_delta(tuned_rows: list[dict], baseline_rows: list[dict]) -> dict[str, dict[str, float]]:
@@ -520,14 +582,16 @@ def run_alpha_sweep(args: argparse.Namespace, model_dir: Path | None, grouped: d
                               n_tune_q, n_hold_q, best, curves, saturated)
 
     curves: dict[str, list[dict]] = {"symbol": [], "nl": []}
-    sys.stderr.write(f"{'α':>5}  {'symbol NDCG':>12} {'n':>5}  {'NL NDCG':>9} {'n':>5}\n")
+    sys.stderr.write(f"sweeping {len(ALPHA_GRID)} α values in one pass over the tune half...\n")
+    grid_labels = [f"{a}:{a}" for a in ALPHA_GRID]
+    by_pair = _run_half(
+        repo_names=tune, grouped=grouped, repo_specs=repo_specs, args=args,
+        model_dir=model_dir, alpha_pairs=grid_labels,
+    )
+    sys.stderr.write(f"\n{'α':>5}  {'symbol NDCG':>12} {'n':>5}  {'NL NDCG':>9} {'n':>5}\n")
     sys.stderr.write(f"{'-' * 5}  {'-' * 12} {'-' * 5}  {'-' * 9} {'-' * 5}\n")
-    for a in ALPHA_GRID:
-        rows = _run_half(
-            repo_names=tune, grouped=grouped, repo_specs=repo_specs, args=args,
-            model_dir=model_dir, alpha_symbol=a, alpha_nl=a,
-        )
-        means = _class_means(rows)
+    for a, label in zip(ALPHA_GRID, grid_labels):
+        means = _class_means(by_pair[label])
         for cls in ("symbol", "nl"):
             curves[cls].append({"alpha": a, **means[cls]})
         sys.stderr.write(
@@ -572,18 +636,34 @@ def _alpha_holdout(args, model_dir, grouped, repo_specs, tune, holdout,
     the point of the experiment.
     """
     # ── Single holdout evaluation: tuned pair vs the shipped baseline ──
-    sys.stderr.write("holdout evaluation (one run each — no tuning happens here)\n")
-    tuned_rows = _run_half(
-        repo_names=holdout, grouped=grouped, repo_specs=repo_specs, args=args,
-        model_dir=model_dir, alpha_symbol=best["symbol"], alpha_nl=best["nl"],
-    )
-    # The baseline is run with α UNPINNED rather than pinned to
-    # (0.3, 0.5): that exercises the shipped adaptive path itself, so
-    # the comparison can't be corrupted by the pinning plumbing.
-    baseline_rows = _run_half(
-        repo_names=holdout, grouped=grouped, repo_specs=repo_specs, args=args,
-        model_dir=model_dir, alpha_symbol=None, alpha_nl=None,
-    )
+    #
+    # Both arms in one pass, against the same index build. The baseline
+    # arm runs α UNPINNED rather than pinned to (0.3, 0.5): that
+    # exercises the shipped adaptive path itself, so the comparison
+    # can't be corrupted by the pinning plumbing.
+    sys.stderr.write("holdout evaluation (no tuning happens here)\n")
+    tuned_label = f"{best['symbol']}:{best['nl']}"
+    if tuned_label == "0.3:0.5":
+        # The tuned pair IS the shipped pair. Asking ken for both would
+        # be a duplicate --alpha-pairs entry; the adaptive arm already
+        # answers it, and Δ is exactly zero by construction.
+        by_pair = _run_half(
+            repo_names=holdout, grouped=grouped, repo_specs=repo_specs, args=args,
+            model_dir=model_dir, alpha_pairs=["adaptive"],
+        )
+        baseline_rows = by_pair["adaptive"]
+        tuned_rows = baseline_rows
+        sys.stderr.write(
+            "  note: the tune argmax IS the shipped pair — Δ is zero by construction, "
+            "which is itself the result.\n"
+        )
+    else:
+        by_pair = _run_half(
+            repo_names=holdout, grouped=grouped, repo_specs=repo_specs, args=args,
+            model_dir=model_dir, alpha_pairs=["adaptive", tuned_label],
+        )
+        baseline_rows = by_pair["adaptive"]
+        tuned_rows = by_pair[tuned_label]
     tuned, baseline = _class_means(tuned_rows), _class_means(baseline_rows)
     paired = _paired_delta(tuned_rows, baseline_rows)
 
