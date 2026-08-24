@@ -12,7 +12,7 @@ Ordering: item 4 (provenance) first — it's small and items 2–3 want it in pl
 
 **Claim to test:** the inherited fusion weights (α_symbol=0.3, α_NL=0.5) are near-optimal, and RRF is flat around the middle anyway.
 
-**What exists already.** α is adaptive per query class (`internal/search/adaptive.go:resolveAlpha`, verbatim from semble's `ranking/weighting.py`), and the `alphaOverride` parameter already plumbs through `Hybrid()` — so this is a harness change only, no search-path code. ADR-013 (corpus-adaptive α, a third query-class branch) is Deprecated and stays that way; this item is about validating the two existing constants, not adding routing.
+**What exists already.** α is adaptive per query class (`internal/search/adaptive.go:resolveAlpha`, verbatim from semble's `ranking/weighting.py`), and the `alphaOverride` parameter already plumbs through `Hybrid()` — so this is a harness change only, no search-path code. **[Correction, 2026-08-24: that last clause was wrong.** `alphaOverride` existed only on the unexported `hybridSearch`, and all three call sites in `index.go` hardcoded `-1`; nothing exported could pin α. Item 1 needed a small search-path addition — see "As built" below.**]** ADR-013 (corpus-adaptive α, a third query-class branch) is Deprecated and stays that way; this item is about validating the two existing constants, not adding routing.
 
 **Design.**
 - Split the 1,251 semble-bench queries **by repo, not by query** — queries from one repo share an index, and a per-query split would leak corpus statistics across the boundary. Deterministic split (hash of repo name), roughly 60/40 tune/holdout, stratified so both halves keep a similar symbol/NL mix.

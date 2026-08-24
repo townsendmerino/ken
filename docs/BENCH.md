@@ -438,6 +438,56 @@ The bench writes `bench/tokens/results/{semble,coir}-tokens.json` — gitignored
 - **CoIR-CSN-Python warning.** The substring-leak artifact that makes BM25 beat hybrid on this corpus (see ["Why BM25 beats hybrid on CSN-Python"](#why-bm25-beats-hybrid-on-csn-python) above) also makes grep more competitive on recall — but not on tokens, because the corpus size makes any grep result set ridiculous. The headline number is semble's bench; CoIR confirms the direction on a different distribution but isn't the cleanest demonstration of ken's value on its own.
 - **Suffix-aware qrel matching.** Recall is computed via the same `path_matches` semble uses (`norm_file == target OR file.endswith("/"+target) OR target.endswith("/"+file)`) — handles the common case where semble's annotations are repo-rooted (`aiohttp/client.py`) but ken's chunk.File is benchmark-root-relative (`client.py`).
 
+## α sensitivity — is (0.3, 0.5) actually the right pair?
+
+ken inherits semble's two adaptive fusion weights verbatim: **α_symbol = 0.3** (identifier-shaped queries lean BM25) and **α_NL = 0.5** (natural-language queries balance the two arms). α is the semantic arm's weight in the RRF fuse; BM25 gets 1 − α. The [r/Rag thread](internal/rag-thread-followups.md) asked the fair question — were those ever swept, or just inherited?
+
+They were inherited. This section sweeps them, and the point of the design is that **the sweep is not allowed to report on the data it tuned on**.
+
+### Method
+
+- **Split by repo, not by query.** Every query from one repo is answered from that repo's index, so a per-query split would put queries from the same corpus on both sides of the boundary and let corpus statistics leak into the "held-out" half. The split is deterministic (`md5(repo_name)` ordering — not Python's `hash()`, which is salted per process), **stratified by language**, at a 60/40 tune/holdout ratio. Language is the stratum because query class correlates with it and it is knowable before any run; the realized symbol/NL balance of both halves is printed next to the split so a bad draw is visible rather than silent.
+- **Two 1-D sweeps, not a 2-D grid.** The classes use separate constants and `isSymbolQuery` picks per query, so α_symbol and α_NL never interact. A single run pinned at (a, a) therefore yields *both* curve points at a — its symbol queries score the symbol curve, its NL queries the NL curve. That's 11 passes over the tune half instead of 22.
+- **Then one holdout evaluation.** Take the per-class argmax from the tune half, run that one pair on the holdout half, and compare against the shipped pair on the same half. The baseline arm runs α **unpinned**, exercising the shipped adaptive path itself, so the comparison can't be corrupted by the pinning plumbing.
+- **Ties go to the shipped constant.** The symbol curve saturates outright on some splits (every grid point identical to 4dp). Without this rule, an every-point-equal curve hands the argmax to whichever extreme the sort visited first, and the report claims α=0.0 was "tuned" on the strength of no evidence at all.
+
+### Reading the result honestly
+
+ken's retrieval is deterministic — the same corpus at the same α reproduces the same ranking, so there is **no run-to-run jitter to average away**. The uncertainty is sampling: which repos landed in the holdout and which queries they carry. Two separate bars therefore apply:
+
+1. **Materiality** — is the delta big enough to care about? The threshold used is ±0.005 NDCG, the tightest agreement band reported anywhere in this document (per-language Python vs semble).
+2. **Distinguishability** — is it separable from zero at all? Both arms score the *same* queries, so the right statistic is the **paired** per-query difference and its standard error. This matters more than it sounds: queries differ enormously in difficulty and α moves only a small minority of them, so an unpaired comparison drowns the effect in between-query variance.
+
+The harness reports Δ, its paired SE, the t statistic, and — the number that makes a small mean interpretable — **how many queries α moved at all**. A delta that clears bar 1 but not bar 2 is reported as indistinguishable from zero, not as a finding.
+
+### The parity constraint
+
+**α = (0.3, 0.5) remains the reference the ken-vs-semble comparison is run at**, per this document's "don't tune ken's constants" rule, and it remains what ships. Any tuned pair is a labelled experiment. Changing the shipped default would mean amending the verbatim-port framing itself, which needs its own ADR — a favorable holdout number would be the *start* of that argument, not the end of it. `ken search` deliberately has no α flag for the same reason; the pinning surface exists only on `ken bench`.
+
+### Reproduce
+
+```bash
+# One-time: semble checkout + the 63-repo corpus (see "Bootstrap the corpus").
+go build -o /tmp/ken ./cmd/ken
+
+# Full experiment: 11 tune passes + 2 holdout passes. ~2 h on a 16-core box.
+python3 bench/semble/run_ken.py --ken /tmp/ken --mode hybrid --alpha-sweep
+
+# Re-evaluate a known pair on the same deterministic holdout — 2 passes, not 13.
+python3 bench/semble/run_ken.py --ken /tmp/ken --mode hybrid --alpha-sweep --alpha-argmax 0.3,0.4
+
+# A single pinned run, scored like any other benchmark run.
+python3 bench/semble/run_ken.py --ken /tmp/ken --mode hybrid --alpha-nl 0.4
+```
+
+Writes `bench/semble/results/alpha-sweep-<mode>.json`: the tune curves, the argmax, the holdout means, the paired per-query differences, the per-query rows for both holdout arms (so a different slice or significance bar can be computed offline without re-running), and a [provenance block](#result-provenance).
+
+Aggregation note: the sweep averages **per query** within a half, not per repo then across repos the way the headline table does — the class slices have very uneven per-repo counts, and a 3-query repo shouldn't weigh as much as a 40-query one. Sweep numbers are comparable within the sweep, not against the published per-language table.
+
+### Results
+
+_Pending — the full 63-repo sweep is running. This subsection lands with the two tune curves, the holdout comparison, and the verdict._
+
 ## Result provenance
 
 Every result file a bench harness writes carries a `provenance` block: the commit, the chunker, the mode, the α pair, the model's content digest, the corpus revisions, and the `KEN_*` environment. Without it a published number can't be reproduced once the tree moves — six months later a regression and a config change look identical, and there is no way to tell which commit produced which figure. (Raised in the [r/Rag thread follow-ups](internal/rag-thread-followups.md), item 4.)
@@ -492,6 +542,7 @@ semble bench (this doc's primary reference):
 
 - `bench/semble/run_ken.py` — Python adapter; drives `ken bench` over stdin per repo.
 - `bench/semble/results/ken-<mode>.json` — written per run. Gitignored; regenerate at will.
+- `bench/semble/results/alpha-sweep-<mode>.json` — the [α-sensitivity](#α-sensitivity--is-03-05-actually-the-right-pair) experiment's curves, holdout comparison, and per-query rows. Gitignored.
 - `cmd/ken/main.go` — `ken bench` subcommand that the adapter drives.
 
 CoIR-CSN-Python external bench:
