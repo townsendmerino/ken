@@ -288,6 +288,22 @@ def run_repo(
                     "alpha": _pair_label(rec),
                     "ndcg10": ndcg_at_k(pair_ranks, n_relevant, top_k),
                     "recall": any(1 <= r <= top_k for r in pair_ranks),
+                    # Rank detail for the chunker-disagreement analysis
+                    # (follow-ups item 2). best_rank is None when no
+                    # relevant chunk surfaced at all — the "missed by
+                    # this chunker" case, which is the interesting half
+                    # of a disagreement.
+                    "ranks": pair_ranks,
+                    "best_rank": min(pair_ranks) if pair_ranks else None,
+                    "n_relevant": n_relevant,
+                    "targets": [t.path for t in task.all_relevant],
+                    # The ranked hit list, so a disagreement can be
+                    # traced to the specific chunk each chunker
+                    # surfaced (or failed to).
+                    "hits": [
+                        {"file": r["file_path"], "start": r["start_line"], "end": r["end_line"]}
+                        for r in rec["results"]
+                    ],
                 })
 
         if verbose:
@@ -1118,6 +1134,12 @@ def main() -> int:
              "(e.g. '0.3,0.4'). Same deterministic split; 2 passes instead of 13.",
     )
     p.add_argument(
+        "--dump-per-query", action="store_true",
+        help="record per-query ranks + hit lists in the result JSON. Needed by the chunker-"
+             "disagreement analysis (scripts/chunker_disagreement.py), which compares two runs "
+             "query by query; the default summary keeps only per-repo aggregates.",
+    )
+    p.add_argument(
         "--split-seed", default="", metavar="STR",
         help="salt the repo-split ordering. Changing only --tune-fraction re-cuts the SAME "
              "ordering (nested splits); a new seed draws a different partition, which is what "
@@ -1226,6 +1248,7 @@ def main() -> int:
 
     started = time.perf_counter()
     outcomes: list[RepoOutcome] = []
+    per_query: list[dict] | None = [] if args.dump_per_query else None
     for repo_name, repo_tasks in sorted(grouped.items()):
         spec = repo_specs[repo_name]
         if args.verbose:
@@ -1245,6 +1268,7 @@ def main() -> int:
             rerank_beta=args.rerank_beta,
             alpha_symbol=args.alpha_symbol,
             alpha_nl=args.alpha_nl,
+            per_task=per_query,
         )
         outcomes.append(o)
         sys.stderr.write(
@@ -1279,7 +1303,11 @@ def main() -> int:
     # Save full results JSON.
     out_dir = Path(__file__).resolve().parent / "results"
     out_dir.mkdir(exist_ok=True)
-    out_path = out_dir / f"ken-{args.mode}.json"
+    # Chunker in the filename: item 2 compares a regex run against a
+    # treesitter one, and they would otherwise clobber each other.
+    # regex stays unsuffixed so existing paths in docs keep resolving.
+    suffix = "" if args.chunker == "regex" else f"-{args.chunker}"
+    out_path = out_dir / f"ken-{args.mode}{suffix}.json"
 
     # One corpus entry per scored repo. semble's RepoSpec may already
     # carry the pinned revision sync_repos.py checked out; fall back to
@@ -1337,6 +1365,8 @@ def main() -> int:
             for o in outcomes
         ],
     }
+    if per_query is not None:
+        summary["per_query"] = per_query
     out_path.write_text(json.dumps(summary, indent=2) + "\n")
     sys.stderr.write(f"Results saved to {out_path}\n")
     print(json.dumps(summary, indent=2))

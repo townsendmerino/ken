@@ -54,13 +54,25 @@ Methodology lessons the plan didn't anticipate:
 **Claim to test:** "treesitter Δ −0.004 overall, within noise" may be hiding a real win on a specific failure class that aggregate NDCG averages away.
 
 **Design.**
-- Re-run regex vs treesitter on the semble bench, but instead of comparing aggregate NDCG, extract the **per-query outcome pairs** (rank of qrel target under each chunker) from the existing result JSON (`bench/semble/results/`).
+- Re-run regex vs treesitter on the semble bench, but instead of comparing aggregate NDCG, extract the **per-query outcome pairs** (rank of qrel target under each chunker) from the existing result JSON (`bench/semble/results/`). **[Correction, 2026-08-24: the result JSON stores only per-repo aggregates (`ndcg10`, `by_category`) — there are no per-query ranks in it, so this extraction was impossible as written. `run_ken.py --dump-per-query` now records ranks + hit lists, and the two chunker runs write to distinct files.]**
 - Classify the queries where the two chunkers disagree (target found by one, missed or ranked ≥5 lower by the other) along the axes the bench already carries: query category (architecture / semantic / symbol via `by_category`), language, and — the commenter's specific axes — whether the failure is a *boundary* failure: target chunk split mid-definition, or a chunk mixing two adjacent definitions. Boundary-failure detection needs a small classifier over the chunk spans vs the file's definition spans; the enrichment pass already extracts definition locations, so this is a join, not new parsing.
 - Also answer the commenter's direct question — cross-file symbol references — by slicing symbol-class disagreements on whether the qrel target file differs from the file the query's identifier is defined in.
 
 **Deliverable:** a table in BENCH.md ("where the chunkers disagree"): disagreement count by category × language, share of disagreements that are boundary failures, and a verdict on whether ADR-011 (regex stays default) needs revisiting for any slice. If treesitter wins the boundary-failure slice decisively, that's the right amendment to the Reddit claim even if the aggregate stays flat.
 
-**Estimate:** medium-small. No new benchmark runs needed if existing result JSONs for both chunkers are current; the work is the disagreement classifier and the definition-span join.
+**Estimate:** medium-small. No new benchmark runs needed if existing result JSONs for both chunkers are current; the work is the disagreement classifier and the definition-span join. **[Correction: new runs ARE needed — see above. Both runs are ~10 min each now that indexing is the only real cost.]**
+
+### As built (in progress, 2026-08-24)
+
+The definition-span join landed first, as `bench/chunkdiff` (build tag `bench`), because it answers the commenter's *traceability* question directly and needs no query data at all:
+
+- **SPLIT** — a definition no single chunk fully contains. Retrieval can surface it, but no one result shows the whole thing; the agent gets half a function. Measured over **leaf** definitions (functions + methods).
+- **MIXED** — a chunk containing the start of ≥2 definitions, so the span doesn't map to one symbol. Measured over **top-level** definitions only (top-level functions + classes), deliberately: a chunk holding a whole class with five methods *does* map to one symbol, and counting its five method starts as mixing would penalize exactly the outcome the metric should reward. That asymmetry has its own unit test.
+
+Spans come from `structural.ExtractFile` — the same extractor Arm B enrichment already runs — so it is a join, as planned, not new parsing. Two details that would have quietly corrupted the numbers:
+
+- **Overlap-aware containment.** The line chunker emits overlapping windows precisely so a definition straddling one boundary still appears whole in a neighbour. Containment therefore asks "does *any* chunk cover this", not "does the chunk containing its start line"; the naive version punishes a chunker for the feature that fixes the defect being measured.
+- **All-chunkers-or-none per file.** A file analyzed under regex but skipped under treesitter would make the two columns describe different corpora. Files with no registered extractor, or no spanned definitions, are skipped entirely — scoring them as perfectly traceable would dilute every rate with files that never had a symbol in them.
 
 ---
 
