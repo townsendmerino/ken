@@ -100,3 +100,6 @@ go.work.sum
 # Temporal-drift harness output (regenerated via
 # `go test -tags=bench ./bench/temporal/`).
 bench/temporal/results/
+
+# repowise index — generated codebase-intelligence artifacts, never committed
+.repowise/
