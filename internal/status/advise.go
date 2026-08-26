@@ -69,7 +69,18 @@ type AdviseInputs struct {
 
 	// AutoFetchDisabled is true when KEN_MCP_AUTO_FETCH is explicitly falsey.
 	AutoFetchDisabled bool
+
+	// CorpusChunks is the chunk count of the repo's existing snapshot
+	// (search.PeekSnapshotChunks on <cwd>/.ken/snapshot.bin), or 0 when no
+	// snapshot is present / it wasn't probed. Drives the large-corpus advice.
+	CorpusChunks int
 }
+
+// largeCorpusChunks is the chunk count above which a cold hybrid build's
+// embedding pass is slow enough (multi-second) that KEN_MCP_STAGED's
+// serve-bm25-first pays off. The largest corpus measured (Linux kernel, hybrid)
+// is ~826k chunks; 100k is a comfortably-large repo where the suggestion helps.
+const largeCorpusChunks = 100_000
 
 // Advise analyzes the inputs and returns findings ordered most-severe-first.
 func Advise(in AdviseInputs) []Finding {
@@ -127,7 +138,16 @@ func Advise(in AdviseInputs) []Finding {
 			"raise KEN_MCP_CACHE_SIZE (default 16)"})
 	}
 
-	// 6. Usage / token-savings tracking.
+	// 6. Repo shape — a large corpus benefits from a staged cold start
+	// (docs/USERS.md "Tuning for your repo shape"). Sized from the existing
+	// snapshot's chunk count (peeked, no rebuild) when one is present.
+	if in.CorpusChunks >= largeCorpusChunks {
+		f = append(f, Finding{SeverityInfo, "Large corpus",
+			fmt.Sprintf("This repo's snapshot holds %s chunks; on a cold start, hybrid embedding of that many chunks is the slow step.", formatInt(in.CorpusChunks)),
+			"set KEN_MCP_STAGED=1 — ken-mcp serves BM25 lexical instantly and upgrades to hybrid in the background (see docs/USERS.md \"Tuning for your repo shape\")"})
+	}
+
+	// 7. Usage / token-savings tracking.
 	if st.SavingsPath == "" || st.Savings.AllTime.Calls == 0 {
 		f = append(f, Finding{SeverityInfo, "No usage recorded yet",
 			"Token-savings tracking has no entries yet — it populates as agents call ken.", ""})

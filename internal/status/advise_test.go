@@ -32,6 +32,32 @@ func healthyInputs() AdviseInputs {
 	}
 }
 
+func TestAdvise_LargeCorpus(t *testing.T) {
+	// Above the threshold → a SeverityInfo "Large corpus" finding suggesting STAGED.
+	in := healthyInputs()
+	in.CorpusChunks = 200_000
+	f := Advise(in)
+	got := findTitle(f, "Large corpus")
+	if got == nil {
+		t.Fatal("expected a 'Large corpus' finding at 200k chunks")
+	}
+	if got.Severity != SeverityInfo {
+		t.Errorf("Large corpus severity = %v, want Info", got.Severity)
+	}
+	if !strings.Contains(got.Action, "KEN_MCP_STAGED=1") {
+		t.Errorf("action should suggest KEN_MCP_STAGED=1; got %q", got.Action)
+	}
+
+	// Below the threshold (and unset, 0) → no finding.
+	in.CorpusChunks = 50_000
+	if findTitle(Advise(in), "Large corpus") != nil {
+		t.Error("50k chunks is under the threshold — should not fire")
+	}
+	if findTitle(Advise(healthyInputs()), "Large corpus") != nil {
+		t.Error("unset CorpusChunks (0) should not fire")
+	}
+}
+
 func TestAdvise_HealthyIsAllOK(t *testing.T) {
 	f := Advise(healthyInputs())
 	for _, x := range f {

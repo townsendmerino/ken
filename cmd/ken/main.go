@@ -351,12 +351,22 @@ func cmdDoctor(args []string) int {
 		}
 	}
 
+	// Size the corpus from the repo's existing snapshot (written by ken-mcp when
+	// KEN_MCP_SNAPSHOT is on) so doctor can suggest KEN_MCP_STAGED on a large
+	// repo. Cheap header-only peek — never loads the index body; CWD-relative,
+	// since doctor is run at the repo root. Absent snapshot ⇒ 0 ⇒ no advice.
+	corpusChunks := 0
+	if n, ok := search.PeekSnapshotChunks(search.SnapshotBinPath(".")); ok {
+		corpusChunks = n
+	}
+
 	findings := status.Advise(status.AdviseInputs{
 		Status:             st,
 		RerankCacheEntries: rerankEntries,
 		MCPMode:            strings.TrimSpace(os.Getenv("KEN_MCP_MODE")),
 		CachingDisabled:    strings.TrimSpace(os.Getenv("KEN_MCP_CACHE_SIZE")) == "0",
 		AutoFetchDisabled:  isFalseyEnv(os.Getenv("KEN_MCP_AUTO_FETCH")),
+		CorpusChunks:       corpusChunks,
 	})
 
 	if jsonOut {

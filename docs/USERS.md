@@ -151,6 +151,28 @@ Rule of thumb: if the question is "find chunks that answer this
 question," ken wins. If it's "find all instances of X," grep
 wins.
 
+## Tuning for your repo shape
+
+Defaults — hybrid mode, regex chunker, snapshots on — are right for
+most repos. Reach for the knobs below only when your repo has a shape
+that stresses **cold start** (first query on a fresh index) or
+**rebuilds** (re-indexing as you edit). All are `KEN_MCP_*` env vars
+([full list](#configuration)); ken-mcp always watches, so live edits
+re-index automatically.
+
+| Your repo… | Reach for | Why |
+|---|---|---|
+| **Small / medium, stable** (≲ tens of thousands of files) | nothing — the defaults | Cold start is already 1–3 s, so `STAGED` / `LAZY_ENRICH` add moving parts for no gain. Just run `ken download-model` once to stay on the ~97% hybrid path instead of the ~82–91% bm25 fallback. |
+| **Large** (100 K+ files — big monorepo, kernel-scale) | `KEN_MCP_STAGED=1` | Serves BM25 lexical **instantly** (~4× faster first query), then upgrades to hybrid in the background. Snapshots (on by default) make every *restart* after that instant. Trim vendored/generated trees with `.kenignore` to shrink the index. |
+| **High-churn** (you edit it throughout the session) | `KEN_MCP_EMBED_CACHE=1` | Persistent `sha256(chunk)→vector` cache: a rebuild re-embeds only the chunks whose text actually changed — the rest are hits. Biggest win when you re-index repeatedly. |
+| **Large *and* high-churn** (the hard case) | `KEN_MCP_STAGED=1` + `KEN_MCP_EMBED_CACHE=1` | Staged gets a usable first query out of the big cold build; the embed cache keeps every rebuild after it cheap as you edit. |
+| **Structure-heavy exploration** (lots of `definition` / `outline` / `callers`) | `KEN_MCP_CHUNKER=treesitter` | AST-aligned chunk boundaries, so a retrieved span is one whole symbol rather than a line-window straddling two. (The `# func:` enrichment labels apply on any chunker.) |
+| **No model / air-gapped** | nothing — bm25 is automatic | With no embedding model ken falls back to BM25-only (~82–91% recall). Fine for keyword-ish lookups; weaker on conceptual "where do we handle X." |
+
+Starting points, not a routing algorithm — and `ken doctor` already
+flags the health half (model missing, cache cold) plus, on a large
+corpus, the `STAGED` suggestion above.
+
 ## The nine MCP tools
 
 Quick reference. Pass `output: "json"` to any of these for a

@@ -26,10 +26,12 @@
 package search
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -192,6 +194,46 @@ func (m SnapshotManifest) FilesEqual(other SnapshotManifest) bool {
 // ADR-024 operator prebuilt (.ken/index.bin), which is loaded frozen.
 func SnapshotBinPath(dir string) string      { return filepath.Join(dir, ".ken", "snapshot.bin") }
 func SnapshotManifestPath(dir string) string { return filepath.Join(dir, ".ken", "snapshot.manifest") }
+
+// PeekSnapshotChunks reads only the KEN1 header of a snapshot.bin and returns
+// its chunk count, WITHOUT loading the (potentially hundreds-of-MB)
+// chunks+vectors body. Returns (0, false) when the file is absent, too short,
+// or not a KEN1 blob. `ken doctor` uses it to size the corpus cheaply for the
+// repo-shape advice (the size-keyed KEN_MCP_STAGED suggestion).
+func PeekSnapshotChunks(path string) (int, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer func() { _ = f.Close() }()
+	// The header (magic + version + kenVersion LP + mode byte + chunker LP +
+	// numChunks) is well under 512 B, so read a bounded prefix and never touch
+	// the body. A short read just fails the guarded parse below → (0, false).
+	prefix := make([]byte, 512)
+	n, _ := io.ReadFull(f, prefix)
+	r := bytes.NewReader(prefix[:n])
+	var magic [4]byte
+	if _, err := io.ReadFull(r, magic[:]); err != nil || string(magic[:]) != serializeMagic {
+		return 0, false
+	}
+	if _, err := binfmt.ReadU32(r); err != nil { // format version
+		return 0, false
+	}
+	if _, err := binfmt.ReadLPString(r); err != nil { // ken version
+		return 0, false
+	}
+	if _, err := r.ReadByte(); err != nil { // mode byte
+		return 0, false
+	}
+	if _, err := binfmt.ReadLPString(r); err != nil { // chunker name
+		return 0, false
+	}
+	numChunks, err := binfmt.ReadU32(r)
+	if err != nil {
+		return 0, false
+	}
+	return int(numChunks), true
+}
 
 // CurrentManifest walks dir the SAME way the index build does
 // (repo.WalkFS with the default options — .ken/ is pruned, so the snapshot's
