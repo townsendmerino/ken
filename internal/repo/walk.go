@@ -245,6 +245,22 @@ func (m *Matcher) MaxFileBytes() int64 {
 // `npm install` creating ~30k node_modules/ subdirs each triggers a full
 // recursive watch + WalkDir inline on the event loop, exhausting the inotify
 // watch table. Empty / "." (the root) always descends.
+// ancestorDirExcluded reports whether any ANCESTOR directory of p (slash-
+// separated) is excluded by a directory-scoped rule (e.g. `node_modules/`
+// excluding everything beneath it). Each ancestor is checked with isDir=true.
+// The caller checks p itself separately — as a directory in ShouldDescend, as a
+// file in ShouldIndex — so this handles only the shared ancestor-prune walk
+// (WalkFS gets that for free via fs.SkipDir; the Matcher answers paths directly
+// with no walk, so it synthesizes the same pruning here).
+func (m *Matcher) ancestorDirExcluded(p string) bool {
+	for i := strings.LastIndex(p, "/"); i > 0; i = strings.LastIndex(p[:i], "/") {
+		if matchScopes(m.scopes, p[:i], true) {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Matcher) ShouldDescend(relDir string) bool {
 	if m == nil {
 		return false
@@ -258,13 +274,8 @@ func (m *Matcher) ShouldDescend(relDir string) bool {
 	}
 	// The dir itself, plus every ancestor, checked as a directory: a
 	// dir-scoped rule like `node_modules/` excludes the dir and its subtree.
-	if matchScopes(m.scopes, relDir, true) {
+	if matchScopes(m.scopes, relDir, true) || m.ancestorDirExcluded(relDir) {
 		return false
-	}
-	for i := strings.LastIndex(relDir, "/"); i > 0; i = strings.LastIndex(relDir[:i], "/") {
-		if matchScopes(m.scopes, relDir[:i], true) {
-			return false
-		}
 	}
 	return true
 }
@@ -291,16 +302,10 @@ func (m *Matcher) ShouldIndex(relPath string) bool {
 		relPath == ".ken" || strings.HasPrefix(relPath, ".ken/") {
 		return false
 	}
-	// Walk-style dir-prune simulation: ask matchScopes for each
-	// ancestor directory of relPath with isDir=true, so a dir-only
-	// rule like `node_modules/` correctly excludes files INSIDE that
-	// directory. WalkFS gets this for free via fs.SkipDir; Matcher
-	// answers paths directly with no walk, so we synthesize the same
-	// pruning here.
-	for i := strings.LastIndex(relPath, "/"); i > 0; i = strings.LastIndex(relPath[:i], "/") {
-		if matchScopes(m.scopes, relPath[:i], true) {
-			return false
-		}
+	// Dir-prune simulation: a dir-only rule like `node_modules/` must exclude
+	// files INSIDE that directory (see ancestorDirExcluded).
+	if m.ancestorDirExcluded(relPath) {
+		return false
 	}
 	// Then check the file itself (e.g. `*.log` non-dir rules).
 	if matchScopes(m.scopes, relPath, false) {
