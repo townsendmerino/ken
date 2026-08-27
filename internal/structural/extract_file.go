@@ -84,12 +84,16 @@ func extractGuarded(gram, rel string, data []byte) *FileStruct {
 	if err != nil || tree == nil {
 		return nil
 	}
-	if r := tree.ParseStopReason(); r != gotreesitter.ParseStopAccepted {
+	// parseBudgetForceTimeout is a test seam (normally false): it forces the
+	// budget-exhausted branch below without depending on gotreesitter's
+	// timing-dependent deadline actually firing.
+	forced := parseBudgetForceTimeout.Load()
+	if r := tree.ParseStopReason(); r != gotreesitter.ParseStopAccepted || forced {
 		// A budget exhaustion (KEN_ENRICH_FILE_BUDGET_MS) surfaces as
 		// ParseStopTimeout: count + log it as a distinct, observable skip so a
 		// pathological file (the 159× template cliff) is visible, not silently
 		// unenriched. Other non-accept reasons stay silent (unchanged).
-		if r == gotreesitter.ParseStopTimeout {
+		if r == gotreesitter.ParseStopTimeout || forced {
 			recordParseBudgetSkip(rel, time.Since(start))
 		}
 		return nil

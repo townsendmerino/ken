@@ -407,10 +407,20 @@ func envParseBudgetMicros() uint64 {
 	return ms * 1000
 }
 
-// parseBudgetOverrideMicros lets tests force a sub-millisecond budget (the env
-// knob is whole-ms, too coarse to guarantee a timeout on a trivial file).
-// 0 = use the env. Test-only.
+// parseBudgetOverrideMicros lets tests set a sub-millisecond budget (the env
+// knob is whole-ms). 0 = use the env. Test-only. NOTE: a small wall-clock
+// budget does NOT reliably produce a timeout — gotreesitter checks its deadline
+// only at parse-step boundaries, so a trivial file can finish before the first
+// check (that made TestParseBudget_ExhaustionSkipsCountsLogs flaky on fast
+// runners). To exercise the budget-exhausted handling deterministically, use
+// parseBudgetForceTimeout instead of a tiny budget here.
 var parseBudgetOverrideMicros atomic.Uint64
+
+// parseBudgetForceTimeout, when true, makes extractGuarded take the
+// budget-exhausted path (skip + count + log) after the parse, regardless of the
+// real ParseStopReason. Test-only, deterministic — it decouples the assertion
+// about ken's handling from gotreesitter's timing-dependent deadline check.
+var parseBudgetForceTimeout atomic.Bool
 
 func effectiveParseBudgetMicros() uint64 {
 	if v := parseBudgetOverrideMicros.Load(); v != 0 {

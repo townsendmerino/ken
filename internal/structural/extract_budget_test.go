@@ -13,23 +13,21 @@ func clearParserPools() {
 }
 
 // TestParseBudget_ExhaustionSkipsCountsLogs drives the budget-exhausted code
-// path deterministically: a 1-microsecond budget (via the test override, since
-// the env knob is whole-ms) guarantees any real parse times out. The file must
-// be skipped (nil), counted, and logged with a positive duration.
+// path DETERMINISTICALLY via parseBudgetForceTimeout — not a tiny wall-clock
+// budget, which relies on gotreesitter's deadline firing before a trivial parse
+// finishes and so flaked on fast runners. The file must be skipped (nil),
+// counted, and logged with a positive parse duration.
 func TestParseBudget_ExhaustionSkipsCountsLogs(t *testing.T) {
-	parseBudgetOverrideMicros.Store(1) // 1µs → every parse exceeds it
-	clearParserPools()
+	parseBudgetForceTimeout.Store(true) // force the exhausted branch, no timing dependence
 	var logged []string
 	var loggedDur time.Duration
 	SetParseBudgetLogf(func(p string, d time.Duration) { logged = append(logged, p); loggedDur = d })
 	t.Cleanup(func() {
-		parseBudgetOverrideMicros.Store(0)
-		clearParserPools()
+		parseBudgetForceTimeout.Store(false)
 		SetParseBudgetLogf(nil)
 	})
 
 	before := ParseBudgetSkips()
-	// A few constructs so the parse takes enough steps to hit a deadline check.
 	src := []byte("<?php\nnamespace App;\nfunction hello() { return greet(); }\n" +
 		"class Foo { public function bar(): int { return baz(); } }\n")
 	fs := ExtractFile("budget.php", src)
