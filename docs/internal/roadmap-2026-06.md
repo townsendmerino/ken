@@ -151,9 +151,17 @@ declined**: query is competitive from ~50k on but build cost reproduces the prio
 (271.8s measured) — incompatible with `ken index --watch`'s 2s republish contract — and it costs *more* memory than
 `Flat`, not less. Shipped: `FSOptions.DenseRetriever` / `KEN_ANN=flat-i8|flat-binary-i8` knob in
 `internal/search/index.go` (`denseRetriever` interface + `buildDenseRetriever`), default unchanged (`Flat`), threaded
-through `FromFSWithOptions` and the watch path, regression-tested (`retriever_seam_test.go`). Remaining gap before
-flipping the default: kernel-scale (500k+) recall on a real single corpus is measured latency/memory-only so far,
-not recall — see the findings doc's "What's not measured."
+through `FromFSWithOptions` and the watch path, regression-tested (`retriever_seam_test.go`).
+
+**Same-day follow-up, closes the kernel-scale gap:** ran the real-corpus recall spot-check the doc's "What's not
+measured" section called for (`internal/search/kernel_scale_spotcheck_test.go`, opt-in via `KEN_KERNEL_CORPUS`) against
+a real 584,019-chunk sparse Linux kernel checkout. Result **revises the recommendation**: `FlatI8` holds at real
+kernel scale (agree@10 vs exact `Flat` = 1.00 on domain queries, 0.98 self-retrieval) but `FlatBinaryI8` does not
+(0.96 on both) — a real degradation the repo-scale real-qrel evidence and the synthetic-vector ramp both missed.
+**Revised per-regime pick: `FlatBinaryI8` at repo/mid scale (real qrels, zero cost), `FlatI8` at kernel scale
+(real agree@k, no such gap)** — not `FlatBinaryI8` everywhere as the same-day-earlier numbers suggested. Neither
+default flips yet (see ADR-043's update note). Separately surfaced: Arm B enrichment hung >30min on this real
+driver tree with no wall-clock parse budget on the library path — filed as a note, not fixed here.
 
 ### A3. PGO + `GOAMD64` scaffold for ken's release builds — **OPEN (S), mostly moot**
 The ken-side half of the SIMD thread. Wider-SIMD is dead (A1), but two SIMD-independent levers survive: a `default.pgo` profile (few-% from aggressive inlining across ken-mcp; Michael notes it can occasionally regress — measure with benchstat) and an optional `GOAMD64=v3` amd64 release variant. Low priority — neither touches the bandwidth wall A2 addresses; log it so it isn't rediscovered.

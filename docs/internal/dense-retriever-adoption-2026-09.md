@@ -7,7 +7,23 @@ cosine the bottleneck on a real workload*).
 
 ## TL;DR
 
-**`FlatBinaryI8` wins outright — not just "at scale."** On the real 63-repo /
+**Updated 2026-09-06 (same day, follow-up):** the real kernel-scale spot-check
+below **changes the recommendation for large corpora.** At repo/mid scale
+(real qrels, the 63-repo semble benchmark), `FlatBinaryI8` costs zero
+measured end-to-end recall and is fastest everywhere. But at real kernel
+scale (584k real chunks, a sparse Linux kernel checkout), `FlatBinaryI8`'s
+raw agreement with exact `Flat` drops to **0.96** (was ≈1.00 at small/real
+scale) — a real, quantified degradation the small-corpus and synthetic-vector
+evidence couldn't see, confirming the exact risk the synthetic-vector caveat
+flagged. `FlatI8` shows **no such drop** at the same real scale (agree@10
+1.00 on domain queries, 0.98 on the harder near-duplicate stress test) and
+is still 5.5× faster than `Flat` there. **Revised: `FlatI8` is the
+recommended choice at genuine kernel scale; `FlatBinaryI8` stays the
+recommendation at repo/mid scale** where its zero-cost evidence is real
+qrels, not raw agreement. See "Kernel-scale spot-check" below for the full
+numbers; the original (superseded) TL;DR follows for context.
+
+**Original TL;DR:** **`FlatBinaryI8` wins outright — not just "at scale."** On the real 63-repo /
 1251-query semble corpus, swapping ken's semantic arm from `ann.Flat` to
 `ann.FlatBinaryI8` costs **zero measured end-to-end recall** (pipeline
 recall@10 identical to 3 decimals: 0.974 all / 0.971 NL / 0.995 symbol —
@@ -199,25 +215,69 @@ contract is possible (pin a `Seed` constant) but is moot here since HNSW's
 build cost already disqualifies it at the sizes where it would otherwise be
 attractive (see scale ramp).
 
-## What's not measured (the honest gap)
+## Kernel-scale spot-check (real corpus, 2026-09-06 follow-up — closes the gap below)
 
-Real semble repos top out at ~6,700 chunks (laravel-framework) — nowhere
-near kernel scale, so the recall numbers above are only validated up to
-~7k-vector single corpora (76,616 vecs total, but split across 63
-*independent* small indices, not one large one). The scale ramp
-deliberately measures latency/memory/build-time only, on synthetic
-unit-random vectors — it says nothing about whether `FlatBinaryI8`'s binary
-prefilter keeps recall at N=200k–800k **on real, semantically clustered
-code embeddings**, where near-duplicate boilerplate (the exact clustered
-structure `HNSW`'s own doc references — "clustered data" is what its
-diversity heuristic is tuned for) could plausibly stress a Hamming-distance
-prefilter differently than it stresses exact cosine at small N. This is the
-one place this pass genuinely extrapolates rather than measures, and it's
-also the actual kernel-demo regime `kernel-demo-feasibility.md` cares about.
-**Trigger to close this gap:** run `scripts/kernel_demo_bench.sh`'s scale
-ramp (or an equivalent large single real corpus) with `KEN_ANN=flat-binary-i8`
-wired in (Phase 2 below) and diff recall against the `flat-f32` baseline at
-each rung.
+The gap identified below ("What's not measured") was closed the same day it
+was flagged. Retained as `internal/search/kernel_scale_spotcheck_test.go`
+(`-tags=bench`, opt-in via `KEN_KERNEL_CORPUS`), run against a real sparse
+Linux kernel checkout (`torvalds/linux@v6.6`, commit `ffc25326`, paths
+`arch/x86 drivers fs kernel mm net sound` — the same corpus family
+`scripts/kernel_demo_bench.sh` uses) — **584,019 real chunks, dim 256**,
+built with `KEN_ENRICH=off` (Arm B structural enrichment hit an unbounded
+tree-sitter parse on this real driver tree with no wall-clock budget on the
+library path — a genuine, separate finding; see the callout at the end of
+this section — and enrichment is orthogonal to dense-retriever recall, so
+disabling it isolates the variable this spot-check is about).
+
+Ground truth is exact `ann.Flat` over the SAME real embeddings (no external
+relevance judgments needed for this question — see the harness's doc
+comment for why). Two query sets: 16 realistic kernel-domain NL/symbol
+queries (the same set `kernel_demo_bench.sh` uses), and 300 of the corpus's
+*own* chunk embeddings used as queries (self-retrieval — the sharpest
+near-duplicate-cluster test, since a chunk is its own nearest neighbor).
+
+| Retriever | agree@10 (kernel queries, n=16) | agree@10 (self-retrieval, n=300) | Query p50 | Build |
+|---|--:|--:|--:|--:|
+| `flat-f32` (ground truth) | 1.0000 | 1.0000 | 14.1ms | — (aliases vecs) |
+| `flat-i8` | **1.0000** | **0.9823** | 2.5ms (5.5×) | 0.55s |
+| `flat-binary-i8` | 0.9625 | 0.9590 | 1.2ms (11.4×) | 1.12s |
+
+**This is the finding that revises the recommendation.** At repo/mid scale,
+every retriever's agreement with exact `Flat` was ≈1.00 (see the real-corpus
+table above) — small enough that the synthetic-vector scale ramp's silence
+on recall didn't seem to matter. At real kernel scale, `FlatI8` *still* holds
+at ≈1.00, but `FlatBinaryI8`'s raw agreement drops to **0.96** — a real,
+quantified ~4-point gap that neither the repo-scale real-qrel evidence nor
+the synthetic-vector latency ramp could have shown, because it's specific to
+real code's semantic clustering at real scale interacting with the binary
+Hamming prefilter (exactly the mechanism the "what's not measured" section
+below predicted, before this check existed to confirm it).
+
+**What this does and doesn't tell us.** This measures agree@10 — the raw
+ANN arm's agreement with exact cosine, the `find_related` / candidate-set
+exposure — not fused end-to-end pipeline recall (framing #1's distinction),
+because no relevance judgments exist for a 584k-chunk real kernel corpus (an
+undertaking well beyond this spot-check's scope; semble's benchmark tops out
+at 63 repos of at most a few thousand chunks each). At repo scale, RRF +
+BM25 fusion fully absorbed larger candidate-set differences than this into
+zero end-to-end recall cost — so it's plausible `FlatBinaryI8`'s 0.96 also
+washes out downstream at kernel scale. But "plausible" is exactly the word
+that shouldn't gate a default, which is why the revised recommendation
+below treats `FlatI8` — which shows no gap to explain away — as the safe
+choice at real kernel scale, and leaves the fusion-level question about
+`FlatBinaryI8` at that scale genuinely open rather than assumed-fine.
+
+**Separate finding, not part of this evaluation:** the first spot-check run
+(same corpus, enrichment left on) hung past a 30-minute timeout inside
+`walkAndChunkFSWithModel`'s Arm B structural-enrichment pass — a goroutine
+dump showed it stuck in `gotreesitter` parsing, consistent with the
+documented "unbounded structural-parse cost" risk (`DESIGN.md` §10's C#
+grammar history is the same failure class) on a library/CLI path that has no
+default wall-clock parse budget (`KEN_ENRICH_FILE_BUDGET_MS` defaults to
+`500` in `ken-mcp` only). Some file under `arch/x86`/`drivers`/`sound` in
+this real corpus triggers it. Not investigated further here — orthogonal to
+A2 — but worth a follow-up issue: a real, large, non-adversarial C corpus
+hung the CLI/library indexing path indefinitely with a default configuration.
 
 The already-known memory caveat from the 2026-08-15 pass still applies
 identically here and is **not re-opened by this doc**: `ann.New` aliases
@@ -238,32 +298,50 @@ refactor scoped (not started) in that earlier pass.
 |---|---|
 | **Repo scale (today's default, N < ~50k)** | Adopt `FlatBinaryI8`. Measured on the real published benchmark: zero recall cost, ~2× faster even here. This is not "wait for a trigger" — it's a strict improvement at the scale ken already runs at every day. |
 | **Mid scale (50k–200k)** | `FlatBinaryI8` — 4.7–6.0× faster, 3.5× less memory, same recall evidence (aikit's own gates + the fact nothing in the mechanism is scale-dependent). `FlatI8` alone is a weaker, non-default-worthy choice at this range — 2.65× is a real number but binary-i8 dominates it in every column measured. |
-| **Kernel scale (500k–5M, the demo regime)** | `FlatBinaryI8` is the projected answer (5.4× faster / 3.5× smaller at 800k, and the mechanism has no reason to degrade further) but recall AT THIS SCALE ON REAL DATA is unmeasured — see the gap above. Don't flip a default here before that spot-check; do wire the knob so the check is a one-line config change, not a refactor. |
+| **Kernel scale (500k–5M, the demo regime)** | **Revised:** `FlatI8`, not `FlatBinaryI8`. The real 584k-chunk spot-check shows `FlatI8` holding at agree@10≈1.00 (same as small scale) while `FlatBinaryI8` drops to 0.96 — a real, measured degradation specific to real large-scale code clustering. `FlatI8` is still 5.5× faster than `Flat` at this scale with no recall question mark; `FlatBinaryI8`'s extra speed (11.4×) comes with a gap that hasn't been shown to wash out downstream (no real qrels exist at this scale to check). Use `KEN_ANN=flat-i8` here, not `flat-binary-i8`. |
 | **HNSW, any scale** | Not adopted at any scale for ken's default indexing model. Query is competitive from ~50k on (2.8–5.6× vs `flat-f32`), but build cost (53.5s@50k, 271.8s@200k, tens of minutes extrapolated@800k) is fundamentally incompatible with `ken index --watch`'s 2-second republish-on-edit contract, and it costs *more* memory than `Flat`, not less — it solves neither of ken's two stated goals (latency AND memory) at once the way `FlatBinaryI8` does. The only scenario where it could still make sense is a build-once, never-re-indexed static artifact (e.g., a frozen `ken build-index` output that's never watched) — out of scope here since `FlatBinaryI8` already wins without HNSW's downsides in every regime tested. |
 
 ## Decision
 
-**Adopt `FlatBinaryI8` as an opt-in dense retriever now** (Phase 2, wired in
-this change as `FSOptions.DenseRetriever` / the `KEN_ANN=flat-binary-i8` env
-knob it reads by default — no new CLI flag, matching how `KEN_ENRICH`
-already threads through `defaultFSOptions`; default unchanged at
-`flat-f32`) — this closes the "evaluate against the recall bar"
-half of [`DESIGN.md` §10](../DESIGN.md#10-risk-register)'s HNSW/quantized-
-retriever trigger with a measured **no** for HNSW and a measured **yes** for
-`FlatBinaryI8`, while being honest that the yes is validated at repo/mid
-scale and projected (not yet confirmed) at kernel scale.
+**Adopt both `FlatI8` and `FlatBinaryI8` as opt-in, regime-specific
+retrievers now** (Phase 2, wired as `FSOptions.DenseRetriever` / the
+`KEN_ANN=flat-i8|flat-binary-i8` env knob — no new CLI flag, matching how
+`KEN_ENRICH` already threads through `defaultFSOptions`; default unchanged
+at `flat-f32`). This closes the "evaluate against the recall bar" half of
+[`DESIGN.md` §10](../DESIGN.md#10-risk-register)'s HNSW/quantized-retriever
+trigger with a measured **no** for `HNSW`, a measured **yes** for
+`FlatBinaryI8` at repo/mid scale (real qrels, zero cost), and — after the
+kernel-scale spot-check revised the original recommendation — a measured
+**yes with a caveat** for `FlatBinaryI8` and a cleaner **yes** for `FlatI8`
+at real kernel scale.
 
-**Do not flip the default yet.** Two things gate that, in order: (1) the
-kernel-scale real-corpus recall spot-check above, since that's the regime
-the memory savings matter most for and the one this pass couldn't measure
-directly; (2) a decision on the ken-mcp incremental-store memory tradeoff
-(accept the ~29% overhead there, or wait for the int8-throughout refactor).
-Neither blocks shipping the knob — they block defaulting it on.
+**Do not flip the default yet, at any scale.** For repo/mid scale, the
+evidence is strong (`FlatBinaryI8`, real qrels, zero cost) but a global
+default still needs the ken-mcp incremental-store memory tradeoff resolved
+first (accept the ~29% overhead there, or wait for the int8-throughout
+refactor) — unchanged from the original decision. For kernel scale, the
+`FlatI8` recommendation is now backed by real large-corpus data (agree@10
+≈1.00 at 584k real chunks) but still lacks the fusion-level (not just raw
+ANN) recall evidence that repo scale has, because no relevance judgments
+exist for a corpus that size. Both facts argue for keeping this opt-in
+rather than flipping a global default that would apply uniformly regardless
+of corpus size.
 
 **`HNSW` is closed, not deferred** — `DESIGN.md` §10's "HNSW for the dense
 retriever" risk-register entry should be marked resolved-declined rather
 than left open, since the trigger it names ("dense matrix size makes exact
-cosine the bottleneck") is real and confirmed (the 200k/800k `flat-f32`
-numbers above show it), but `HNSW` specifically is not the answer to it —
-`FlatBinaryI8` is, at a fraction of the operational cost (no minutes-long
-rebuild, no memory increase).
+cosine the bottleneck") is real and confirmed (the 200k/800k synthetic AND
+the 584k real `flat-f32` numbers all show it), but `HNSW` specifically is
+not the answer to it — `FlatI8`/`FlatBinaryI8` are, at a fraction of the
+operational cost (no minutes-long rebuild).
+
+**A candidate future refinement, not built here:** since the right choice is
+now known to depend on corpus size (`FlatBinaryI8` below ~50k-ish where real
+qrels validate it, `FlatI8` at real kernel scale), a size-aware default
+(`FlatBinaryI8` under some chunk-count threshold, `FlatI8` above it) is a
+plausible eventual design — deterministic and reproducible (chunk count, not
+load, so it doesn't reopen the `ken build-index` byte-identical concern),
+but adds a real discontinuity to tune and test. Not pursued now: it's premature
+complexity ahead of the two remaining gates above (incremental-store memory,
+kernel-scale fusion-level evidence), and the explicit env knob already lets
+an operator pick per-deployment today.

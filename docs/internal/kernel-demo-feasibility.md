@@ -32,21 +32,39 @@ The lever the roofline points at is **fewer bytes streamed per candidate**, and 
 [`docs/internal/dense-retriever-adoption-2026-09.md`](dense-retriever-adoption-2026-09.md)
 for the full evaluation, roadmap A2):** all three were evaluated against the
 0.967 NL / 0.995 symbol recall bar through ken's real RRF fusion, not just
-inferred from theory. The result: `FlatBinaryI8` (binary Hamming prefilter +
-int8 rerank — a two-stage retriever added to aikit since this doc was first
-written) wins outright, at every scale tested, including today's repo scale
-— 2× faster than `Flat` at N=13k with zero measured end-to-end recall cost
-(pipeline recall@10 identical to 3 decimals across `Flat`/`FlatI8`/
-`FlatBinaryI8`/`HNSW` on the real 63-repo/1251-query semble benchmark), 5.4×
-faster and 3.5× less memory at N=800k. `HNSW`'s query is competitive from
-~50k vecs on but its build cost reproduces the 4m23s@200k anchor almost
-exactly (271.8s measured) and it costs *more* memory than `Flat`, not less
-(keeps the f32 vectors AND a graph) — disqualified for `ken index --watch`'s
-2-second republish contract at any scale. `FlatBinaryI8` is now wired in as
-an opt-in `KEN_ANN=flat-binary-i8` knob (default unchanged); recall at true
-kernel scale (500k+) on real data is the one gap left — see that doc's "What's
-not measured" section — which is exactly what running this script with the
-knob flipped would close.
+inferred from theory, and then — the same day — against a real 584k-chunk
+sparse Linux kernel checkout (the exact regime this doc is about), which is
+what this script sparse-clones. The result has two parts, because the
+kernel-scale check revised the first one:
+
+- On the real 63-repo/1251-query semble benchmark (repo/mid scale), `FlatBinaryI8`
+  (binary Hamming prefilter + int8 rerank — a two-stage retriever added to
+  aikit since this doc was first written) wins outright — 2× faster than
+  `Flat` at N=13k with zero measured end-to-end recall cost (pipeline
+  recall@10 identical to 3 decimals across `Flat`/`FlatI8`/`FlatBinaryI8`/
+  `HNSW`).
+- On the real 584,019-chunk kernel checkout (`arch/x86 drivers fs kernel mm
+  net sound` at v6.6) — the actual regime this document is about — that
+  result **did not hold**: `FlatI8` matched exact `Flat`'s top-10 essentially
+  perfectly (agree@10 1.00 on realistic domain queries, 0.98 on a
+  near-duplicate stress test) at 5.5× the query speed, but `FlatBinaryI8`'s
+  agreement dropped to 0.96 on both — a real, quantified gap the repo-scale
+  benchmark and the earlier synthetic-vector scale ramp both missed, because
+  it's specific to real code's semantic clustering at real scale meeting the
+  binary prefilter. **`FlatI8`, not `FlatBinaryI8`, is the answer for a real
+  kernel-scale corpus.**
+
+`HNSW`'s query is competitive from ~50k vecs on but its build cost reproduces
+the 4m23s@200k anchor almost exactly (271.8s measured) and it costs *more*
+memory than `Flat`, not less (keeps the f32 vectors AND a graph) —
+disqualified for `ken index --watch`'s 2-second republish contract at any
+scale. Both `FlatI8` and `FlatBinaryI8` are now wired in as opt-in
+(`KEN_ANN=flat-i8` / `flat-binary-i8`, default unchanged); a full-kernel
+demo today should reach for `flat-i8`, not `flat-binary-i8`, given the
+measured gap above. (Separately, the kernel-scale run also surfaced that Arm
+B structural enrichment can hang indefinitely on a real large driver tree —
+see the findings doc's callout; run with `KEN_ENRICH=off` if reproducing this
+until that's investigated.)
 
 The original next step this whole thread pointed to — **evaluate
 `FlatI8`/`FlatBinary`/`HNSW` in ken's hybrid path against the 0.967 NL /
