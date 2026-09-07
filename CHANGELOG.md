@@ -13,6 +13,80 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [1.6.0] — 2026-09-07 — opt-in quantized dense retrievers + another "apparent hang" fix
+
+A feature release: `FlatI8`/`FlatBinaryI8` land as an opt-in, measured swap
+for ken's exact-cosine dense retriever, alongside a second instance of the
+"apparent hang" failure class v1.5.1 fixed for C# — this time on plain
+`.c`/`.h` files. The 1.0 public API surface is unchanged.
+
+### Added
+
+- **Opt-in quantized dense retrievers: `KEN_ANN=flat-i8` / `flat-binary-i8`
+  (ADR-043).** ken's semantic arm has always been exact f32 `ann.Flat`. Two
+  retained measurement harnesses (a real 63-repo/1251-query benchmark, and a
+  13k→800k synthetic scale ramp) plus a real 584k-chunk Linux-kernel spot-check
+  found: `FlatBinaryI8` (binary-prefilter + int8 rerank) costs **zero measured
+  end-to-end recall** at repo/mid scale and is fastest there — 2× faster than
+  `Flat` even at today's typical repo size; `FlatI8` is the safer pick at real
+  kernel scale, where `FlatBinaryI8`'s agreement with exact cosine measurably
+  drops (0.96 vs `FlatI8`'s 1.00) on real, large, clustered code embeddings —
+  a gap neither the repo-scale benchmark nor synthetic vectors could show.
+  `HNSW` was evaluated and declined at every scale: competitive query latency
+  from ~50k vecs on, but multi-minute build time and *more* memory than
+  `Flat`, not less. Default unchanged (exact `Flat`); full writeup in
+  [`dense-retriever-adoption-2026-09.md`](docs/internal/dense-retriever-adoption-2026-09.md).
+
+### Fixed
+
+- **`ken index` / `search` / `bench` / `perf` no longer risk an unbounded,
+  hang-looking stall from structural enrichment on ordinary real code
+  ([gotreesitter#1100], ADR-044).** A survey of a real 37,775-file `.c`/`.h`
+  corpus found 504 files (1.33%) — clock drivers, GPU register tables,
+  device-ID tables, and other large designated-initializer-array-heavy driver
+  code — triggering a `gotreesitter` `c`-grammar slowdown structurally
+  similar to the C# issue v1.5.1 fixed, just on a different grammar and
+  spread across many files instead of one. These four commands now default
+  `KEN_ENRICH_FILE_BUDGET_MS` to 2000ms when unset, skipping (not hanging on)
+  a pathological file's structural enrichment and logging it to stderr.
+  `ken build-index` is deliberately unaffected — its contract is
+  byte-identical, machine-load-independent output (ADR-040), which a
+  wall-clock budget would undermine; it keeps the prior unbounded behavior.
+- **`ken-mcp` forced shutdown exits non-zero.** Grace-period expiry and a
+  second SIGINT/SIGTERM both previously called `os.Exit(0)`, indistinguishable
+  from a clean drain to a supervisor even though an in-flight request was
+  dropped. Grace expiry now exits `1`; a second signal exits with the shell's
+  death-by-signal convention (128+signal — `130` for SIGINT, `143` for
+  SIGTERM).
+
+### Security
+
+- Bumped `golang.org/x/crypto` 0.53.0 → 0.56.0 (pulls `x/net` 0.57, `x/text`
+  0.41), closing GO-2026-6354 / GO-2026-6355 — reachable via go-git's SSH
+  clone path. `govulncheck` is clean again. Bumped `aikit` 1.24.0 → 1.31.0
+  alongside it (amd64-only quantized-matmul work + behavior-preserving
+  refactors, not on ken's arm64 f32 path — validated no change to rerank
+  scores or hybrid rankings).
+
+### Documentation
+
+- `docs/USERS.md` gains a "Tuning for your repo shape" table mapping repo
+  size/churn/structure to the flag combination to reach for (`KEN_MCP_STAGED`,
+  `KEN_MCP_EMBED_CACHE`, the treesitter chunker), consolidating guidance that
+  was previously scattered across the README env table and
+  `PERF-expectations.md`.
+
+### Internal
+
+- `internal/repo`: deduplicated the ancestor-directory exclusion logic that
+  had drifted into two verbatim copies across `ShouldDescend`/`ShouldIndex`
+  (behavior-preserving) and added a direct test for the DB `Config`→`Options`
+  mapping.
+- Fixed a Windows-only flake in the parse-budget-exhaustion test (was timing-
+  dependent; now deterministic).
+
+[gotreesitter#1100]: https://github.com/odvcencio/gotreesitter/issues/1100
+
 ## [1.5.1] — 2026-08-24 — fix an apparent hang when indexing C#
 
 A patch release with one user-facing fix. The 1.0 public API surface is
