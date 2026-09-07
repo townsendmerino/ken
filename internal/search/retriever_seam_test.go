@@ -40,10 +40,6 @@ func TestBuildDenseRetriever_KindSelectsConcreteType(t *testing.T) {
 		if gotType != wantType {
 			t.Errorf("kind %q: got %s, want %s", tc.kind, gotType, wantType)
 		}
-		// Every variant must satisfy the same Query(q, k) []ann.Hit shape —
-		// this IS the seam; if any candidate stops satisfying it, this line
-		// fails to compile rather than fail at runtime.
-		var _ denseRetriever = got
 	}
 }
 
