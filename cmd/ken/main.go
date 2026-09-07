@@ -288,14 +288,21 @@ func main() {
 	}
 	switch os.Args[1] {
 	case "index":
+		setupEnrichBudget()
 		os.Exit(cmdIndex(os.Args[2:]))
 	case "search":
+		setupEnrichBudget()
 		os.Exit(cmdSearch(os.Args[2:]))
 	case "bench":
+		setupEnrichBudget()
 		os.Exit(cmdBench(os.Args[2:]))
 	case "perf":
+		setupEnrichBudget()
 		os.Exit(cmdPerf(os.Args[2:]))
 	case "build-index":
+		// Deliberately NOT setupEnrichBudget() — build-index's contract is
+		// byte-identical, machine-load-independent output (ADR-040); see
+		// setupEnrichBudget's doc comment.
 		os.Exit(cmdBuildIndex(os.Args[2:]))
 	case "download-model":
 		os.Exit(cmdDownloadModel(os.Args[2:]))
