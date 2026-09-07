@@ -2,11 +2,11 @@
 
 **Question:** is "ken takes on the Linux kernel" a good demo for the performance work (aikit v1.4 SIMD f32 dot kernel, v1.5 int8 reranker)?
 
-**Short answer:** it's a great *headline* and a risky *perf* demo, because the kernel lands squarely on ken's one unshipped scaling component. Don't commit on extrapolation — run `scripts/kernel_demo_bench.sh` on the M1 Pro first and let the curve decide.
+**Short answer:** it's a great *headline* and a risky *perf* demo, because the kernel lands squarely on ken's flat O(N) semantic scan — the one place ken hasn't taken the scaling lever its own dependency already ships. Don't commit on extrapolation — run `scripts/kernel_demo_bench.sh` on the M1 Pro first and let the curve decide.
 
 ## Why it's risky (from ken's own docs)
 
-The semantic arm (`aikit/ann.Flat.Query`) is brute-force cosine, **O(N) in chunks**; HNSW is on the risk register, unshipped ([DESIGN.md §10](../DESIGN.md#10-risk-register)). The SIMD win was measured at ~13k chunks (laravel) and is a **constant factor on an O(N) scan** — it moves the wall later, not away. The kernel is the "Large" row in [PERF-expectations.md](../PERF-expectations.md): **~80k files, extrapolated ~5M chunks**, ~10–30 min full hybrid index, with memory-at-huge-scale listed as unmeasured and treesitter "not recommended at this scale."
+The semantic arm (`aikit/ann.Flat.Query`) is brute-force cosine, **O(N) in chunks**, and ken wires only the f32 `ann.Flat` (`ann.New(vecs)` in `internal/search/index.go`). The approximate/quantized retrievers that fix this — `HNSW`, `FlatI8`, `FlatBinary` — are **shipped in aikit** (HNSW since v0.2.0) but **not yet wired into ken**; the swap is a constructor change gated on a trigger ([DESIGN.md §10](../DESIGN.md#10-risk-register)). The SIMD win was measured at ~13k chunks (laravel) and is a **constant factor on an O(N) scan** — it moves the wall later, not away. The kernel is the "Large" row in [PERF-expectations.md](../PERF-expectations.md): **~80k files, extrapolated ~5M chunks**, ~10–30 min full hybrid index, with memory-at-huge-scale listed as unmeasured and treesitter "not recommended at this scale."
 
 Linear extrapolations from the documented anchors (M1 Pro):
 
@@ -17,6 +17,42 @@ Linear extrapolations from the documented anchors (M1 Pro):
 | Embedding matrix RAM | unmeasured | **multiple GB** (→ embedded-binary `mcp.Run` demo balloons to multi-GB, breaking the "single small static binary" pitch) |
 
 A ~600 ms p50 is the opposite of the "instant" story a perf demo needs. That's the risk: the full kernel hides your constant-factor win under O(N) and may showcase the wall instead.
+
+## The real lever: bytes per candidate (not multiply-width)
+
+An archsimd evaluation in aikit (2026-09, `docs/task-archsimd-eval.md`) settled *why* wider SIMD is the wrong lever here: **`ann.Flat.Query` is memory-bandwidth-bound ~11× over**. A dot product reads each operand once and reuses nothing (0.25 MAC/byte, fixed at every dimension), while the box's roofline ridge is 2.74 MAC/byte; production `Flat.Query` already shards across cores and plateaus at ~90% of the DRAM read ceiling while using ~8% of the arithmetic. A faster multiply optimizes the 92% that's already idle — so both the f32 dot kernel and the int8 reranker were NO-GO for Go's `simd` (bandwidth, plus VPDPBUSD isn't in the API).
+
+The lever the roofline points at is **fewer bytes streamed per candidate**, and every rung already exists in aikit — it just needs wiring into ken's pipeline:
+
+- **`FlatI8`** — f32→int8 measured ~4.44× at d=768/N=200k (against a 4× byte reduction — the near-exact match *is* the bandwidth-bound confirmation). Mild recall cost; the likeliest first swap.
+- **`FlatBinary`** — ~11.6×, larger recall cost; the "how fast can it possibly go" bound.
+- **`HNSW`** — changes the complexity class (sub-linear), not just the constant; the real answer to "the kernel is 5M chunks."
+
+**Update (2026-09-06, measured — see
+[`docs/internal/dense-retriever-adoption-2026-09.md`](dense-retriever-adoption-2026-09.md)
+for the full evaluation, roadmap A2):** all three were evaluated against the
+0.967 NL / 0.995 symbol recall bar through ken's real RRF fusion, not just
+inferred from theory. The result: `FlatBinaryI8` (binary Hamming prefilter +
+int8 rerank — a two-stage retriever added to aikit since this doc was first
+written) wins outright, at every scale tested, including today's repo scale
+— 2× faster than `Flat` at N=13k with zero measured end-to-end recall cost
+(pipeline recall@10 identical to 3 decimals across `Flat`/`FlatI8`/
+`FlatBinaryI8`/`HNSW` on the real 63-repo/1251-query semble benchmark), 5.4×
+faster and 3.5× less memory at N=800k. `HNSW`'s query is competitive from
+~50k vecs on but its build cost reproduces the 4m23s@200k anchor almost
+exactly (271.8s measured) and it costs *more* memory than `Flat`, not less
+(keeps the f32 vectors AND a graph) — disqualified for `ken index --watch`'s
+2-second republish contract at any scale. `FlatBinaryI8` is now wired in as
+an opt-in `KEN_ANN=flat-binary-i8` knob (default unchanged); recall at true
+kernel scale (500k+) on real data is the one gap left — see that doc's "What's
+not measured" section — which is exactly what running this script with the
+knob flipped would close.
+
+The original next step this whole thread pointed to — **evaluate
+`FlatI8`/`FlatBinary`/`HNSW` in ken's hybrid path against the 0.967 NL /
+0.995 symbol recall bar** — a recall-vs-latency measurement, using this same
+harness, not a compute-kernel rewrite — is now done; the paragraph above is
+the answer.
 
 ## What the harness measures
 
@@ -34,7 +70,7 @@ A ~600 ms p50 is the opposite of the "instant" story a perf demo needs. That's t
 
 ## Credibility angle (consulting goal)
 
-"I measured ken honestly against the kernel, found the flat-ANN wall at ~N chunks, and that's the empirical case for the HNSW work on the risk register" is a stronger engineering story than a cherry-picked win — it demonstrates you know your own complexity curve. The harness output is the artifact that story is built on.
+"I measured ken honestly against the kernel, found the flat-ANN wall at ~N chunks, then measured the fix — wiring aikit's already-shipped `FlatI8`/`FlatBinary`/`HNSW` — against the recall bar" is a stronger engineering story than a cherry-picked win: it shows you know your own complexity curve *and* your dependency's toolbox. Bonus credibility, and squarely on-brand for the pure-Go-no-cgo thesis: the archsimd NO-GO (`docs/task-archsimd-eval.md`) is itself a publishable artifact — a rigorous *no*, backed by a roofline, is rarer and more trustworthy than a cherry-picked yes. The harness output is what both stories are built on.
 
 ## Note on sandbox measurement
 

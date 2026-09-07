@@ -130,3 +130,33 @@ Two guards in `internal/buildchecks` (ride the existing `go test ./...` CI job):
 
 ### 28. godoc audit of the public surface — **M** — ✅ **DONE (376e609)**
 Audited every exported symbol in `mcp/` + `mcp/db/` via a `go/doc` walk. `mcp/db` was already 100% documented; `mcp/` had exactly one gap (the `LogLevel` const block) — now documented. `TestPublicSurfaceDocumented` (in `mcp/`) keeps it complete in CI without depending on a golangci revive-rule config.
+
+---
+
+## Addendum — post-1.1.0 investigations (2026-09)
+
+### A1. Go `archsimd` for aikit's hot kernels — ❌ **NO-GO, measured (aikit `docs/task-archsimd-eval.md`)**
+Prompted by Stapelberg's "DCS: Fast TurboPFor with Go SIMD" (deletes cgo via Go 1.26 `simd`). Ran the investigation-first eval against aikit's two hot kernels; both declined, each for an independent measured reason. (1) `ann.Flat.Query` is **memory-bandwidth-bound ~11×** — a dot product is 0.25 MAC/byte fixed at every dim vs the box's 2.74 MAC/byte ridge; production `Flat.Query` already shards across cores and plateaus at ~90% of the DRAM ceiling at ~8% of arithmetic, so a wider multiply optimizes the idle 92%. (2) archsimd **can't express** the int8 reranker — `VPDPBUSD` (used 9× in aikit's `dot_i8_avx512vnni_amd64.s`) is absent from Go 1.27's API, and arm64 `Int8x16` has no SDOT, so a port is a downgrade on both arches. (3) aikit **already** ran this campaign in v1.23/v1.24 for nine *compute-bound* elementwise kernels (1.4–5.6×, both arches). No production code touched; roofline harness retained. Two corrections to my brief: aikit's portable `simd` lowers to NEON (Apple Silicon **not** excluded — 2.5–2.6× on shipped softmax), and `linalg.Dot` already runs the Stapelberg CPUID/XGETBV→AVX2 dispatch. **Byproduct fix:** `kernel-demo-feasibility.md` + the bench-script header said HNSW was "unshipped" — corrected (shipped in aikit, unwired in ken).
+
+### A2. Wire aikit's quantized retrievers into ken's hybrid path — **DONE (measured), 2026-09-06**
+A1's roofline said the lever is **bytes per candidate**, not multiply-width. Full evaluation + wiring in
+[`docs/internal/dense-retriever-adoption-2026-09.md`](dense-retriever-adoption-2026-09.md): built the real
+harness (`internal/search/retriever_eval_test.go` — 63-repo/1251-query semble recall table; `retriever_scale_bench_test.go`
+— synthetic 13k→800k latency/build/memory ramp), then wired the winner in behind a default-off knob. Result:
+**`FlatBinaryI8`** (a two-stage binary-prefilter + int8-rerank retriever aikit added since A2 was scoped) wins
+outright — zero measured end-to-end recall cost (pipeline recall@10 identical to 3 decimals vs `Flat`/`FlatI8`/`HNSW`
+on the real benchmark) and fastest at every N tested, repo scale included (2× at N=13k, 5.4× at N=800k, 3.5× less
+memory throughout). Plain `FlatI8` is a smaller, scale-gated win (slower than `Flat` below ~50k). **`HNSW` is
+declined**: query is competitive from ~50k on but build cost reproduces the prior 4m23s@200k anchor almost exactly
+(271.8s measured) — incompatible with `ken index --watch`'s 2s republish contract — and it costs *more* memory than
+`Flat`, not less. Shipped: `FSOptions.DenseRetriever` / `KEN_ANN=flat-i8|flat-binary-i8` knob in
+`internal/search/index.go` (`denseRetriever` interface + `buildDenseRetriever`), default unchanged (`Flat`), threaded
+through `FromFSWithOptions` and the watch path, regression-tested (`retriever_seam_test.go`). Remaining gap before
+flipping the default: kernel-scale (500k+) recall on a real single corpus is measured latency/memory-only so far,
+not recall — see the findings doc's "What's not measured."
+
+### A3. PGO + `GOAMD64` scaffold for ken's release builds — **OPEN (S), mostly moot**
+The ken-side half of the SIMD thread. Wider-SIMD is dead (A1), but two SIMD-independent levers survive: a `default.pgo` profile (few-% from aggressive inlining across ken-mcp; Michael notes it can occasionally regress — measure with benchstat) and an optional `GOAMD64=v3` amd64 release variant. Low priority — neither touches the bandwidth wall A2 addresses; log it so it isn't rediscovered.
+
+### A4. Publish the archsimd NO-GO as a writeup — **OPEN (M), consulting-cred**
+A rigorous *no* backed by a roofline is rarer and more credible than a cherry-picked yes, and it's dead-on the pure-Go-no-cgo thesis. Strong companion to #23's "ship your docs as an MCP binary" post. Source material is `task-archsimd-eval.md` + the retained roofline harness.

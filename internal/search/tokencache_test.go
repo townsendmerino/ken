@@ -112,7 +112,7 @@ func TestBuildIndex_CachedDocsEqualFreshIndex(t *testing.T) {
 
 	fresh := BuildIndex(chunks, nil, ModeBM25, nil)
 	cachedDocs := tokenizeDocs(chunks, cache)
-	viaCache := buildIndexFromDocs(chunks, cachedDocs, nil, ModeBM25, nil)
+	viaCache := buildIndexFromDocs(chunks, cachedDocs, nil, ModeBM25, nil, denseFlat)
 
 	for _, q := range []string{"handleRequest42", "parseToken", "userID"} {
 		a := fresh.Search(q, 10)

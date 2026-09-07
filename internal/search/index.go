@@ -138,6 +138,16 @@ type FSOptions struct {
 	// pre-enrichment results are well-formed — just lower-ranked until the
 	// background pass lands.
 	LazyEnrichment bool
+
+	// DenseRetriever selects the dense-arm implementation: "" (default) is
+	// ann.Flat (exact f32 cosine, unchanged behavior), "flat-i8" is
+	// ann.FlatI8, "flat-binary-i8" is ann.FlatBinaryI8. See
+	// docs/internal/dense-retriever-adoption-2026-09.md for the measured
+	// recall/latency/memory tradeoffs behind each — none of them change
+	// end-to-end recall on the published benchmark, so this is an
+	// opt-in latency/memory knob, not a quality one. defaultFSOptions
+	// reads it from KEN_ANN. An unrecognized value falls back to "" (Flat).
+	DenseRetriever string
 }
 
 // Mode selects the retrieval strategy.
@@ -188,13 +198,55 @@ type Result struct {
 	Score float64
 }
 
+// denseRetriever is the seam DESIGN.md §10 anticipates around the dense
+// arm's Query method. ann.Flat, ann.FlatI8, and ann.FlatBinaryI8 all
+// satisfy it, so buildDenseRetriever can swap the concrete type without
+// any other code in this package caring which one ix.flat holds — see
+// docs/internal/dense-retriever-adoption-2026-09.md for the measurements
+// behind the swap.
+type denseRetriever interface {
+	Query(q []float32, k int) []ann.Hit
+}
+
+// denseRetrieverKind selects buildDenseRetriever's concrete type. The zero
+// value (denseFlat, "") is ann.Flat — exact f32 cosine, today's behavior,
+// unchanged for every existing caller.
+type denseRetrieverKind string
+
+const (
+	// denseFlat is ann.Flat: exact f32 cosine, O(N)/query. Default.
+	denseFlat denseRetrieverKind = ""
+	// denseFlatI8 is ann.FlatI8: int8-quantized, ~4x less memory, faster
+	// from ~200k vecs on (slower than Flat below ~50k — see the eval doc).
+	denseFlatI8 denseRetrieverKind = "flat-i8"
+	// denseFlatBinaryI8 is ann.FlatBinaryI8: binary Hamming prefilter +
+	// int8 rerank. Measured fastest at every scale tested, repo scale
+	// included, with no measured end-to-end recall cost (see the eval
+	// doc's real-corpus table) — the recommended opt-in choice.
+	denseFlatBinaryI8 denseRetrieverKind = "flat-binary-i8"
+)
+
+// buildDenseRetriever constructs the dense arm for kind over vecs. An
+// unrecognized kind (should not happen — defaultFSOptions validates the
+// env var) falls back to denseFlat rather than panicking.
+func buildDenseRetriever(kind denseRetrieverKind, vecs [][]float32) denseRetriever {
+	switch kind {
+	case denseFlatI8:
+		return ann.NewFlatI8(vecs)
+	case denseFlatBinaryI8:
+		return ann.NewFlatBinaryI8(vecs)
+	default:
+		return ann.New(vecs)
+	}
+}
+
 // Index is a built, queryable index over a directory tree.
 type Index struct {
 	mode   Mode
 	chunks []chunk.Chunk
 	bm     *bm25.Index
 	model  *embed.StaticModel // nil for ModeBM25
-	flat   *ann.Flat          // nil for ModeBM25
+	flat   denseRetriever     // nil for ModeBM25
 
 	// vecs is the per-chunk embedding slice BuildIndex received,
 	// retained so WithExtraChunks can rebuild a new Index over
@@ -254,6 +306,19 @@ func defaultFSOptions() FSOptions {
 	case "0", "off", "false", "no":
 		opts.DisableEnrichment = true
 	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KEN_ANN"))) {
+	case "":
+		// unset — leave opts.DenseRetriever at its zero value (denseFlat).
+	case string(denseFlatI8):
+		opts.DenseRetriever = string(denseFlatI8)
+	case string(denseFlatBinaryI8):
+		opts.DenseRetriever = string(denseFlatBinaryI8)
+		// An unrecognized value falls back to "" (Flat) rather than
+		// erroring — matches KEN_ENRICH's tolerant-default posture. There's
+		// no logger threaded into this low-level constructor to warn
+		// through; ken-mcp's own KEN_MCP_* enum vars use envcfg.EnvEnum for
+		// the warn-and-fall-back behavior where a logger is available.
+	}
 	return opts
 }
 
@@ -268,7 +333,7 @@ func FromFSWithOptions(fsys fs.FS, mode Mode, chunkerName, modelDir string, opts
 	if err != nil {
 		return nil, err
 	}
-	return BuildIndex(chunks, vecs, mode, model), nil
+	return buildIndexFromDocs(chunks, tokenizeDocs(chunks, nil), vecs, mode, model, denseRetrieverKind(opts.DenseRetriever)), nil
 }
 
 // FromPath is the real-filesystem entry point — a thin wrapper
@@ -680,18 +745,22 @@ func FromFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.Sta
 // (Search / FindRelated / ResolveChunk) checks Tombstoned before
 // returning a result.
 func BuildIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, model *embed.StaticModel) *Index {
-	return buildIndexFromDocs(chunks, tokenizeDocs(chunks, nil), vecs, mode, model)
+	return buildIndexFromDocs(chunks, tokenizeDocs(chunks, nil), vecs, mode, model, denseFlat)
 }
 
 // buildIndexFromDocs is BuildIndex with the per-chunk BM25 token lists
-// supplied by the caller (docs[i]==nil for tombstoned chunks). Split out
-// so the incremental watch path can feed cached tokens (audit §5) while
-// the cold path computes them fresh — both share the assembly + ann.New.
-// docs MUST be index-aligned with chunks.
-func buildIndexFromDocs(chunks []chunk.Chunk, docs [][]string, vecs [][]float32, mode Mode, model *embed.StaticModel) *Index {
+// supplied by the caller (docs[i]==nil for tombstoned chunks) and an
+// explicit dense-retriever kind. Split out so the incremental watch path
+// can feed cached tokens (audit §5) while the cold path computes them
+// fresh — both share the assembly + buildDenseRetriever. docs MUST be
+// index-aligned with chunks. BuildIndex (the public entry point) always
+// passes denseFlat — this parameter exists so FSOptions.DenseRetriever
+// (FromFSWithOptions / the watch path) can opt into an alternate
+// implementation without changing BuildIndex's public signature.
+func buildIndexFromDocs(chunks []chunk.Chunk, docs [][]string, vecs [][]float32, mode Mode, model *embed.StaticModel, retrieverKind denseRetrieverKind) *Index {
 	ix := &Index{mode: mode, chunks: chunks, bm: bm25.Build(docs), model: model, vecs: vecs}
 	if model != nil {
-		ix.flat = ann.New(vecs)
+		ix.flat = buildDenseRetriever(retrieverKind, vecs)
 	}
 	return ix
 }

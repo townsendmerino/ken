@@ -382,7 +382,7 @@ func (w *WatchedIndex) buildUnionedIndexLocked() *Index {
 	var ix *Index
 	if len(w.extraChunks) == 0 {
 		docs := tokenizeDocs(w.chunks, w.tokens)
-		ix = buildIndexFromDocs(w.chunks, docs, w.vecs, w.mode, w.model)
+		ix = buildIndexFromDocs(w.chunks, docs, w.vecs, w.mode, w.model, denseRetrieverKind(w.fsOpts.DenseRetriever))
 	} else {
 		merged := make([]chunk.Chunk, 0, len(w.chunks)+len(w.extraChunks))
 		merged = append(merged, w.chunks...)
@@ -415,7 +415,7 @@ func (w *WatchedIndex) buildUnionedIndexLocked() *Index {
 		docs := make([][]string, 0, len(merged))
 		docs = append(docs, tokenizeDocs(w.chunks, w.tokens)...)
 		docs = append(docs, tokenizeDocs(w.extraChunks, nil)...)
-		ix = buildIndexFromDocs(merged, docs, mergedVecs, w.mode, w.model)
+		ix = buildIndexFromDocs(merged, docs, mergedVecs, w.mode, w.model, denseRetrieverKind(w.fsOpts.DenseRetriever))
 	}
 	if w.reranker != nil {
 		ix.reranker = w.reranker

@@ -1,7 +1,6 @@
 package search
 
 import (
-	"github.com/townsendmerino/aikit/ann"
 	"github.com/townsendmerino/aikit/bm25"
 	"github.com/townsendmerino/aikit/chunk"
 	"github.com/townsendmerino/aikit/fuse"
@@ -43,7 +42,7 @@ const candidateOverfetch = 5
 func hybridSearch(
 	query string,
 	qVec []float32,
-	flat *ann.Flat,
+	flat denseRetriever,
 	bm *bm25.Index,
 	chunks []chunk.Chunk,
 	topK int,
