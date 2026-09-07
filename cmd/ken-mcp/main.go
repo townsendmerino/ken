@@ -747,13 +747,18 @@ func main() {
 		case err := <-runDone:
 			finish(err) // drain completed within the grace window
 		case <-timer.C:
+			// Non-zero on purpose: an in-flight request was dropped, and a supervisor (or a
+			// test) must be able to tell a forced exit from a clean drain, which exits 0.
 			logger.Logf(kenmcp.LogWarn, "shutdown grace (%s) expired; forcing exit (an in-flight request did not finish in time)", grace)
 			doCleanup()
-			os.Exit(0)
-		case <-sigCh:
+			os.Exit(1)
+		case s := <-sigCh:
+			// 128+signal — the code the process would have died with had the signal not
+			// been trapped, so a second Ctrl-C reads as SIGINT (130) and a second SIGTERM
+			// as 143, never as success.
 			logger.Logf(kenmcp.LogWarn, "second signal received; forcing exit")
 			doCleanup()
-			os.Exit(0)
+			os.Exit(forcedExitCode(s))
 		}
 	}
 }
@@ -1372,4 +1377,13 @@ func durOrOff(d time.Duration) string {
 		return "off"
 	}
 	return d.String()
+}
+
+// forcedExitCode is the shell convention for death by signal: 128 + the signal
+// number (SIGINT → 130, SIGTERM → 143). Falls back to 1 for a non-POSIX signal.
+func forcedExitCode(s os.Signal) int {
+	if sig, ok := s.(syscall.Signal); ok {
+		return 128 + int(sig)
+	}
+	return 1
 }
