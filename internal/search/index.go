@@ -148,6 +148,19 @@ type FSOptions struct {
 	// opt-in latency/memory knob, not a quality one. defaultFSOptions
 	// reads it from KEN_ANN. An unrecognized value falls back to "" (Flat).
 	DenseRetriever string
+
+	// MmapModel selects aikit's embed.LoadMmap over embed.LoadFromFS for
+	// the embedding-model load: the safetensors tensors are memory-mapped
+	// from modelDir instead of heap-read (aikit measured 5.8× less peak
+	// heap, 17% slower cold start — see aikit's embed.LoadMmap doc comment).
+	// A read-only mmap of the same file also has its physical pages shared
+	// by the kernel across every mapping, so this is the multi-repo win
+	// too: N cached ken-mcp repos stop paying N separate heap copies of
+	// the same model. False (heap read, unchanged behavior) is right for
+	// a short-lived CLI process where cold-start latency dominates; true
+	// is right for a long-lived server. See LoadModelDir, the single
+	// dispatch point every model-loading call site uses.
+	MmapModel bool
 }
 
 // Mode selects the retrieval strategy.
@@ -374,7 +387,7 @@ func walkAndChunkFS(ctx context.Context, fsys fs.FS, mode Mode, chunkerName, mod
 		if modelDir == "" {
 			return nil, nil, nil, nil, fmt.Errorf("search: mode requires an embedding model — pass --model <dir>, run `ken download-model`, or use --mode=bm25")
 		}
-		m, err := embed.LoadFromFS(os.DirFS(modelDir), ".")
+		m, err := LoadModelDir(modelDir, opts.MmapModel)
 		if err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("search: model not found at %s: %w — run `ken download-model --to %s` to fetch it, or use --mode=bm25", modelDir, err, modelDir)
 		}
@@ -382,6 +395,20 @@ func walkAndChunkFS(ctx context.Context, fsys fs.FS, mode Mode, chunkerName, mod
 	}
 	chunks, vecs, returnedModel, migDirs, err := walkAndChunkFSWithModel(ctx, fsys, mode, chunkerName, model, opts)
 	return chunks, vecs, returnedModel, migDirs, err
+}
+
+// LoadModelDir is the single dispatch point every model-loading call site
+// uses (the live walkAndChunkFS build, ken-mcp's pre-built-index load, and
+// its M1 snapshot load): mmap=false is embed.LoadFromFS (heap read, the
+// unchanged default — right for a short-lived CLI process where cold-start
+// latency dominates); mmap=true is aikit's embed.LoadMmap (memory-mapped,
+// right for a long-lived server — see FSOptions.MmapModel's doc comment for
+// the measured tradeoff and the multi-repo page-sharing win).
+func LoadModelDir(modelDir string, mmap bool) (*embed.StaticModel, error) {
+	if mmap {
+		return embed.LoadMmap(modelDir)
+	}
+	return embed.LoadFromFS(os.DirFS(modelDir), ".")
 }
 
 // walkAndChunkFSWithModel does the actual corpus-bootstrapping work:

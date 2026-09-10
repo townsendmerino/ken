@@ -61,7 +61,7 @@ func tryLoadSnapshot(dir string, mode search.Mode, modeStr, chunker, modelDir st
 	// to seed the index (query-time encoding). BM25 needs none.
 	var model *embed.StaticModel
 	if mode != search.ModeBM25 {
-		m, mErr := embed.LoadFromFS(os.DirFS(modelDir), ".")
+		m, mErr := search.LoadModelDir(modelDir, fsOpts.MmapModel)
 		if mErr != nil {
 			logger.Logf(kenmcp.LogWarn, "snapshot needs a model but loading %q failed (%v); rebuilding", modelDir, mErr)
 			return nil

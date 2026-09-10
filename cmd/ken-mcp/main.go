@@ -234,7 +234,7 @@ func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeS
 	if data, err := os.ReadFile(prebuiltIndexPath(dir)); err == nil {
 		var model *embed.StaticModel
 		if mode != search.ModeBM25 {
-			m, mErr := embed.LoadFromFS(os.DirFS(modelDir), ".")
+			m, mErr := search.LoadModelDir(modelDir, fsOpts.MmapModel)
 			if mErr != nil {
 				logger.Logf(kenmcp.LogWarn, "pre-built index %s needs a model but loading %q failed (%v); live-indexing instead",
 					prebuiltIndexPath(dir), modelDir, mErr)
@@ -428,6 +428,16 @@ func main() {
 		logger.Logf(kenmcp.LogInfo, "staged readiness on (KEN_MCP_STAGED): cold builds serve BM25 first, embed to hybrid in background")
 	}
 
+	// Steady-state memory (default on): mmap the embedding model instead of
+	// heap-reading it (search.LoadModelDir / aikit's embed.LoadMmap). A
+	// long-lived server pays for the model's resident footprint
+	// indefinitely, and a read-only mmap lets the kernel share the same
+	// physical pages across every repo's WatchedIndex that loads it — N
+	// cached repos stop paying N heap copies. Costs a bit of first-touch
+	// latency as pages fault in; set to 0/off if modelDir sits on a
+	// filesystem where mmap misbehaves (e.g. some network mounts).
+	mmapModel := envcfg.EnvBool("KEN_MCP_MMAP_MODEL", true, logger)
+
 	// M5: neural reranker — opt-in (default off), loaded lazily on the
 	// first hybrid+rerank query so the ~491 ms encoder.Load stays off the
 	// cold-start path. The model is shared across every WatchedIndex (via
@@ -500,6 +510,7 @@ func main() {
 		noAutoMigrations:  noAutoMigrations,
 		lazyEnrich:        lazyEnrich,
 		staged:            staged,
+		mmapModel:         mmapModel,
 		lazyReranker:      lazyReranker,
 		rerankerOptions:   rerankerOptions,
 		dbDefaultKey:      dbDefaultKey,
@@ -778,6 +789,7 @@ type repoBuilder struct {
 	noAutoMigrations  bool
 	lazyEnrich        bool
 	staged            bool
+	mmapModel         bool
 	lazyReranker      *search.LazyReranker
 	rerankerOptions   []search.RerankerOption
 	dbDefaultKey      string    // normalized cache key the DB extras attach to ("" ⇒ none)
@@ -844,6 +856,7 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 		LogWriter:             os.Stderr,
 		LazyEnrichment:        rb.lazyEnrich,
 		StagedEmbedding:       rb.staged,
+		MmapModel:             rb.mmapModel,
 	}
 	// Assign the interface only when non-nil so a nil *Cache doesn't become
 	// a non-nil VecCache holding a nil pointer.
