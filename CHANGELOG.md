@@ -13,6 +13,33 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [1.7.0] — 2026-09-10 — ken-mcp mmaps the embedding model
+
+A steady-state-memory release: `ken-mcp` was observed resident at ~1.6 GB.
+The 1.0 public API surface is unchanged.
+
+### Added
+
+- **`ken-mcp` mmaps the embedding model instead of heap-reading it, default
+  on (`KEN_MCP_MMAP_MODEL`, ADR-045).** Every model-loading call site (the
+  live build, the pre-built-index load, and the M1 snapshot load) went
+  through `embed.LoadFromFS`, a full heap read of the 64 MB
+  `model.safetensors`, with no sharing across the per-process repo LRU
+  (`KEN_MCP_CACHE_SIZE`) — each cached repo paid its own copy. aikit's
+  `embed.LoadMmap` already existed for this; nothing called it. `ken-mcp`
+  now dispatches through a single `search.LoadModelDir(dir, mmap)` entry
+  point and defaults to mmap: measured **−18% peak RSS** (306,240 → 250,448
+  KB) building a hybrid index over ken's own repo, and the win grows with
+  `KEN_MCP_CACHE_SIZE` since a read-only mmap's physical pages are
+  kernel-shared across every cached repo's copy of the same model file — a
+  benefit a heap read can't get regardless of cache size. `KEN_MCP_MMAP_MODEL=0`
+  reverts to the unchanged heap-read behavior (e.g. for a model directory on
+  a filesystem where mmap misbehaves). The CLI (`ken index`/`search`/
+  `build-index`) and `mcp.Run`'s embedded-corpus path are unaffected — short-
+  lived processes where aikit's measured 17%-slower mmap cold start isn't
+  worth paying, and an embedded `//go:embed` model has no real directory to
+  mmap regardless.
+
 ## [1.6.0] — 2026-09-07 — opt-in quantized dense retrievers + another "apparent hang" fix
 
 A feature release: `FlatI8`/`FlatBinaryI8` land as an opt-in, measured swap
