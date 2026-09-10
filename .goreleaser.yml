@@ -114,6 +114,29 @@ changelog:
       - "Merge pull request"
       - "Merge branch"
 
+# GitHub Release page. The grouped commit list is auto-generated from the
+# `changelog:` block above; this header/footer frames it and points at the
+# curated, hand-written notes in CHANGELOG.md — the source of truth for
+# highlights and upgrade guidance, which an auto-generated commit list can't
+# convey. (For a fully curated body, feed the extracted CHANGELOG section via
+# `goreleaser release --release-notes=<file>` from CI — a bigger change to the
+# release workflow, deferred.)
+release:
+  header: |
+    Fast hybrid code search for agents — pure Go, single static binary, MCP-compatible with [semble](https://github.com/MinishLab/semble).
+
+    **Curated highlights, behavior changes, and upgrade notes are in [CHANGELOG.md](https://github.com/townsendmerino/ken/blob/main/CHANGELOG.md).** The grouped list below is auto-generated from commits.
+
+    **Install / upgrade**
+    ```bash
+    brew upgrade --cask ken   # macOS/Linux — first time: brew install --cask townsendmerino/tap/ken
+    scoop update ken          # Windows
+    go install github.com/townsendmerino/ken/cmd/ken@latest
+    go install github.com/townsendmerino/ken/cmd/ken-mcp@latest
+    ```
+  footer: |
+    **Full curated changelog:** https://github.com/townsendmerino/ken/blob/main/CHANGELOG.md
+
 # Homebrew tap (macOS/Linux). GoReleaser generates the cask and pushes it
 # to townsendmerino/homebrew-tap on each release. Requires a PAT with
 # contents:write on that repo, exposed to CI as $TAP_GITHUB_TOKEN.

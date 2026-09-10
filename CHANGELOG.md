@@ -37,6 +37,14 @@ for ken's exact-cosine dense retriever, alongside a second instance of the
   `Flat`, not less. Default unchanged (exact `Flat`); full writeup in
   [`dense-retriever-adoption-2026-09.md`](docs/internal/dense-retriever-adoption-2026-09.md).
 
+- **`ken doctor` now flags large repos.** A new size-keyed finding reads the
+  repo's existing `.ken/snapshot.bin` header — via `search.PeekSnapshotChunks`,
+  a header-only KEN1 read that never loads the body — and on a snapshot of
+  ≥100k chunks suggests `KEN_MCP_STAGED=1` (SeverityInfo) for an instant BM25
+  first query that upgrades to hybrid in the background. Size is the only axis
+  surfaced as live advice (churn and query-intent aren't reliably detectable);
+  the corresponding repo-shape tuning guide is under Documentation below.
+
 ### Fixed
 
 - **`ken index` / `search` / `bench` / `perf` no longer risk an unbounded,

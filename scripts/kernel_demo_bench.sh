@@ -9,9 +9,11 @@
 # are visible rather than extrapolated.
 #
 # Why a ramp, not just the whole kernel: the semantic arm (aikit/ann.Flat) is
-# brute-force cosine, O(N) in chunks; HNSW is unshipped (DESIGN.md §10). The
-# SIMD win (aikit v1.4) is a constant factor on that O(N) scan — it moves the
-# wall later, not away. Plotting p50 vs chunk-count tells you where the wall is.
+# brute-force cosine, O(N) in chunks. It's bandwidth-bound ~11x (see aikit's
+# task-archsimd-eval.md), so the fix is fewer bytes/candidate — FlatI8/FlatBinary/
+# HNSW, all shipped in aikit but not yet wired into ken (which uses f32 ann.Flat
+# only). The SIMD win (aikit v1.4) is a constant factor on that O(N) scan — it
+# moves the wall later, not away. Plotting p50 vs chunk-count tells you where it is.
 #
 # Usage:
 #   scripts/kernel_demo_bench.sh                 # default ramp, bm25 + hybrid
