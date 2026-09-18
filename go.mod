@@ -7,7 +7,7 @@ require (
 	github.com/go-git/go-git/v5 v5.19.2
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/google/jsonschema-go v0.4.3
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/odvcencio/gotreesitter v0.52.0
 	github.com/pkoukk/tiktoken-go v0.1.8
