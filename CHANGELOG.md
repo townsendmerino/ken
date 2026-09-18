@@ -13,6 +13,55 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [1.8.0] — 2026-09-17 — markdown chunking activated + aikit correctness fixes
+
+A retrieval-quality release: `.md` files finally get proper heading-based
+chunking instead of a silent line-fallback, and three real correctness
+fixes land via an aikit bump. The 1.0 public API surface is unchanged.
+
+### Changed
+
+- **`.md` files now chunk through the dedicated markdown chunker by
+  default.** The markdown chunker (`aikit/chunk/markdown`) has been linked
+  into `cmd/ken` and `cmd/ken-mcp` for a while, but nothing ever actually
+  selected it for a file — every `.md` file silently fell through to
+  whatever chunker was requested (`regex` by default), which has no
+  markdown-specific rules and falls back to the line chunker. `chunkOneFile`
+  now routes `.md` files to the registered markdown chunker instead, giving
+  heading-based chunk boundaries on the default `--chunker=regex` path.
+  `--chunker=line` remains an explicit opt-out. `ken perf index`/`search`
+  now link the markdown chunker too, so perf measurements reflect the same
+  chunking behavior as `ken index`/`search`. Recall/NDCG on semble's 63-repo
+  corpus: hybrid recall@10 unchanged (0.973/0.969/0.995 all/nl/symbol);
+  BM25-only recall ticks up +0.002 (0.840 → 0.842), consistent with
+  markdown files chunking properly instead of falling back.
+- **Reduced allocations on the hybrid rerank hot path.** `rerankTopK`
+  replaces a scores map + separate ranked-keys slice with one slice,
+  dropping a map allocation and per-comparison hash lookups from the sort;
+  `hybridSearch`'s query-boost step now mutates its scores map in place
+  instead of paying for a defensive copy it doesn't need; per-file stem
+  matching in `boostEmbeddedSymbols`/`scanNonCandidates` is now memoized
+  instead of recomputed per chunk. Behavior-preserving — verified via
+  byte-identical recall@10 on the semble corpus.
+
+### Fixed
+
+- **Three real correctness fixes inherited from bumping `aikit`
+  v1.31.0 → v1.45.1** (14 releases, 152 commits — Dependabot's PR only
+  reached v1.42.0): BM25's WAND unsound bound at B>1, an ANN/HNSW scoring
+  bug, and duplicate-key handling in the inlined RRF fuse. No API changes;
+  verified via a full `go test ./...` pass with a real model (semantic/
+  hybrid/recall paths exercised) plus aikit's own `TestGolden_EmbeddingCosine`
+  parity check.
+
+### Internal
+
+- Dependency bumps: `github.com/modelcontextprotocol/go-sdk` 1.7.0 → 1.8.0,
+  `github.com/jackc/pgx/v5` 5.10.0 → 5.11.0.
+- New `BenchmarkRerank_Scale` (100/1k/10k chunks) and
+  `TestChunkOneFile_MarkdownAutoRoute` — the markdown-routing path had zero
+  prior coverage.
+
 ## [1.7.0] — 2026-09-10 — ken-mcp mmaps the embedding model
 
 A steady-state-memory release: `ken-mcp` was observed resident at ~1.6 GB.
