@@ -345,6 +345,21 @@ func boostMultiChunkFiles(scores map[int]float64, chunks []chunk.Chunk) {
 	}
 }
 
+// applyQueryBoostInPlace applies query-specific boosts in-place to scores.
+func applyQueryBoostInPlace(scores map[int]float64, query string, chunks []chunk.Chunk, predicted []string) map[int]float64 {
+	if len(scores) == 0 {
+		return scores
+	}
+	ms := maxScore(scores)
+	if isSymbolQuery(query) {
+		boostSymbolDefinitions(scores, query, ms, chunks)
+	} else {
+		boostStemMatches(scores, query, ms, chunks)
+		boostEmbeddedSymbols(scores, query, ms, chunks, predicted)
+	}
+	return scores
+}
+
 // applyQueryBoost is semble boosting.apply_query_boost. Returns a new map
 // (may contain non-candidate chunk indices the scans injected).
 //
@@ -357,16 +372,9 @@ func applyQueryBoost(combined map[int]float64, query string, chunks []chunk.Chun
 	if len(combined) == 0 {
 		return combined
 	}
-	ms := maxScore(combined)
 	boosted := make(map[int]float64, len(combined))
 	maps.Copy(boosted, combined)
-	if isSymbolQuery(query) {
-		boostSymbolDefinitions(boosted, query, ms, chunks)
-	} else {
-		boostStemMatches(boosted, query, ms, chunks)
-		boostEmbeddedSymbols(boosted, query, ms, chunks, predicted)
-	}
-	return boosted
+	return applyQueryBoostInPlace(boosted, query, chunks, predicted)
 }
 
 func boostSymbolDefinitions(boosted map[int]float64, query string, ms float64, chunks []chunk.Chunk) {
@@ -408,20 +416,37 @@ func boostEmbeddedSymbols(boosted map[int]float64, query string, ms float64, chu
 	for i, n := range names {
 		symbolsLower[i] = strings.ToLower(n)
 	}
+
+	var lastFile string
+	var lastOK bool
+	fileOK := make(map[string]bool, 64)
+
 	for idx := range chunks {
 		if _, in := boosted[idx]; in {
 			continue
 		}
-		stem := strings.ToLower(fileStem(chunks[idx].File))
-		stemNorm := strings.ReplaceAll(stem, "_", "")
-		ok := false
-		for _, s := range symbolsLower {
-			if stem == s || stemNorm == s ||
-				(len(stem) >= embeddedStemMinLen && strings.HasPrefix(s, stem)) ||
-				(len(stemNorm) >= embeddedStemMinLen && strings.HasPrefix(s, stemNorm)) {
-				ok = true
-				break
+		fp := chunks[idx].File
+		var ok bool
+		if fp == lastFile {
+			ok = lastOK
+		} else if cachedOK, seen := fileOK[fp]; seen {
+			ok = cachedOK
+			lastFile = fp
+			lastOK = ok
+		} else {
+			stem := strings.ToLower(fileStem(fp))
+			stemNorm := strings.ReplaceAll(stem, "_", "")
+			for _, s := range symbolsLower {
+				if stem == s || stemNorm == s ||
+					(len(stem) >= embeddedStemMinLen && strings.HasPrefix(s, stem)) ||
+					(len(stemNorm) >= embeddedStemMinLen && strings.HasPrefix(s, stemNorm)) {
+					ok = true
+					break
+				}
 			}
+			fileOK[fp] = ok
+			lastFile = fp
+			lastOK = ok
 		}
 		if !ok {
 			continue
@@ -437,11 +462,29 @@ func boostEmbeddedSymbols(boosted map[int]float64, query string, ms float64, chu
 // define one of names.
 func scanNonCandidates(boosted map[int]float64, names []string, boostUnit float64,
 	chunks []chunk.Chunk, stemOK func(string) bool) {
+	var lastFile string
+	var lastOK bool
+	fileOK := make(map[string]bool, 64)
+
 	for idx := range chunks {
 		if _, in := boosted[idx]; in {
 			continue
 		}
-		if !stemOK(strings.ToLower(fileStem(chunks[idx].File))) {
+		fp := chunks[idx].File
+		var ok bool
+		if fp == lastFile {
+			ok = lastOK
+		} else if cachedOK, seen := fileOK[fp]; seen {
+			ok = cachedOK
+			lastFile = fp
+			lastOK = ok
+		} else {
+			ok = stemOK(strings.ToLower(fileStem(fp)))
+			fileOK[fp] = ok
+			lastFile = fp
+			lastOK = ok
+		}
+		if !ok {
 			continue
 		}
 		if t := definitionTier(chunks[idx], names, boostUnit); t != 0 {

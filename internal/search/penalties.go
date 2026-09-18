@@ -95,9 +95,14 @@ func rerankTopK(scores map[int]float64, chunks []chunk.Chunk, topK int, penalise
 	if len(scores) == 0 {
 		return nil
 	}
+	type candidateItem struct {
+		idx   int
+		score float64
+	}
 	penaltyCache := map[string]float64{}
-	penalised := make(map[int]float64, len(scores))
+	ranked := make([]candidateItem, 0, len(scores))
 	for idx, sc := range scores {
+		pen := sc
 		if penalisePaths {
 			fp := chunks[idx].File
 			p, ok := penaltyCache[fp]
@@ -105,23 +110,18 @@ func rerankTopK(scores map[int]float64, chunks []chunk.Chunk, topK int, penalise
 				p = filePathPenalty(fp)
 				penaltyCache[fp] = p
 			}
-			penalised[idx] = sc * p
-		} else {
-			penalised[idx] = sc
+			pen = sc * p
 		}
+		ranked = append(ranked, candidateItem{idx: idx, score: pen})
 	}
 
-	ranked := make([]int, 0, len(penalised))
-	for idx := range penalised {
-		ranked = append(ranked, idx)
-	}
 	// semble sorts by -score; iteration order before sort was start_line.
 	// Sort by (-penalised, StartLine, File, idx) for a stable, deterministic
 	// order that matches semble's intent.
 	sort.Slice(ranked, func(a, b int) bool {
-		ia, ib := ranked[a], ranked[b]
-		if penalised[ia] != penalised[ib] {
-			return penalised[ia] > penalised[ib]
+		ia, ib := ranked[a].idx, ranked[b].idx
+		if ranked[a].score != ranked[b].score {
+			return ranked[a].score > ranked[b].score
 		}
 		if chunks[ia].StartLine != chunks[ib].StartLine {
 			return chunks[ia].StartLine < chunks[ib].StartLine
@@ -140,8 +140,9 @@ func rerankTopK(scores map[int]float64, chunks []chunk.Chunk, topK int, penalise
 	var selected []sel
 	minSelected := math.Inf(1)
 
-	for _, idx := range ranked {
-		pen := penalised[idx]
+	for _, it := range ranked {
+		pen := it.score
+		idx := it.idx
 		if len(selected) >= topK && pen <= minSelected {
 			break
 		}

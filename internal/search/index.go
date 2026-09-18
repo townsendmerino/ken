@@ -49,6 +49,7 @@ import (
 	"github.com/townsendmerino/aikit/bm25"
 	"github.com/townsendmerino/aikit/chunk"
 	_ "github.com/townsendmerino/aikit/chunk/regex" // registers the default "regex" chunker
+
 	// NOTE: treesitter and markdown are NOT blank-imported here. Binaries
 	// that want them must blank-import them explicitly — e.g. cmd/ken-mcp
 	// and cmd/ken-mcp-docs do, but the embedded-corpus demo binary
@@ -721,7 +722,13 @@ feedLoop:
 // once for the whole directory by sql.FoldMigrations rather than per-file,
 // avoiding redundant N+1 chunks (CREATE + many ALTERs).
 func chunkOneFile(chunkerName, rel string, data []byte, skipSQLStructural bool) ([]chunk.Chunk, error) {
-	cs, err := chunk.ChunkFile(chunkerName, rel, data, chunk.DefaultChunkSize)
+	effectiveChunker := chunkerName
+	if effectiveChunker != "line" && chunk.Language(rel) == "markdown" {
+		if _, err := chunk.Get("markdown"); err == nil {
+			effectiveChunker = "markdown"
+		}
+	}
+	cs, err := chunk.ChunkFile(effectiveChunker, rel, data, chunk.DefaultChunkSize)
 	if err != nil {
 		return nil, err
 	}

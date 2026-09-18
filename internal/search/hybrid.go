@@ -53,9 +53,10 @@ func hybridSearch(
 	candidateCount := topK * candidateOverfetch
 
 	// Semantic candidates (cosine similarity, already sorted desc).
-	var semOrder []int
-	for _, h := range flat.Query(qVec, candidateCount) {
-		semOrder = append(semOrder, h.Index)
+	semHits := flat.Query(qVec, candidateCount)
+	semOrder := make([]int, len(semHits))
+	for i, h := range semHits {
+		semOrder[i] = h.Index
 	}
 	// BM25 candidates, excluding zero-score (semble drops score≤0).
 	// Predicted identifiers extend the query token bag (canonicalized
@@ -69,20 +70,22 @@ func hybridSearch(
 			bmTerms = append(bmTerms, bm25.Tokenize(p)...)
 		}
 	}
-	var bmOrder []int
-	for _, r := range bm.TopK(bmTerms, candidateCount) {
+	bmHits := bm.TopK(bmTerms, candidateCount)
+	bmOrder := make([]int, 0, len(bmHits))
+	for _, r := range bmHits {
 		if r.Score > 0 {
 			bmOrder = append(bmOrder, r.Doc)
 		}
 	}
 
-	fused := fuse.RRFWeighted(fuse.DefaultK, []float64{alpha, 1.0 - alpha}, semOrder, bmOrder)
+	weights := [2]float64{alpha, 1.0 - alpha}
+	fused := fuse.RRFWeighted(fuse.DefaultK, weights[:], semOrder, bmOrder)
 	combined := make(map[int]float64, len(fused))
 	for _, r := range fused {
 		combined[r.Key] = r.Score
 	}
 
 	boostMultiChunkFiles(combined, chunks)
-	combined = applyQueryBoost(combined, query, chunks, predicted)
+	applyQueryBoostInPlace(combined, query, chunks, predicted)
 	return rerankTopK(combined, chunks, topK, alpha < 1.0)
 }
