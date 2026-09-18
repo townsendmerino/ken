@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/townsendmerino/aikit/chunk"
+	_ "github.com/townsendmerino/aikit/chunk/markdown"
 	"github.com/townsendmerino/aikit/chunk/treesitter"
 	"github.com/townsendmerino/ken/internal/perf"
 	"github.com/townsendmerino/ken/internal/search"

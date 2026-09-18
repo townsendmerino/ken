@@ -83,3 +83,21 @@ func BenchmarkRerank(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkRerank_Scale measures how reranking + boosting scales as corpus size
+// grows from 100 to 10,000 chunks (holding the candidate count constant at 100).
+func BenchmarkRerank_Scale(b *testing.B) {
+	for _, nChunks := range []int{100, 1_000, 10_000} {
+		numFiles := max(1, nChunks/20)
+		chunks := buildRerankCorpus(numFiles, 20)
+		fused := buildFusedScores(len(chunks), 100)
+		b.Run(fmt.Sprintf("N%d/NaturalLang", len(chunks)), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				boosted := applyQueryBoost(fused, "build index from path", chunks, nil)
+				_ = rerankTopK(boosted, chunks, 20, true)
+			}
+		})
+	}
+}
