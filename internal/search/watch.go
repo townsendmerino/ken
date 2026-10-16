@@ -97,6 +97,15 @@ type WatchedIndex struct {
 	// NewWatchedIndex returns successfully.
 	ix atomic.Pointer[Index]
 
+	// generation counts snapshot publishes (every w.publish call), starting
+	// at 1 for the first build. ADR-042's build-id provenance field: lets a
+	// caller correlate a Result/Hit back to "which published snapshot served
+	// this query," e.g. to detect a swap mid-session or dedupe cache entries
+	// across a reindex. Bumped unconditionally on every publish, including
+	// metadata-only republishes (SetReranker/SetExtraChunks) — those also
+	// swap the pointer, so they're a new generation by this definition.
+	generation atomic.Uint64
+
 	// Mutable corpus state owned by the debouncer goroutine. chunks
 	// and vecs are parallel. During a flush, deletes mark entries as
 	// Tombstoned in-place; compactCorpus then drops tombstoned entries
@@ -200,6 +209,21 @@ func (w *WatchedIndex) EmbedModel() *embed.StaticModel { return w.model }
 // Load returns the current Index snapshot. Goroutine-safe; one atomic
 // load. Never returns nil after NewWatchedIndex succeeds.
 func (w *WatchedIndex) Load() *Index { return w.ix.Load() }
+
+// publish stores the newly-built Index and bumps generation. The single
+// funnel every snapshot-swap call site uses, so Generation() always agrees
+// with what Load() returns.
+func (w *WatchedIndex) publish(ix *Index) {
+	w.generation.Add(1)
+	w.ix.Store(ix)
+}
+
+// Generation returns the number of snapshots published so far (1 after the
+// first build, incremented on every subsequent republish). Pairs with Load:
+// reading both without a lock between them can observe a slightly newer
+// generation than the loaded pointer if a publish races in between, which is
+// fine for its purpose (cache/provenance correlation, not consistency).
+func (w *WatchedIndex) Generation() uint64 { return w.generation.Load() }
 
 // Root is the directory this index was built from. For a local-path repo it's
 // the path the caller passed; for a URL repo it's the temp clone dir the cache

@@ -98,7 +98,7 @@ func (w *WatchedIndex) warmCorpusInBackground(ctx context.Context) {
 	w.vecs = newVecs
 	w.mode = targetMode     // upgrade bm25 → hybrid when staged; unchanged otherwise
 	w.stagedPending = false // vecs is now full-length: appendFile/refold may embed (audit N1)
-	w.ix.Store(w.buildUnionedIndexLocked())
+	w.publish(w.buildUnionedIndexLocked())
 	w.notifySwap()
 	// Reuse the flush notification so ken-mcp's OnFlush re-persists the now-full
 	// snapshot (M1) — a boot after this is a clean full-quality load.
@@ -164,7 +164,7 @@ func (w *WatchedIndex) flush(batch map[string]fsnotify.Op, resyncPresent map[str
 		return
 	}
 	newIx := w.buildUnionedIndexLocked()
-	w.ix.Store(newIx)
+	w.publish(newIx)
 	total := len(w.chunks) + len(w.extraChunks)
 	// Unlock BEFORE the notify callbacks (audit R8): notifyFlush is
 	// ken-mcp's OnFlush = writeSnapshot — a whole-repo WalkFS + Stat, a full
@@ -463,7 +463,7 @@ func (w *WatchedIndex) SetReranker(r Reranker, opts ...RerankerOption) {
 		next := *cur
 		next.reranker = r
 		next.rerankCfg = w.rerankCfg
-		w.ix.Store(&next)
+		w.publish(&next)
 	}
 }
 
@@ -505,7 +505,7 @@ func (w *WatchedIndex) SetExtraChunks(chunks []chunk.Chunk) {
 	} else {
 		w.extraVecs = nil
 	}
-	w.ix.Store(w.buildUnionedIndexLocked())
+	w.publish(w.buildUnionedIndexLocked())
 	w.notifySwap()
 }
 

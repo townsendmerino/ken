@@ -50,7 +50,7 @@ func WrapStatic(ix *Index, root string, mode Mode, chunkerName string) *WatchedI
 		done:        make(chan struct{}),
 		static:      true,
 	}
-	wi.ix.Store(ix)
+	wi.publish(ix)
 	close(wi.done) // no watcher goroutine; Close()'s <-w.done returns immediately
 	return wi
 }
@@ -202,7 +202,7 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 	if reconcile != nil {
 		reconcile(wi)
 	}
-	wi.ix.Store(wi.buildUnionedIndexLocked())
+	wi.publish(wi.buildUnionedIndexLocked())
 
 	// Bring the deferred build to full quality. On the non-watching path
 	// there's no long-lived process, so warm synchronously before returning
