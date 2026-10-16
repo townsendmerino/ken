@@ -13,6 +13,34 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [1.9.0] — 2026-10-16 — public `ken/engine` library package
+
+A new public package for embedding ken as an in-process context engine
+(ADR-046), alongside the existing CLI and MCP server surfaces. The 1.0
+public API surface (`mcp.*`) is unchanged and additive-only; this adds a
+second, independent public surface rather than modifying it.
+
+### Added
+
+- **`github.com/townsendmerino/ken/engine`.** `Open(ctx, root, Options)
+  (*Workspace, error)` builds or loads an ADR-039 snapshot of a watched +
+  structural index without touching any `internal/` package. `Workspace`
+  methods: `Search`/`SearchMode`/`FindRelated` (returning a new `Hit` type
+  — adds `Hash` (sha256 of the chunk text), `Rank`, `Gen` (a new
+  `WatchedIndex.Generation()` counter — the generation-counter half of
+  ADR-042), and best-effort per-arm `BM25Rank`/`DenseRank` on top of the
+  existing hybrid ranking, computed without changing it), `Definition` /
+  `References` / `Callers` / `Outline` / `Symbols`, `Status`, `Close`.
+  `ApproxTokens` re-exports `mcp/token_budget.go`'s dependency-free token
+  estimator for callers assembling their own context budget.
+  `cmd/ken-mcp` is the package's first client: its index-construction and
+  ADR-039 snapshot wiring now call `engine.Open` instead of carrying a
+  second copy of that logic. No ranking or recall change — the full
+  `internal/search` test suite and the cross-run build-determinism check
+  pass unmodified; the full semble NDCG re-run needs a semble checkout
+  this environment didn't have set up, so it wasn't re-run for this
+  release (the change touches no scoring/ranking code — see ADR-046).
+
 ## [1.8.0] — 2026-09-17 — markdown chunking activated + aikit correctness fixes
 
 A retrieval-quality release: `.md` files finally get proper heading-based

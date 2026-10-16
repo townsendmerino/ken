@@ -55,6 +55,7 @@ import (
 	// the embed layer so per-language gating doesn't shrink it.
 	_ "github.com/townsendmerino/aikit/chunk/markdown"
 	"github.com/townsendmerino/aikit/chunk/treesitter"
+	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/embedcache"
 	"github.com/townsendmerino/ken/internal/envcfg"
 	"github.com/townsendmerino/ken/internal/modelfetch"
@@ -230,7 +231,7 @@ func localPathHasPrebuilt(dir string) bool {
 //     corpus is still indexable; a slower-but-correct result beats an
 //     outage. (Distinct from mismatch, which is a config error the
 //     operator must fix.)
-func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, persistSnapshot bool, logger *kenmcp.Logger) (*search.WatchedIndex, error) {
+func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, persistSnapshot bool, logger *kenmcp.Logger) (*search.WatchedIndex, func(func(string)), error) {
 	if data, err := os.ReadFile(prebuiltIndexPath(dir)); err == nil {
 		var model *embed.StaticModel
 		if mode != search.ModeBM25 {
@@ -250,10 +251,11 @@ func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeS
 		switch {
 		case lErr == nil:
 			logger.Logf(kenmcp.LogInfo, "loaded pre-built index %s (%d chunks, no watch)", prebuiltIndexPath(dir), ix.Len())
-			return search.WrapStatic(ix, dir, mode, chunker), nil
+			wi := search.WrapStatic(ix, dir, mode, chunker)
+			return wi, wi.SetOnFlush, nil
 		case errors.Is(lErr, search.ErrModeMismatch) || errors.Is(lErr, search.ErrChunkerMismatch):
 			// Config error — fail loud rather than serve wrong results.
-			return nil, fmt.Errorf("pre-built index %s: %w (server is mode=%s chunker=%s; rebuild with matching `ken build-index` flags or fix KEN_MCP_MODE/KEN_MCP_CHUNKER)",
+			return nil, nil, fmt.Errorf("pre-built index %s: %w (server is mode=%s chunker=%s; rebuild with matching `ken build-index` flags or fix KEN_MCP_MODE/KEN_MCP_CHUNKER)",
 				prebuiltIndexPath(dir), lErr, modeStr, chunker)
 		default:
 			// Corrupt / format-version / model-required — fall back.
@@ -264,48 +266,33 @@ func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeS
 }
 
 // buildOrLoadSnapshot is the cold-start M1 (ADR-039) fall-through, taken when
-// there is no ADR-024 operator prebuilt to serve frozen. When persistSnapshot
-// is set (a local repo with KEN_MCP_SNAPSHOT on) it first tries the persisted
-// <repo>/.ken/snapshot.{manifest,bin} fast path — load + drift-scan, skipping
-// the walk/chunk/enrich/embed rebuild when the repo is unchanged — then, on a
-// miss or drift, live-builds and writes a fresh snapshot for next time. Any
-// snapshot failure degrades silently to the live build.
-func buildOrLoadSnapshot(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, persistSnapshot bool, logger *kenmcp.Logger) (*search.WatchedIndex, error) {
-	if persistSnapshot {
-		if wi := tryLoadSnapshot(dir, mode, modeStr, chunker, modelDir, fsOpts, logger); wi != nil {
-			return wi, nil
-		}
-	}
-	wi, err := liveWatched(ctx, dir, mode, chunker, modelDir, fsOpts, logger)
+// there is no ADR-024 operator prebuilt to serve frozen. engine.Open owns the
+// actual load-snapshot-or-live-build-and-persist decision (ADR-046) — ken-mcp
+// no longer carries its own copy of that logic, so it can't drift from
+// ken/engine's. The returned setOnFlush is ws.SetOnFlush (composes with
+// engine's own snapshot-persist-on-flush hook) rather than the raw
+// WatchedIndex's SetOnFlush, which would replace it outright.
+func buildOrLoadSnapshot(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, persistSnapshot bool, logger *kenmcp.Logger) (*search.WatchedIndex, func(func(string)), error) {
+	ws, err := engine.Open(ctx, dir, engine.Options{
+		Mode:                  modeStr,
+		Chunker:               chunker,
+		ModelDir:              modelDir,
+		Watch:                 true,
+		Snapshot:              persistSnapshot,
+		DisableFoldMigrations: fsOpts.DisableFoldMigrations,
+		LogWriter:             fsOpts.LogWriter,
+		DisableEnrichment:     fsOpts.DisableEnrichment,
+		LazyEnrichment:        fsOpts.LazyEnrichment,
+		StagedEmbedding:       fsOpts.StagedEmbedding,
+		MmapModel:             fsOpts.MmapModel,
+		DenseRetriever:        fsOpts.DenseRetriever,
+		EmbedCache:            fsOpts.EmbedCache,
+	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if persistSnapshot {
-		// M2/M4: with lazy enrichment or staged embedding the build just
-		// published a RAW/BM25 index; the background pass republishes the full
-		// one and its OnFlush persists that. Persisting the partial index now
-		// would race that and could leave a partial snapshot on disk, so let
-		// the background pass own the write. (A crash mid-warm → no snapshot →
-		// next boot rebuilds, which is also fast — self-consistent.)
-		if !fsOpts.LazyEnrichment && !fsOpts.StagedEmbedding {
-			writeSnapshot(dir, wi, mode, chunker, modelDir, fsOpts, logger)
-		}
-	}
-	return wi, nil
-}
-
-// liveWatched is the original walk+chunk+embed build with the file
-// watcher enabled (v0.3+ behavior). Factored out so loadOrBuildWatched
-// has a single fallback call site. ctx scopes the initial build so a
-// shutdown signal cancels a large in-progress index (Fix 2).
-func liveWatched(ctx context.Context, dir string, mode search.Mode, chunker, modelDir string, fsOpts search.FSOptions, logger *kenmcp.Logger) (*search.WatchedIndex, error) {
-	logger.Logf(kenmcp.LogInfo, "indexing %s (live build, watching)", dir)
-	ix, err := search.NewWatchedIndexWithContext(ctx, dir, mode, chunker, modelDir, true, fsOpts)
-	if err != nil {
-		return nil, err
-	}
-	logger.Logf(kenmcp.LogInfo, "indexed %s (%d chunks, watching)", dir, ix.Len())
-	return ix, nil
+	logger.Logf(kenmcp.LogInfo, "indexed %s (%d chunks, watching)", dir, ws.WatchedIndex().Len())
+	return ws.WatchedIndex(), ws.SetOnFlush, nil
 }
 
 // runSubcommand dispatches one-shot CLI subcommands that exit before
@@ -864,7 +851,7 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 		fsOpts.EmbedCache = embedCache
 	}
 	persistSnapshot := rb.snapshotEnabled && isLocal
-	ix, err := loadOrBuildWatched(ctx, dir, bMode, bModeStr, rb.chunker, bModelDir, fsOpts, persistSnapshot, rb.logger)
+	ix, setOnFlush, err := loadOrBuildWatched(ctx, dir, bMode, bModeStr, rb.chunker, bModelDir, fsOpts, persistSnapshot, rb.logger)
 	if err != nil {
 		if cleanup != nil {
 			cleanup()
@@ -893,16 +880,13 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 	// Log reindex activity at info-level so warn-default runs stay
 	// quiet but `KEN_MCP_LOG_LEVEL=info` shows agents the file
 	// watcher is doing its job. Stays on stderr (never stdout, the
-	// MCP JSON-RPC channel).
-	ix.SetOnFlush(func(msg string) {
+	// MCP JSON-RPC channel). setOnFlush is ws.SetOnFlush for an
+	// engine-backed index (composes with engine's own ADR-039
+	// snapshot-persist-on-flush hook) or the raw WatchedIndex's
+	// SetOnFlush for the ADR-024 static pre-built case (never fires —
+	// a frozen index has no watcher — so persistence is moot there).
+	setOnFlush(func(msg string) {
 		rb.logger.Logf(kenmcp.LogInfo, "%s: %s", dir, msg)
-		// M1 (ADR-039): a flush changed the corpus — re-persist the
-		// snapshot so a restart after edits loads the latest, not a
-		// stale one. Best-effort (writeSnapshot never fails the server);
-		// runs in the watcher goroutine, off the query path.
-		if persistSnapshot {
-			writeSnapshot(dir, ix, bMode, rb.chunker, bModelDir, fsOpts, rb.logger)
-		}
 		// M2: a flush rebuilds the index snapshot, leaving the old
 		// corpus/postings/vectors as garbage. Hand the freed pages
 		// back to the OS so a long-lived idle server doesn't sit on
