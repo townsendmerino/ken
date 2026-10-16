@@ -27,7 +27,7 @@ go build ./...                                   # build everything
 go test ./...                                    # all tests
 go test ./internal/search/ -run TestSerializeRoundtrip_BM25 -v   # a single test (regexp on name)
 go vet ./...                                      # must be clean
-make gofmt-check                                  # gofmt scope = Makefile GOFMT_DIRS (cmd internal mcp bench demos); CI runs this exact target
+make gofmt-check                                  # gofmt scope = Makefile GOFMT_DIRS (cmd engine internal mcp bench demos tools); CI runs this exact target
 go fix ./...                                      # Go 1.26 modernizers (SplitSeq, min, range-int)
 
 go run ./cmd/ken index  <path>  [--watch|--no-watch] [--write-snapshot] [--chunker=regex|treesitter|line] [--mode=bm25|semantic|hybrid] [--model=DIR]

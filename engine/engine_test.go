@@ -42,7 +42,7 @@ func TestOpenSearchBM25(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	if ws.Root() != dir {
 		// dir may be a symlink-resolved tmp path on macOS (/private/var vs
@@ -93,7 +93,7 @@ func TestGenerationBumpsOnExtraChunksUnion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	before := ws.Status().Generation
 	ws.SetExtraChunks(nil) // a no-op union still republishes a new snapshot
@@ -112,7 +112,7 @@ func TestStructuralDefinitionAndReferences(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	// The structural build is lazy/background; poll briefly rather than
 	// assume the first call (which may return ErrStructuralBuilding on a
@@ -197,7 +197,7 @@ func TestSearchModeHybridPerArmRanks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	hits, eff, err := ws.SearchMode(ctx, "bar", 5, engine.ModeHybrid)
 	if err != nil {
@@ -230,7 +230,7 @@ func TestFindRelated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	// The fixture is a single chunk, so FindRelated legitimately finds
 	// nothing (it drops the source chunk itself) — this just exercises the
@@ -262,7 +262,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-Open: %v", err)
 	}
-	defer ws2.Close()
+	defer func() { _ = ws2.Close() }()
 	if got := ws2.Status().ChunkCount; got != chunkCount {
 		t.Errorf("reloaded chunk count = %d, want %d", got, chunkCount)
 	}
