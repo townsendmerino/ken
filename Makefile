@@ -21,7 +21,9 @@ GOFMT_DIRS := cmd internal mcp bench demos tools
 # skipping the linter — the gap that used to let a lint failure reach `main`.
 # v2.13.0 is the first release with go 1.27 support (prebuilt binaries built
 # with go 1.27); earlier versions' staticcheck crashes on the go 1.27 stdlib.
-GOLANGCI_VERSION := v2.13.0
+# Bumped to v2.14.0 for the go1.27.2 toolchain bump: v2.13.0 can't read
+# go1.27.2's export data (version 5, max supported 4) and type-checks nothing.
+GOLANGCI_VERSION := v2.14.0
 
 help: ## list targets
 	@grep -hE '^[a-z][a-zA-Z0-9_-]*:.*##' $(MAKEFILE_LIST) \
