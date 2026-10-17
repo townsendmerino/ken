@@ -13,6 +13,44 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [1.10.0] — 2026-10-16 — `engine`: section-level retrieval for markdown
+
+K9 for `tack`: a long instruction file (`CLAUDE.md`, `AGENTS.md`) shouldn't
+load whole into a small context window. `engine.Hit` now carries heading
+structure so a caller can ship just the relevant sections.
+
+### Added
+
+- **`Hit.HeadingPath []string`** — for a markdown hit, the chain of
+  headings enclosing it, outermost first (e.g. `["Testing", "A skip is
+  not a pass"]`); empty for non-markdown hits.
+- **`(*Workspace) Sections(ctx, path) ([]Section, error)`** — a markdown
+  file's heading-bounded sections in file order.
+  `Section{HeadingPath, Level, StartLine, EndLine, ApproxTokens}`. Every
+  markdown `Hit`'s line range falls inside exactly one returned `Section`
+  with the same `HeadingPath` (guarded by `engine/sections_test.go`,
+  cross-checked against every real chunk the markdown chunker produces for
+  ken's own `CLAUDE.md` and a fixture with nested/setext headings, a
+  headerless preamble, and a code fence whose `#` line isn't a heading).
+- **`(*Workspace) SearchFiles(ctx, query, k, mode, files) ([]Hit, Mode,
+  error)`** — `SearchMode` restricted to the given repo-relative files, so
+  a caller can ask "which sections of CLAUDE.md match this message"
+  without hits from the rest of the repo. Implemented as a post-filter on
+  an over-fetched `SearchMode` call — no ranking change.
+- `engine` now registers the markdown chunker itself (blank-imports
+  `aikit/chunk/markdown`), so any consumer gets heading-aware `.md`
+  chunking without remembering the side-effect import `cmd/ken`/
+  `cmd/ken-mcp` already carry.
+- `docs/DEVELOPERS.md`'s public-API-surface section now documents the full
+  `engine` package (it was missed in 1.9.0's entry).
+
+See [ADR-047](docs/internal/DECISIONS.md#adr-047-engine-section-level-retrieval-for-markdown--hitheadingpath-workspacesections-workspacesearchfiles)
+for why the heading scanner is a deliberate, documented port of
+`aikit/chunk/markdown`'s unexported classifier rather than a shared
+function — promoting it to a public `aikit` API is a tracked follow-up,
+deferred because `aikit`'s release ritual needs a real-box perfgate run
+and tonight's queue was full.
+
 ## [1.9.0] — 2026-10-16 — public `ken/engine` library package
 
 A new public package for embedding ken as an in-process context engine
