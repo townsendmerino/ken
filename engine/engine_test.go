@@ -268,6 +268,104 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	}
 }
 
+// writeMixedRepo lays down one Go file and one markdown file (with nested
+// headings) in a fresh temp dir, for testing Hit.HeadingPath and
+// SearchFiles across file types.
+func writeMixedRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	goSrc := `package sample
+
+func Alpha() int { return 1 }
+`
+	mdSrc := `# Guide
+
+## Setup
+
+Run alpha to get started.
+
+## Alpha details
+
+Alpha returns a constant.
+`
+	if err := os.WriteFile(filepath.Join(dir, "code.go"), []byte(goSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "GUIDE.md"), []byte(mdSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestSearch_HeadingPathOnlyOnMarkdownHits(t *testing.T) {
+	dir := writeMixedRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ws, err := engine.Open(ctx, dir, engine.Options{Mode: "bm25"})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = ws.Close() }()
+
+	hits, err := ws.Search(ctx, "alpha", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	sawMarkdown, sawGo := false, false
+	for _, h := range hits {
+		switch h.File {
+		case "GUIDE.md":
+			sawMarkdown = true
+			if len(h.HeadingPath) == 0 {
+				t.Errorf("markdown hit %s:%d has empty HeadingPath", h.File, h.StartLine)
+			}
+		case "code.go":
+			sawGo = true
+			if len(h.HeadingPath) != 0 {
+				t.Errorf("non-markdown hit %s:%d has non-empty HeadingPath %v", h.File, h.StartLine, h.HeadingPath)
+			}
+		}
+	}
+	if !sawMarkdown || !sawGo {
+		t.Fatalf("expected hits from both files, got: %+v", hits)
+	}
+}
+
+func TestSearchFiles(t *testing.T) {
+	dir := writeMixedRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ws, err := engine.Open(ctx, dir, engine.Options{Mode: "bm25"})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = ws.Close() }()
+
+	hits, _, err := ws.SearchFiles(ctx, "alpha", 10, engine.ModeBM25, []string{"GUIDE.md"})
+	if err != nil {
+		t.Fatalf("SearchFiles: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("SearchFiles returned no hits")
+	}
+	for _, h := range hits {
+		if h.File != "GUIDE.md" {
+			t.Errorf("SearchFiles restricted to GUIDE.md returned a hit from %s", h.File)
+		}
+	}
+
+	// A file not in the index is silently ignored, not an error.
+	none, _, err := ws.SearchFiles(ctx, "alpha", 10, engine.ModeBM25, []string{"nope.md"})
+	if err != nil {
+		t.Fatalf("SearchFiles(unknown file): %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("SearchFiles(unknown file) = %+v, want no hits", none)
+	}
+}
+
 func TestApproxTokens(t *testing.T) {
 	if got := engine.ApproxTokens(""); got != 0 {
 		t.Errorf("ApproxTokens(\"\") = %d, want 0", got)

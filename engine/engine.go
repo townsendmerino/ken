@@ -24,6 +24,17 @@ import (
 	"path/filepath"
 	"sync"
 
+	// Registers the "markdown" chunker (heading-aware .md/.mdx/.markdown
+	// chunking) so any engine consumer gets it by default — same
+	// cost/benefit cmd/ken and cmd/ken-mcp already made (ADR-023's binary-
+	// size seam is about the treesitter chunker specifically; markdown has
+	// no embedded grammar data and is cheap to always link). Without this,
+	// internal/search's chunkOneFile falls back to whatever Options.Chunker
+	// names (regex by default) for .md files, and Hit.HeadingPath/
+	// (*Workspace).Sections would have nothing markdown-shaped to agree
+	// with.
+	_ "github.com/townsendmerino/aikit/chunk/markdown"
+
 	"github.com/townsendmerino/ken/internal/search"
 	"github.com/townsendmerino/ken/internal/structural"
 )

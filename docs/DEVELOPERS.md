@@ -204,6 +204,51 @@ stable, semantics may evolve between minors):
 - `Config{DSN, Engine, Schemas, ExcludeSchemas, Listen, …}` —
   DB integration options.
 
+**`github.com/townsendmerino/ken/engine`** (ADR-046, since v1.9.0) — Hard,
+1.0-committed. ken's library surface for embedding as an in-process
+context engine (`cmd/ken-mcp` is its first client; `github.com/townsendmerino/tack`
+the first external one) — importable without touching any `internal/*`
+package:
+
+- `Open(ctx, root, Options) (*Workspace, error)` — builds or loads an
+  ADR-039 snapshot of a watched + structural index over a local directory.
+- `Options{Mode, Chunker, ModelDir, Watch, Snapshot, DisableEnrichment,
+  LazyEnrichment, StagedEmbedding, MmapModel, DenseRetriever,
+  DisableFoldMigrations, EmbedCache, LogWriter}`.
+- `Workspace.{Search, SearchMode, SearchFiles, FindRelated}` — return
+  `[]Hit`; `SearchMode`/`SearchFiles` also return the effective `Mode`.
+  `SearchFiles` restricts hits to a given set of repo-relative paths (post-
+  filters an over-fetched ranking; never re-ranks — added in v1.10.0 for
+  "which sections of this one file match" use cases).
+- `Hit{File, StartLine, EndLine, Text, Hash, Score, Rank, Gen, BM25Rank,
+  DenseRank, HeadingPath}` — `Hash` is sha256(Text); `Gen` is
+  `WatchedIndex.Generation()` (ADR-042's counter half); `BM25Rank`/
+  `DenseRank` are best-effort per-arm ranks for the hybrid modes;
+  `HeadingPath` (v1.10.0) is the markdown heading chain enclosing the hit,
+  empty for non-markdown hits.
+- `Workspace.{Definition, References, Callers, Outline, Symbols}` —
+  structural lookups; return `ErrStructuralBuilding` / `ErrNoStructuralIndex`
+  while the lazy structural index isn't ready yet / isn't available.
+- `Workspace.Sections(ctx, path) ([]Section, error)` (v1.10.0) — a
+  markdown file's heading-bounded sections, in file order; every markdown
+  Hit's line range falls inside exactly one returned Section with the
+  same `HeadingPath`.
+- `Section{HeadingPath, Level, StartLine, EndLine, ApproxTokens}`.
+- `Workspace.{Status, Close, Root, SetOnFlush, SetReranker, SetExtraChunks,
+  WatchedIndex, StructuralIfBuilt}` — the latter two are aliased-type
+  escape hatches (`engine.WatchedIndex`/`engine.Index`/
+  `engine.StructuralIndex` alias `search.WatchedIndex`/`search.Index`/
+  `structural.Index`) back to the lower-level surface for callers (like
+  `cmd/ken-mcp`) that need per-call telemetry, filters, or token budgeting
+  the `Hit`-based methods don't model.
+- `Mode`, `ModeBM25`, `ModeSemantic`, `ModeHybrid`, `ModeHybridRerank`,
+  `Telemetry`, `Reranker`, `RerankerOption`, `With{RerankN,
+  RerankBlendBeta, AdaptiveRerankN}`, `VecCache` — aliases/wrappers over
+  `internal/search`'s equivalents, same pattern as `mcp/api_aliases.go`.
+- `ApproxTokens(s string) int` — the same dependency-free token-count
+  heuristic `mcp/token_budget.go` uses internally, exported for callers
+  assembling their own context budget.
+
 ### ken's `internal/*`
 
 All `internal/` packages are **not public**. They're stable

@@ -75,6 +75,13 @@ type Hit struct {
 	// ranking for the same query (or, for FindRelated, simply equal to
 	// Rank — FindRelated IS a dense-only query), or 0 if not applicable.
 	DenseRank int
+
+	// HeadingPath is the chain of markdown headings enclosing this hit,
+	// outermost first (e.g. ["Testing", "A skip is not a pass"]) — the
+	// HeadingPath of the Section (see Sections) that contains StartLine.
+	// Empty for a non-markdown file, or if the file's sections can't be
+	// read (best effort; never fails the search).
+	HeadingPath []string
 }
 
 // chunkKey identifies a chunk by its span, stable enough to cross-reference
@@ -140,20 +147,22 @@ func (w *Workspace) toHits(ix *search.Index, results []search.Result, effMode se
 		}
 	}
 
+	sectionCache := make(map[string][]Section)
 	hits := make([]Hit, len(results))
 	for i, r := range results {
 		key := keyOf(r)
 		hits[i] = Hit{
-			File:      r.Chunk.File,
-			StartLine: r.Chunk.StartLine,
-			EndLine:   r.Chunk.EndLine,
-			Text:      r.Chunk.Text,
-			Hash:      hashText(r.Chunk.Text),
-			Score:     r.Score,
-			Rank:      i + 1,
-			Gen:       gen,
-			BM25Rank:  bm25Rank[key],
-			DenseRank: denseRank[key],
+			File:        r.Chunk.File,
+			StartLine:   r.Chunk.StartLine,
+			EndLine:     r.Chunk.EndLine,
+			Text:        r.Chunk.Text,
+			Hash:        hashText(r.Chunk.Text),
+			Score:       r.Score,
+			Rank:        i + 1,
+			Gen:         gen,
+			BM25Rank:    bm25Rank[key],
+			DenseRank:   denseRank[key],
+			HeadingPath: w.headingPathFor(r.Chunk.File, r.Chunk.StartLine, sectionCache),
 		}
 	}
 	return hits
@@ -196,19 +205,73 @@ func (w *Workspace) FindRelated(ctx context.Context, filePath string, line, k in
 	if err != nil {
 		return nil, fmt.Errorf("engine: find_related: %w", err)
 	}
+	sectionCache := make(map[string][]Section)
 	hits := make([]Hit, len(results))
 	for i, r := range results {
 		hits[i] = Hit{
-			File:      r.Chunk.File,
-			StartLine: r.Chunk.StartLine,
-			EndLine:   r.Chunk.EndLine,
-			Text:      r.Chunk.Text,
-			Hash:      hashText(r.Chunk.Text),
-			Score:     r.Score,
-			Rank:      i + 1,
-			Gen:       gen,
-			DenseRank: i + 1,
+			File:        r.Chunk.File,
+			StartLine:   r.Chunk.StartLine,
+			EndLine:     r.Chunk.EndLine,
+			Text:        r.Chunk.Text,
+			Hash:        hashText(r.Chunk.Text),
+			Score:       r.Score,
+			Rank:        i + 1,
+			Gen:         gen,
+			DenseRank:   i + 1,
+			HeadingPath: w.headingPathFor(r.Chunk.File, r.Chunk.StartLine, sectionCache),
 		}
 	}
 	return hits, nil
+}
+
+// searchFilesOverfetchCap bounds how many candidates SearchFiles pulls
+// from the unrestricted ranking before filtering to the requested files.
+// Generous enough that a small set of target files (the K9 use case: one
+// or two instruction files) is very unlikely to lose a relevant hit to the
+// cutoff, while keeping the cost bounded on a huge corpus.
+const searchFilesOverfetchCap = 5000
+
+// SearchFiles is SearchMode restricted to hits whose File is in files —
+// "which sections of CLAUDE.md match this message" without pulling in
+// hits from the rest of the repo. It does not re-rank: it runs the exact
+// same SearchMode pipeline over a larger candidate pool, then keeps only
+// the hits already ranked inside files, preserving their relative scores
+// and order. files must be non-empty; paths not present in the index are
+// silently ignored rather than erroring (a typo'd path just yields no
+// hits from it, matching SearchMode's own graceful-degradation style).
+func (w *Workspace) SearchFiles(ctx context.Context, query string, k int, mode Mode, files []string) ([]Hit, Mode, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, mode, fmt.Errorf("engine: search: %w", err)
+	}
+	if len(files) == 0 || k <= 0 {
+		return nil, mode, nil
+	}
+	want := make(map[string]bool, len(files))
+	for _, f := range files {
+		want[f] = true
+	}
+
+	ix := w.index.Load()
+	gen := w.index.Generation()
+
+	overfetch := ix.Len()
+	if overfetch > searchFilesOverfetchCap {
+		overfetch = searchFilesOverfetchCap
+	}
+	if overfetch < k {
+		overfetch = k
+	}
+	results, eff := ix.SearchMode(query, overfetch, mode)
+
+	filtered := make([]search.Result, 0, k)
+	for _, r := range results {
+		if !want[r.Chunk.File] {
+			continue
+		}
+		filtered = append(filtered, r)
+		if len(filtered) >= k {
+			break
+		}
+	}
+	return w.toHits(ix, filtered, eff, gen, query, k), eff, nil
 }
