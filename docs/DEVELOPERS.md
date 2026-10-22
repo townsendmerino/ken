@@ -214,7 +214,10 @@ package:
   ADR-039 snapshot of a watched + structural index over a local directory.
 - `Options{Mode, Chunker, ModelDir, Watch, Snapshot, DisableEnrichment,
   LazyEnrichment, StagedEmbedding, MmapModel, DenseRetriever,
-  DisableFoldMigrations, EmbedCache, LogWriter}`.
+  StructuralMaxFileBytes, DisableFoldMigrations, EmbedCache, LogWriter}`.
+  `StructuralMaxFileBytes` caps the files the structural index parses
+  (0 → `KEN_STRUCTURAL_MAX_FILE_BYTES`, else 1 MiB); it is separate from
+  enrichment's fixed 64 KiB cap.
 - `Workspace.{Search, SearchMode, SearchFiles, FindRelated}` — return
   `[]Hit`; `SearchMode`/`SearchFiles` also return the effective `Mode`.
   `SearchFiles` restricts hits to a given set of repo-relative paths (post-

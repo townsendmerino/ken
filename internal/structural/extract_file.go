@@ -1,11 +1,14 @@
 package structural
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/odvcencio/gotreesitter"
+
+	"github.com/townsendmerino/ken/internal/bytesize"
 )
 
 // maxEnrichBytes is the per-file size ceiling for Arm B enrichment. Files
@@ -46,6 +49,32 @@ func ExtractFile(rel string, data []byte) *FileStruct {
 	return extractGuarded(gram, rel, data)
 }
 
+// DefaultMaxStructuralFileBytes is the structural index's per-file size
+// ceiling when neither BuildOptions.MaxFileBytes nor
+// KEN_STRUCTURAL_MAX_FILE_BYTES sets one: 1 MiB. It is separate from
+// maxEnrichBytes (64 KiB), which bounds only the Arm B enrichment parse and
+// stays fixed so the label can't change; before the two were split, a
+// 96 KB Go file's functions and types were missing from Definition,
+// Outline and SymbolAt entirely. The walker's own KEN_MAX_FILE_BYTES
+// (default 2 MiB) still applies first.
+const DefaultMaxStructuralFileBytes int64 = 1 << 20
+
+// ResolveMaxStructuralFileBytes returns the structural index's size cap:
+// opt if it is > 0, else KEN_STRUCTURAL_MAX_FILE_BYTES (a byte count, with
+// an optional KiB/MiB/KB/MB suffix; invalid or non-positive values are
+// ignored, as with KEN_MAX_FILE_BYTES), else DefaultMaxStructuralFileBytes.
+func ResolveMaxStructuralFileBytes(opt int64) int64 {
+	if opt > 0 {
+		return opt
+	}
+	if raw := os.Getenv("KEN_STRUCTURAL_MAX_FILE_BYTES"); raw != "" {
+		if n, ok := bytesize.Parse(raw); ok && n > 0 {
+			return n
+		}
+	}
+	return DefaultMaxStructuralFileBytes
+}
+
 // extractGuarded is the single guarded parse+extract both structural parse
 // paths — ExtractFile (per-file enrichment) and Build (the corpus indexer
 // worker) — MUST route through, so the two can't drift on the safety
@@ -62,9 +91,14 @@ func ExtractFile(rel string, data []byte) *FileStruct {
 // err guard on Parse below cannot catch, crashing the whole process (#110).
 // That was FIXED upstream in gotreesitter v0.20.6 (ken pins v0.48.1; the exact
 // crashers now parse clean — TestParse_LargeTableDrivenGo_NoFatalOverflow), so
-// this 64 KiB ceiling is no longer the crash safeguard, just a cheap bound that
-// also caps enrichment cost on very large files. Not a formal depth bound —
-// gotreesitter still exposes no node/depth cap (only a wall-clock timeout).
+// the ceiling is no longer the crash safeguard, just a cheap bound on parse
+// cost. Not a formal depth bound — gotreesitter still exposes no node/depth
+// cap (only a wall-clock timeout). The ceiling differs by caller: enrichment
+// (extractGuarded, ExtractFile) uses the fixed 64 KiB maxEnrichBytes, so the
+// Arm B label never changes; the structural index (Build, Update) passes its
+// own, 1 MiB by default (ResolveMaxStructuralFileBytes), through
+// extractGuardedCap. The 24 files over 64 KiB in goinfer (66–223 KB, Go and
+// Python) parsed in 3–250 ms each when the split was made.
 //
 // Guard 2 — parse acceptance. gotreesitter returns the partially-built tree
 // on every non-accept stop reason (timeout, cancellation, iteration cap,
@@ -72,7 +106,15 @@ func ExtractFile(rel string, data []byte) *FileStruct {
 // the determinism contract; reject any tree whose parse didn't run to clean
 // acceptance.
 func extractGuarded(gram, rel string, data []byte) *FileStruct {
-	if len(data) > maxEnrichBytes {
+	return extractGuardedCap(gram, rel, data, maxEnrichBytes)
+}
+
+// extractGuardedCap is extractGuarded with an explicit size ceiling: the
+// enrichment path passes maxEnrichBytes, the structural index its own
+// (ResolveMaxStructuralFileBytes). Everything else — the parse budget, the
+// acceptance check — is shared.
+func extractGuardedCap(gram, rel string, data []byte, maxBytes int64) *FileStruct {
+	if int64(len(data)) > maxBytes {
 		return nil
 	}
 	lc := langCacheFor(gram)

@@ -106,6 +106,17 @@ pre-built binaries.
   intermediates, none called from more than 200 files, 500 results).
   `Callees` returns the calls made inside a symbol's span, in line order,
   as `Callee{File, Name, Receiver, Line}`; a call in a closure counts.
+- **The structural index's own file-size cap, 1 MiB by default and
+  configurable**: `engine.Options.StructuralMaxFileBytes` and the
+  `KEN_STRUCTURAL_MAX_FILE_BYTES` environment variable (byte count or
+  `KiB`/`MiB`; it applies to ken-mcp too), plus
+  `structural.BuildWithOptions`/`BuildOptions`. Until now the structural
+  build shared the Arm B enrichment's 64 KiB parse cap, so `Definition`,
+  `Outline` and the rest saw nothing in a larger file: in goinfer, 24 files
+  (66–223 KB) — `decoder.Options` and `decoder.Model.ResidentDecline`
+  among their declarations. Those files now parse in 3–250 ms each. The
+  enrichment cap stays at 64 KiB, so the label and ranking don't change;
+  `Index.Update` (K13) keeps the cap an index was built with.
 - **`Status.StructuralGeneration`** — counts published structural indexes
   (1 after the first build, +1 per update that changed a file's
   structure), beside the search index's `Generation`.

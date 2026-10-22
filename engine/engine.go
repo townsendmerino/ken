@@ -118,6 +118,15 @@ type Options struct {
 	// flat-binary-i8's agreement with exact search degrades.
 	DenseRetriever string
 
+	// StructuralMaxFileBytes is the largest file the structural index
+	// (Definition, Outline, SymbolAt, …) parses; larger files are left out
+	// of it. 0 defers to the KEN_STRUCTURAL_MAX_FILE_BYTES environment
+	// variable, else 1 MiB. Independent of the Arm B enrichment's fixed
+	// 64 KiB parse cap, so it never changes search ranking. Files over the
+	// walk's own KEN_MAX_FILE_BYTES (2 MiB by default) are never indexed
+	// at all.
+	StructuralMaxFileBytes int64
+
 	// DisableFoldMigrations turns off Tier-1 SQL migration-history folding
 	// (search.FSOptions.DisableFoldMigrations).
 	DisableFoldMigrations bool
@@ -250,7 +259,7 @@ func Open(ctx context.Context, root string, opts Options) (*Workspace, error) {
 		logf: func(format string, args ...any) { fmt.Fprintf(logWriter, format+"\n", args...) },
 	}
 	w.structural.builder = func(ctx context.Context) (*structural.Index, error) {
-		return structural.BuildWithContext(ctx, w.root)
+		return structural.BuildWithOptions(ctx, w.root, structural.BuildOptions{MaxFileBytes: opts.StructuralMaxFileBytes})
 	}
 	w.structural.update = func(idx *structural.Index, paths []string) (*structural.Index, bool) {
 		return idx.Update(w.root, paths, w.admit, w.logf)

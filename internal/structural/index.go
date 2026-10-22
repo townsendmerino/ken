@@ -275,6 +275,11 @@ type Index struct {
 	// lookup returns every class's method with that name across
 	// the corpus; qualified lookup pins down a single type.
 	methods map[string][]string
+
+	// maxFileBytes is the size cap the index was built with
+	// (BuildOptions.MaxFileBytes resolved); Update applies the same one.
+	// 0 (an Index not made by BuildWithOptions) means the default.
+	maxFileBytes int64
 }
 
 // EnrichOptions toggles which structural facts each variant arm
@@ -570,11 +575,29 @@ func Build(corpusDir string) (*Index, error) {
 // pulling jobs once ctx is cancelled and the build returns ctx.Err() instead
 // of running a whole core to completion on an abandoned request.
 func BuildWithContext(ctx context.Context, corpusDir string) (*Index, error) {
+	return BuildWithOptions(ctx, corpusDir, BuildOptions{})
+}
+
+// BuildOptions configures BuildWithOptions. The zero value is
+// BuildWithContext's behavior.
+type BuildOptions struct {
+	// MaxFileBytes is the largest file the structural index parses;
+	// larger files are left out of it. <= 0 resolves through
+	// ResolveMaxStructuralFileBytes (KEN_STRUCTURAL_MAX_FILE_BYTES, else
+	// DefaultMaxStructuralFileBytes). Index.Update keeps the cap the
+	// index was built with. It doesn't affect enrichment, whose 64 KiB
+	// cap is fixed.
+	MaxFileBytes int64
+}
+
+// BuildWithOptions is BuildWithContext with options.
+func BuildWithOptions(ctx context.Context, corpusDir string, opts BuildOptions) (*Index, error) {
 	ix := &Index{
-		files:   make(map[string]*FileStruct),
-		callers: make(map[string][]CallSite),
-		defs:    make(map[string][]string),
-		methods: make(map[string][]string),
+		files:        make(map[string]*FileStruct),
+		callers:      make(map[string][]CallSite),
+		defs:         make(map[string][]string),
+		methods:      make(map[string][]string),
+		maxFileBytes: ResolveMaxStructuralFileBytes(opts.MaxFileBytes),
 	}
 
 	// Gitignore-aware walk via the same internal/repo.WalkFS path
@@ -628,11 +651,14 @@ func BuildWithContext(ctx context.Context, corpusDir string) (*Index, error) {
 					continue
 				}
 				// C2/M7: route through the SAME guarded parse ExtractFile
-				// uses — the size ceiling (fatal-stack-overflow defense) and
-				// the ParseStopReason acceptance check. Previously Build
-				// parsed unguarded, so a 64 KiB–2 MiB pathological file
-				// crashed the whole server / emitted nondeterministic trees.
-				fs := extractGuarded(gram, j.rel, src)
+				// uses — a size ceiling and the ParseStopReason acceptance
+				// check. Previously Build parsed unguarded, so a 64 KiB–2 MiB
+				// pathological file crashed the whole server / emitted
+				// nondeterministic trees (the crash is fixed upstream since
+				// gotreesitter v0.20.6). The ceiling here is the structural
+				// index's own (ix.maxFileBytes, 1 MiB by default), not the
+				// enrichment's 64 KiB.
+				fs := extractGuardedCap(gram, j.rel, src, ix.maxFileBytes)
 				if fs == nil {
 					continue
 				}
@@ -746,9 +772,9 @@ func (ix *Index) buildLookups() {
 // For each path: a file that exists, that admit accepts (nil admits
 // everything — pass the same admission rules the walk used, e.g.
 // repo.Matcher.ShouldIndex) and that has a registered extractor is
-// re-extracted through extractGuarded, the guarded parse Build uses; a
-// file extractGuarded rejects (oversized, no longer accepted by the
-// parser) leaves the index, with a logf line. A path that no longer
+// re-extracted through the guarded parse Build uses, with the size cap the
+// index was built with; a file the guarded parse rejects (over the cap, no
+// longer accepted by the parser) leaves the index, with a logf line. A path that no longer
 // exists is dropped, with every indexed file under it when it was a
 // directory. An existing directory is ignored: pass its files.
 //
@@ -756,6 +782,10 @@ func (ix *Index) buildLookups() {
 // is one re-extraction per path plus a pass over the corpus's recorded
 // definitions and calls — no re-parse of unchanged files.
 func (ix *Index) Update(corpusDir string, paths []string, admit func(rel string) bool, logf func(format string, args ...any)) (*Index, bool) {
+	maxBytes := ix.maxFileBytes
+	if maxBytes <= 0 {
+		maxBytes = ResolveMaxStructuralFileBytes(0)
+	}
 	files := make(map[string]*FileStruct, len(ix.files)+len(paths))
 	maps.Copy(files, ix.files)
 	changed := false
@@ -791,7 +821,7 @@ func (ix *Index) Update(corpusDir string, paths []string, admit func(rel string)
 			drop(rel)
 			continue
 		}
-		fs := extractGuarded(gram, rel, data)
+		fs := extractGuardedCap(gram, rel, data, maxBytes)
 		if fs == nil {
 			if _, had := files[rel]; had && logf != nil {
 				logf("structural: %s no longer extracts cleanly (oversized or not accepted by the parser); dropped from the structural index", rel)
@@ -805,7 +835,7 @@ func (ix *Index) Update(corpusDir string, paths []string, admit func(rel string)
 	if !changed {
 		return ix, false
 	}
-	nix := &Index{files: files}
+	nix := &Index{files: files, maxFileBytes: maxBytes}
 	nix.buildLookups()
 	return nix, true
 }
