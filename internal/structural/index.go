@@ -128,6 +128,13 @@ type FileStruct struct {
 	// Raises: every exception type the file's `raise X(...)`
 	// statements name. Dedup'd; order matches first occurrence.
 	Raises []string
+
+	// Package is the Go package clause's name ("pull" for `package
+	// pull`, "pull_test" for an external test package); empty for every
+	// other language. Definition and Callers use it to resolve
+	// package-qualified names (`pull.Select`). The Arm B label doesn't
+	// read it.
+	Package string
 }
 
 // CalleeNames returns the deduped list of callee leaf names invoked
@@ -702,6 +709,9 @@ func (ix *Index) buildLookups() {
 			}
 		}
 		for _, cls := range fs.Classes {
+			if isShell(cls) {
+				continue // groups methods; the type is declared elsewhere
+			}
 			ix.defs[cls.Name] = append(ix.defs[cls.Name], path)
 		}
 		for _, callee := range fs.CalleeNames() {
@@ -800,6 +810,14 @@ func (ix *Index) Update(corpusDir string, paths []string, admit func(rel string)
 	return nix, true
 }
 
+// isShell reports whether cls only groups methods whose receiver type is
+// declared in another file — a ClassDef Go's linkMethodToClass created and
+// no type_spec in the file filled in. It has no span; every extractor
+// records one for a real declaration. A shell is not a definition: it
+// stays in Outline (grouping its methods, span 0) but not in defs, so
+// Definition, Symbols and SymbolsInPath leave it out.
+func isShell(cls ClassDef) bool { return cls.StartLine == 0 }
+
 // uniqStringsSorted sorts the slice and removes consecutive
 // duplicates in place. Returns a slice of length ≤ len(in).
 func uniqStringsSorted(in []string) []string {
@@ -829,27 +847,77 @@ func (ix *Index) File(path string) *FileStruct { return ix.files[path] }
 // CallRefs. Used by the Track 1 "callers" enrichment and the Track 2
 // `references` tool. Cost is proportional to the matching files' call
 // refs, not the corpus. The returned slice is fresh; callers may modify it.
+//
+// Matching is by the callee's leaf name. A dotted name (K14) narrows it
+// where the call text allows:
+//
+//   - "pkg.F", when pkg.F resolves to a Go function or type in package
+//     pkg (see Definition): calls written `pkg.F(…)` (receiver text
+//     "pkg"), plus bare `F(…)` calls in files of package pkg. `x.F(…)` on
+//     any other receiver is left out. An import alias (`p "…/pkg"`) is
+//     text "p", so its calls don't match.
+//   - "Type.method" and "pkg.Type.method": a method's receiver is a
+//     variable, whose type the index doesn't know, so these match every
+//     call to the leaf name, as a bare name does.
+//   - A dotted name that resolves to no definition matches nothing.
 func (ix *Index) Callers(name string) []CallSite {
-	files := ix.callers[name]
+	leaf, keep, ok := ix.callMatch(name)
+	if !ok {
+		return nil
+	}
+	files := ix.callers[leaf]
 	if len(files) == 0 {
 		return nil
 	}
-	out := make([]CallSite, len(files))
-	for i, c := range files {
-		out[i] = CallSite{File: c.File, Calls: callsTo(ix.files[c.File], name)}
+	out := make([]CallSite, 0, len(files))
+	for _, c := range files {
+		calls := callsTo(ix.files[c.File], leaf, keep)
+		if keep != nil && len(calls) == 0 {
+			continue
+		}
+		out = append(out, CallSite{File: c.File, Calls: calls})
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
 
-// callsTo returns every call to callee in fs, sorted by line then caller,
-// with duplicate (line, caller) pairs (`f(f(x))`) collapsed.
-func callsTo(fs *FileStruct, callee string) []Call {
+// callMatch resolves a Callers name to the leaf name calls are indexed
+// under, plus a filter on individual calls (nil keeps them all). ok is
+// false when a dotted name resolves to no definition.
+func (ix *Index) callMatch(name string) (leaf string, keep func(*FileStruct, CallRef) bool, ok bool) {
+	last := strings.LastIndexByte(name, '.')
+	if last < 0 {
+		return name, nil, true
+	}
+	leaf = name[last+1:]
+	sites := ix.qualifiedDefinition(name)
+	if len(sites) == 0 {
+		return "", nil, false
+	}
+	for _, s := range sites {
+		if s.Kind == DefinitionKindMethod {
+			return leaf, nil, true // a method form: matched by bare name
+		}
+	}
+	// Only package-qualified sites: "pkg.F".
+	pkg := name[:last]
+	return leaf, func(fs *FileStruct, r CallRef) bool {
+		return r.Receiver == pkg || (r.Receiver == "" && fs.Package == pkg)
+	}, true
+}
+
+// callsTo returns every call to callee in fs that keep accepts (nil keeps
+// all), sorted by line then caller, with duplicate (line, caller) pairs
+// (`f(f(x))`) collapsed.
+func callsTo(fs *FileStruct, callee string, keep func(*FileStruct, CallRef) bool) []Call {
 	if fs == nil {
 		return nil
 	}
 	var out []Call
 	for _, r := range fs.CallRefs {
-		if r.Callee == callee {
+		if r.Callee == callee && (keep == nil || keep(fs, r)) {
 			out = append(out, Call{Line: r.Line, Caller: r.EnclosingSymbol})
 		}
 	}

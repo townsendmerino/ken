@@ -83,10 +83,10 @@ type Reference struct {
 func (ix *Index) References(name string) []Reference {
 	var out []Reference
 
-	// Call sites — already indexed in ix.callers.
-	for _, c := range ix.callers[name] {
+	// Call sites — the same matching as Callers, qualified names included.
+	for _, c := range ix.Callers(name) {
 		var lines []int
-		for _, call := range callsTo(ix.files[c.File], name) {
+		for _, call := range c.Calls {
 			if len(lines) == 0 || lines[len(lines)-1] != call.Line {
 				lines = append(lines, call.Line)
 			}
@@ -242,21 +242,8 @@ func (ix *Index) Definition(name string) []DefinitionSite {
 	// accidentally pick up a top-level function or class whose
 	// literal text happens to contain a dot (which can't happen in
 	// any of Stage 8 v0's supported grammars, but is defensive).
-	if dot := indexOfDot(name); dot >= 0 {
-		enclosing, method := name[:dot], name[dot+1:]
-		var out []DefinitionSite
-		for _, f := range ix.methods[name] {
-			sp := defSpan(ix.files[f], method, DefinitionKindMethod, enclosing)
-			out = append(out, DefinitionSite{
-				File:    f,
-				Kind:    DefinitionKindMethod,
-				QName:   name,
-				Line:    sp.start,
-				EndLine: sp.end,
-				DocLine: sp.doc,
-			})
-		}
-		return out
+	if indexOfDot(name) >= 0 {
+		return ix.qualifiedDefinition(name)
 	}
 
 	// Bare name: merge top-level defs + method sites. Same file
@@ -360,6 +347,76 @@ func (ix *Index) Definition(name string) []DefinitionSite {
 			DocLine: si.span.doc,
 		})
 	}
+	return out
+}
+
+// qualifiedDefinition resolves a dotted name (K14). The result is the union
+// of:
+//
+//   - methods named exactly `name` ("Type.method", every language — the
+//     pre-K14 behavior; Elixir-style dotted module names like
+//     "MyApp.Account.deposit" match here too);
+//   - for Go, "pkg.Name": a top-level function or type Name in a file whose
+//     package clause is pkg;
+//   - for Go, "pkg.Type.method": method on Type in a file of package pkg.
+//
+// Packages are matched by name, so two packages that share one (two
+// `config` packages) both match; an external test package's name is its
+// own (`pull_test`). Import aliases don't resolve. Other languages'
+// module qualifiers (Python's `module.func`) aren't resolved. Sorted by
+// file then kind; a site appears once.
+func (ix *Index) qualifiedDefinition(name string) []DefinitionSite {
+	var out []DefinitionSite
+	seen := make(map[DefinitionSite]bool)
+	add := func(s DefinitionSite) {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	method := func(file, qname, enclosing, leaf string) DefinitionSite {
+		sp := defSpan(ix.files[file], leaf, DefinitionKindMethod, enclosing)
+		return DefinitionSite{File: file, Kind: DefinitionKindMethod, QName: qname, Line: sp.start, EndLine: sp.end, DocLine: sp.doc}
+	}
+
+	last := strings.LastIndexByte(name, '.')
+	for _, f := range ix.methods[name] {
+		add(method(f, name, name[:last], name[last+1:]))
+	}
+
+	parts := strings.Split(name, ".")
+	switch len(parts) {
+	case 2: // pkg.Name
+		pkg, leaf := parts[0], parts[1]
+		for _, f := range ix.defs[leaf] {
+			fs := ix.files[f]
+			if fs == nil || fs.Package != pkg {
+				continue
+			}
+			kind := DefinitionKindFunction
+			for _, c := range fs.Classes {
+				if c.Name == leaf && !isShell(c) {
+					kind = DefinitionKindClass
+					break
+				}
+			}
+			sp := defSpan(fs, leaf, kind, "")
+			add(DefinitionSite{File: f, Kind: kind, Line: sp.start, EndLine: sp.end, DocLine: sp.doc})
+		}
+	case 3: // pkg.Type.method
+		pkg, qual := parts[0], parts[1]+"."+parts[2]
+		for _, f := range ix.methods[qual] {
+			if fs := ix.files[f]; fs != nil && fs.Package == pkg {
+				add(method(f, qual, parts[1], parts[2]))
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].File != out[j].File {
+			return out[i].File < out[j].File
+		}
+		return out[i].Kind < out[j].Kind
+	})
 	return out
 }
 

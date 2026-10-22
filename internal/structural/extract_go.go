@@ -22,7 +22,10 @@ import (
 //     . "fmt"` is treated as binding nothing distinctive (skipped).
 //   - Calls: every distinct callee leaf name from call_expression.
 //     `foo(...)` → "foo"; `obj.Bar(...)` → "Bar" (via
-//     selector_expression's .field).
+//     selector_expression's .field), with Receiver "obj" (the operand's
+//     text). The Arm B label reads only the callee names.
+//   - Package: the package clause's name (FileStruct.Package), for
+//     package-qualified Definition lookups (`pkg.Func`).
 //   - Raises: Go doesn't have a raise statement. `panic(err)` is
 //     captured as a CALL of "panic" — uniform with Python's stop-
 //     word filter; if "panic" feels noisy in the enrichment, the
@@ -113,9 +116,17 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 				}
 			}
 		}
+	case "package_clause":
+		nc := n.NamedChildCount()
+		for i := range nc {
+			if c := n.NamedChild(i); c != nil && c.Type(lang) == "package_identifier" {
+				fs.Package = nodeText(src, c)
+				break
+			}
+		}
 	case "call_expression":
 		if name := goCalleeName(src, n, lang); name != "" && !goIsBuiltinOrNoise(name) {
-			fs.appendCall(name, "", n, enclosingSymbol)
+			fs.appendCall(name, goCallReceiver(src, n, lang), n, enclosingSymbol)
 		}
 		nc := n.NamedChildCount()
 		for i := range nc {
@@ -284,6 +295,21 @@ func goCalleeName(src []byte, callNode *gotreesitter.Node, lang *gotreesitter.La
 	return ""
 }
 
+// goCallReceiver returns the text of the operand in a selector call:
+// `pkg.New()` → "pkg", `s.store.Get()` → "s.store". "" for a bare call
+// (`foo()`) and for shapes goCalleeName can't name. The text is all there
+// is: a package name and a variable look the same.
+func goCallReceiver(src []byte, callNode *gotreesitter.Node, lang *gotreesitter.Language) string {
+	fn := callNode.ChildByFieldName("function", lang)
+	if fn == nil || fn.Type(lang) != "selector_expression" {
+		return ""
+	}
+	if op := fn.ChildByFieldName("operand", lang); op != nil {
+		return nodeText(src, op)
+	}
+	return ""
+}
+
 // goImportBoundName returns the bound local name for an import_spec
 // node. `import "fmt"` → "fmt" (last path component);
 // `import f "fmt"` → "f"; `import _ "x"` → ""; `import . "x"` → "".
@@ -397,11 +423,18 @@ func linkMethodToClass(fs *FileStruct, typeName string, fn FuncDef) {
 
 // ensureClass adds cls to fs.Classes if not already present. If a
 // ClassDef with the same Name exists (e.g. created earlier by
-// linkMethodToClass), the existing entry stays and its Methods
-// are preserved.
+// linkMethodToClass, for methods that come before their type in the
+// file), the existing entry stays and its Methods are preserved; if it
+// has no span yet — it was a shell — it takes cls's, so it counts as
+// the type's declaration.
 func ensureClass(fs *FileStruct, cls ClassDef) {
 	for i := range fs.Classes {
 		if fs.Classes[i].Name == cls.Name {
+			if fs.Classes[i].StartLine == 0 {
+				fs.Classes[i].StartLine = cls.StartLine
+				fs.Classes[i].EndLine = cls.EndLine
+				fs.Classes[i].DocLine = cls.DocLine
+			}
 			return
 		}
 	}

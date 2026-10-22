@@ -73,6 +73,23 @@ pre-built binaries.
   distinct from file scope. Cost is proportional to that file's
   definitions; answers are as current as the structural index (K13). The
   underlying `structural.Index.SymbolsAt` is available too.
+- **Qualified names in `Definition`, `Callers` and `References`** (K14).
+  `A.B` now gives the union of methods `B` on type `A` (as before) and,
+  for Go, a top-level function or type `B` in a file whose package is `A`
+  (`pull.Select`); `A.B.C` gives, for Go, method `C` on type `B` in a file
+  of package `A` (`decoder.Model.KVF16DeclineReason`). Packages are
+  matched by name, so two `config` packages both match `config.Load`; an
+  external test package is its own name (`pull_test`); import aliases
+  don't resolve. For `Callers("pkg.F")`, calls written `pkg.F(…)` plus bare
+  `F(…)` calls inside package `pkg` count, and `x.F(…)` on other receivers
+  doesn't; method forms (`Type.m`, `pkg.Type.m`) still match every call by
+  the method's name, since the receiver is a variable whose type the index
+  doesn't know. A dotted name that resolves to no definition gives no
+  callers. Other languages' module qualifiers (Python's `module.func`)
+  aren't resolved in this release. To support it, `FileStruct.Package`
+  records a Go file's package clause, and the Go extractor now records a
+  selector call's receiver text in `CallRef.Receiver` (it was always `""`
+  for Go). The Arm B label reads neither, and is byte-identical.
 - **`Status.StructuralGeneration`** — counts published structural indexes
   (1 after the first build, +1 per update that changed a file's
   structure), beside the search index's `Generation`.
@@ -94,6 +111,17 @@ pre-built binaries.
 - **`Workspace.Callers`'s doc said a file "may appear more than once
   (once per call site)"**; the index has always returned one `CallSite`
   per file. The comment now says so, and the sites are in `Calls` (K11).
+- **A Go type no longer has a definition in every file that holds its
+  methods** (K14). A method whose receiver type is declared in another
+  file creates a class "shell" in its own file to group it in `Outline`;
+  the shells went into the definition map too, so `Definition("Model")`
+  returned the declaring file and, with line 0, every file holding only
+  methods of `Model`. Shells now stay out of `Definition`, `Symbols` and
+  `SymbolsInPath` (no Go name is lost: a type's methods live in its
+  package) and keep grouping methods in `Outline`, with span 0. A type
+  declared after its methods in the same file is no longer mistaken for a
+  shell: it gets its span. ken-mcp's `definition` and `symbols` tools
+  change the same way.
 
 ## [1.10.0] — 2026-10-16 — `engine`: section-level retrieval for markdown
 
