@@ -396,3 +396,48 @@ func (w *Workspace) SymbolAt(ctx context.Context, path string, line int) ([]Symb
 	}
 	return syms, nil
 }
+
+// TestSite is one test function that exercises a symbol, and where to run
+// it (TestsFor).
+type TestSite = structural.TestSite
+
+// Callee is one call made inside a symbol (Callees).
+type Callee = structural.Callee
+
+// TestsFor returns the test functions that call symbol: directly (Depth
+// 1), or, when maxDepth >= 2, through one non-test function (Depth 2,
+// with Via naming it). Sorted by Depth, then File, then StartLine.
+// Matching is by name, as in Callers, with its package qualifier
+// narrowing where it applies; a call inside a closure (a t.Run subtest)
+// counts for the enclosing test. Dir is the directory to run the test
+// from — for Go, the package directory (`go test -run '^TestX$' ./<Dir>`).
+//
+// Conventions: Go *_test.go files with top-level Test/Benchmark/Fuzz/
+// Example functions; Python test_*.py and *_test.py files with test_*
+// functions and test_* methods of Test* classes. Other languages give an
+// empty result, not an error. Depth 2 matches the intermediate function
+// by its leaf name, so a common name fans out; it follows at most 64
+// intermediates, skips one called from more than 200 files, and the whole
+// result is capped at 500 — a missing Depth-2 test is the price of a
+// bounded answer.
+func (w *Workspace) TestsFor(ctx context.Context, symbol string, maxDepth int) ([]TestSite, error) {
+	idx, err := w.structuralIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return idx.TestsFor(symbol, maxDepth), nil
+}
+
+// Callees returns the calls made inside symbol's span, in line order (by
+// file, then line, when the name has several definitions). A call inside a
+// closure counts. symbol resolves as in Definition, qualified forms
+// included; a class has no callees. Calls the extractors drop as noise —
+// Go builtins and fmt's Printf/Sprintf/Errorf family, Python builtins —
+// don't appear.
+func (w *Workspace) Callees(ctx context.Context, symbol string) ([]Callee, error) {
+	idx, err := w.structuralIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return idx.Callees(symbol), nil
+}

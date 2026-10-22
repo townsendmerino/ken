@@ -90,6 +90,22 @@ pre-built binaries.
   records a Go file's package clause, and the Go extractor now records a
   selector call's receiver text in `CallRef.Receiver` (it was always `""`
   for Go). The Arm B label reads neither, and is byte-identical.
+- **`(*Workspace) TestsFor(ctx, symbol, maxDepth) ([]TestSite, error)` and
+  `(*Workspace) Callees(ctx, symbol) ([]Callee, error)`** (K15).
+  `TestsFor` returns the test functions that call the symbol directly
+  (`Depth` 1) or, with `maxDepth >= 2`, through one non-test function
+  (`Depth` 2, `Via` naming it), as `TestSite{File, QName, StartLine,
+  EndLine, Dir, Depth, Via}`, sorted by depth, file, line. `Dir` is the
+  test file's directory — for Go the package directory, so a caller can run
+  `go test -run '^(TestA|TestB)$' ./<Dir>` instead of `./...`. A call
+  inside a closure (`t.Run`) counts for the enclosing test. Conventions:
+  Go `*_test.go` with `Test`/`Benchmark`/`Fuzz`/`Example` functions;
+  Python `test_*.py`/`*_test.py` with `test_*` functions and `test_*`
+  methods of `Test*` classes; other languages give an empty result. Depth
+  2 matches the intermediate by its leaf name and is capped (64
+  intermediates, none called from more than 200 files, 500 results).
+  `Callees` returns the calls made inside a symbol's span, in line order,
+  as `Callee{File, Name, Receiver, Line}`; a call in a closure counts.
 - **`Status.StructuralGeneration`** — counts published structural indexes
   (1 after the first build, +1 per update that changed a file's
   structure), beside the search index's `Generation`.
