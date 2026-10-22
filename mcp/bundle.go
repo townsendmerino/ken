@@ -50,6 +50,16 @@ type RepoBundle struct {
 	// lets a client cancellation / timeout abort the whole-corpus parse.
 	StructuralBuilder func(context.Context) (*structural.Index, error)
 
+	// Structural, when set, supplies the structural index in place of
+	// StructuralBuilder and this bundle's own build state machine: the
+	// bundle's StructuralIndex/StructuralPending/StructuralIfBuilt delegate
+	// to it, and reaping the bundle Closes it. cmd/ken-mcp sets it to the
+	// engine.Workspace that built Index, so the structural tools share
+	// engine's lazy build and follow file edits as the watcher flushes
+	// (ADR-048) — a StructuralBuilder result is built once and never
+	// changes. nil keeps the StructuralBuilder path.
+	Structural StructuralSource
+
 	structuralMu       sync.Mutex  // guards the build-state fields below
 	structuralBuilt    atomic.Bool // set once a build succeeds
 	structuralIdx      *structural.Index
@@ -57,6 +67,17 @@ type RepoBundle struct {
 	structuralDone     chan struct{}      // closed when the in-flight build finishes
 	structuralCancel   context.CancelFunc // cancels the in-flight build (audit N7)
 	structuralFailedAt time.Time          // last failure; gates the retry cooldown
+}
+
+// StructuralSource supplies a RepoBundle's structural index (see
+// RepoBundle.Structural). The methods mean what RepoBundle's own methods of
+// the same names mean; Close stops any in-flight build and releases the
+// source (for an engine.Workspace, its watcher too).
+type StructuralSource interface {
+	StructuralIndex(ctx context.Context) *structural.Index
+	StructuralPending() bool
+	StructuralIfBuilt() *structural.Index
+	Close() error
 }
 
 // Structural-build timing knobs (audit R3).
@@ -96,6 +117,9 @@ var structuralFailCooldown = 60 * time.Second
 // running, it failed, or it found no supported files — handlers defend
 // against nil and can call StructuralPending to distinguish "building".
 func (b *RepoBundle) StructuralIndex(ctx context.Context) *structural.Index {
+	if b.Structural != nil {
+		return b.Structural.StructuralIndex(ctx)
+	}
 	if b.StructuralBuilder == nil {
 		return nil
 	}
@@ -175,6 +199,10 @@ func (b *RepoBundle) runStructuralBuild(ctx context.Context, done chan struct{})
 // build is running. BuildWithContext honors cancellation at the next file
 // boundary, so the wait is bounded.
 func (b *RepoBundle) stopStructuralBuild() {
+	if b.Structural != nil {
+		_ = b.Structural.Close()
+		return
+	}
 	b.structuralMu.Lock()
 	done := b.structuralDone
 	if b.structuralCancel != nil {
@@ -192,6 +220,9 @@ func (b *RepoBundle) stopStructuralBuild() {
 // active cooldown). Handlers use it to tell an agent "still building, retry
 // shortly" apart from "this corpus has no structural index" (audit R3).
 func (b *RepoBundle) StructuralPending() bool {
+	if b.Structural != nil {
+		return b.Structural.StructuralPending()
+	}
 	if b.StructuralBuilder == nil || b.structuralBuilt.Load() {
 		return false
 	}
@@ -210,6 +241,9 @@ func (b *RepoBundle) StructuralPending() bool {
 // status tool uses this so a `status` query doesn't force the lazy (and, on
 // large corpora, expensive) structural parse just to report on it.
 func (b *RepoBundle) StructuralIfBuilt() *structural.Index {
+	if b.Structural != nil {
+		return b.Structural.StructuralIfBuilt()
+	}
 	if b.structuralBuilt.Load() {
 		return b.structuralIdx
 	}

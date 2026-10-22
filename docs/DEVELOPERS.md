@@ -163,7 +163,12 @@ authors never need to import `internal/search`.
 - `Result` — single search hit returned by ken's hybrid pipeline
   (alias for `search.Result`); consumed by `FormatResults`.
 - `Cache`, `NewCache(max, builder)`, `RepoBundle{Index,
-  Structural}`, `Builder` — repo cache used by tools.
+  StructuralBuilder, Structural}`, `Builder` — repo cache used by tools.
+  `Structural` (a `StructuralSource`: `StructuralIndex`,
+  `StructuralPending`, `StructuralIfBuilt`, `Close`) takes precedence over
+  `StructuralBuilder`; cmd/ken-mcp sets it to an adapter over the
+  `engine.Workspace` that built `Index`, so the structural tools follow
+  edits (ADR-048). `StructuralBuilder` builds once and never updates.
 - `Cache.{Get, GetBundle, Len, Capacity, Close}` — cache
   read/write surface.
 - `DBIntegration` interface, `ReindexResult` — DB tier-2 integration.

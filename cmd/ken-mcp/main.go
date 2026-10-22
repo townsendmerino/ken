@@ -231,7 +231,7 @@ func localPathHasPrebuilt(dir string) bool {
 //     corpus is still indexable; a slower-but-correct result beats an
 //     outage. (Distinct from mismatch, which is a config error the
 //     operator must fix.)
-func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, persistSnapshot bool, logger *kenmcp.Logger) (*search.WatchedIndex, func(func(string)), error) {
+func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, persistSnapshot bool, logger *kenmcp.Logger) (*search.WatchedIndex, func(func(string)), *engine.Workspace, error) {
 	if data, err := os.ReadFile(prebuiltIndexPath(dir)); err == nil {
 		var model *embed.StaticModel
 		if mode != search.ModeBM25 {
@@ -252,10 +252,10 @@ func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeS
 		case lErr == nil:
 			logger.Logf(kenmcp.LogInfo, "loaded pre-built index %s (%d chunks, no watch)", prebuiltIndexPath(dir), ix.Len())
 			wi := search.WrapStatic(ix, dir, mode, chunker)
-			return wi, wi.SetOnFlush, nil
+			return wi, wi.SetOnFlush, nil, nil
 		case errors.Is(lErr, search.ErrModeMismatch) || errors.Is(lErr, search.ErrChunkerMismatch):
 			// Config error — fail loud rather than serve wrong results.
-			return nil, nil, fmt.Errorf("pre-built index %s: %w (server is mode=%s chunker=%s; rebuild with matching `ken build-index` flags or fix KEN_MCP_MODE/KEN_MCP_CHUNKER)",
+			return nil, nil, nil, fmt.Errorf("pre-built index %s: %w (server is mode=%s chunker=%s; rebuild with matching `ken build-index` flags or fix KEN_MCP_MODE/KEN_MCP_CHUNKER)",
 				prebuiltIndexPath(dir), lErr, modeStr, chunker)
 		default:
 			// Corrupt / format-version / model-required — fall back.
@@ -272,7 +272,7 @@ func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeS
 // ken/engine's. The returned setOnFlush is ws.SetOnFlush (composes with
 // engine's own snapshot-persist-on-flush hook) rather than the raw
 // WatchedIndex's SetOnFlush, which would replace it outright.
-func buildOrLoadSnapshot(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, persistSnapshot bool, logger *kenmcp.Logger) (*search.WatchedIndex, func(func(string)), error) {
+func buildOrLoadSnapshot(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, persistSnapshot bool, logger *kenmcp.Logger) (*search.WatchedIndex, func(func(string)), *engine.Workspace, error) {
 	ws, err := engine.Open(ctx, dir, engine.Options{
 		Mode:                  modeStr,
 		Chunker:               chunker,
@@ -289,11 +289,30 @@ func buildOrLoadSnapshot(ctx context.Context, dir string, mode search.Mode, mode
 		EmbedCache:            fsOpts.EmbedCache,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	logger.Logf(kenmcp.LogInfo, "indexed %s (%d chunks, watching)", dir, ws.WatchedIndex().Len())
-	return ws.WatchedIndex(), ws.SetOnFlush, nil
+	return ws.WatchedIndex(), ws.SetOnFlush, ws, nil
 }
+
+// workspaceStructural adapts an engine.Workspace to mcp.StructuralSource,
+// so a RepoBundle's structural tools use engine's lazy structural build —
+// and its updates on every watcher flush (ADR-048) — instead of the
+// bundle's own build-once state machine.
+type workspaceStructural struct{ ws *engine.Workspace }
+
+func (s workspaceStructural) StructuralIndex(ctx context.Context) *structural.Index {
+	idx, _ := s.ws.Structural(ctx)
+	return idx
+}
+
+// StructuralPending reads Status, which counts the index's files; it is
+// only consulted after StructuralIndex came back nil.
+func (s workspaceStructural) StructuralPending() bool { return s.ws.Status().StructuralPending }
+
+func (s workspaceStructural) StructuralIfBuilt() *structural.Index { return s.ws.StructuralIfBuilt() }
+
+func (s workspaceStructural) Close() error { return s.ws.Close() }
 
 // runSubcommand dispatches one-shot CLI subcommands that exit before
 // the MCP server starts. v0.8.0 introduces `print-listen-script`, the
@@ -851,7 +870,7 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 		fsOpts.EmbedCache = embedCache
 	}
 	persistSnapshot := rb.snapshotEnabled && isLocal
-	ix, setOnFlush, err := loadOrBuildWatched(ctx, dir, bMode, bModeStr, rb.chunker, bModelDir, fsOpts, persistSnapshot, rb.logger)
+	ix, setOnFlush, ws, err := loadOrBuildWatched(ctx, dir, bMode, bModeStr, rb.chunker, bModelDir, fsOpts, persistSnapshot, rb.logger)
 	if err != nil {
 		if cleanup != nil {
 			cleanup()
@@ -924,6 +943,14 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 	// now that the snapshot is published, so idle RSS settles near the
 	// live index size instead of the build high-water.
 	debug.FreeOSMemory()
+	if ws != nil {
+		// A live, watched build: the structural tools use the Workspace's
+		// structural state, which every watcher flush brings up to date
+		// (ADR-048). Its build logs go to the engine LogWriter (stderr).
+		return &kenmcp.RepoBundle{Index: ix, Structural: workspaceStructural{ws}}, cleanup, nil
+	}
+	// The ADR-024 pre-built index is frozen (no watcher), so a structural
+	// index built once from the files on disk stays as current as it is.
 	return &kenmcp.RepoBundle{Index: ix, StructuralBuilder: structuralBuilder}, cleanup, nil
 }
 

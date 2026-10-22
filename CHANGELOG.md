@@ -59,9 +59,16 @@ pre-built binaries.
   would skip (gitignored, binary, oversized, symlink) is dropped. With
   `Snapshot` on, Refresh defers the snapshot write to `Close` (or the next
   watcher flush) rather than rewriting the whole snapshot per edit.
-  ken-mcp keeps its own structural build state (`mcp.RepoBundle`), so its
-  structural tools don't follow edits yet; wiring it onto `SetOnBatch` is
-  a follow-up.
+  **ken-mcp's structural tools follow edits too**: for a live (watched)
+  build, `mcp.RepoBundle` takes its structural index from the engine
+  `Workspace` that built the search index, through the new
+  `RepoBundle.Structural` field (`mcp.StructuralSource`) and
+  `(*Workspace).Structural(ctx)`. Before, `definition`, `outline`,
+  `callers` and the rest kept the spans of their first build until the
+  repo was evicted or the server restarted. The ADR-024 pre-built (frozen)
+  index keeps the build-once `StructuralBuilder`. ken-mcp's structural
+  build log lines now come from engine (`engine: structural index built
+  for …`) on stderr.
 - **`(*Workspace) SymbolAt(ctx, path, line) ([]SymbolSpan, error)` — the
   symbol at a line** (K12). The indexed functions, methods and classes
   whose spans contain the line, innermost first, as

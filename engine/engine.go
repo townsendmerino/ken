@@ -39,6 +39,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	// Registers the "markdown" chunker (heading-aware .md/.mdx/.markdown
 	// chunking) so any engine consumer gets it by default — same
@@ -259,7 +260,16 @@ func Open(ctx context.Context, root string, opts Options) (*Workspace, error) {
 		logf: func(format string, args ...any) { fmt.Fprintf(logWriter, format+"\n", args...) },
 	}
 	w.structural.builder = func(ctx context.Context) (*structural.Index, error) {
-		return structural.BuildWithOptions(ctx, w.root, structural.BuildOptions{MaxFileBytes: opts.StructuralMaxFileBytes})
+		start := time.Now()
+		idx, err := structural.BuildWithOptions(ctx, w.root, structural.BuildOptions{MaxFileBytes: opts.StructuralMaxFileBytes})
+		if err != nil {
+			w.logf("engine: structural index build for %s failed (%v); structural calls report no index and retry after a cooldown", w.root, err)
+			return nil, err
+		}
+		s := idx.Stats()
+		w.logf("engine: structural index built for %s: %d files, %d symbols, %d callees in %v",
+			w.root, s.IndexedFiles, s.UniqueSymbols, s.UniqueCallees, time.Since(start).Round(time.Millisecond))
+		return idx, nil
 	}
 	w.structural.update = func(idx *structural.Index, paths []string) (*structural.Index, bool) {
 		return idx.Update(w.root, paths, w.admit, w.logf)

@@ -11,6 +11,8 @@ package engine
 // is expressed in terms of aikit's public chunk.Chunk.
 
 import (
+	"context"
+
 	"github.com/townsendmerino/aikit/chunk"
 	"github.com/townsendmerino/ken/internal/search"
 	"github.com/townsendmerino/ken/internal/structural"
@@ -37,6 +39,16 @@ func (w *Workspace) WatchedIndex() *WatchedIndex { return w.index }
 // need Files()/Stats() beyond what Definition/References/Callers/
 // Outline/Symbols model.
 type StructuralIndex = structural.Index
+
+// Structural returns the current structural index, starting the lazy build
+// on first use and waiting for it as Definition does — the raw-index escape
+// hatch for a caller (ken-mcp's structural tools) that runs its own lookups
+// over it. Errors are ErrStructuralBuilding and ErrNoStructuralIndex, as
+// for the other structural methods. The index is immutable; after a file
+// change (Refresh or the watcher) the next call returns a new one.
+func (w *Workspace) Structural(ctx context.Context) (*StructuralIndex, error) {
+	return w.structuralIndex(ctx)
+}
 
 // StructuralIfBuilt returns the current structural index only if a prior
 // Definition/References/Callers/Outline/Symbols call already finished
