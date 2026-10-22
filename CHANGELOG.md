@@ -13,6 +13,23 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [Unreleased]
+
+### Fixed
+
+- **`engine.Hit.Text` no longer starts with the Arm B enrichment label**
+  (K10). Since 1.9.0, a hit from a file with a structural extractor carried
+  the indexer's synthetic `# ken: func: … | calls: …` line ahead of its
+  code: a line the file doesn't contain, one more line than
+  `StartLine..EndLine`. `Search`, `SearchMode`, `SearchFiles` and
+  `FindRelated` now strip it with `structural.StripLabel`, the helper
+  ken-mcp already uses at its own boundary, so `Text` is exactly the
+  file's lines `StartLine..EndLine`. `Hit.Hash` is the sha256 of that
+  text, so it no longer changes when an edit elsewhere in the file changes
+  the file-level label. `tack` is the only external `engine` caller today.
+  The stored chunks keep their label for BM25 and the embedding, so
+  ranking is unchanged and the semble NDCG benchmark needs no re-run.
+
 ## [1.10.0] — 2026-10-16 — `engine`: section-level retrieval for markdown
 
 K9 for `tack`: a long instruction file (`CLAUDE.md`, `AGENTS.md`) shouldn't

@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"github.com/townsendmerino/ken/internal/search"
+	"github.com/townsendmerino/ken/internal/structural"
 )
 
 // Mode selects the retrieval pipeline. 1.0-stable alias for search.Mode.
@@ -42,14 +43,26 @@ const (
 type Hit struct {
 	// File, StartLine, EndLine, Text locate and contain the hit; lines are
 	// 1-based inclusive, matching aikit's chunk.Chunk.
+	//
+	// Text is exactly the file's lines StartLine..EndLine as they were when
+	// the file was last indexed. The Arm B enrichment label the indexer
+	// prepends for BM25 and the embedding (ADR-035) is stripped before the
+	// Hit is built, as ken-mcp strips it at its own boundary; the stored
+	// chunk keeps its label, so ranking is unaffected. The one exception is
+	// a synthetic chunk with no single source range — a Tier-1 folded SQL
+	// migration chunk, or a chunk injected through SetExtraChunks — whose
+	// Text is whatever that producer wrote.
 	File      string
 	StartLine int
 	EndLine   int
 	Text      string
 
 	// Hash is sha256(Text), hex-encoded — a content fingerprint stable
-	// across reindexes as long as the chunk's text doesn't change, useful
-	// for a caller's own dedup/cache keys.
+	// across reindexes as long as the hit's own lines don't change, useful
+	// for a caller's own dedup/cache keys. Because Text carries no
+	// enrichment label, an edit elsewhere in the file (a new call in
+	// another function, which changes the file-level label) leaves it
+	// unchanged.
 	Hash string
 
 	// Score is the pipeline's fused (or single-arm) relevance score, on
@@ -112,6 +125,16 @@ func hashText(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// hitText returns a result chunk's text as a Hit carries it — the source
+// lines only, without the Arm B enrichment label (structural.StripLabel,
+// the helper ken-mcp's result boundary uses) — and the hash of that text.
+// The one place toHits and FindRelated take Text and Hash from, so the two
+// can't disagree.
+func hitText(r search.Result) (text, hash string) {
+	text = structural.StripLabel(r.Chunk.Text)
+	return text, hashText(text)
+}
+
 // armOverfetch sizes the auxiliary single-arm queries toHits runs to
 // recover per-arm ranks for a hybrid result set — generous enough that a
 // chunk ranked respectably in its arm is actually found, cheap enough that
@@ -151,12 +174,13 @@ func (w *Workspace) toHits(ix *search.Index, results []search.Result, effMode se
 	hits := make([]Hit, len(results))
 	for i, r := range results {
 		key := keyOf(r)
+		text, hash := hitText(r)
 		hits[i] = Hit{
 			File:        r.Chunk.File,
 			StartLine:   r.Chunk.StartLine,
 			EndLine:     r.Chunk.EndLine,
-			Text:        r.Chunk.Text,
-			Hash:        hashText(r.Chunk.Text),
+			Text:        text,
+			Hash:        hash,
 			Score:       r.Score,
 			Rank:        i + 1,
 			Gen:         gen,
@@ -208,12 +232,13 @@ func (w *Workspace) FindRelated(ctx context.Context, filePath string, line, k in
 	sectionCache := make(map[string][]Section)
 	hits := make([]Hit, len(results))
 	for i, r := range results {
+		text, hash := hitText(r)
 		hits[i] = Hit{
 			File:        r.Chunk.File,
 			StartLine:   r.Chunk.StartLine,
 			EndLine:     r.Chunk.EndLine,
-			Text:        r.Chunk.Text,
-			Hash:        hashText(r.Chunk.Text),
+			Text:        text,
+			Hash:        hash,
 			Score:       r.Score,
 			Rank:        i + 1,
 			Gen:         gen,
