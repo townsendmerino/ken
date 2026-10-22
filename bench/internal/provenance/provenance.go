@@ -343,6 +343,13 @@ func Detect(name, path string) Corpus {
 func gitOutput(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
+	// Ask about dir, not whatever repo the environment points at: git
+	// exports GIT_DIR (absolute, from a worktree) and friends to hooks and
+	// `rebase --exec`, and an inherited GIT_DIR makes `rev-parse` answer
+	// for that repo from anywhere — which is how the pre-push hook's run of
+	// TestDetect_OutsideGitTreeIsNotAnError "found" the pushing repo from
+	// a temp dir.
+	cmd.Env = withoutGitRepoEnv(os.Environ())
 	// Discard stderr: "not a git repository" is an expected outcome
 	// here, not something to spray across the bench log.
 	cmd.Stderr = nil
@@ -351,6 +358,22 @@ func gitOutput(dir string, args ...string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// withoutGitRepoEnv drops the variables that tell git which repository,
+// work tree or index to use, so git discovers them from its working
+// directory.
+func withoutGitRepoEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		switch k {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_PREFIX":
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // kenEnv snapshots every KEN_* variable. The bench surface is

@@ -8,7 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -130,6 +132,20 @@ func TestDetect_OutsideGitTreeIsNotAnError(t *testing.T) {
 	}
 	if c.Repo != "" || c.Revision != "" || c.Dirty {
 		t.Errorf("Detect invented git state outside a work tree: %+v", c)
+	}
+}
+
+// A git hook (or `rebase --exec`) runs with GIT_DIR exported — absolute when
+// pushing from a worktree. Detect must still describe the path it was given,
+// not the repo the environment points at.
+func TestDetect_IgnoresInheritedGitDir(t *testing.T) {
+	out, err := exec.Command("git", "rev-parse", "--absolute-git-dir").Output()
+	if err != nil {
+		t.Skip("not running inside a git checkout")
+	}
+	t.Setenv("GIT_DIR", strings.TrimSpace(string(out)))
+	if c := Detect("scratch", t.TempDir()); c.Repo != "" || c.Revision != "" || c.Dirty {
+		t.Errorf("Detect followed an inherited GIT_DIR outside a work tree: %+v", c)
 	}
 }
 
