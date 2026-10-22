@@ -37,7 +37,7 @@
 // # Spans
 //
 // FuncDef and ClassDef record StartLine/EndLine (1-based, inclusive), and
-// DefinitionSite and OutlineEntry report them. A
+// DefinitionSite, OutlineEntry and SymbolSpan report them. A
 // span is the declaration node exactly as tree-sitter reports it, so what
 // it covers is the grammar's choice:
 //

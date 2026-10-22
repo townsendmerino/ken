@@ -62,6 +62,17 @@ pre-built binaries.
   ken-mcp keeps its own structural build state (`mcp.RepoBundle`), so its
   structural tools don't follow edits yet; wiring it onto `SetOnBatch` is
   a follow-up.
+- **`(*Workspace) SymbolAt(ctx, path, line) ([]SymbolSpan, error)` — the
+  symbol at a line** (K12). The indexed functions, methods and classes
+  whose spans contain the line, innermost first, as
+  `SymbolSpan{Name, QName, Kind, StartLine, EndLine}`: a Python method
+  gives `[method, class]`; a Go method, not nested in its type's span,
+  gives the method alone; file scope or a line past the end gives an empty
+  slice; a line in a closure gives the named function around it. A path
+  the structural index doesn't hold returns the new `ErrFileNotIndexed`,
+  distinct from file scope. Cost is proportional to that file's
+  definitions; answers are as current as the structural index (K13). The
+  underlying `structural.Index.SymbolsAt` is available too.
 - **`Status.StructuralGeneration`** — counts published structural indexes
   (1 after the first build, +1 per update that changed a file's
   structure), beside the search index's `Generation`.

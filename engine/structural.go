@@ -16,6 +16,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,8 @@ type (
 	Call = structural.Call
 	// OutlineEntry is one function/class/method in a file's structural outline.
 	OutlineEntry = structural.OutlineEntry
+	// SymbolSpan is one symbol and its lines, as SymbolAt returns it.
+	SymbolSpan = structural.SymbolSpan
 )
 
 // DefinitionKind values.
@@ -75,6 +78,11 @@ var ErrStructuralBuilding = errors.New("engine: structural index still building"
 // (an unsupported-language corpus genuinely has none), or the last build
 // attempt failed and is in its retry cooldown.
 var ErrNoStructuralIndex = errors.New("engine: no structural index available")
+
+// ErrFileNotIndexed means SymbolAt's path isn't in the structural index:
+// a language with no structural extractor, a file the walk skipped, or no
+// such file. Distinct from file scope, which is an empty result.
+var ErrFileNotIndexed = errors.New("engine: file not in the structural index")
 
 // OutlineFile pairs a file path with its structural outline, Outline's
 // return shape for a directory argument (one entry per file under it).
@@ -365,4 +373,26 @@ func (w *Workspace) Symbols(ctx context.Context, path string) ([]string, error) 
 		return idx.Symbols(), nil
 	}
 	return idx.SymbolsInPath(structural.NormalizePath(path)), nil
+}
+
+// SymbolAt returns the indexed symbols whose spans contain line in path,
+// innermost first. A line inside a Python method gives the method, then
+// its class. A Go method is not nested in its type's span, so it gives the
+// method alone. A line at file scope (imports, package-level declarations,
+// comments between functions) or past the end of the file gives an empty
+// slice. Closures and anonymous functions aren't indexed, so a line inside
+// one gives the named function around it. A path the structural index
+// doesn't hold returns ErrFileNotIndexed. Answers are as current as the
+// structural index (see Refresh). Cost is proportional to the definitions
+// in that one file.
+func (w *Workspace) SymbolAt(ctx context.Context, path string, line int) ([]SymbolSpan, error) {
+	idx, err := w.structuralIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
+	syms, ok := idx.SymbolsAt(structural.NormalizePath(path), line)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrFileNotIndexed, path)
+	}
+	return syms, nil
 }

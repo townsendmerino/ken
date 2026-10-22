@@ -458,6 +458,82 @@ func (ix *Index) Outline(filePath string) []OutlineEntry {
 	return out
 }
 
+// SymbolSpan is one indexed symbol and its lines, as SymbolsAt returns it.
+type SymbolSpan struct {
+	Name      string         // bare name: "Size"
+	QName     string         // "Model.Size" for a method, else Name
+	Kind      DefinitionKind // function, class or method
+	StartLine int            // 1-based, inclusive (see "Spans" in the package doc)
+	EndLine   int
+}
+
+// SymbolsAt returns the indexed functions, methods and classes of filePath
+// whose spans contain line, innermost (shortest span) first, and whether
+// filePath is in the index at all — so a caller can tell file scope (ok,
+// empty) from a file the index doesn't know (!ok). Spans are as recorded:
+// a Go method is not nested in its type's span, so a line in it gives the
+// method alone; a line in a Python method gives the method, then its
+// class. Closures, lambdas and anonymous functions aren't indexed, so a
+// line in one gives the named function around it. Symbols with no
+// recorded span (a Go method-grouping shell) never match. Cost is
+// proportional to the file's definitions.
+func (ix *Index) SymbolsAt(filePath string, line int) ([]SymbolSpan, bool) {
+	fs := ix.files[filePath]
+	if fs == nil {
+		return nil, false
+	}
+	out := []SymbolSpan{}
+	if line < 1 {
+		return out, true
+	}
+	for _, fn := range fs.Functions {
+		if fn.StartLine == 0 || line < fn.StartLine || line > fn.EndLine {
+			continue
+		}
+		s := SymbolSpan{Name: fn.Name, QName: fn.Name, Kind: DefinitionKindFunction, StartLine: fn.StartLine, EndLine: fn.EndLine}
+		if fn.IsMethod {
+			s.Kind = DefinitionKindMethod
+			s.QName = qualifySymbol(fn.EnclosingClass, fn.Name)
+		}
+		out = append(out, s)
+	}
+	for _, c := range fs.Classes {
+		if c.StartLine == 0 || line < c.StartLine || line > c.EndLine {
+			continue
+		}
+		out = append(out, SymbolSpan{Name: c.Name, QName: c.Name, Kind: DefinitionKindClass, StartLine: c.StartLine, EndLine: c.EndLine})
+	}
+	// Innermost first: shortest span; then the later start; then a method
+	// before a function before a class (one-line declarations that share a
+	// line). Dart records a method both bare and qualified with one span:
+	// keep the qualified one.
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if la, lb := a.EndLine-a.StartLine, b.EndLine-b.StartLine; la != lb {
+			return la < lb
+		}
+		if a.StartLine != b.StartLine {
+			return a.StartLine > b.StartLine
+		}
+		return kindOrder(a.Kind) < kindOrder(b.Kind)
+	})
+	return slices.CompactFunc(out, func(a, b SymbolSpan) bool {
+		return a.Name == b.Name && a.StartLine == b.StartLine && a.EndLine == b.EndLine && a.Kind != DefinitionKindClass && b.Kind != DefinitionKindClass
+	}), true
+}
+
+// kindOrder ranks kinds for SymbolsAt's tie-break: method, function, class.
+func kindOrder(k DefinitionKind) int {
+	switch k {
+	case DefinitionKindMethod:
+		return 0
+	case DefinitionKindFunction:
+		return 1
+	default:
+		return 2
+	}
+}
+
 // methodSpanQueue hands out the spans of a file's methods, keyed by
 // (class, method name), in the order fs.Functions recorded them. Most
 // extractors build ClassDef.Methods with a separate pass that records no

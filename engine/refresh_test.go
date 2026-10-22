@@ -107,6 +107,12 @@ func TestRefreshMovesSpansWatchOff(t *testing.T) {
 	if s, e := outlineSizeSpan(t, ws, ctx); s != 6 || e != 8 {
 		t.Errorf("after Refresh: Outline Size at %d-%d, want 6-8", s, e)
 	}
+	if syms, err := ws.SymbolAt(ctx, "pull/methods.go", 7); err != nil || len(syms) != 1 || syms[0].QName != "Model.Size" {
+		t.Errorf("after Refresh: SymbolAt(methods.go, 7) = %+v, %v; want Model.Size", syms, err)
+	}
+	if syms, err := ws.SymbolAt(ctx, "pull/methods.go", 3); err != nil || len(syms) != 0 {
+		t.Errorf("after Refresh: SymbolAt(methods.go, 3) = %+v, %v; want file scope (a comment now)", syms, err)
+	}
 	hits, err := ws.Search(ctx, "uniqueShiftedToken", 5)
 	if err != nil || len(hits) == 0 || !strings.Contains(hits[0].Text, "uniqueShiftedToken") {
 		t.Errorf("after Refresh: Search found %+v, %v; want the new text", hits, err)
@@ -260,6 +266,9 @@ func TestRefreshConcurrentReaders(t *testing.T) {
 				}
 				if _, err := ws.Callers(ctx, "Size"); err != nil {
 					fail("Callers mid-refresh: %v", err)
+				}
+				if syms, err := ws.SymbolAt(ctx, "pull/methods.go", 4); err != nil || (len(syms) != 0 && !okSpan(syms[0].StartLine, syms[0].EndLine)) {
+					fail("SymbolAt mid-refresh = %+v, %v", syms, err)
 				}
 				if _, err := ws.Search(ctx, "Size Model", 5); err != nil {
 					fail("Search mid-refresh: %v", err)

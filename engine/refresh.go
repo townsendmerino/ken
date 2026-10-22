@@ -36,7 +36,7 @@ var ErrPathOutsideRoot = errors.New("engine: path outside the workspace root")
 //
 // When Refresh returns, Search and FindRelated serve the new content
 // (Status().Generation has moved if anything changed), and Definition,
-// References, Callers, Outline and Symbols see the new spans
+// References, Callers, Outline, Symbols and SymbolAt see the new spans
 // (Status().StructuralGeneration has moved if a file's structure changed).
 // Refresh never starts a structural build: if none has run yet, the first
 // structural call builds over the current files. If one is in flight, the
