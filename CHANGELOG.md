@@ -23,9 +23,7 @@ following edits and showing lines. See
 [ADR-048](docs/internal/DECISIONS.md#adr-048-engine-structural-spans-symbolat-refresh-qualified-names-testsfor-k10k15).
 No BM25, embedding, fusion or rerank change, the stored chunks keep their
 label, and the snapshot format is unchanged, so the semble NDCG benchmark
-needs no re-run. Released without the Release workflow's binaries
-(GitHub Actions minutes were exhausted); brew/scoop stay on 1.10.0 until
-it runs.
+needs no re-run.
 
 ### Added
 
