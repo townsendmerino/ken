@@ -124,6 +124,16 @@ pre-built binaries.
   among their declarations. Those files now parse in 3–250 ms each. The
   enrichment cap stays at 64 KiB, so the label and ranking don't change;
   `Index.Update` (K13) keeps the cap an index was built with.
+- **ken-mcp's structural tools carry the lines** (additive JSON, plus
+  markdown): `definition` rows gain `end_line` and (Go) `doc_line`, and the
+  markdown shows `file:start-end`; `outline` entries gain `start_line`/
+  `end_line`/`doc_line`, shown as `— 12-30`; `references` rows gain
+  `lines` (the call lines); `callers` keeps `files` and adds `sites`, each
+  file's calls as `{line, caller}`, and its markdown lists them (`— 42 (in
+  Server.handle), 97 (in resolveRepo)`, capped at 12 per file). The tool
+  descriptions and argument schemas now describe the spans and the Go
+  `pkg.Func` / `pkg.Type.Method` qualifiers instead of "no qualification"
+  and "file-level only".
 - **`Status.StructuralGeneration`** — counts published structural indexes
   (1 after the first build, +1 per update that changed a file's
   structure), beside the search index's `Generation`.

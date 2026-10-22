@@ -245,14 +245,17 @@ func NewServer(cfg Config) *sdk.Server {
 		Description: "Locate where a function, class, or method is defined. " +
 			"Bare `symbol` (\"Login\") returns ALL definition sites — top-level functions/classes " +
 			"with that name AND every method named Login on any class across the corpus. " +
-			"Qualified `symbol` (\"User.Login\") returns ONLY methods on the named type. " +
+			"Qualified `symbol` (\"User.Login\") returns ONLY methods on the named type; for Go, " +
+			"\"pkg.Name\" also matches a top-level function or type in package pkg and " +
+			"\"pkg.Type.method\" a method of Type in package pkg (packages matched by name). " +
 			"Tree-sitter-grade: name-resolved, not type-resolved. Each result is labeled " +
 			"function / class / method; method results carry their qualified `Type.method` " +
 			"form in parentheses so an agent can disambiguate when the bare name lives on " +
 			"multiple types. Collisions return all sites in alphabetical-by-file order; " +
 			"ordering does NOT reflect confidence ranking. Each result carries the " +
-			"definition's start `line`, so you can pass (file, line) straight to " +
-			"`find_related` without reading the file first.",
+			"definition's `line` span (start-end; doc comment outside), so you can read just " +
+			"those lines, or pass (file, line) straight to `find_related`, without reading " +
+			"the whole file first.",
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args DefinitionArgs) (*sdk.CallToolResult, any, error) {
 		// The first structural call builds the whole-corpus symbol index,
 		// which can take tens of seconds on a large polyglot repo (audit
@@ -267,7 +270,7 @@ func NewServer(cfg Config) *sdk.Server {
 		Name: "references",
 		Description: "Find every file referencing a name. " +
 			"Returns the file(s) where `symbol` appears in a recognized syntactic context: " +
-			"call sites, import statements, and raise statements. " +
+			"call sites (with their lines), import statements, and raise statements. " +
 			"Tree-sitter-grade: name-resolved, not type-resolved — same-spelled identifiers " +
 			"in different files collapse into a single result list with no semantic " +
 			"disambiguation. Use this for `where is X used` style questions, not for " +
@@ -280,13 +283,13 @@ func NewServer(cfg Config) *sdk.Server {
 
 	sdk.AddTool(srv, &sdk.Tool{
 		Name: "callers",
-		Description: "Find the files that contain a call to a given function name. " +
-			"Returns file-level callers (\"this file has a call to X\"), not function-level " +
-			"call hierarchy. Tree-sitter-grade: name-resolved, not type-resolved — same-spelled " +
-			"functions across types collapse into one list. Stage 8 Gate 2 precision sample: " +
-			"100% on a 400-edge sample across 8 languages. For function-level call hierarchy " +
-			"(which specific function calls X), fall back to an LSP — ken doesn't track caller-" +
-			"function scopes.",
+		Description: "Find the calls to a given function name: one entry per file, each call " +
+			"with its line and the function or method it sits in (a call inside a closure " +
+			"counts for the function around it). Tree-sitter-grade: name-resolved, not " +
+			"type-resolved — same-spelled functions across types collapse into one list. " +
+			"For Go, \"pkg.Func\" narrows to calls written pkg.Func(…) plus bare Func(…) " +
+			"calls inside package pkg. Stage 8 Gate 2 precision sample: 100% on a 400-edge " +
+			"sample across 8 languages.",
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args CallersArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken callers")
 		defer stop()
@@ -297,7 +300,7 @@ func NewServer(cfg Config) *sdk.Server {
 		Name: "outline",
 		Description: "Show the structural outline of a file or directory. " +
 			"For a file path: returns every top-level function, class, and method " +
-			"(with parameter names) defined in that file. " +
+			"(with parameter names and line spans) defined in that file. " +
 			"For a directory path: returns the outline of every indexed file under it. " +
 			"Fast structural overview for understanding what a file or package contains " +
 			"without reading the source.",

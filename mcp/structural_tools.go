@@ -29,6 +29,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -124,10 +125,12 @@ func handleDefinition(ctx context.Context, cfg *Config, args DefinitionArgs) (*s
 			qname = s.QName
 		}
 		resp.Definitions = append(resp.Definitions, DefinitionRowOut{
-			File:  s.File,
-			Line:  s.Line,
-			Kind:  kindLabel(s.Kind),
-			QName: qname,
+			File:    s.File,
+			Line:    s.Line,
+			Kind:    kindLabel(s.Kind),
+			QName:   qname,
+			EndLine: s.EndLine,
+			DocLine: s.DocLine,
 		})
 	}
 	return dispatchOutput(args.Output, resp, renderDefinitionMarkdown(resp))
@@ -142,7 +145,7 @@ func renderDefinitionMarkdown(r DefinitionResponse) string {
 	for i, d := range r.Definitions {
 		loc := d.File
 		if d.Line > 0 {
-			loc = fmt.Sprintf("%s:%d", d.File, d.Line)
+			loc = fmt.Sprintf("%s:%s", d.File, lineSpan(d.Line, d.EndLine))
 		}
 		if d.Kind == "method" && d.QName != "" {
 			fmt.Fprintf(&b, "%d. **%s** — method (%s)\n", i+1, loc, d.QName)
@@ -188,12 +191,14 @@ func handleReferences(ctx context.Context, cfg *Config, args ReferencesArgs) (*s
 	// Group by file so the agent reads "this file uses it in these
 	// contexts" rather than a flat list of (file, kind) pairs.
 	byFile := make(map[string][]structural.ReferenceKind)
+	lines := make(map[string][]int)
 	order := make([]string, 0)
 	for _, r := range refs {
 		if _, ok := byFile[r.File]; !ok {
 			order = append(order, r.File)
 		}
 		byFile[r.File] = append(byFile[r.File], r.Kind)
+		lines[r.File] = append(lines[r.File], r.Lines...) // call lines; nil for imports/raises
 	}
 	sort.Strings(order)
 
@@ -206,6 +211,7 @@ func handleReferences(ctx context.Context, cfg *Config, args ReferencesArgs) (*s
 		resp.References = append(resp.References, ReferenceRowOut{
 			File:  f,
 			Kinds: dedupRefKinds(byFile[f]),
+			Lines: lines[f],
 		})
 	}
 	return dispatchOutput(args.Output, resp, renderReferencesMarkdown(resp))
@@ -218,24 +224,51 @@ func renderReferencesMarkdown(r ReferencesResponse) string {
 		r.Totals.References, pluralS(r.Totals.References),
 		r.Totals.Files, pluralS(r.Totals.Files))
 	for i, row := range r.References {
-		fmt.Fprintf(&b, "%d. **%s** — %s\n", i+1, row.File, strings.Join(row.Kinds, ", "))
+		fmt.Fprintf(&b, "%d. **%s** — %s", i+1, row.File, strings.Join(row.Kinds, ", "))
+		if len(row.Lines) > 0 {
+			fmt.Fprintf(&b, " (call line%s %s)", pluralS(len(row.Lines)), joinLines(row.Lines))
+		}
+		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// maxLinesInMarkdown caps how many line numbers one markdown row lists;
+// the JSON output always carries them all.
+const maxLinesInMarkdown = 12
+
+// joinLines renders call lines as "4, 9, 31", capped at maxLinesInMarkdown
+// with a "+N more" tail.
+func joinLines(lines []int) string {
+	parts := make([]string, 0, min(len(lines), maxLinesInMarkdown)+1)
+	for i, l := range lines {
+		if i == maxLinesInMarkdown {
+			parts = append(parts, fmt.Sprintf("+%d more", len(lines)-i))
+			break
+		}
+		parts = append(parts, strconv.Itoa(l))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// lineSpan renders a span as "12-30", or "12" for a one-line span or an
+// unrecorded end.
+func lineSpan(start, end int) string {
+	if end > start {
+		return fmt.Sprintf("%d-%d", start, end)
+	}
+	return strconv.Itoa(start)
+}
+
 // handleCallers implements the `callers` tool: given a function
-// name, return the list of FILES that contain a call to it. The
-// structural index keys reverse-call by file (not by function), so
-// the response honestly describes "file-level callers" — if a file
-// has 5 functions and one of them calls the target, the file shows
-// once in the list.
+// name, return the FILES that contain a call to it, one entry per file,
+// and (ADR-048) each file's call sites: the line, and the named function
+// or method the call sits in, from the extractor's per-call records.
 //
-// Honest framing: the response header notes the granularity AND the
-// Stage 8 Gate 2 precision number (100% on a 400-edge sample across
-// 8 languages). Tools that need function-level call hierarchy
-// ("which function in the file calls X") should fall back to an
-// LSP — ken's structural index doesn't track caller-function
-// scopes today.
+// Honest framing: name-resolved, not type-resolved — the enclosing
+// function is exact, but which definition of a same-spelled callee a call
+// reaches is not resolved. The Stage 8 Gate 2 precision number (100% on a
+// 400-edge sample across 8 languages) is for the file-level edges.
 func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.CallToolResult, any, error) {
 	sidx, errResult := resolveStructuralIndex(ctx, cfg, args.Repo, args.Output)
 	if errResult != nil {
@@ -260,32 +293,49 @@ func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.Cal
 		return dispatchOutput(args.Output, resp, md)
 	}
 
-	// Dedupe + sort by file path. Callers may report a file once
-	// per call site; for the file-level granularity we expose, one
-	// entry per file is what the agent wants.
-	seen := make(map[string]bool, len(sites))
-	files := make([]string, 0, len(sites))
-	for _, s := range sites {
-		if seen[s.File] {
-			continue
-		}
-		seen[s.File] = true
-		files = append(files, s.File)
+	// The index returns one CallSite per file, sorted by path; sort
+	// anyway so the wire order doesn't depend on that.
+	sort.Slice(sites, func(i, j int) bool { return sites[i].File < sites[j].File })
+	resp := CallersResponse{
+		Symbol: sym,
+		Files:  make([]string, 0, len(sites)),
+		Sites:  make([]CallerSiteOut, 0, len(sites)),
 	}
-	sort.Strings(files)
-
-	resp := CallersResponse{Symbol: sym, Files: files}
+	for _, s := range sites {
+		resp.Files = append(resp.Files, s.File)
+		calls := make([]CallOut, 0, len(s.Calls))
+		for _, c := range s.Calls {
+			calls = append(calls, CallOut{Line: c.Line, Caller: c.Caller})
+		}
+		resp.Sites = append(resp.Sites, CallerSiteOut{File: s.File, Calls: calls})
+	}
 	return dispatchOutput(args.Output, resp, renderCallersMarkdown(resp))
 }
 
 func renderCallersMarkdown(r CallersResponse) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Callers: `%s`\n\n", r.Symbol)
-	fmt.Fprintf(&b, "_%d file%s contain%s a call to this name. File-level granularity; "+
-		"tree-sitter-grade, name-resolved, NOT type-resolved._\n\n",
+	fmt.Fprintf(&b, "_%d file%s contain%s a call to this name; each call shows its line and the function it's in. "+
+		"Tree-sitter-grade, name-resolved, NOT type-resolved._\n\n",
 		len(r.Files), pluralS(len(r.Files)), agreeVerb(len(r.Files) == 1, "s", ""))
-	for i, f := range r.Files {
-		fmt.Fprintf(&b, "%d. **%s**\n", i+1, f)
+	for i, s := range r.Sites {
+		fmt.Fprintf(&b, "%d. **%s**", i+1, s.File)
+		for j, c := range s.Calls {
+			if j == maxLinesInMarkdown {
+				fmt.Fprintf(&b, ", +%d more", len(s.Calls)-j)
+				break
+			}
+			sep := ", "
+			if j == 0 {
+				sep = " — "
+			}
+			if c.Caller != "" {
+				fmt.Fprintf(&b, "%s%d (in %s)", sep, c.Line, c.Caller)
+			} else {
+				fmt.Fprintf(&b, "%s%d (file scope)", sep, c.Line)
+			}
+		}
+		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -403,6 +453,9 @@ func convertOutlineEntries(file string, entries []structural.OutlineEntry) []Out
 			Kind:      kindLabel(e.Kind),
 			Container: e.Container,
 			Params:    e.Params,
+			StartLine: e.StartLine,
+			EndLine:   e.EndLine,
+			DocLine:   e.DocLine,
 		})
 	}
 	return out
@@ -520,13 +573,17 @@ func formatOutlineEntries(entries []structural.OutlineEntry) string {
 		if len(e.Params) > 0 {
 			params = "(" + strings.Join(e.Params, ", ") + ")"
 		}
+		lines := ""
+		if e.StartLine > 0 {
+			lines = " — " + lineSpan(e.StartLine, e.EndLine)
+		}
 		switch {
 		case e.Container != "":
-			fmt.Fprintf(&b, "  - **%s.%s**%s\n", e.Container, e.Name, params)
+			fmt.Fprintf(&b, "  - **%s.%s**%s%s\n", e.Container, e.Name, params, lines)
 		case e.Kind == structural.DefinitionKindClass:
-			fmt.Fprintf(&b, "- class **%s**\n", e.Name)
+			fmt.Fprintf(&b, "- class **%s**%s\n", e.Name, lines)
 		default:
-			fmt.Fprintf(&b, "- func **%s**%s\n", e.Name, params)
+			fmt.Fprintf(&b, "- func **%s**%s%s\n", e.Name, params, lines)
 		}
 	}
 	return b.String()

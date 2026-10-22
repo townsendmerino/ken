@@ -202,27 +202,34 @@ Find where a symbol is defined. Tree-sitter-grade, name-resolved
 (NOT type-resolved — same-spelled names in different files all
 return).
 
-- Args: `symbol` (e.g. `"Login"` or `"User.Login"`), `repo`,
-  `output`.
-- Returns: file + kind (`function` / `class` / `method`) for each
-  site.
+- Args: `symbol` (e.g. `"Login"` or `"User.Login"`; for Go also
+  `"pkg.Func"` or `"pkg.Type.Method"`), `repo`, `output`.
+- Returns: file, line span (`line`/`end_line`; for Go also `doc_line`,
+  where the doc comment starts) and kind (`function` / `class` /
+  `method`) for each site.
 
 ### `references`
 Find every place a name is used: call sites, imports, raises.
 
 - Args: `symbol`, `repo`, `output`.
-- Returns: per-file list of reference kinds.
+- Returns: per-file list of reference kinds, with the call lines.
 
 ### `callers`
-Find files that contain a call to a given function. File-level
-granularity (100% precision on the Stage 8 Gate 2 sample).
+Find the calls to a given function: one entry per file (100%
+precision on the Stage 8 Gate 2 sample), each call with its line and
+the function or method it sits in.
 
-- Args: `symbol`, `repo`, `output`.
-- Returns: list of file paths.
+- Args: `symbol` (for Go, `"pkg.Func"` narrows to calls written
+  `pkg.Func(…)` plus bare calls inside package `pkg`), `repo`, `output`.
+- Returns: file paths (`files`) and per-file call sites (`sites`).
+
+All structural tools follow edits: the structural index is updated with
+each file-watcher flush, so line spans stay current while you edit.
+Files over `KEN_STRUCTURAL_MAX_FILE_BYTES` (1 MiB) aren't parsed.
 
 ### `outline`
 Structural outline of a file or directory: top-level functions,
-classes, methods, with parameters.
+classes, methods, with parameters and line spans.
 
 - Args: `path` (file or directory), `repo`, `output`.
 - Returns: structured outline; for directories, one section per

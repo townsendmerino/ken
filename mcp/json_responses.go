@@ -122,6 +122,12 @@ type DefinitionRowOut struct {
 	Line  int    `json:"line,omitempty"`
 	Kind  string `json:"kind"`
 	QName string `json:"qname,omitempty"`
+	// EndLine is the definition's last line, inclusive (0 if unrecorded):
+	// the span is the declaration node as tree-sitter reports it, doc
+	// comment outside (ADR-048). DocLine (Go only) is the first line of
+	// the comment block directly above, else equal to Line.
+	EndLine int `json:"end_line,omitempty"`
+	DocLine int `json:"doc_line,omitempty"`
 }
 
 // ReferencesResponse lists every file where the symbol appears in a
@@ -140,6 +146,10 @@ type ReferencesResponse struct {
 type ReferenceRowOut struct {
 	File  string   `json:"file"`
 	Kinds []string `json:"kinds"`
+	// Lines are the call lines in File, ascending; absent when the file
+	// has no call reference (the extractors don't record where imports and
+	// raises occur).
+	Lines []int `json:"lines,omitempty"`
 }
 
 // ReferencesRowTotal is the (#references, #files) summary the
@@ -150,12 +160,28 @@ type ReferencesRowTotal struct {
 	Files      int `json:"files"`
 }
 
-// CallersResponse is the `callers` tool's JSON shape. File-level
-// granularity matching the Stage 8 Gate 2 precision-validated
-// surface.
+// CallersResponse is the `callers` tool's JSON shape. Files is the
+// file-level list matching the Stage 8 Gate 2 precision-validated
+// surface; Sites (ADR-048) adds each file's call sites, in the same file
+// order.
 type CallersResponse struct {
-	Symbol string   `json:"symbol"`
-	Files  []string `json:"files"`
+	Symbol string          `json:"symbol"`
+	Files  []string        `json:"files"`
+	Sites  []CallerSiteOut `json:"sites,omitempty"`
+}
+
+// CallerSiteOut is one file's calls to the symbol.
+type CallerSiteOut struct {
+	File  string    `json:"file"`
+	Calls []CallOut `json:"calls"`
+}
+
+// CallOut is one call: its line, and the qualified name of the named
+// function or method it sits in ("Server.handle"; a call in a closure
+// counts for the function around it), empty at file scope.
+type CallOut struct {
+	Line   int    `json:"line"`
+	Caller string `json:"caller,omitempty"`
 }
 
 // OutlineResponse is the `outline` tool's JSON shape. Path is the
@@ -183,6 +209,13 @@ type OutlineEntryOut struct {
 	Kind      string   `json:"kind"` // "function" / "class" / "method"
 	Container string   `json:"container,omitempty"`
 	Params    []string `json:"params,omitempty"`
+	// StartLine/EndLine are the entry's lines, inclusive — the span
+	// `definition` reports for it. Absent (0) when not recorded, and for a
+	// Go class entry that only groups methods of a type declared in
+	// another file. DocLine is Go only (see DefinitionRowOut).
+	StartLine int `json:"start_line,omitempty"`
+	EndLine   int `json:"end_line,omitempty"`
+	DocLine   int `json:"doc_line,omitempty"`
 }
 
 // OutlineFileEntry groups outline entries when the agent passed a

@@ -142,7 +142,7 @@ type ReindexDBArgs struct{}
 // description tells the agent the ranking is alphabetical-by-path
 // (not confidence-weighted) for stage-1 honesty.
 type DefinitionArgs struct {
-	Symbol string `json:"symbol" jsonschema:"The symbol name to locate (function or class name as written in source — exact match; no fuzzy matching, no qualification)."`
+	Symbol string `json:"symbol" jsonschema:"The symbol name to locate (function or class name as written in source — exact match; no fuzzy matching). Type.method and, for Go, pkg.Name / pkg.Type.method qualifiers narrow the match."`
 	repoArg
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with symbol/definitions — see DefinitionResponse)."`
 }
@@ -211,14 +211,12 @@ type StatusArgs struct {
 }
 
 // CallersArgs is the argument schema for the `callers` tool. Returns
-// the list of FILES that contain a call to the named function.
-// File-level granularity is what the structural index actually keys
-// on (Stage 8 Gate 2 sampled 400 edges across 8 languages and
-// confirmed 100% precision — every reported edge resolves to a real
-// call in the file). Function-level granularity ("function A calls
-// function B") would need a richer index; deferred.
+// the FILES that contain a call to the named function (Stage 8 Gate 2
+// sampled 400 edges across 8 languages and confirmed 100% precision —
+// every reported edge resolves to a real call in the file), each with
+// its calls' lines and enclosing functions (ADR-048).
 type CallersArgs struct {
-	Symbol string `json:"symbol" jsonschema:"The function name whose callers you want (exact match, no qualification — pass 'Login' not 'User.Login'). Returns files that contain a call to this name."`
+	Symbol string `json:"symbol" jsonschema:"The function name whose callers you want (exact match). 'User.Login' matches every call to Login (receiver types aren't resolved); for Go, 'pkg.Func' narrows to calls written pkg.Func(...) plus bare Func(...) inside package pkg. Returns each file with its call lines and enclosing functions."`
 	repoArg
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with symbol/files — see CallersResponse)."`
 }
