@@ -221,7 +221,10 @@ package:
   filters an over-fetched ranking; never re-ranks — added in v1.10.0 for
   "which sections of this one file match" use cases).
 - `Hit{File, StartLine, EndLine, Text, Hash, Score, Rank, Gen, BM25Rank,
-  DenseRank, HeadingPath}` — `Hash` is sha256(Text); `Gen` is
+  DenseRank, HeadingPath}` — `Text` is exactly the file's lines
+  `StartLine..EndLine`, without the Arm B enrichment label (fixed in the
+  K10 release; 1.9.0–1.10.0 leaked it); `Hash` is sha256(Text), so it
+  changes only when the hit's own lines do; `Gen` is
   `WatchedIndex.Generation()` (ADR-042's counter half); `BM25Rank`/
   `DenseRank` are best-effort per-arm ranks for the hybrid modes;
   `HeadingPath` (v1.10.0) is the markdown heading chain enclosing the hit,
@@ -229,6 +232,35 @@ package:
 - `Workspace.{Definition, References, Callers, Outline, Symbols}` —
   structural lookups; return `ErrStructuralBuilding` / `ErrNoStructuralIndex`
   while the lazy structural index isn't ready yet / isn't available.
+  Their result types alias `internal/structural`'s, with lines (K11,
+  ADR-048; zero means "not recorded"):
+  `DefinitionSite{File, Kind, QName, Line, EndLine, DocLine}`,
+  `OutlineEntry{Name, Kind, Container, Params, StartLine, EndLine,
+  DocLine}`, `CallSite{File, Calls []Call}` with `Call{Line, Caller}`
+  (one `CallSite` per file; `Caller` is the enclosing named function's
+  qualified name, `""` at file scope), and `Reference{File, Kind, Lines}`
+  (`Lines` for calls; `nil` for imports and raises). `DocLine` is Go only.
+  A span is the declaration node as tree-sitter reports it — doc comments
+  are outside it in every language; whether a decorator/annotation is
+  inside depends on the grammar (see `internal/structural`'s package doc,
+  "Spans"). A dotted name resolves as `Type.method` and, for Go, as
+  `pkg.Name` and `pkg.Type.method` (K14); a Go method-grouping "shell" is
+  not a definition.
+- `Workspace.SymbolAt(ctx, path, line) ([]SymbolSpan, error)` (K12) — the
+  symbols whose spans contain the line, innermost first;
+  `SymbolSpan{Name, QName, Kind, StartLine, EndLine}`. Empty at file
+  scope; `ErrFileNotIndexed` for a path the structural index doesn't hold.
+- `Workspace.Refresh(ctx, changed, deleted) error` (K13) — re-read the
+  given repo-relative files and bring the search and structural indexes up
+  to date before returning (the watcher's flush, synchronously; works with
+  `Watch` off). `ErrPathOutsideRoot` for an absolute or escaping path. The
+  watcher's own flush now updates the structural index too.
+  `Status.StructuralGeneration` counts structural publishes.
+- `Workspace.TestsFor(ctx, symbol, maxDepth) ([]TestSite, error)` and
+  `Workspace.Callees(ctx, symbol) ([]Callee, error)` (K15) —
+  `TestSite{File, QName, StartLine, EndLine, Dir, Depth, Via}` (Go and
+  Python test conventions; `Dir` is the package directory to run);
+  `Callee{File, Name, Receiver, Line}`.
 - `Workspace.Sections(ctx, path) ([]Section, error)` (v1.10.0) — a
   markdown file's heading-bounded sections, in file order; every markdown
   Hit's line range falls inside exactly one returned Section with the

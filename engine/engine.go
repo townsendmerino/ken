@@ -11,9 +11,24 @@
 // requirement inherited from ken-mcp's JSON-RPC stdout contract — see
 // cmd/ken-mcp/main.go's header comment).
 //
+// Search results (Hit) carry the file's exact lines: Hit.Text is
+// StartLine..EndLine as on disk, and Hit.Hash changes only when those
+// lines do. Markdown hits carry their heading chain, and Sections lists a
+// markdown file's sections (ADR-047).
+//
+// Structural results carry line spans (DefinitionSite.EndLine,
+// OutlineEntry.StartLine/EndLine, CallSite.Calls, Reference.Lines). Around
+// them: SymbolAt maps a line to the symbols containing it; TestsFor finds
+// the tests that call a symbol and the directory to run them from;
+// Callees lists the calls a symbol makes. Dotted names resolve as
+// Type.method and, for Go, pkg.Name and pkg.Type.method. Spans are only
+// useful while current, so Refresh brings both indexes up to date for
+// files the caller just wrote, and with Watch on the watcher does the same
+// after its debounce (ADR-048).
+//
 // What's NOT here yet (scoped to later work): change-event subscriptions,
-// a combined "symbol bundle" fetch, and section-level retrieval for
-// markdown instruction files.
+// a combined "symbol bundle" fetch, a snapshot directory outside the repo,
+// and a persisted structural index.
 package engine
 
 import (
