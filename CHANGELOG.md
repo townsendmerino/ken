@@ -13,7 +13,19 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
-## [Unreleased]
+## [1.11.0] — 2026-10-22 — `engine`: structural spans, SymbolAt, Refresh, qualified names, TestsFor
+
+K10–K15 for `tack`: exact hit text, line spans on every structural
+result, the symbol at a line, a structural index that follows edits,
+Go package-qualified names, and a symbol's tests and callees — plus the
+structural index's own file-size cap, and ken-mcp's structural tools
+following edits and showing lines. See
+[ADR-048](docs/internal/DECISIONS.md#adr-048-engine-structural-spans-symbolat-refresh-qualified-names-testsfor-k10k15).
+No BM25, embedding, fusion or rerank change, the stored chunks keep their
+label, and the snapshot format is unchanged, so the semble NDCG benchmark
+needs no re-run. Released without the Release workflow's binaries
+(GitHub Actions minutes were exhausted); brew/scoop stay on 1.10.0 until
+it runs.
 
 ### Added
 
