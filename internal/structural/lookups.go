@@ -59,12 +59,16 @@ const (
 //
 // File is the path relative to the corpus root the index was built
 // over. Kind is the syntactic context the reference was found in.
-// The Stage 8 v0 extractor does not return line numbers — those can
-// be added in a future pass by recording StartPoint at extraction
-// time. For now, files-only is the tree-sitter-grade surface.
+// There is one Reference per (File, Kind).
 type Reference struct {
 	File string
 	Kind ReferenceKind
+
+	// Lines is, for a ReferenceKindCall reference, the lines of the
+	// calls in File, ascending, each once — the same lines as the
+	// matching CallSite.Calls. It is nil for imports and raises: the
+	// extractors don't record where those occur.
+	Lines []int
 }
 
 // References returns every recognized reference to name across the
@@ -81,7 +85,13 @@ func (ix *Index) References(name string) []Reference {
 
 	// Call sites — already indexed in ix.callers.
 	for _, c := range ix.callers[name] {
-		out = append(out, Reference{File: c.File, Kind: ReferenceKindCall})
+		var lines []int
+		for _, call := range callsTo(ix.files[c.File], name) {
+			if len(lines) == 0 || lines[len(lines)-1] != call.Line {
+				lines = append(lines, call.Line)
+			}
+		}
+		out = append(out, Reference{File: c.File, Kind: ReferenceKindCall, Lines: lines})
 	}
 
 	// Import + raise sites — walk per-file metadata. Imports and
@@ -123,24 +133,48 @@ type DefinitionSite struct {
 	// straight into `find_related` (which needs a line) without a
 	// read-the-file round-trip in between.
 	Line int
+
+	// EndLine is the declaration's last line, inclusive, or 0 when the
+	// extractor didn't record a span. [Line, EndLine] is the
+	// declaration node as tree-sitter reports it (see "Spans" in the package doc).
+	EndLine int
+
+	// DocLine is, for Go, the first line of the comment block directly
+	// above the declaration (no blank line between), else equal to
+	// Line. 0 for other languages.
+	DocLine int
 }
 
-// defStartLine returns the 1-based start line of the definition named `name`
-// of `kind` in fs, or 0 if fs is nil, the span wasn't recorded, or no match is
+// span is a definition's recorded lines; the zero value means "not
+// recorded".
+type span struct {
+	start, end, doc int
+}
+
+func funcSpan(f FuncDef) span   { return span{f.StartLine, f.EndLine, f.DocLine} }
+func classSpan(c ClassDef) span { return span{c.StartLine, c.EndLine, c.DocLine} }
+
+// defSpan returns the span of the definition named `name` of `kind` in fs,
+// or the zero span if fs is nil, the span wasn't recorded, or no match is
 // found. For methods, enclosingClass narrows to a specific class ("" matches
 // any). `name` is the bare name (for a method, the method name, not the
-// qualified Type.method form).
-func defStartLine(fs *FileStruct, name string, kind DefinitionKind, enclosingClass string) int {
+// qualified Type.method form). For a class it prefers a ClassDef with a
+// recorded span over a Go method-grouping shell of the same name.
+func defSpan(fs *FileStruct, name string, kind DefinitionKind, enclosingClass string) span {
 	if fs == nil {
-		return 0
+		return span{}
 	}
 	if kind == DefinitionKindClass {
+		var found span
 		for _, c := range fs.Classes {
 			if c.Name == name {
-				return c.StartLine
+				if c.StartLine > 0 {
+					return classSpan(c)
+				}
+				found = classSpan(c)
 			}
 		}
-		return 0
+		return found
 	}
 	for _, f := range fs.Functions {
 		if f.Name != name {
@@ -155,9 +189,9 @@ func defStartLine(fs *FileStruct, name string, kind DefinitionKind, enclosingCla
 		if enclosingClass != "" && f.EnclosingClass != enclosingClass {
 			continue
 		}
-		return f.StartLine
+		return funcSpan(f)
 	}
-	return 0
+	return span{}
 }
 
 // DefinitionKind tags what kind of definition was found at a site.
@@ -212,11 +246,14 @@ func (ix *Index) Definition(name string) []DefinitionSite {
 		enclosing, method := name[:dot], name[dot+1:]
 		var out []DefinitionSite
 		for _, f := range ix.methods[name] {
+			sp := defSpan(ix.files[f], method, DefinitionKindMethod, enclosing)
 			out = append(out, DefinitionSite{
-				File:  f,
-				Kind:  DefinitionKindMethod,
-				QName: name,
-				Line:  defStartLine(ix.files[f], method, DefinitionKindMethod, enclosing),
+				File:    f,
+				Kind:    DefinitionKindMethod,
+				QName:   name,
+				Line:    sp.start,
+				EndLine: sp.end,
+				DocLine: sp.doc,
 			})
 		}
 		return out
@@ -233,7 +270,7 @@ func (ix *Index) Definition(name string) []DefinitionSite {
 	}
 	type siteInfo struct {
 		qname string // qualified Type.method form; empty for non-methods
-		line  int    // 1-based start line, 0 if unrecorded
+		span  span   // lines; zero if unrecorded
 	}
 	// Keyed on (file, kind) only — the line rides in the value so it doesn't
 	// change the dedup identity (two same-name methods in one file still
@@ -255,7 +292,7 @@ func (ix *Index) Definition(name string) []DefinitionSite {
 		}
 		k := key{file: f, kind: kind}
 		if _, dup := seen[k]; !dup {
-			seen[k] = siteInfo{line: defStartLine(ix.files[f], name, kind, "")}
+			seen[k] = siteInfo{span: defSpan(ix.files[f], name, kind, "")}
 			ordered = append(ordered, k)
 		}
 	}
@@ -292,7 +329,7 @@ func (ix *Index) Definition(name string) []DefinitionSite {
 			// EnclosingClass wins under that collision —
 			// acceptable for v0; could split later.
 			if _, dup := seen[k]; !dup {
-				seen[k] = siteInfo{qname: qname, line: fn.StartLine}
+				seen[k] = siteInfo{qname: qname, span: funcSpan(fn)}
 				ordered = append(ordered, k)
 			}
 		}
@@ -313,11 +350,14 @@ func (ix *Index) Definition(name string) []DefinitionSite {
 
 	out := make([]DefinitionSite, 0, len(ordered))
 	for _, k := range ordered {
+		si := seen[k]
 		out = append(out, DefinitionSite{
-			File:  k.file,
-			Kind:  k.kind,
-			QName: seen[k].qname,
-			Line:  seen[k].line,
+			File:    k.file,
+			Kind:    k.kind,
+			QName:   si.qname,
+			Line:    si.span.start,
+			EndLine: si.span.end,
+			DocLine: si.span.doc,
 		})
 	}
 	return out
@@ -337,12 +377,25 @@ func indexOfDot(s string) int {
 // OutlineEntry is one item in a file's structural outline. Functions
 // and classes are emitted as top-level entries; methods of a class
 // are emitted nested under their class with the class's Name set on
-// the Container field.
+// the Container field. A method's Kind is DefinitionKindFunction (not
+// DefinitionKindMethod, as Definition reports it); a non-empty
+// Container is what marks it as a method.
 type OutlineEntry struct {
 	Name      string
 	Kind      DefinitionKind
 	Container string // for methods: enclosing class; for top-level: ""
 	Params    []string
+
+	// StartLine, EndLine are the entry's lines, 1-based inclusive — the
+	// same span Definition reports for it (see "Spans" in the package doc). Both are
+	// 0 when not recorded, and for a Go class entry that only groups
+	// methods whose receiver type is declared in another file (a
+	// "shell"): the type's own entry is in the file that declares it.
+	StartLine int
+	EndLine   int
+
+	// DocLine is as DefinitionSite.DocLine: Go only, 0 elsewhere.
+	DocLine int
 }
 
 // Outline returns the file's structural outline — every top-level
@@ -369,26 +422,70 @@ func (ix *Index) Outline(filePath string) []OutlineEntry {
 			continue
 		}
 		out = append(out, OutlineEntry{
-			Name:   fn.Name,
-			Kind:   DefinitionKindFunction,
-			Params: fn.Params,
+			Name:      fn.Name,
+			Kind:      DefinitionKindFunction,
+			Params:    fn.Params,
+			StartLine: fn.StartLine,
+			EndLine:   fn.EndLine,
+			DocLine:   fn.DocLine,
 		})
 	}
+	spans := methodSpans(fs)
 	for _, cls := range fs.Classes {
 		out = append(out, OutlineEntry{
-			Name: cls.Name,
-			Kind: DefinitionKindClass,
+			Name:      cls.Name,
+			Kind:      DefinitionKindClass,
+			StartLine: cls.StartLine,
+			EndLine:   cls.EndLine,
+			DocLine:   cls.DocLine,
 		})
 		for _, m := range cls.Methods {
+			sp := spans.next(cls.Name, m.Name)
+			if sp.start == 0 {
+				sp = funcSpan(m)
+			}
 			out = append(out, OutlineEntry{
 				Name:      m.Name,
 				Kind:      DefinitionKindFunction,
 				Container: cls.Name,
 				Params:    m.Params,
+				StartLine: sp.start,
+				EndLine:   sp.end,
+				DocLine:   sp.doc,
 			})
 		}
 	}
 	return out
+}
+
+// methodSpanQueue hands out the spans of a file's methods, keyed by
+// (class, method name), in the order fs.Functions recorded them. Most
+// extractors build ClassDef.Methods with a separate pass that records no
+// span, while the FuncDef in fs.Functions carries it; matching the k-th
+// method of a name in a class to the k-th such FuncDef recovers it, and
+// keeps overloads (Java, C#, C++) apart.
+type methodSpanQueue map[[2]string][]span
+
+func methodSpans(fs *FileStruct) methodSpanQueue {
+	q := methodSpanQueue{}
+	for _, fn := range fs.Functions {
+		if fn.IsMethod {
+			k := [2]string{fn.EnclosingClass, fn.Name}
+			q[k] = append(q[k], funcSpan(fn))
+		}
+	}
+	return q
+}
+
+// next pops the next recorded span for (class, name), or the zero span.
+func (q methodSpanQueue) next(class, name string) span {
+	k := [2]string{class, name}
+	s := q[k]
+	if len(s) == 0 {
+		return span{}
+	}
+	q[k] = s[1:]
+	return s[0]
 }
 
 // Symbols returns every top-level name (function or class) defined

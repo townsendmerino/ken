@@ -36,8 +36,12 @@ type (
 	Reference = structural.Reference
 	// ReferenceKind classifies a Reference.
 	ReferenceKind = structural.ReferenceKind
-	// CallSite is one file containing a call to a symbol.
+	// CallSite is one file containing a call to a symbol; its Calls hold
+	// the individual call sites.
 	CallSite = structural.CallSite
+	// Call is one call site in a CallSite's file: its line and the
+	// qualified name of the named function or method it sits in.
+	Call = structural.Call
 	// OutlineEntry is one function/class/method in a file's structural outline.
 	OutlineEntry = structural.OutlineEntry
 )
@@ -242,9 +246,9 @@ func (w *Workspace) References(ctx context.Context, symbol string) ([]Reference,
 	return idx.References(symbol), nil
 }
 
-// Callers returns every file containing a call to symbol. A file may
-// appear more than once (once per call site); callers that want one entry
-// per file should dedupe.
+// Callers returns every file containing a call to symbol, sorted by file:
+// one CallSite per file, whose Calls list each call in it (line and
+// enclosing function), in line order.
 func (w *Workspace) Callers(ctx context.Context, symbol string) ([]CallSite, error) {
 	idx, err := w.structuralIndex(ctx)
 	if err != nil {

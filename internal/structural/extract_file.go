@@ -104,5 +104,14 @@ func extractGuarded(gram, rel string, data []byte) *FileStruct {
 	}
 	fs := &FileStruct{Path: rel}
 	langExtractor[gram](data, root, lc.lang, fs)
+	if extractCheck != nil {
+		extractCheck(gram, data, fs)
+	}
 	return fs
 }
+
+// extractCheck, when set, sees every FileStruct extractGuarded produces,
+// with the source it came from. Test-only (spans_test.go's TestMain uses
+// it to check every span every extractor test produces); nil in
+// production.
+var extractCheck func(gram string, data []byte, fs *FileStruct)

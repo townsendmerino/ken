@@ -33,6 +33,32 @@
 // Languages whose grammar isn't production-viable — e.g. bash
 // (pathologically slow) — silently fall through to the chunker's line
 // fallback; see DESIGN.md §10.
+//
+// # Spans
+//
+// FuncDef and ClassDef record StartLine/EndLine (1-based, inclusive), and
+// DefinitionSite and OutlineEntry report them. A
+// span is the declaration node exactly as tree-sitter reports it, so what
+// it covers is the grammar's choice:
+//
+//   - A doc comment above a declaration is OUTSIDE the span in every
+//     language. For Go, DocLine records where the comment block starts.
+//   - Decorators, attributes and annotations on their own lines above the
+//     declaration are OUTSIDE the span where the grammar makes them a
+//     sibling node: Python decorators (the extractor takes the inner
+//     function_definition/class_definition, not decorated_definition, so a
+//     decorated function's span starts at `def`), Rust `#[...]`
+//     attributes, Dart annotations, Elixir `@doc`/`@spec`, and TypeScript/
+//     JavaScript decorators on methods.
+//   - They are INSIDE the span where the grammar makes them part of the
+//     declaration's modifiers: Java, Kotlin, Scala and Swift annotations,
+//     PHP `#[...]` attributes, and TypeScript/JavaScript decorators on a
+//     class.
+//   - A Go type's span is its type_spec: in `type T struct{…}` that starts
+//     on the `type` line; inside a grouped `type ( … )` it starts at T.
+//
+// A caller that edits by span and wants a decorator or annotation that
+// sits outside it should read upward from StartLine.
 package structural
 
 import (
@@ -139,9 +165,16 @@ type FuncDef struct {
 	// definition (inclusive). Zero values for either field mean
 	// "not recorded" — the extractor that produced this FuncDef
 	// didn't capture spans. Captured by every extractor as of
-	// Phase 0 (docs/internal/structural-call-graph-plan.md).
+	// Phase 0 (docs/internal/structural-call-graph-plan.md). The span
+	// is the declaration node as tree-sitter reports it; see "Spans" in
+	// the package doc for what that covers per language.
 	StartLine int
 	EndLine   int
+
+	// DocLine is the first line of the comment block directly above
+	// the declaration (no blank line between), else StartLine. Go only
+	// (extractGo); 0 for every other language.
+	DocLine int
 }
 
 // ClassDef is one class definition.
@@ -152,8 +185,15 @@ type ClassDef struct {
 	// StartLine, EndLine are 1-based line numbers spanning the
 	// class definition (inclusive). Same semantics as FuncDef:
 	// zero values mean "not recorded." Captured as of Phase 0.
+	//
+	// A Go ClassDef that only groups methods whose receiver type is
+	// declared elsewhere (a "shell", from linkMethodToClass) has no
+	// declaration in this file, so both stay 0.
 	StartLine int
 	EndLine   int
+
+	// DocLine: as FuncDef.DocLine. Go only.
+	DocLine int
 }
 
 // CallRef is one call site recorded by the extractor. Phase 0
@@ -178,9 +218,27 @@ type CallRef struct {
 }
 
 // CallSite represents one file calling a particular name. Used by the
-// reverse call-graph index.
+// reverse call-graph index. There is one CallSite per file; Calls holds
+// the individual call sites in it.
 type CallSite struct {
 	File string
+
+	// Calls is every call to the name in File, in line order, one entry
+	// per (line, caller). Filled by Index.Callers at query time from the
+	// file's CallRefs; nil on the CallSite values the index stores
+	// internally.
+	Calls []Call
+}
+
+// Call is one call site inside a CallSite's file.
+type Call struct {
+	// Line is the 1-based line the call expression starts on.
+	Line int
+	// Caller is the qualified name of the enclosing named function or
+	// method (CallRef.EnclosingSymbol): "Server.handle" for a method,
+	// "resolveRepo" for a function. A call inside a closure or lambda
+	// counts for the named function around it. "" at file scope.
+	Caller string
 }
 
 // Index is the corpus-wide structural index. Goroutine-safe for reads
@@ -682,10 +740,43 @@ func (ix *Index) Files() map[string]*FileStruct { return ix.files }
 // no entry for it (unsupported language, parse failure, etc.).
 func (ix *Index) File(path string) *FileStruct { return ix.files[path] }
 
-// Callers returns the files that call the given name, sorted by path.
-// Used by the Track 1 "callers" enrichment and the Track 2
-// `references` tool.
-func (ix *Index) Callers(name string) []CallSite { return ix.callers[name] }
+// Callers returns the files that call the given name, sorted by path,
+// one CallSite per file, each with its Calls filled from the file's
+// CallRefs. Used by the Track 1 "callers" enrichment and the Track 2
+// `references` tool. Cost is proportional to the matching files' call
+// refs, not the corpus. The returned slice is fresh; callers may modify it.
+func (ix *Index) Callers(name string) []CallSite {
+	files := ix.callers[name]
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]CallSite, len(files))
+	for i, c := range files {
+		out[i] = CallSite{File: c.File, Calls: callsTo(ix.files[c.File], name)}
+	}
+	return out
+}
+
+// callsTo returns every call to callee in fs, sorted by line then caller,
+// with duplicate (line, caller) pairs (`f(f(x))`) collapsed.
+func callsTo(fs *FileStruct, callee string) []Call {
+	if fs == nil {
+		return nil
+	}
+	var out []Call
+	for _, r := range fs.CallRefs {
+		if r.Callee == callee {
+			out = append(out, Call{Line: r.Line, Caller: r.EnclosingSymbol})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Line != out[j].Line {
+			return out[i].Line < out[j].Line
+		}
+		return out[i].Caller < out[j].Caller
+	})
+	return slices.Compact(out)
+}
 
 // Defs returns the files that define the given top-level name, sorted
 // by path. Used by the Track 2 `definition` tool.

@@ -1,6 +1,8 @@
 package structural
 
 import (
+	"strings"
+
 	"github.com/odvcencio/gotreesitter"
 )
 
@@ -59,6 +61,7 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 	case "function_declaration":
 		fn := extractGoFunc(src, n, lang, "")
 		fn.fillSpan(n)
+		fn.DocLine = goDocLine(src, n)
 		fs.Functions = append(fs.Functions, fn)
 		// Recurse into the body so nested calls land in fs.CallRefs
 		// attributed to this function.
@@ -74,6 +77,7 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 		recvType := goReceiverType(src, n, lang)
 		fn := extractGoFunc(src, n, lang, recvType)
 		fn.fillSpan(n)
+		fn.DocLine = goDocLine(src, n)
 		fs.Functions = append(fs.Functions, fn)
 		// Methods are also recorded under their receiver type in
 		// Classes — same shape Python uses for class methods.
@@ -104,6 +108,7 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 			if c.Type(lang) == "type_spec" {
 				if cls := extractGoType(src, c, lang); cls.Name != "" {
 					cls.fillSpan(c)
+					cls.DocLine = goDocLine(src, c)
 					ensureClass(fs, cls)
 				}
 			}
@@ -310,6 +315,57 @@ func goImportBoundName(src []byte, spec *gotreesitter.Node, lang *gotreesitter.L
 		return raw
 	}
 	return ""
+}
+
+// goDocLine returns the first line of the comment block directly above
+// node n — `//` lines, or a `/* … */` block, with no blank line between
+// it and n's first line — or n's own start line when there is none. Read
+// from the source text rather than the tree's comment siblings, so it
+// needs no parent links.
+func goDocLine(src []byte, n *gotreesitter.Node) int {
+	line := nodeStartLine(n)
+	i := int(n.StartByte())
+	if i > len(src) {
+		return line
+	}
+	for i > 0 && src[i-1] != '\n' {
+		i--
+	}
+	// prevLine returns the line ending just before byte i (the '\n' at
+	// i-1), trimmed, and the offset where it starts.
+	prevLine := func(i int) (string, int) {
+		end := i - 1
+		j := end
+		for j > 0 && src[j-1] != '\n' {
+			j--
+		}
+		return strings.TrimSpace(string(src[j:end])), j
+	}
+	doc := line
+	for i > 0 {
+		text, j := prevLine(i)
+		switch {
+		case strings.HasPrefix(text, "//"):
+			doc--
+			i = j
+			continue
+		case strings.HasSuffix(text, "*/"):
+			// Walk up to the line that opens the block.
+			k, d := j, doc-1
+			for !strings.Contains(text, "/*") {
+				if k == 0 {
+					return doc // unterminated: leave the doc line where it was
+				}
+				text, k = prevLine(k)
+				d--
+			}
+			doc = d
+			i = k
+			continue
+		}
+		break
+	}
+	return doc
 }
 
 func lastSlash(s string) int {

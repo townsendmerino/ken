@@ -15,6 +15,33 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Added
+
+- **Lines on every structural result** (K11). All additive fields on the
+  `internal/structural` types that `engine` aliases; zero means "not
+  recorded":
+  - `DefinitionSite.EndLine` — the declaration's last line, inclusive
+    (`Line` stays the first).
+  - `OutlineEntry.StartLine` / `EndLine` — the same span `Definition`
+    reports. A Go class entry that only groups methods whose receiver type
+    is declared in another file has both at 0.
+  - `CallSite.Calls []Call` with the new `Call{Line, Caller}` (aliased as
+    `engine.Call`): every call to the symbol in the file, in line order;
+    `Caller` is the enclosing named function or method's qualified name
+    (`"Server.handle"`), with calls inside closures counted for it, and
+    `""` at file scope.
+  - `Reference.Lines` — the call lines for a call reference; `nil` for
+    imports and raises, whose lines the extractors don't record.
+  - `DefinitionSite.DocLine` / `OutlineEntry.DocLine`, Go only: the first
+    line of the comment block directly above the declaration, else the
+    declaration's first line.
+  - What a span covers per language (doc comments outside everywhere;
+    decorators/attributes/annotations inside or outside depending on the
+    grammar; a decorated Python function starts at `def`) is documented in
+    `internal/structural`'s package doc, and a test-only hook now checks
+    every span every extractor test produces, in all 15 languages, lies
+    within its file and contains its name.
+
 ### Fixed
 
 - **`engine.Hit.Text` no longer starts with the Arm B enrichment label**
@@ -29,6 +56,9 @@ pre-built binaries.
   the file-level label. `tack` is the only external `engine` caller today.
   The stored chunks keep their label for BM25 and the embedding, so
   ranking is unchanged and the semble NDCG benchmark needs no re-run.
+- **`Workspace.Callers`'s doc said a file "may appear more than once
+  (once per call site)"**; the index has always returned one `CallSite`
+  per file. The comment now says so, and the sites are in `Calls` (K11).
 
 ## [1.10.0] — 2026-10-16 — `engine`: section-level retrieval for markdown
 
