@@ -64,6 +64,7 @@ package structural
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -655,6 +656,18 @@ func BuildWithContext(ctx context.Context, corpusDir string) (*Index, error) {
 		ix.files[r.rel] = r.fs
 	}
 
+	ix.buildLookups()
+	return ix, nil
+}
+
+// buildLookups is pass 2: (re)builds defs, methods and callers from
+// ix.files. Shared by BuildWithContext and Update, so a refreshed index
+// has exactly the maps a fresh build over the same files would.
+func (ix *Index) buildLookups() {
+	ix.callers = make(map[string][]CallSite)
+	ix.defs = make(map[string][]string)
+	ix.methods = make(map[string][]string)
+
 	// Pass 2: build the lookup maps.
 	//
 	//   defs[name]      → files where `name` is a top-level def
@@ -712,8 +725,79 @@ func BuildWithContext(ctx context.Context, corpusDir string) (*Index, error) {
 			return ix.callers[k][i].File < ix.callers[k][j].File
 		})
 	}
+}
 
-	return ix, nil
+// Update returns a new Index equal to ix with each of paths (repo-relative,
+// slash-separated) brought up to date from disk under corpusDir, and
+// whether anything changed. ix itself is not modified — it is immutable
+// once built, so readers holding it keep a consistent view — and the
+// returned Index shares the untouched files' FileStructs with it.
+//
+// For each path: a file that exists, that admit accepts (nil admits
+// everything — pass the same admission rules the walk used, e.g.
+// repo.Matcher.ShouldIndex) and that has a registered extractor is
+// re-extracted through extractGuarded, the guarded parse Build uses; a
+// file extractGuarded rejects (oversized, no longer accepted by the
+// parser) leaves the index, with a logf line. A path that no longer
+// exists is dropped, with every indexed file under it when it was a
+// directory. An existing directory is ignored: pass its files.
+//
+// The lookup maps are rebuilt over all files (buildLookups), so the cost
+// is one re-extraction per path plus a pass over the corpus's recorded
+// definitions and calls — no re-parse of unchanged files.
+func (ix *Index) Update(corpusDir string, paths []string, admit func(rel string) bool, logf func(format string, args ...any)) (*Index, bool) {
+	files := make(map[string]*FileStruct, len(ix.files)+len(paths))
+	maps.Copy(files, ix.files)
+	changed := false
+	drop := func(rel string) {
+		if _, ok := files[rel]; ok {
+			delete(files, rel)
+			changed = true
+		}
+	}
+	for _, rel := range paths {
+		abs := filepath.Join(corpusDir, filepath.FromSlash(rel))
+		fi, err := os.Stat(abs)
+		if err != nil {
+			drop(rel)
+			prefix := rel + "/"
+			for p := range files {
+				if strings.HasPrefix(p, prefix) {
+					drop(p)
+				}
+			}
+			continue
+		}
+		if fi.IsDir() {
+			continue
+		}
+		gram, ok := kenLangToTSLang[strings.ToLower(filepath.Ext(rel))]
+		if !ok || (admit != nil && !admit(rel)) {
+			drop(rel)
+			continue
+		}
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			drop(rel)
+			continue
+		}
+		fs := extractGuarded(gram, rel, data)
+		if fs == nil {
+			if _, had := files[rel]; had && logf != nil {
+				logf("structural: %s no longer extracts cleanly (oversized or not accepted by the parser); dropped from the structural index", rel)
+			}
+			drop(rel)
+			continue
+		}
+		files[rel] = fs
+		changed = true
+	}
+	if !changed {
+		return ix, false
+	}
+	nix := &Index{files: files}
+	nix.buildLookups()
+	return nix, true
 }
 
 // uniqStringsSorted sorts the slice and removes consecutive

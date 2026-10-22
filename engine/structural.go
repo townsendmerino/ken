@@ -16,6 +16,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -99,34 +100,56 @@ const structuralFirstWait = 10 * time.Second
 var structuralFailCooldown = 60 * time.Second
 
 // structuralState is the lazy/background structural-build state machine,
-// embedded in Workspace. A SUCCESSFUL build is cached for the Workspace's
-// lifetime; a failed one is not, but is rate-limited by the cooldown
+// embedded in Workspace. A SUCCESSFUL build is kept for the Workspace's
+// lifetime and brought up to date file by file as files change (apply,
+// K13); a failed one is not kept, but is rate-limited by the cooldown
 // above.
 type structuralState struct {
 	builder func(context.Context) (*structural.Index, error)
+	// update brings an index up to date for the given repo-relative
+	// paths, returning the new index and whether anything changed
+	// (structural.Index.Update with the Workspace's root and admission
+	// rules).
+	update func(idx *structural.Index, paths []string) (*structural.Index, bool)
 
-	mu       sync.Mutex // guards the fields below
-	built    atomic.Bool
-	idx      *structural.Index
+	// cur is the published index, nil until the first build succeeds.
+	// Readers load it without a lock; every replacement is a whole new
+	// immutable *structural.Index, so a reader sees the old index or the
+	// new one, never a mix.
+	cur atomic.Pointer[structural.Index]
+	// gen counts published structural indexes: 1 after the first build,
+	// +1 for every update that changed something.
+	gen atomic.Uint64
+
+	mu       sync.Mutex // guards the fields below; held across an update
 	building bool
 	done     chan struct{}
 	cancel   context.CancelFunc
 	failedAt time.Time
+	// Changes that arrived while a build was in flight: the build may have
+	// read those files before they changed, so run applies them to its
+	// result before publishing. pendingReset means a change of unknown
+	// extent (a watcher overflow): run discards its result instead.
+	queued       map[string]struct{}
+	pendingReset bool
 }
+
+// built reports whether a structural index has been published.
+func (s *structuralState) built() bool { return s.cur.Load() != nil }
 
 // get returns the structural index, or nil if it isn't ready yet (building,
 // or in a failure cooldown). ctx bounds how long the caller blocks for an
 // in-flight build; the build itself runs under an independent budget and
 // keeps going after ctx is done.
 func (s *structuralState) get(ctx context.Context) *structural.Index {
-	if s.built.Load() {
-		return s.idx
+	if idx := s.cur.Load(); idx != nil {
+		return idx
 	}
 
 	s.mu.Lock()
-	if s.built.Load() {
+	if idx := s.cur.Load(); idx != nil {
 		s.mu.Unlock()
-		return s.idx
+		return idx
 	}
 	if !s.building {
 		if !s.failedAt.IsZero() && time.Since(s.failedAt) < structuralFailCooldown {
@@ -155,7 +178,7 @@ func (s *structuralState) get(ctx context.Context) *structural.Index {
 	defer timer.Stop()
 	select {
 	case <-done:
-		return s.idx // nil if the build failed
+		return s.cur.Load() // nil if the build failed
 	case <-timer.C:
 		return nil // still building — caller should retry shortly
 	case <-ctx.Done():
@@ -167,12 +190,27 @@ func (s *structuralState) run(ctx context.Context, done chan struct{}) {
 	idx, err := s.builder(ctx)
 
 	s.mu.Lock()
-	if err != nil {
+	switch {
+	case err != nil:
 		s.failedAt = time.Now()
-	} else {
-		s.idx = idx
-		s.built.Store(true) // publish last; happens-before close(done)
+	case s.pendingReset:
+		// Files changed in ways the watcher couldn't enumerate while this
+		// build ran; it may hold stale files. Drop it — the next call
+		// starts a fresh build over the current tree.
+	default:
+		if len(s.queued) > 0 {
+			paths := make([]string, 0, len(s.queued))
+			for p := range s.queued {
+				paths = append(paths, p)
+			}
+			sort.Strings(paths)
+			idx, _ = s.update(idx, paths)
+		}
+		s.cur.Store(idx) // publish last; happens-before close(done)
+		s.gen.Add(1)
 	}
+	s.queued = nil
+	s.pendingReset = false
 	s.building = false
 	if s.cancel != nil {
 		s.cancel()
@@ -197,11 +235,48 @@ func (s *structuralState) stop() {
 	}
 }
 
+// apply brings the structural index up to date for paths that changed on
+// disk (repo-relative; changed, created or deleted — update reads the disk
+// to tell which). It never starts a build: with no index yet, the lazy
+// build reads the current files anyway. During a build the paths are
+// queued for run to apply before it publishes. resync means the change's
+// extent is unknown (a watcher event-queue overflow): the index is dropped
+// and the next structural call rebuilds it.
+func (s *structuralState) apply(paths []string, resync bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.building {
+		if resync {
+			s.pendingReset = true
+			return
+		}
+		if s.queued == nil {
+			s.queued = make(map[string]struct{}, len(paths))
+		}
+		for _, p := range paths {
+			s.queued[p] = struct{}{}
+		}
+		return
+	}
+	idx := s.cur.Load()
+	if idx == nil {
+		return
+	}
+	if resync {
+		s.cur.Store(nil)
+		return
+	}
+	if nidx, changed := s.update(idx, paths); changed {
+		s.cur.Store(nidx)
+		s.gen.Add(1)
+	}
+}
+
 // pending reports whether a structural build is currently running, or a
 // fresh call right now would start one (no cached result, no active
 // cooldown).
 func (s *structuralState) pending() bool {
-	if s.built.Load() {
+	if s.built() {
 		return false
 	}
 	s.mu.Lock()

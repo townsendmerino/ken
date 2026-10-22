@@ -6,7 +6,10 @@ package search
 
 import (
 	"fmt"
+	"sort"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 // SetOnSwap installs a channel that receives one nonblocking send
@@ -29,6 +32,38 @@ func (w *WatchedIndex) SetOnFlush(f func(msg string)) {
 	w.onFlushMu.Lock()
 	defer w.onFlushMu.Unlock()
 	w.onFlush = f
+}
+
+// SetOnBatch installs a callback invoked synchronously at the end of every
+// flush — a watcher debounce or a ReconcileFiles call — with the batch's
+// repo-relative paths in sorted order (files, or a directory for a
+// directory remove/rename). It runs after the new snapshot is published
+// (or after the flush found nothing to change: a path the search index
+// never held may still matter to another index), on the flushing
+// goroutine, so when ReconcileFiles returns the callback has run. resync
+// is true after an fsnotify event-queue overflow, when events were dropped
+// and paths alone don't say what changed. Pass nil to disable. Safe to
+// call at any time.
+func (w *WatchedIndex) SetOnBatch(f func(paths []string, resync bool)) {
+	w.onBatchMu.Lock()
+	defer w.onBatchMu.Unlock()
+	w.onBatch = f
+}
+
+// notifyBatch calls the OnBatch callback (if set) for a flushed batch.
+func (w *WatchedIndex) notifyBatch(batch map[string]fsnotify.Op, resync bool) {
+	w.onBatchMu.Lock()
+	f := w.onBatch
+	w.onBatchMu.Unlock()
+	if f == nil {
+		return
+	}
+	paths := make([]string, 0, len(batch))
+	for p := range batch {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	f(paths, resync)
 }
 
 // notifyFlush calls the OnFlush callback (if set) with a one-line

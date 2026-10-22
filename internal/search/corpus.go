@@ -161,6 +161,7 @@ func (w *WatchedIndex) flush(batch map[string]fsnotify.Op, resyncPresent map[str
 	// nothing to swap or notify. A real rename still tombstones, so N2 holds.
 	if !changed && compacted == 0 {
 		w.corpusMu.Unlock()
+		w.notifyBatch(batch, resyncPresent != nil)
 		return
 	}
 	newIx := w.buildUnionedIndexLocked()
@@ -174,6 +175,7 @@ func (w *WatchedIndex) flush(batch map[string]fsnotify.Op, resyncPresent map[str
 	// persist. The published snapshot is already Stored, so the callbacks
 	// need no lock.
 	w.corpusMu.Unlock()
+	w.notifyBatch(batch, resyncPresent != nil)
 	w.notifySwap()
 	w.notifyFlush(total, len(batch), compacted, time.Since(start))
 }

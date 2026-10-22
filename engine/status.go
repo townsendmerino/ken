@@ -15,6 +15,12 @@ type Status struct {
 
 	StructuralBuilt   bool
 	StructuralPending bool
+
+	// StructuralGeneration counts published structural indexes: 0 until
+	// the first build finishes, 1 after it, +1 for every Refresh or
+	// watcher flush that changed a file's structure. Generation is the
+	// search index's counter; the two move independently.
+	StructuralGeneration uint64
 }
 
 // countUniqueFiles counts distinct non-tombstoned files across ix's chunks.
@@ -36,14 +42,15 @@ func countUniqueFiles(ix *search.Index) int {
 func (w *Workspace) Status() Status {
 	ix := w.index.Load()
 	return Status{
-		Root:              w.root,
-		Mode:              ix.Mode(),
-		Chunker:           w.chunker,
-		FileCount:         countUniqueFiles(ix),
-		ChunkCount:        ix.Len(),
-		Generation:        w.index.Generation(),
-		WatchActive:       w.watch,
-		StructuralBuilt:   w.structural.built.Load(),
-		StructuralPending: w.structural.pending(),
+		Root:                 w.root,
+		Mode:                 ix.Mode(),
+		Chunker:              w.chunker,
+		FileCount:            countUniqueFiles(ix),
+		ChunkCount:           ix.Len(),
+		Generation:           w.index.Generation(),
+		WatchActive:          w.watch,
+		StructuralBuilt:      w.structural.built(),
+		StructuralPending:    w.structural.pending(),
+		StructuralGeneration: w.structural.gen.Load(),
 	}
 }

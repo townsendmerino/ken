@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	// Registers the "markdown" chunker (heading-aware .md/.mdx/.markdown
 	// chunking) so any engine consumer gets it by default — same
@@ -35,6 +36,7 @@ import (
 	// with.
 	_ "github.com/townsendmerino/aikit/chunk/markdown"
 
+	"github.com/townsendmerino/ken/internal/repo"
 	"github.com/townsendmerino/ken/internal/search"
 	"github.com/townsendmerino/ken/internal/structural"
 )
@@ -139,6 +141,24 @@ type Workspace struct {
 	onFlush   func(msg string)
 
 	structural structuralState
+
+	// matcher is the walk's admission rules (gitignore, size cap, binary
+	// and symlink rejection), built on the first structural update; see
+	// admit.
+	matcherOnce sync.Once
+	matcher     *repo.Matcher
+
+	// refreshing counts Refresh calls in flight; while it is non-zero a
+	// flush marks the snapshot dirty instead of rewriting it.
+	refreshing    atomic.Int32
+	snapshotDirty atomic.Bool
+}
+
+// admit reports whether the initial walk would have indexed rel — the
+// same rules the search side re-checks on every flush.
+func (w *Workspace) admit(rel string) bool {
+	w.matcherOnce.Do(func() { w.matcher = repo.NewMatcher(repo.Options{Root: w.root}) })
+	return w.matcher.ShouldIndex(rel)
 }
 
 // defaultModelDir returns ~/.ken/model, falling back to "" (meaning: let
@@ -217,6 +237,9 @@ func Open(ctx context.Context, root string, opts Options) (*Workspace, error) {
 	w.structural.builder = func(ctx context.Context) (*structural.Index, error) {
 		return structural.BuildWithContext(ctx, w.root)
 	}
+	w.structural.update = func(idx *structural.Index, paths []string) (*structural.Index, bool) {
+		return idx.Update(w.root, paths, w.admit, w.logf)
+	}
 
 	var wi *search.WatchedIndex
 	if opts.Snapshot {
@@ -231,9 +254,23 @@ func Open(ctx context.Context, root string, opts Options) (*Workspace, error) {
 			w.persistSnapshot(wi)
 		}
 	}
+	// Every flush — the watcher's, or Refresh's — hands its paths to the
+	// structural index too (K13), on the flushing goroutine, before the
+	// OnFlush callbacks below run.
+	wi.SetOnBatch(w.structural.apply)
 	wi.SetOnFlush(func(msg string) {
 		if opts.Snapshot {
-			w.persistSnapshot(wi)
+			if w.refreshing.Load() > 0 {
+				// Refresh defers the snapshot write to Close (or the
+				// next watcher flush): a caller refreshing after every
+				// edit would otherwise rewrite the whole snapshot each
+				// time. A snapshot left behind is safe — the next Open's
+				// drift check reconciles the files that changed.
+				w.snapshotDirty.Store(true)
+			} else {
+				w.snapshotDirty.Store(false)
+				w.persistSnapshot(wi)
+			}
 		}
 		w.onFlushMu.Lock()
 		cb := w.onFlush
@@ -264,8 +301,13 @@ func (w *Workspace) SetOnFlush(f func(msg string)) {
 }
 
 // Close stops the file watcher (if any) and any in-flight background
-// structural build. Idempotent.
+// structural build, and — if Snapshot was requested and a Refresh left
+// the on-disk snapshot behind the index — writes it. Idempotent.
 func (w *Workspace) Close() error {
 	w.structural.stop()
-	return w.index.Close()
+	err := w.index.Close()
+	if w.snapshotEnabled && w.snapshotDirty.CompareAndSwap(true, false) {
+		w.persistSnapshot(w.index)
+	}
+	return err
 }

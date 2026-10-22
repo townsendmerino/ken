@@ -166,6 +166,13 @@ type WatchedIndex struct {
 	onFlushMu sync.Mutex
 	onFlush   func(msg string)
 
+	// Caller-facing hook: invoked at the end of every flush (watcher
+	// debounce or ReconcileFiles) with the batch's paths. engine uses it
+	// to bring the structural index along (K13). nil disables. Set via
+	// SetOnBatch.
+	onBatchMu sync.Mutex
+	onBatch   func(paths []string, resync bool)
+
 	// Debounce delay; overridable for tests. Defaults to WatchDebounce.
 	debounce time.Duration
 

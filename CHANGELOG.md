@@ -41,6 +41,30 @@ pre-built binaries.
     `internal/structural`'s package doc, and a test-only hook now checks
     every span every extractor test produces, in all 15 languages, lies
     within its file and contains its name.
+- **`(*Workspace) Refresh(ctx, changed, deleted) error` — a structural
+  index that follows edits** (K13). Refresh re-reads the given
+  repo-relative files and brings both indexes up to date before it
+  returns: the search side through the same flush the watcher runs
+  (`WatchedIndex.ReconcileFiles`), the structural side by re-extracting
+  each file with the guarded parse the build uses and rebuilding the
+  lookup maps (`structural.Index.Update`), published atomically — a reader
+  sees the old structural index or the new one, never a mix. It works with
+  `Watch` off. The watcher's own flush now updates the structural index
+  the same way (a new `WatchedIndex.SetOnBatch` hook), so a long-lived
+  `Watch: true` workspace stays right too; before, the structural index
+  never changed after its first build. Refresh never starts a structural
+  build; a change that lands during one is applied to its result before it
+  publishes. A path that is absolute or escapes the root is rejected with
+  the new `ErrPathOutsideRoot` before anything is read; a file the walk
+  would skip (gitignored, binary, oversized, symlink) is dropped. With
+  `Snapshot` on, Refresh defers the snapshot write to `Close` (or the next
+  watcher flush) rather than rewriting the whole snapshot per edit.
+  ken-mcp keeps its own structural build state (`mcp.RepoBundle`), so its
+  structural tools don't follow edits yet; wiring it onto `SetOnBatch` is
+  a follow-up.
+- **`Status.StructuralGeneration`** — counts published structural indexes
+  (1 after the first build, +1 per update that changed a file's
+  structure), beside the search index's `Generation`.
 
 ### Fixed
 

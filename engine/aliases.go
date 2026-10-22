@@ -38,14 +38,13 @@ func (w *Workspace) WatchedIndex() *WatchedIndex { return w.index }
 // Outline/Symbols model.
 type StructuralIndex = structural.Index
 
-// StructuralIfBuilt returns the structural index only if a prior
+// StructuralIfBuilt returns the current structural index only if a prior
 // Definition/References/Callers/Outline/Symbols call already finished
-// building it; unlike those methods, it never triggers a build itself.
+// building it; unlike those methods, it never triggers a build itself. The
+// index is immutable; a later file change publishes a new one, so call
+// again rather than holding the result.
 func (w *Workspace) StructuralIfBuilt() *StructuralIndex {
-	if w.structural.built.Load() {
-		return w.structural.idx
-	}
-	return nil
+	return w.structural.cur.Load()
 }
 
 // VecCache is a persistent content-hash→vector cache consulted on every
