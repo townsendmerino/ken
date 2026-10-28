@@ -56,6 +56,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-046](#adr-046-public-kenengine-library-package-ken-mcp-is-its-first-client) | Public `ken/engine` library package; `ken-mcp` is its first client | Accepted |
 | [ADR-047](#adr-047-engine-section-level-retrieval-for-markdown--hitheadingpath-workspacesections-workspacesearchfiles) | `engine` section-level retrieval for markdown — `Hit.HeadingPath`, `Workspace.Sections`, `Workspace.SearchFiles` | Accepted |
 | [ADR-048](#adr-048-engine-structural-spans-symbolat-refresh-qualified-names-testsfor-k10k15) | `engine` structural spans, SymbolAt, Refresh, qualified names, TestsFor (K10–K15) | Accepted |
+| [ADR-049](#adr-049-drop-retained-f32-vectors-from-watchedindex-recompute-on-demand-k17) | Drop retained f32 vectors from WatchedIndex; recompute on demand (K17) | Accepted |
 
 ---
 
@@ -2865,3 +2866,27 @@ What `status` genuinely **cannot** answer retroactively is *which index generati
 - **Follow-up (same release): the structural index gets its own size cap.** The structural build shared enrichment's 64 KiB `maxEnrichBytes` through `extractGuarded`, so `Definition` saw nothing in a larger file — checking tack's calibration table found `decoder.Options` (118 KB file) and `decoder.Model.ResidentDecline` (96 KB) missing. `extractGuardedCap` now takes the ceiling: enrichment keeps 64 KiB (label byte-identical), and the structural build and `Update` use `BuildOptions.MaxFileBytes` → `KEN_STRUCTURAL_MAX_FILE_BYTES` → 1 MiB (`engine.Options.StructuralMaxFileBytes` passes it through). 1 MiB covers every source file over 64 KiB in goinfer (24 files, 66–223 KB, parsing in 3–250 ms each on a loaded machine), and the walk's 2 MiB cap still applies first; the per-file parse budget (`KEN_ENRICH_FILE_BUDGET_MS`, 500 ms in ken-mcp) still skips a pathological one. *Rejected:* raising `maxEnrichBytes` itself (changes the label, so ranking, and needs an NDCG re-run); no cap at all (leaves only the walk's 2 MiB, and a library caller like tack runs with no parse budget).
 
 **Rejected alternatives:** *Store spans/calls in new index maps at build time.* Everything needed is already on `FileStruct`; computing at query time keeps the index (and its memory) the same size, and the cost is proportional to the matching files. *Have `Refresh` update the structural index itself, beside the flush.* Two code paths (the watcher's and `Refresh`'s) would drift; routing both through the flush's batch hook means one path, already exercised by the watcher. *Patch `defs`/`methods`/`callers` per changed file.* Faster per update, but the maps' slices are shared with readers of the old index, so patching means copy-on-write bookkeeping per key; rebuilding pass 2 is simple, deterministic (the same maps a fresh build makes), and cheap next to a parse — revisit only with numbers. *Debounce snapshot writes on a timer.* Needs a background goroutine whose lifetime outlives `Refresh`, which ken-mcp (which never calls `Workspace.Close`) would leak; deferring to `Close` plus the next watcher flush needs none, and a stale snapshot is already safe. *Mark Go shells with a new `ClassDef` field.* Every extractor already records a span for a real declaration, so "no span" identifies a shell without growing the type. *Resolve `pkg.F` callers through import paths.* Needs import-path-to-package resolution per file (aliases, dot imports, vendoring); matching receiver text by package name is the tree-sitter-grade answer, and an alias simply doesn't match (documented). *Change `Outline`'s method kind to `DefinitionKindMethod`.* `Container` already says it, and ken-mcp's outline output would change for no gain.
+
+## ADR-049: Drop retained f32 vectors from WatchedIndex; recompute on demand (K17)
+
+**Status:** Accepted. **Date:** 2026-10-28. **Related:** resolves [ADR-043](#adr-043-dense-retriever-seam--optin-flatbinaryi8-hnsw-declined)'s memory guardrail; verified by K16 memory harness; preserves [ADR-039](#adr-039-persistent-index-snapshot--reconcile-on-boot-cold-start-m1) disk format unchanged.
+
+**Context.** `WatchedIndex` (`internal/search/watch.go:WatchedIndex`) retained `vecs [][]float32` (1,048 B/chunk) so that incremental flushes (`ReconcileFiles` / watcher batches) and compactions could rebuild or append to the dense retriever without re-embedding unchanged chunks. Because of that, enabling `KEN_ANN=flat-i8` on the watched path — the path both `ken-mcp` and `engine.Open` use — *added* ~260 B/chunk on top of the 1,024 B/chunk instead of replacing them (ADR-043's guardrail).
+Model2Vec embeddings are completely deterministic (`f64` accumulation, `docs/DESIGN.md` §4). Re-embedding a chunk from `Chunk.Text` reproduces its index-time vector byte-for-byte (`math.Float32bits`). Therefore, `WatchedIndex` does not need to retain duplicate `f32` vectors beside the dense retriever's own store.
+
+**Decision.**
+- **Drop `vecs [][]float32` from `WatchedIndex`.** Keep only the active `denseStore` (`flatStore`, `flatI8Store`, or `flatBinaryI8Store`).
+- **Incremental append:** on watcher flush / reconcile, encode only new/changed chunks and append/quantize them directly into the active dense store (`w.dense = w.dense.Append(batchVecs)`).
+- **Compaction:** compact the dense store rows directly (`w.dense = w.dense.Compact(kept)`).
+- **Snapshot publication:** published `Index` carries `ix.flat = w.dense` and `ix.vecs = nil`.
+- **Deterministic recompute on demand:** when full `f32` vectors are needed (e.g. for `SnapshotBytes()` writing `.ken/snapshot.bin` or Centroids), `(*Index).Vecs()` recomputes `f32` vectors on demand from `Chunk.Text` via `ix.model.Encode(c.Text)`.
+- **Pre-registered gates (all passed, red-first verified):**
+  1. *Bit-identity (Tier 0):* recomputed vectors match index-time vectors bit-for-bit (`math.Float32bits`) across golden fixture and owner repo (`TestK17_Gate1_RecomputeBitIdentity`).
+  2. *Pipeline recall & NDCG (Tier 1):* pipeline recall@10 and NDCG@10 match to 3 decimal places under Flat and FlatI8 (`TestK17_Gate2_PipelineRecallParity`).
+  3. *Watcher republish latency (Tier 1):* single-file edit republish stays at 50ms (well under 2s limit) (`TestK17_Gate3_WatcherRepublishLatency`).
+  4. *Memory (Tier 1):* dense-side resident bytes per chunk under `KEN_ANN=flat-i8` is 260.01 B/chunk (well under 300 B/chunk bound, saving 1,024 B/chunk, ~79% of dense memory, ~207 MB on goinfer, ~612 MB at 584k kernel scale) (`TestK17_Gate4_DenseMemoryPerChunk`).
+
+**Consequences / guardrails.**
+- Zero ranking or recall changes: all queries hit the exact same underlying retriever kernels.
+- Zero disk snapshot format changes: `.ken/snapshot.bin` serialization continues to write KEN1 f32 vectors via `SnapshotBytes()`.
+- Dense memory on `WatchedIndex` with `KEN_ANN=flat-i8` shrinks by 80.1% (from 1,308 B/chunk down to 260 B/chunk).

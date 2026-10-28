@@ -54,10 +54,9 @@ func (w *WatchedIndex) warmCorpusInBackground(ctx context.Context) {
 
 	newChunks := make([]chunk.Chunk, len(w.chunks))
 	copy(newChunks, w.chunks)
-	newVecs := make([][]float32, len(newChunks))
-	if !needEmbed {
-		// Preserve any existing vectors verbatim (nothing to (re)embed).
-		copy(newVecs, w.vecs)
+	var newVecs [][]float32
+	if needEmbed {
+		newVecs = make([][]float32, len(newChunks))
 	}
 
 	byFile := map[string][]int{}
@@ -95,9 +94,13 @@ func (w *WatchedIndex) warmCorpusInBackground(ctx context.Context) {
 	}
 
 	w.chunks = newChunks
-	w.vecs = newVecs
+	if needEmbed {
+		w.dense = makeDenseStore(denseRetrieverKind(w.fsOpts.DenseRetriever), newVecs)
+	} else {
+		w.dense = nil
+	}
 	w.mode = targetMode     // upgrade bm25 → hybrid when staged; unchanged otherwise
-	w.stagedPending = false // vecs is now full-length: appendFile/refold may embed (audit N1)
+	w.stagedPending = false // dense is now full-length: appendFile/refold may embed (audit N1)
 	w.publish(w.buildUnionedIndexLocked())
 	w.notifySwap()
 	// Reuse the flush notification so ken-mcp's OnFlush re-persists the now-full
@@ -343,19 +346,26 @@ func (w *WatchedIndex) refoldMigrationDir(dir string) int {
 		}
 		return 0
 	}
-	for _, c := range folded {
-		w.chunks = append(w.chunks, c)
-		// Same staged guard as appendFile (audit N1): don't grow vecs while
-		// pre-warm, or it misaligns with chunks and compactCorpus panics.
-		if w.model != nil && !w.stagedPending {
-			w.vecs = append(w.vecs, encodeCached(w.fsOpts.EmbedCache, w.model, c.Text))
+	var batchVecs [][]float32
+	if w.model != nil && !w.stagedPending {
+		batchVecs = make([][]float32, len(folded))
+		for i, c := range folded {
+			batchVecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, c.Text)
+		}
+	}
+	w.chunks = append(w.chunks, folded...)
+	if len(batchVecs) > 0 {
+		if w.dense == nil {
+			w.dense = makeDenseStore(denseRetrieverKind(w.fsOpts.DenseRetriever), batchVecs)
+		} else {
+			w.dense = w.dense.Append(batchVecs)
 		}
 	}
 	return len(folded)
 }
 
 // buildUnionedIndexLocked constructs the published Index from the union
-// of FS chunks (w.chunks/w.vecs) and the orchestrator-injected extra
+// of FS chunks (w.chunks/w.dense) and the orchestrator-injected extra
 // chunks (w.extraChunks/w.extraVecs). Caller MUST hold corpusMu.
 //
 // The concatenation order is "FS first, extras second" so a chunk's
@@ -368,15 +378,9 @@ func (w *WatchedIndex) refoldMigrationDir(dir string) int {
 // built snapshot. The reranker instance is shared across rebuilds so
 // its content-hash LRU cache carries forward.
 func (w *WatchedIndex) buildUnionedIndexLocked() *Index {
-	// Parallel-slice invariant, checked wherever the corpus is assembled — not
-	// only at first build (audit N1/R6): w.vecs is empty (BM25 or staged
-	// pre-warm) or exactly one-per-chunk. A violation would otherwise surface
-	// as an opaque makeslice/index panic in compactCorpus on the flush
-	// goroutine, killing the process. Degrade to BM25 for this snapshot + log,
-	// rather than crash. With the N1 append-site guards this should never fire.
-	if len(w.vecs) != 0 && len(w.vecs) != len(w.chunks) {
-		w.logf("BUG: vecs/chunks misaligned (vecs=%d chunks=%d); dropping vectors, serving BM25 for this snapshot", len(w.vecs), len(w.chunks))
-		w.vecs = nil
+	if w.dense != nil && w.dense.Len() != len(w.chunks) {
+		w.logf("BUG: dense/chunks misaligned (dense=%d chunks=%d); dropping dense store, serving BM25 for this snapshot", w.dense.Len(), len(w.chunks))
+		w.dense = nil
 	}
 	if w.tokens == nil {
 		w.tokens = newTokenCache()
@@ -384,40 +388,21 @@ func (w *WatchedIndex) buildUnionedIndexLocked() *Index {
 	var ix *Index
 	if len(w.extraChunks) == 0 {
 		docs := tokenizeDocs(w.chunks, w.tokens)
-		ix = buildIndexFromDocs(w.chunks, docs, w.vecs, w.mode, w.model, denseRetrieverKind(w.fsOpts.DenseRetriever))
+		ix = buildIndexFromDense(w.chunks, docs, w.dense, w.mode, w.model)
 	} else {
 		merged := make([]chunk.Chunk, 0, len(w.chunks)+len(w.extraChunks))
 		merged = append(merged, w.chunks...)
 		merged = append(merged, w.extraChunks...)
-		var mergedVecs [][]float32
-		if w.vecs != nil || w.extraVecs != nil {
-			mergedVecs = make([][]float32, 0, len(w.vecs)+len(w.extraVecs))
-			mergedVecs = append(mergedVecs, w.vecs...)
-			mergedVecs = append(mergedVecs, w.extraVecs...)
+		var mergedDense denseRetriever
+		if w.dense != nil && len(w.extraVecs) > 0 {
+			mergedDense = w.dense.Append(w.extraVecs)
+		} else if w.dense != nil {
+			mergedDense = w.dense
 		}
-		// The w.vecs/w.chunks check above passes vacuously during the staged
-		// window (len(w.vecs)==0), but SetExtraChunks embeds extras
-		// unconditionally on w.model!=nil — so the merged pair can be N+E chunks
-		// against only E vectors (audit R5-1). That misalignment doesn't panic
-		// (indices stay in range) but silently ranks FS chunks by DB-chunk
-		// vectors in FindRelated / semantic search until the warm pass
-		// republishes. Re-check the assembled result and degrade to BM25 rather
-		// than serve confidently-wrong hits. Gating SetExtraChunks on
-		// !stagedPending instead is NOT a fix: the warm pass doesn't re-embed
-		// extras, so they'd stay vector-less forever.
-		if len(mergedVecs) != 0 && len(mergedVecs) != len(merged) {
-			w.logf("BUG: merged vecs/chunks misaligned (vecs=%d chunks=%d); dropping vectors, serving BM25 for this snapshot", len(mergedVecs), len(merged))
-			mergedVecs = nil
-		}
-		// FS chunks reuse the cache (the common, per-save path); the
-		// extras (Tier-2 DB chunks) are tokenized fresh — they change on
-		// their own refresh cadence and caching them would only add map
-		// churn. Concatenated FS-first so indices stay stable (matching
-		// the merged chunk order above).
 		docs := make([][]string, 0, len(merged))
 		docs = append(docs, tokenizeDocs(w.chunks, w.tokens)...)
 		docs = append(docs, tokenizeDocs(w.extraChunks, nil)...)
-		ix = buildIndexFromDocs(merged, docs, mergedVecs, w.mode, w.model, denseRetrieverKind(w.fsOpts.DenseRetriever))
+		ix = buildIndexFromDense(merged, docs, mergedDense, w.mode, w.model)
 	}
 	if w.reranker != nil {
 		ix.reranker = w.reranker
@@ -531,29 +516,23 @@ func (w *WatchedIndex) compactCorpus() int {
 		return 0
 	}
 	newChunks := make([]chunk.Chunk, 0, len(w.chunks)-dropped)
-	// Defensive: if vecs and chunks ever fall out of alignment (the R4-1 class:
-	// a stagedPending append that skipped its vector), drop the vectors entirely
-	// and degrade to BM25 rather than index w.vecs[i] out of range and panic on
-	// the flush/startup goroutine. buildUnionedIndexLocked's invariant check
-	// then republishes as BM25. Aligned corpora take the fast path unchanged.
-	var newVecs [][]float32
-	if len(w.vecs) == len(w.chunks) {
-		newVecs = make([][]float32, 0, len(w.vecs)-dropped)
-	} else if len(w.vecs) != 0 {
-		w.logf("BUG: compactCorpus vecs/chunks misaligned (%d vecs, %d chunks); dropping vectors, degrading to BM25", len(w.vecs), len(w.chunks))
-		w.vecs = nil
-	}
+	kept := make([]int, 0, len(w.chunks)-dropped)
 	for i, c := range w.chunks {
 		if c.Tombstoned {
 			continue
 		}
 		newChunks = append(newChunks, c)
-		if newVecs != nil {
-			newVecs = append(newVecs, w.vecs[i])
+		kept = append(kept, i)
+	}
+	if w.dense != nil {
+		if w.dense.Len() == len(w.chunks) {
+			w.dense = w.dense.Compact(kept)
+		} else {
+			w.logf("BUG: compactCorpus dense/chunks misaligned (%d dense, %d chunks); dropping dense store, degrading to BM25", w.dense.Len(), len(w.chunks))
+			w.dense = nil
 		}
 	}
 	w.chunks = newChunks
-	w.vecs = newVecs
 	return dropped
 }
 
@@ -646,14 +625,19 @@ func (w *WatchedIndex) appendFile(rel string) int {
 	// raises: label, and its BM25 tokens + embedding diverge from a fresh
 	// build, degrading the index as edits accumulate.
 	enrichChunks(rel, data, cs, w.fsOpts.DisableEnrichment)
-	for _, c := range cs {
-		w.chunks = append(w.chunks, c)
-		// Skip embedding while a staged build is still pre-warm (audit N1):
-		// w.vecs must stay empty until the warm pass fills it, or vecs and
-		// chunks misalign and compactCorpus panics. The warm pass re-embeds
-		// every chunk (including these) and clears stagedPending.
-		if w.model != nil && !w.stagedPending {
-			w.vecs = append(w.vecs, encodeCached(w.fsOpts.EmbedCache, w.model, c.Text))
+	var batchVecs [][]float32
+	if w.model != nil && !w.stagedPending {
+		batchVecs = make([][]float32, len(cs))
+		for i, c := range cs {
+			batchVecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, c.Text)
+		}
+	}
+	w.chunks = append(w.chunks, cs...)
+	if len(batchVecs) > 0 {
+		if w.dense == nil {
+			w.dense = makeDenseStore(denseRetrieverKind(w.fsOpts.DenseRetriever), batchVecs)
+		} else {
+			w.dense = w.dense.Append(batchVecs)
 		}
 	}
 	return len(cs)

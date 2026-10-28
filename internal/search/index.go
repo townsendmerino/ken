@@ -799,6 +799,19 @@ func buildIndexFromDocs(chunks []chunk.Chunk, docs [][]string, vecs [][]float32,
 	return ix
 }
 
+// buildIndexFromDense constructs an Index from an existing denseRetriever
+// (such as a denseStore) without retaining duplicate f32 vectors (ADR-049 / K17).
+func buildIndexFromDense(chunks []chunk.Chunk, docs [][]string, dense denseRetriever, mode Mode, model *embed.StaticModel) *Index {
+	return &Index{
+		mode:   mode,
+		chunks: chunks,
+		bm:     bm25.Build(docs),
+		model:  model,
+		flat:   dense,
+		vecs:   nil,
+	}
+}
+
 // tokenCache memoizes BM25 tokenization keyed by chunk text. Tokens are a
 // pure function of Chunk.Text, so on the incremental watch path — where a
 // single-file save re-chunks ~5 of N chunks — reusing cached tokens turns
@@ -964,24 +977,28 @@ func (ix *Index) WithExtraChunks(extras []chunk.Chunk) (*Index, error) {
 	var mergedVecs [][]float32
 	if ix.model != nil {
 		// Semantic / hybrid: encode extras via the retained model.
-		// Invariant: when model != nil, ix.vecs has one entry per
+		// Invariant: when model != nil, ix.vecs (or recomputed ix.Vecs()) has one entry per
 		// existing chunk. A caller that sets model without parallel vecs
 		// would produce a short mergedVecs and ann.Flat over a truncated
 		// matrix — wrong rankings silently. Return an error instead of
 		// panicking (audit §23): this is reachable from mcp.Run's DB-
 		// refresh callback, and a panic there takes down the whole MCP
 		// server; the caller keeps serving the prior snapshot.
-		if len(ix.vecs) != len(ix.chunks) {
+		baseVecs := ix.vecs
+		if len(baseVecs) == 0 && len(ix.chunks) > 0 {
+			baseVecs = ix.Vecs()
+		}
+		if len(baseVecs) != len(ix.chunks) {
 			return nil, fmt.Errorf(
 				"search: WithExtraChunks: model != nil requires len(vecs)==len(chunks); got vecs=%d chunks=%d",
-				len(ix.vecs), len(ix.chunks))
+				len(baseVecs), len(ix.chunks))
 		}
 		extraVecs := make([][]float32, len(extras))
 		for i, c := range extras {
 			extraVecs[i] = ix.model.Encode(c.Text)
 		}
-		mergedVecs = make([][]float32, 0, len(ix.vecs)+len(extras))
-		mergedVecs = append(mergedVecs, ix.vecs...)
+		mergedVecs = make([][]float32, 0, len(baseVecs)+len(extras))
+		mergedVecs = append(mergedVecs, baseVecs...)
 		mergedVecs = append(mergedVecs, extraVecs...)
 	}
 	// ModeBM25 path: mergedVecs stays nil; BuildIndex builds BM25 only.
@@ -1024,7 +1041,23 @@ func (ix *Index) BM25() *bm25.Index { return ix.bm }
 // context centroids over the already-encoded chunk vectors — a
 // free aggregation that requires no new compute at index time.
 // Read-only; the caller MUST NOT mutate.
-func (ix *Index) Vecs() [][]float32 { return ix.vecs }
+//
+// When vecs was not retained at build time (e.g. WatchedIndex under K17 / ADR-049),
+// Vecs recomputes the f32 vectors deterministically on demand from Chunk.Text
+// using ix.model.
+func (ix *Index) Vecs() [][]float32 {
+	if ix.vecs != nil {
+		return ix.vecs
+	}
+	if ix.mode == ModeBM25 || ix.model == nil || len(ix.chunks) == 0 {
+		return nil
+	}
+	vecs := make([][]float32, len(ix.chunks))
+	for i, c := range ix.chunks {
+		vecs[i] = ix.model.Encode(c.Text)
+	}
+	return vecs
+}
 
 // ResolveChunk returns the chunk that contains the 1-indexed line in
 // filePath, or nil if there is none. Mirrors semble utils._resolve_chunk:

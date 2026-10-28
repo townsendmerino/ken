@@ -211,6 +211,25 @@ The `v1.71.0+` postings arena flattened per-term posting slices into a contiguou
 > confirmed that all 4 workspaces share a single page-cached mapping of `model.safetensors` (paying 0 duplicate heap copies).
 > Under `MmapModel: false`, 4 workspaces would hold 4 separate heap copies (15.57 MB heap).
 
+### K17: Dropping retained f32 vectors from WatchedIndex (measured 2026-10-28)
+
+Prior to K17, `WatchedIndex` retained `vecs [][]float32` (1,048 B/chunk) so that incremental flushes could append and compact.
+When `KEN_ANN=flat-i8` was enabled, the quantized store was added *on top* of `vecs`, causing dense memory to cost ~1,284 B/chunk instead of shrinking (ADR-043 guardrail).
+
+With K17 (ADR-049), `WatchedIndex` holds only the active `denseStore` (`flatStore`, `flatI8Store`, or `flatBinaryI8Store`).
+Incremental appends quantize directly into the dense store; compactions drop quantized rows in-place.
+When full-precision `f32` vectors are needed (e.g. for `.ken/snapshot.bin` serialization or Centroids), they are recomputed deterministically on demand from `Chunk.Text` via Model2Vec's bit-identical `f64` accumulation.
+
+**Dense-side resident bytes per chunk on WatchedIndex:**
+
+| Config | Dense Representation | Pre-K17 Bytes/Chunk | Post-K17 Bytes/Chunk | Delta | Goinfer Savings (198k chunks) |
+|---|---|---:|---:|---:|---:|
+| Default (`Flat`) | `ann.Flat` (f32) | 1,048 B | 1,024 B | −24 B (−2.3%) | −4.7 MB |
+| `KEN_ANN=flat-i8` | `ann.FlatI8` (int8 + scales) | 1,308 B | **260 B** | **−1,048 B (−80.1%)** | **−207.4 MB** |
+| `KEN_ANN=flat-binary-i8` | `ann.FlatBinaryI8` (1-bit + int8) | 1,340 B | **292 B** | **−1,048 B (−78.2%)** | **−207.4 MB** |
+
+At 584,019-chunk Linux kernel scale, selecting `KEN_ANN=flat-i8` on `WatchedIndex` drops dense memory from **~764 MB to ~152 MB** (saving **~612 MB**).
+
 **Resident memory at steady state** (after `Build` settles, before
 queries):
 

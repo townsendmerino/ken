@@ -60,11 +60,11 @@ type WatchedIndex struct {
 	warmDoEnrich bool
 
 	// stagedPending is true from construction until the M4 staged warm pass
-	// fills w.vecs. While set, w.vecs is intentionally empty (BM25 served) and
+	// builds w.dense. While set, w.dense is intentionally nil (BM25 served) and
 	// the watch-path append sites (appendFile/refoldMigrationDir) must NOT
-	// append per-chunk vectors — otherwise w.vecs grows to `c` entries against
+	// append per-chunk vectors — otherwise w.dense grows to `c` entries against
 	// N+c chunks and compactCorpus panics (audit N1). Cleared by the warm pass
-	// under corpusMu once it publishes a full-length vecs. Written only under
+	// under corpusMu once it publishes a full-length dense store. Written only under
 	// corpusMu; read there too.
 	stagedPending bool
 
@@ -116,14 +116,14 @@ type WatchedIndex struct {
 	// filtered on every read path) until GC reclaims them.
 	//
 	// Held under corpusMu. As of v0.7.0 there are TWO writers: the
-	// debouncer goroutine (touching chunks/vecs from fsnotify events)
+	// debouncer goroutine (touching chunks/dense from fsnotify events)
 	// and any caller of SetExtraChunks (typically the db.Refresher
 	// from cmd/ken-mcp updating the Tier-2 DB chunks). The published
 	// Index is always built from chunks ∪ extraChunks so a flush from
 	// either trigger publishes a consistent unioned snapshot.
 	corpusMu sync.Mutex
 	chunks   []chunk.Chunk
-	vecs     [][]float32
+	dense    denseStore
 	model    *embed.StaticModel
 
 	// tokens memoizes BM25 tokenization keyed by chunk text so a flush

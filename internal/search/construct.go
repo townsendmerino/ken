@@ -160,13 +160,15 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 		chunkerName:   chunkerName,
 		modelDir:      modelDir,
 		chunks:        chunks,
-		vecs:          vecs,
 		model:         model,
 		matcher:       repo.NewMatcher(repo.Options{Root: root}),
 		done:          make(chan struct{}),
 		debounce:      debounce,
 		fsOpts:        opts,
 		migrationDirs: migDirs,
+	}
+	if mode != ModeBM25 && len(vecs) > 0 {
+		wi.dense = makeDenseStore(denseRetrieverKind(opts.DenseRetriever), vecs)
 	}
 	// Cold-start warm deferral. staged (M4) defers BOTH the enrich parse and the
 	// embed, serving BM25 lexical instantly; lazyEnrich (M2) defers only the
