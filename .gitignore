@@ -103,3 +103,6 @@ bench/temporal/results/
 
 # repowise index — generated codebase-intelligence artifacts, never committed
 .repowise/
+
+# Claude agent worktrees and scratch
+/.claude/
