@@ -170,6 +170,47 @@ flat-vs-HNSW ANN (HNSW not shipped; see
 
 ## Memory & binary size
 
+### Index memory composition (K16 harness, measured 2026-10-28)
+
+Measured using `-tags=bench` harness (`internal/search/index_memory_bench_test.go`),
+anchored on Apple M-series (darwin/arm64, Go 1.27.3). Every component is verified
+as both an exact byte formula from live data structures (Tier 0) and measured heap delta
+(`runtime.MemStats.HeapAlloc` after `runtime.GC()`) from building that component alone (Tier 1).
+
+**Synthetic 10k-chunk calibration gate (Tier 0 vs Tier 1 within 5%):**
+- Chunk text: Formula 3.62 MB, Measured 3.76 MB (diff: 3.78%)
+- BM25: Formula 3.56 MB, Measured 3.58 MB (diff: 0.45%)
+- Retained f32 vectors: Formula 10.48 MB, Measured 10.49 MB (diff: 0.06%)
+- FlatI8: Formula 2.60 MB, Measured 2.61 MB (diff: 0.21%)
+- FlatBinaryI8: Formula 2.92 MB, Measured 2.93 MB (diff: 0.45%)
+- Structural index: Formula 304.8 KB, Measured 301.6 KB (diff: 1.04%)
+
+**aikit bump savings on BM25 postings arena (v1.70.1 vs v1.74.0):**
+The `v1.71.0+` postings arena flattened per-term posting slices into a contiguous arena, eliminating slice headers and append slack:
+
+| Corpus | Files | Chunks | BM25 pre-bump (v1.70.1) | BM25 post-bump (v1.74.0) | BM25 Savings |
+|---|---:|---:|---:|---:|---:|
+| tack | 303 | 2,003 | 2.87 MB | 2.20 MB | **−23.5%** |
+| ken | 465 | 4,276 | 6.11 MB | 4.73 MB | **−22.6%** |
+| aikit | 1,104 | 8,582 | 11.84 MB | 9.28 MB | **−21.6%** |
+| goinfer | 25,468 | 197,926 | 205.91 MB | 170.96 MB | **−17.0%** (−34.95 MB) |
+| all 4 combined | 27,340 | 212,787 | 226.73 MB | 187.17 MB | **−17.4%** (−39.56 MB) |
+| Linux kernel (584k) | — | — | *absent* | *absent* | *(skipped)* |
+
+**Full component breakdown by corpus (aikit v1.74.0, hybrid mode with Flat):**
+
+| Corpus | Chunks | Chunk Text | BM25 | Retained f32 vecs | FlatI8 | FlatBinaryI8 | Structural | Model2Vec (mmap) | Model2Vec (heap) | Component Sum | Peak RSS |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| tack | 2,003 | 2.27 MB | 2.20 MB | 2.00 MB | 0.50 MB | 0.56 MB | 2.15 MB | 3.90 MB | 3.87 MB | 12.51 MB | 606.92 MB |
+| ken | 4,276 | 4.68 MB | 4.73 MB | 4.27 MB | 1.06 MB | 1.19 MB | 3.48 MB | 3.90 MB | 3.90 MB | 21.07 MB | 960.17 MB |
+| aikit | 8,582 | 10.41 MB | 9.28 MB | 8.58 MB | 2.13 MB | 2.39 MB | 7.01 MB | 3.90 MB | 3.90 MB | 39.18 MB | 1,263.75 MB |
+| goinfer | 197,926 | 300.48 MB | 170.96 MB | 197.82 MB | 49.08 MB | 55.12 MB | 107.13 MB | 3.87 MB | 3.90 MB | 780.25 MB | 4,236.20 MB |
+| all 4 (1 proc) | 212,787 | 317.84 MB | 187.17 MB | 212.67 MB | 52.77 MB | 59.26 MB | 119.77 MB | 3.90 MB | 15.57 MB | 841.35 MB | 5,622.61 MB |
+
+> **tack K7 multi-workspace confirmation:** opening all 4 workspaces in one process via `engine.Open` with `MmapModel: true`
+> confirmed that all 4 workspaces share a single page-cached mapping of `model.safetensors` (paying 0 duplicate heap copies).
+> Under `MmapModel: false`, 4 workspaces would hold 4 separate heap copies (15.57 MB heap).
+
 **Resident memory at steady state** (after `Build` settles, before
 queries):
 
