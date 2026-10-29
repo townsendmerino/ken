@@ -25,6 +25,9 @@ type RunnerConfig struct {
 	Budgets         []int
 	Arms            []Arm
 	Evaluate        bool
+	// ProvenanceExtra is recorded in every result's provenance block
+	// (e.g. the ContextBench commit and evaluator environment).
+	ProvenanceExtra map[string]string
 }
 
 // ResolveRepoPath finds the cached repository path in repoCache.
@@ -164,7 +167,9 @@ func RunBatch(ctx context.Context, cfg RunnerConfig, tasks []Task) ([]TaskResult
 		cfg.Budgets = DefaultBudgets
 	}
 	prov := provenance.Collect(provenance.Options{
-		Harness: "bench/contextbench",
+		Harness:  "bench/contextbench",
+		ModelDir: cfg.ModelDir,
+		Extra:    cfg.ProvenanceExtra,
 	})
 
 	var allResults []TaskResult

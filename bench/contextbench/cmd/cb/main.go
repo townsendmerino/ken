@@ -8,9 +8,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/townsendmerino/ken/bench/contextbench"
 )
@@ -42,6 +45,11 @@ func main() {
 	runEval := flag.Bool("eval", true, "Run external evaluate.py for official metrics")
 	leannRunner := flag.String("leann-runner", "", "Path to external LEANN runner script for L1/L2")
 	modelDir := flag.String("model-dir", "", "Path to Model2Vec model directory (defaults to ~/.ken/model)")
+	resume := flag.Bool("resume", false, "Run task by task, appending each task's records to -out and skipping tasks already complete there")
+	evalCheckout := flag.Bool("evaluator-checkout", false, "With -resume: check each task out through the evaluator's own checkout first (fills the cache), and remove the worktree after")
+	errPath := flag.String("errors", "", "With -resume: JSONL file for failed tasks (default <out>.errors.jsonl)")
+	var provExtra kvFlag
+	flag.Var(&provExtra, "prov", "key=value recorded in every result's provenance block (repeatable)")
 
 	flag.Parse()
 
@@ -108,17 +116,48 @@ func main() {
 		Budgets:         budgets,
 		Arms:            arms,
 		Evaluate:        *runEval,
+		ProvenanceExtra: provExtra,
 	}
 
-	ctx := context.Background()
-	results, err := contextbench.RunBatch(ctx, cfg, tasks)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error executing CB1 batch: %v\n", err)
-		os.Exit(1)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var results []contextbench.TaskResult
+	exitCode := 0
+	if *resume {
+		if *outPath == "" {
+			fmt.Fprintf(os.Stderr, "Error: -resume needs -out\n")
+			os.Exit(2)
+		}
+		ep := *errPath
+		if ep == "" {
+			ep = *outPath + ".errors.jsonl"
+		}
+		results, err = contextbench.RunResumable(ctx, cfg, tasks, contextbench.ResumeConfig{
+			OutPath:           *outPath,
+			ErrPath:           ep,
+			EvaluatorCheckout: *evalCheckout,
+			Logf: func(format string, args ...any) {
+				fmt.Printf("  %s %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+			},
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error executing CB1 run: %v\n", err)
+			if results == nil {
+				os.Exit(1)
+			}
+			exitCode = 1
+		}
+	} else {
+		results, err = contextbench.RunBatch(ctx, cfg, tasks)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error executing CB1 batch: %v\n", err)
+			os.Exit(1)
+		}
 	}
+	defer func() { os.Exit(exitCode) }()
 
-	// Write output JSONL if requested
-	if *outPath != "" {
+	// Write output JSONL if requested (RunResumable has already written it)
+	if *outPath != "" && !*resume {
 		f, err := os.Create(*outPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening output file: %v\n", err)
@@ -225,4 +264,21 @@ func main() {
 	}
 
 	fmt.Println(contextbench.FormatComparisonTable(comparisons))
+}
+
+// kvFlag collects repeated key=value flags.
+type kvFlag map[string]string
+
+func (k *kvFlag) String() string { return fmt.Sprint(map[string]string(*k)) }
+
+func (k *kvFlag) Set(v string) error {
+	key, val, ok := strings.Cut(v, "=")
+	if !ok || key == "" {
+		return fmt.Errorf("want key=value, got %q", v)
+	}
+	if *k == nil {
+		*k = kvFlag{}
+	}
+	(*k)[key] = val
+	return nil
 }

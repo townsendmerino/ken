@@ -50,7 +50,9 @@ type evalRawRecord struct {
 		File   evalRawGranularity `json:"file"`
 	} `json:"final"`
 	Trajectory struct {
-		AUCLine float64 `json:"auc_line"`
+		AUCCoverage struct {
+			Line float64 `json:"line"`
+		} `json:"auc_coverage"`
 	} `json:"trajectory"`
 }
 
@@ -158,7 +160,7 @@ func ParseEvaluatorOutput(outPath string) ([]EvaluatedMetric, error) {
 			FileCoverage:   raw.Final.File.Coverage,
 			LinePrecision:  raw.Final.Line.Precision,
 			FilePrecision:  raw.Final.File.Precision,
-			AUCCov:         raw.Trajectory.AUCLine,
+			AUCCov:         raw.Trajectory.AUCCoverage.Line,
 			Error:          raw.Error,
 		})
 	}
