@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/townsendmerino/aikit/chunk"
+	"github.com/townsendmerino/aikit/chunk/treesitter"
 	"github.com/townsendmerino/ken/bench/contextbench"
 	"github.com/townsendmerino/ken/internal/structural"
 )
@@ -50,6 +52,7 @@ func main() {
 	resume := flag.Bool("resume", false, "Run task by task, appending each task's records to -out and skipping tasks already complete there")
 	evalCheckout := flag.Bool("evaluator-checkout", false, "With -resume: check each task out through the evaluator's own checkout first (fills the cache), and remove the worktree after")
 	errPath := flag.String("errors", "", "With -resume: JSONL file for failed tasks (default <out>.errors.jsonl)")
+	tsTimeoutMs := flag.Int("ts-timeout-ms", -1, "Re-register the treesitter chunker with this per-parse timeout in ms (0 = none); -1 keeps aikit's default (1 s)")
 	breakdown := flag.Bool("breakdown", false, "Also print per-language, per-source and per-repository tables at 8,192 tokens")
 	var provExtra kvFlag
 	flag.Var(&provExtra, "prov", "key=value recorded in every result's provenance block (repeatable)")
@@ -122,6 +125,10 @@ func main() {
 		ProvenanceExtra: provExtra,
 	}
 
+	if *tsTimeoutMs >= 0 {
+		chunk.Register("treesitter", treesitter.New(treesitter.WithParseTimeoutMicros(uint64(*tsTimeoutMs)*1000)))
+		fmt.Printf("Treesitter chunker parse timeout: %d ms\n", *tsTimeoutMs)
+	}
 	if b := os.Getenv("KEN_ENRICH_FILE_BUDGET_MS"); b != "" {
 		fmt.Printf("Enrichment parse budget: KEN_ENRICH_FILE_BUDGET_MS=%s (skips are logged and counted per record)\n", b)
 		structural.SetParseBudgetLogf(func(path string, d time.Duration) {
