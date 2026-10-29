@@ -2871,7 +2871,7 @@ What `status` genuinely **cannot** answer retroactively is *which index generati
 
 **Status:** Accepted. **Date:** 2026-10-28. **Related:** resolves [ADR-043](#adr-043-dense-retriever-seam--optin-flatbinaryi8-hnsw-declined)'s memory guardrail; verified by K16 memory harness; preserves [ADR-039](#adr-039-persistent-index-snapshot--reconcile-on-boot-cold-start-m1) disk format unchanged.
 
-**Context.** `WatchedIndex` (`internal/search/watch.go:WatchedIndex`) retained `vecs [][]float32` (1,048 B/chunk) so that incremental flushes (`ReconcileFiles` / watcher batches) and compactions could rebuild or append to the dense retriever without re-embedding unchanged chunks. Because of that, enabling `KEN_ANN=flat-i8` on the watched path — the path both `ken-mcp` and `engine.Open` use — *added* ~260 B/chunk on top of the 1,024 B/chunk instead of replacing them (ADR-043's guardrail).
+**Context.** `WatchedIndex` (`internal/search/watch.go:WatchedIndex`) retained `vecs [][]float32` (1,048 B/chunk) so that incremental flushes (`ReconcileFiles` / watcher batches) and compactions could rebuild or append to the dense retriever without re-embedding unchanged chunks. Because of that, enabling `KEN_ANN=flat-i8` on the watched path — the path both `ken-mcp` and `engine.Open` use — *added* ~260 B/chunk on top of the 1,048 B/chunk instead of replacing them (ADR-043's guardrail).
 Model2Vec embeddings are completely deterministic (`f64` accumulation, `docs/DESIGN.md` §4). Re-embedding a chunk from `Chunk.Text` reproduces its index-time vector byte-for-byte (`math.Float32bits`). Therefore, `WatchedIndex` does not need to retain duplicate `f32` vectors beside the dense retriever's own store.
 
 **Decision.**
@@ -2884,7 +2884,7 @@ Model2Vec embeddings are completely deterministic (`f64` accumulation, `docs/DES
   1. *Bit-identity (Tier 0):* recomputed vectors match index-time vectors bit-for-bit (`math.Float32bits`) across golden fixture and owner repo (`TestK17_Gate1_RecomputeBitIdentity`).
   2. *Pipeline recall & NDCG (Tier 1):* pipeline recall@10 and NDCG@10 match to 3 decimal places under Flat and FlatI8 (`TestK17_Gate2_PipelineRecallParity`).
   3. *Watcher republish latency (Tier 1):* single-file edit republish stays at 50ms (well under 2s limit) (`TestK17_Gate3_WatcherRepublishLatency`).
-  4. *Memory (Tier 1):* dense-side resident bytes per chunk under `KEN_ANN=flat-i8` is 260.01 B/chunk (well under 300 B/chunk bound, saving 1,024 B/chunk, ~79% of dense memory, ~207 MB on goinfer, ~612 MB at 584k kernel scale) (`TestK17_Gate4_DenseMemoryPerChunk`).
+  4. *Memory (Tier 1):* dense-side resident bytes per chunk under `KEN_ANN=flat-i8` is 260.01 B/chunk (well under 300 B/chunk bound, saving 1,048 B/chunk, ~80% of dense memory, ~207 MB on goinfer, ~612 MB at 584k kernel scale) (`TestK17_Gate4_DenseMemoryPerChunk`).
 
 **Consequences / guardrails.**
 - Zero ranking or recall changes: all queries hit the exact same underlying retriever kernels.
