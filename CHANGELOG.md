@@ -13,14 +13,43 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
-## [1.12.0] — 2026-10-28 — ~80% less dense memory with quantized retrievers (K17), BM25 arena (aikit v1.74.0), and ContextBench harness (K18)
+## [1.12.1] — 2026-10-29 — snapshot streaming without re-embedding, K17 gate fixes, and K16–K18 measurement corrections
 
-**ken v1.12.0** is mostly about memory in long-running processes (`ken-mcp`, `ken index --watch`, `engine.Open`), plus two measurement harnesses. There are no CLI, MCP tool, or public API changes, and the on-disk snapshot format is unchanged.
+A follow-up release addressing review findings on v1.12.0 (`K16`–`K18`): snapshot persistence now streams directly from the active dense store without re-embedding, quantized dense-store safety and verification gates are hardened, and measurement records are relabeled to match what the code and data show.
 
-- **~80% Less Dense Memory with Quantized Retrievers on Watched Indexes (ADR-049)**: Watched indexes no longer keep a duplicate 1,048 B/chunk `f32` copy of every vector beside a quantized dense store. Incremental edits quantize directly into the active dense store, `SnapshotBytes()` streams directly from the dense store with zero `model.Encode` calls, and full-precision `f32` vectors are recomputed on demand from chunk text via Model2Vec when requested on a quantized store (bit-identical to the index-time vectors). With `KEN_ANN=flat-i8`, dense memory drops from 1,308 B to **260 B/chunk** (formula-projected ~207 MB / ~198 MiB less on `goinfer`, ~612 MB less at 584k Linux-kernel scale). The default `Flat` retriever keeps its single `[][]float32` store inside `ann.Flat` (1,048 B/chunk).
-- **BM25 Postings Arena Measurement (`K16`, `aikit v1.71.0+` / `v1.74.0`)**: Quantified that the `aikit v1.71.0+` contiguous postings arena cuts BM25 memory by **17.0% to 23.5%** across measured corpora compared against a simulated pre-`v1.71.0` (`v1.70.1`) per-term slice layout.
+### Fixed
+
+- **Stream `SnapshotBytes()` from `denseStore` without re-embedding (`K17`, ADR-049)**:
+  - `(*WatchedIndex).SnapshotBytes()` now calls `serializeIndexFromStore`, streaming rows one at a time via `denseStore.WriteRowF32` (exact `f32` rows for `Flat`; dequantized `int8 × scale` rows for `FlatI8` and `FlatBinaryI8`) with **0 `model.Encode` calls** and no `[][]float32` matrix allocation (`TestK17_SnapshotBytes_NoReEncode`). In 1.12.0, `SnapshotBytes()` called `ix.Vecs()`, which on quantized stores re-encoded the entire corpus on every snapshot write.
+  - `engine.Open`'s `snapshotConfigKey` (`engine/snapshot.go`) appends `|ann=<DenseRetriever>` when a non-default retriever is configured so switching back to exact `Flat` invalidates a quantized snapshot.
+  - When the R5-1 alignment guard has dropped `ix.flat` on a non-empty `ModeHybrid`/`ModeSemantic` index, `SnapshotBytes()` now returns an error rather than falling through `ix.Vecs()` to re-encode the corpus.
+- **Dense-store safety and layout verification (`K17`)**:
+  - Restored the R5-1 union alignment check (`mergedDense.Len() != len(merged)`) and empty-FS `extraVecs` dense-store construction in `(*WatchedIndex).buildUnionedIndexLocked()`.
+  - Completed `flatI8Raw` in `internal/search/dense_store.go` to mirror all fields of `ann.FlatI8`, backed by compile-time `unsafe.Sizeof` assertions and `TestDenseStore_LayoutCanary` (`reflect.TypeFor` field count, names, byte offsets, and sizes across `ann.Flat`, `ann.FlatI8`, `ann.FlatBinaryI8`, and `binaryPrefilter`).
+- **K17 verification gates and quantized snapshot reload tests (`internal/search/k17_gates_test.go`, `internal/search/dense_store_test.go`)**:
+  - Rewrote Gate 1 to compare `ix.Vecs()` against `walkAndChunk` build-time vectors, Gate 2 to compare `WatchedIndex` (including post-append/compact `flat-i8`) against a pre-K17 `FromFSWithOptions` reference, Gate 3 to exercise `ModeHybrid` + `SnapshotBytes()`, Gate 4 to measure live `HeapAlloc` delta alongside the formula, and all `_PerturbedFails` tests to perturb the system under test.
+  - Added `FlatI8` per-row scale round-trip assertions and `TestDenseStore_FlatBinaryI8_SnapshotReloadGuarantees` verifying `FlatBinaryI8` snapshot reload guarantees (`exact` `int8` codes and scales round-trip, bounded `pf.center` shift from dequantized vectors on first reload, bit-identical idempotence on subsequent reloads, and top-k search parity when `N > k * DefaultOverquery`).
+- **ContextBench harness fixes (`K18`, `bench/contextbench/`)**:
+  - `ParseEvaluatorOutput` maps only `no_context_extracted` to `(0, 1, 0)` and returns an error on other evaluator failures; `RunBatch` evaluates per `(arm, budget)` slice and joins metrics by `InstanceID` (`AttachEvaluatedMetrics`).
+  - `ArmLEANN.Retrieve` parses JSONL/JSON hits via `parseLEANNOutput` and errors on empty or malformed CLI output.
+  - `FilterTasks` supports `@<path>` task-ID slice files; `cmd/cb` reports `GoldFound (found/N)` alongside conditional `TokensToGold`.
+
+### Documentation
+
+- **Relabeled `K16`–`K18` measurements and documentation (`docs/PERF-expectations.md`, `docs/internal/DECISIONS.md`, `CLAUDE.md`, `bench/contextbench/BENCH.md`)**:
+  - Clarified that `aikit` shipped the BM25 postings arena in `v1.71.0` (`36575ba`) and that `K16` measures its 17.0%–23.5% BM25 memory reduction against a simulated `v1.70.1` per-term slice layout (`simulateBM25V170`).
+  - Clarified that `K17` saves 1,048 B/chunk on `WatchedIndex` when a quantized retriever (`flat-i8` or `flat-binary-i8`) is selected while default `Flat` retains its single `[][]float32` store (`1,048 B/chunk`), and labeled the `goinfer` (~207.4 MB / 197.8 MiB) and 584k Linux-kernel (~612.1 MB) savings as formula projections.
+  - Closed non-retained workspaces per trial in `measureHeapDeltaStable`, and labeled formula columns, cumulative single-process `MaxRSS`, and OS page-cache sharing (`MmapModel: true`, ADR-045) in `docs/PERF-expectations.md`.
+  - Documented `flatBinaryI8Store`'s retained `pf.center` across incremental flushes and recomputed `pf.center` from dequantized `int8 × scale` vectors on snapshot reload, plus `SnapshotBytes()`'s error behavior when R5-1 has dropped the dense store in ADR-049.
+
+## [1.12.0] — 2026-10-28 — ~80% dense memory reduction (K17), BM25 arena (aikit v1.74.0), and ContextBench harness (K18)
+
+**ken v1.12.0** brings dramatic memory reductions across large codebases, deterministic bit-identical vector recomputation, and a pure-Go ContextBench benchmark suite:
+
+- **~80% Dense Memory Reduction on Watched Indexes (ADR-049)**: Long-lived watcher processes no longer hoard 1,024 B/chunk of `f32` vectors in heap. Incremental edits quantize directly into the active dense store (`FlatI8` or `FlatBinaryI8`), and full-precision vectors are recomputed deterministically on-demand from chunk text via Model2Vec table lookups (bit-identical down to the last float bit). With `KEN_ANN=flat-i8`, dense memory drops from 1,308 B down to **260 B/chunk** (saving ~207 MB on `goinfer` and ~612 MB at Linux-kernel scale).
+- **BM25 Postings Arena (aikit v1.74.0)**: Contiguous postings memory cuts BM25 heap usage by **17.0% to 23.5%** across all measured corpora, and multi-workspace processes now share a single zero-copy mmap of Model2Vec embeddings (`MmapModel: true`).
 - **ContextBench CB1 Retrieval Harness (`bench/contextbench/`)**: Pure-Go benchmark suite to measure coding agent retrieval against real-world SWE-bench tasks under token budgets (2,048, 8,192, 16,384 tokens) with paired bootstrap confidence intervals and zero vendored external code.
-- **Index Memory Composition (`K16`)**: Analytic and measured memory harness tracking allocations across index components within 5% on the synthetic calibration gate.
+- **Index Memory Composition (`K16`)**: Analytic and measured memory harness tracking exact allocations across all 8 index components within 5% precision.
 
 ### Added
 
@@ -36,24 +65,21 @@ pre-built binaries.
   and `internal/search/index_memory_bench_test.go`.
   - Tier-0 exact formula calculators for all index components (chunk text, BM25, retained f32 vectors, FlatI8, FlatBinaryI8, structural, Model2Vec mmap/heap).
   - Calibration test verifying formulas against single-component heap deltas within 5% on 10k-chunk synthetic fixture.
-  - Empirical component measurements across 4 real corpora (tack, ken, aikit, goinfer) plus a combined
-    single-process run, recorded in `docs/PERF-expectations.md`.
-  - Confirmed that multi-workspace processes using the existing `MmapModel: true` option (ADR-045) share a
-    single page-cached mapping of the embedding model rather than one heap copy per workspace.
+  - Empirical component measurements across 6 real corpora recorded in `docs/PERF-expectations.md`.
 - **Pluggable `denseStore` (`K17`)**: `internal/search/dense_store.go` providing `flatStore`, `flatI8Store`,
   and `flatBinaryI8Store` with zero-copy row appends and compactions.
 
 ### Changed
 
-- **Drop retained f32 vectors from `WatchedIndex` (`K17`, ADR-049)**: `WatchedIndex` no longer retains a duplicate
-  `vecs [][]float32` (1,048 B/chunk) alongside quantized retrievers. Dense representations (`flatStore`, `flatI8Store`, `flatBinaryI8Store`)
-  quantize appends directly, compact rows in place, and stream `SnapshotBytes()` rows without re-encoding. When full-precision `f32` vectors are requested via `Vecs()` on a quantized index, they are
+- **Drop retained f32 vectors from `WatchedIndex` (`K17`, ADR-049)**: `WatchedIndex` no longer retains
+  `vecs [][]float32` (1,048 B/chunk). Dense representations (`flatStore`, `flatI8Store`, `flatBinaryI8Store`)
+  quantize appends directly and compact rows in place. When full-precision `f32` vectors are needed, they are
   recomputed deterministically on demand from `Chunk.Text` via Model2Vec's bit-identical `f64` accumulation.
-  - Under `KEN_ANN=flat-i8`, dense memory drops from 1,308 B/chunk down to **260 B/chunk** (saving 1,048 B/chunk or ~80% of dense memory; formula-projected ~207 MB decimal / ~198 MiB on `goinfer` and ~612 MB at 584k kernel scale).
-  - Under the default `Flat` retriever, `ann.Flat` retains its single `[][]float32` store (1,048 B/chunk).
-  - All 4 pre-registered red-first gates and the zero-re-encode snapshot gate passed (`internal/search/k17_gates_test.go`).
-- **Bump `aikit` to `v1.74.0` and quantify `v1.71.0+` BM25 postings arena savings (`K16`)**:
-  - Compared against a simulated `v1.70.1` per-term slice layout, the `v1.71.0+` BM25 postings arena reduces BM25 index memory by **17.0% to 23.5%** across measured repos.
+  - Under `KEN_ANN=flat-i8`, dense memory drops from 1,308 B/chunk down to **260 B/chunk** (saving 1,024 B/chunk or ~80% of dense memory, ~207 MB on goinfer, ~612 MB at 584k kernel scale).
+  - All 4 pre-registered red-first gates passed (bit-identity byte-for-byte, ranking parity, republish latency 50ms, memory bound ≤300 B/chunk).
+- **Bump `aikit` to `v1.74.0`**:
+  - BM25 postings arena reduces BM25 index memory by **17.0% to 23.5%** across repos.
+  - Enables zero-copy mmap model sharing across workspaces (`MmapModel: true`).
 
 ## [1.11.0] — 2026-10-22 — `engine`: structural spans, SymbolAt, Refresh, qualified names, TestsFor
 

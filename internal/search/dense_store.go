@@ -63,8 +63,12 @@ type denseStore interface {
 	// WriteRowF32 returns or reconstructs row i as a float32 slice without calling
 	// model.Encode. For flatStore it returns the stored f32 row directly; for
 	// flatI8Store / flatBinaryI8Store it dequantizes int8 * scale into dst
-	// (allocating only if cap(dst) < Dim()), which round-trips bit-identically
-	// back into the same int8 codes when reloaded into FlatI8.
+	// (allocating only if cap(dst) < Dim()). Reloading those dequantized rows into
+	// FlatI8 (or FlatBinaryI8's exact rerank stage) reproduces the identical int8
+	// codes and per-row scales within <= 1 float32 ULP (bit-identical after one
+	// reload); reloading into FlatBinaryI8 recomputes pf.center from the
+	// dequantized rows, so 1-bit prefilter codes can differ on borderline
+	// coordinates from a cold f32 build (and are bit-identical on subsequent reloads).
 	WriteRowF32(i int, dst []float32) []float32
 	Len() int
 	Dim() int
@@ -284,9 +288,13 @@ func (s *flatBinaryI8Store) WriteRowF32(i int, dst []float32) []float32 {
 // sign codes against the initial build's pf.center. Retaining pf.center avoids
 // recomputing the corpus mean and repacking all N existing 1-bit rows on every
 // watcher flush (ADR-049); if a corpus shifts substantially across many flushes,
-// 1-bit Hamming prefilter candidates can drift slightly from a fresh
-// ann.NewFlatBinaryI8 build until the next full rebuild or snapshot load
-// ( whereas the int8 rerank stage uses exact per-row scales).
+// 1-bit Hamming prefilter candidates can drift slightly from a fresh cold
+// ann.NewFlatBinaryI8 build until the next full cold rebuild (whereas the int8
+// rerank stage uses per-row scales). A snapshot load also recomputes pf.center
+// from the persisted dequantized (int8 * scale) vectors rather than raw f32
+// vectors, so 1-bit codes on a reloaded FlatBinaryI8 snapshot can differ from
+// a cold build on borderline coordinates near pf.center (while remaining
+// bit-identical across subsequent snapshot reloads).
 func (s *flatBinaryI8Store) Append(newVecs [][]float32) denseStore {
 	raw := (*flatBinaryI8Raw)(unsafe.Pointer(s.f))
 	exactStore := newFlatI8Store(raw.exact)
