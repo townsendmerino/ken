@@ -228,14 +228,58 @@ func FilterTasks(tasks []Task, sliceName string) ([]Task, error) {
 		return stratifiedSample(tasks, 100, 42), nil
 
 	default:
+		// Support @<file> or a path to a slice file (newline-delimited instance IDs
+		// or JSONL records with an "instance_id" field, such as LEANN's
+		// contextbench_official_eval_claude_baseline.jsonl).
+		sliceFile := strings.TrimPrefix(sliceName, "@")
+		if ids, err := loadSliceIDsFromFile(sliceFile); err == nil && len(ids) > 0 {
+			var out []Task
+			for _, t := range tasks {
+				if ids[t.InstanceID] || ids[t.OriginalInstID] {
+					out = append(out, t)
+				}
+			}
+			return out, nil
+		}
+
 		// Check if it's a specific instance ID
 		for _, t := range tasks {
 			if t.InstanceID == sliceName || t.OriginalInstID == sliceName {
 				return []Task{t}, nil
 			}
 		}
-		return nil, fmt.Errorf("slice %q did not match known slices or instance ID", sliceName)
+		return nil, fmt.Errorf("slice %q did not match known slices, slice file, or instance ID", sliceName)
 	}
+}
+
+func loadSliceIDsFromFile(path string) (map[string]bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	ids := make(map[string]bool)
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, 4*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "{") {
+			var row struct {
+				InstanceID string `json:"instance_id"`
+			}
+			if err := json.Unmarshal([]byte(line), &row); err == nil && row.InstanceID != "" {
+				ids[row.InstanceID] = true
+				continue
+			}
+		}
+		ids[line] = true
+	}
+	return ids, scanner.Err()
 }
 
 // stratifiedSample draws targetN tasks stratified by language using fixed seed.

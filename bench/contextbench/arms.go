@@ -3,7 +3,10 @@
 package contextbench
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -292,7 +295,48 @@ func (a *ArmLEANN) Retrieve(ctx context.Context, repoDir, problemStatement strin
 	}
 	latency := time.Since(t0).Milliseconds()
 
-	_ = out
-	// External adapter parses output into []Hit
-	return nil, ArmStats{QueryLatencyMs: latency, PeakFootprintBytes: getPeakRSS()}, nil
+	hits, err := parseLEANNOutput(out)
+	if err != nil {
+		return nil, ArmStats{}, fmt.Errorf("arm %s: %w", a.name, err)
+	}
+	return hits, ArmStats{QueryLatencyMs: latency, PeakFootprintBytes: getPeakRSS()}, nil
+}
+
+// parseLEANNOutput parses external LEANN adapter stdout as either a JSON array
+// of Hit objects or JSON Lines (one Hit object per line). Empty output is
+// rejected as an error so an unimplemented or silent adapter cannot score as a
+// valid zero-hit run.
+func parseLEANNOutput(out []byte) ([]Hit, error) {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("external LEANN runner produced empty output")
+	}
+	if trimmed[0] == '[' {
+		var hits []Hit
+		if err := json.Unmarshal(trimmed, &hits); err != nil {
+			return nil, fmt.Errorf("unmarshal LEANN JSON array: %w", err)
+		}
+		return hits, nil
+	}
+	var hits []Hit
+	scanner := bufio.NewScanner(bytes.NewReader(trimmed))
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, 4*1024*1024)
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var h Hit
+		if err := json.Unmarshal(line, &h); err != nil {
+			return nil, fmt.Errorf("unmarshal LEANN JSONL line %d: %w", lineNum, err)
+		}
+		hits = append(hits, h)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan LEANN output: %w", err)
+	}
+	return hits, nil
 }

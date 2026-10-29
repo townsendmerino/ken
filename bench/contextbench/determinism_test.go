@@ -5,11 +5,89 @@ package contextbench
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func testModelDir(t *testing.T) string {
+	t.Helper()
+	if home, err := os.UserHomeDir(); err == nil {
+		cand := filepath.Join(home, ".ken", "model")
+		if f, err := os.Open(filepath.Join(cand, "tokenizer.json")); err == nil {
+			_ = f.Close()
+			return cand
+		}
+	}
+	dir := t.TempDir()
+	tokens := []string{
+		"[UNK]", "validate", "jwt", "token", "auth", "handler", "bearer", "hmac", "verification",
+		"package", "main", "func", "http", "error", "secret", "key",
+	}
+	for c := byte('a'); c <= 'z'; c++ {
+		tokens = append(tokens, string(c), "##"+string(c))
+	}
+	vocab := make(map[string]int32, len(tokens))
+	for i, tok := range tokens {
+		vocab[tok] = int32(i)
+	}
+	tokJSON := map[string]any{
+		"added_tokens": []map[string]any{{"id": 0, "content": "[UNK]", "special": true}},
+		"normalizer":   map[string]any{"type": "BertNormalizer", "clean_text": true, "handle_chinese_chars": true, "lowercase": true},
+		"pre_tokenizer": map[string]any{
+			"type": "BertPreTokenizer",
+		},
+		"model": map[string]any{
+			"type":                      "WordPiece",
+			"unk_token":                 "[UNK]",
+			"continuing_subword_prefix": "##",
+			"max_input_chars_per_word":  100,
+			"vocab":                     vocab,
+		},
+	}
+	tokBytes, _ := json.Marshal(tokJSON)
+	_ = os.WriteFile(filepath.Join(dir, "tokenizer.json"), tokBytes, 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"normalize":true,"embedding_dtype":"float32","vocabulary_quantization":0}`), 0o644)
+
+	const dim = 256
+	vCount := len(tokens)
+	embLen := vCount * dim * 4
+	mapLen := vCount * 8
+	wgtLen := vCount * 8
+	hdrObj := map[string]any{
+		"embeddings": map[string]any{"dtype": "F32", "shape": []int{vCount, dim}, "data_offsets": []int{0, embLen}},
+		"mapping":    map[string]any{"dtype": "I64", "shape": []int{vCount}, "data_offsets": []int{embLen, embLen + mapLen}},
+		"weights":    map[string]any{"dtype": "F64", "shape": []int{vCount}, "data_offsets": []int{embLen + mapLen, embLen + mapLen + wgtLen}},
+	}
+	hdrBytes, _ := json.Marshal(hdrObj)
+	var buf bytes.Buffer
+	var b8 [8]byte
+	binary.LittleEndian.PutUint64(b8[:], uint64(len(hdrBytes)))
+	buf.Write(b8[:])
+	buf.Write(hdrBytes)
+	rng := rand.New(rand.NewSource(42))
+	var b4 [4]byte
+	for range vCount {
+		for range dim {
+			binary.LittleEndian.PutUint32(b4[:], math.Float32bits(float32(rng.NormFloat64()*0.1)))
+			buf.Write(b4[:])
+		}
+	}
+	for i := range vCount {
+		binary.LittleEndian.PutUint64(b8[:], uint64(i))
+		buf.Write(b8[:])
+	}
+	for range vCount {
+		binary.LittleEndian.PutUint64(b8[:], math.Float64bits(1.0))
+		buf.Write(b8[:])
+	}
+	_ = os.WriteFile(filepath.Join(dir, "model.safetensors"), buf.Bytes(), 0o644)
+	return dir
+}
 
 func createFixtureRepo(t *testing.T) string {
 	t.Helper()
@@ -85,6 +163,7 @@ func ValidateJWTToken(token string) error {
 
 func TestDeterminism_ArmsByteIdentical(t *testing.T) {
 	repoDir := createFixtureRepo(t)
+	modelDir := testModelDir(t)
 	ctx := context.Background()
 
 	arms := []Arm{
@@ -98,11 +177,11 @@ func TestDeterminism_ArmsByteIdentical(t *testing.T) {
 
 	for _, arm := range arms {
 		t.Run("Arm_"+arm.Name(), func(t *testing.T) {
-			hits1, _, err := arm.Retrieve(ctx, repoDir, query, "")
+			hits1, _, err := arm.Retrieve(ctx, repoDir, query, modelDir)
 			if err != nil {
 				t.Fatalf("run 1 failed: %v", err)
 			}
-			hits2, _, err := arm.Retrieve(ctx, repoDir, query, "")
+			hits2, _, err := arm.Retrieve(ctx, repoDir, query, modelDir)
 			if err != nil {
 				t.Fatalf("run 2 failed: %v", err)
 			}
@@ -170,5 +249,105 @@ func TestDeterminism_PerturbedTrajFails(t *testing.T) {
 
 	if bytes.Equal(b1, b2) {
 		t.Fatalf("expected perturbed trajectory record to differ byte-for-byte, but matched")
+	}
+}
+
+func TestParseEvaluatorOutput_ErrorHandling(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. "no_context_extracted" is the only error mapped to coverage=0, precision=1.0, auc=0.0.
+	validPath := filepath.Join(tmpDir, "valid.jsonl")
+	validContent := `{"instance_id":"task-1","error":"no_context_extracted"}
+{"instance_id":"task-2","final":{"line":{"coverage":0.75,"precision":0.5},"symbol":{"coverage":1.0,"precision":0.8},"file":{"coverage":1.0,"precision":1.0}},"trajectory":{"auc_line":0.75}}
+`
+	if err := os.WriteFile(validPath, []byte(validContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metrics, err := ParseEvaluatorOutput(validPath)
+	if err != nil {
+		t.Fatalf("ParseEvaluatorOutput(valid): %v", err)
+	}
+	if len(metrics) != 2 {
+		t.Fatalf("expected 2 metrics, got %d", len(metrics))
+	}
+	if metrics[0].LineCoverage != 0.0 || metrics[0].LinePrecision != 1.0 || metrics[0].AUCCov != 0.0 {
+		t.Errorf("unexpected no_context_extracted score: %+v", metrics[0])
+	}
+	if metrics[1].LineCoverage != 0.75 || metrics[1].LinePrecision != 0.5 || metrics[1].AUCCov != 0.75 {
+		t.Errorf("unexpected task-2 score: %+v", metrics[1])
+	}
+
+	// 2. Any other evaluator error (e.g. git_checkout_failed) must return an error.
+	badPath := filepath.Join(tmpDir, "bad.jsonl")
+	badContent := `{"instance_id":"task-1","error":"git_checkout_failed"}` + "\n"
+	if err := os.WriteFile(badPath, []byte(badContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseEvaluatorOutput(badPath); err == nil {
+		t.Fatal("expected ParseEvaluatorOutput to return an error on non-no_context_extracted error")
+	}
+}
+
+func TestAttachEvaluatedMetrics_KeyJoinAndMismatch(t *testing.T) {
+	results := []TaskResult{
+		{InstanceID: "inst-a", Arm: "K", Budget: 8192},
+		{InstanceID: "inst-b", Arm: "K", Budget: 8192},
+	}
+	idxs := []int{0, 1}
+
+	// Out-of-order evaluator rows must join by InstanceID, not line position.
+	metrics := []EvaluatedMetric{
+		{InstanceID: "inst-b", LineCoverage: 0.80, LinePrecision: 0.40, AUCCov: 0.80},
+		{InstanceID: "inst-a", LineCoverage: 0.25, LinePrecision: 0.50, AUCCov: 0.25},
+	}
+	if err := AttachEvaluatedMetrics(results, idxs, metrics); err != nil {
+		t.Fatalf("AttachEvaluatedMetrics: %v", err)
+	}
+	if results[0].LineCoverage != 0.25 || results[1].LineCoverage != 0.80 {
+		t.Fatalf("wrong key join: inst-a=%f (want 0.25), inst-b=%f (want 0.80)",
+			results[0].LineCoverage, results[1].LineCoverage)
+	}
+
+	// Row count mismatch must error.
+	if err := AttachEvaluatedMetrics(results, idxs, metrics[:1]); err == nil {
+		t.Fatal("expected error on row count mismatch")
+	}
+
+	// Missing InstanceID must error.
+	wrongID := []EvaluatedMetric{
+		{InstanceID: "inst-a", LineCoverage: 0.25},
+		{InstanceID: "inst-unknown", LineCoverage: 0.80},
+	}
+	if err := AttachEvaluatedMetrics(results, idxs, wrongID); err == nil {
+		t.Fatal("expected error on missing instance_id")
+	}
+}
+
+func TestParseLEANNOutput(t *testing.T) {
+	if _, err := parseLEANNOutput(nil); err == nil {
+		t.Fatal("expected error on empty LEANN output")
+	}
+	if _, err := parseLEANNOutput([]byte("   \n\t ")); err == nil {
+		t.Fatal("expected error on whitespace-only LEANN output")
+	}
+
+	jsonl := `{"file":"a.go","start_line":1,"end_line":10,"text":"package a","score":0.9}
+{"file":"b.go","start_line":5,"end_line":15,"text":"package b","score":0.7}
+`
+	hits, err := parseLEANNOutput([]byte(jsonl))
+	if err != nil {
+		t.Fatalf("parseLEANNOutput(jsonl): %v", err)
+	}
+	if len(hits) != 2 || hits[0].File != "a.go" || hits[1].StartLine != 5 {
+		t.Fatalf("unexpected parsed hits: %+v", hits)
+	}
+
+	arr := `[{"file":"c.go","start_line":2,"end_line":8,"text":"package c","score":0.8}]`
+	hitsArr, err := parseLEANNOutput([]byte(arr))
+	if err != nil {
+		t.Fatalf("parseLEANNOutput(array): %v", err)
+	}
+	if len(hitsArr) != 1 || hitsArr[0].File != "c.go" {
+		t.Fatalf("unexpected parsed array hits: %+v", hitsArr)
 	}
 }

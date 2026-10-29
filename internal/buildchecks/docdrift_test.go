@@ -65,7 +65,6 @@ func TestDocLinksResolve(t *testing.T) {
 	skipDir := map[string]bool{
 		".git": true, "outputs": true, "node_modules": true,
 		".venv": true, "bench_out": true, "dist": true, "vendor": true,
-		".claude": true,
 		// cmd/ken-mcp-docs embeds a COPY of docs/ for the demo binary; its
 		// relative links resolve against the embed root, not the repo, so
 		// they're not browsable links — skip the whole demo tree.

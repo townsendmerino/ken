@@ -134,9 +134,9 @@ func main() {
 
 	// Print summary table per arm & budget
 	fmt.Printf("\n=== CB1 Retrieval Summary (N=%d tasks) ===\n", len(tasks))
-	fmt.Printf("%-6s | %-6s | %-10s | %-10s | %-10s | %-10s | %-12s | %-10s\n",
-		"Arm", "Budget", "LineCov", "SymCov", "FileCov", "LinePrec", "TokensToGold", "Build(ms)")
-	fmt.Println(strings.Repeat("-", 85))
+	fmt.Printf("%-6s | %-6s | %-10s | %-10s | %-10s | %-10s | %-12s | %-9s | %-10s\n",
+		"Arm", "Budget", "LineCov", "SymCov", "FileCov", "LinePrec", "TokensToGold", "GoldFound", "Build(ms)")
+	fmt.Println(strings.Repeat("-", 98))
 
 	type key struct {
 		Arm    string
@@ -185,17 +185,20 @@ func main() {
 			if acc.goldFound > 0 {
 				avgTokGold = acc.tokensToGold / float64(acc.goldFound)
 			}
-			fmt.Printf("%-6s | %-6d | %9.4f | %9.4f | %9.4f | %9.4f | %12.1f | %9.1f\n",
+			foundStr := fmt.Sprintf("%d/%d", acc.goldFound, acc.count)
+			fmt.Printf("%-6s | %-6d | %9.4f | %9.4f | %9.4f | %9.4f | %12.1f | %9s | %9.1f\n",
 				k.Arm, k.Budget,
 				acc.lineCov/n,
 				acc.symCov/n,
 				acc.fileCov/n,
 				acc.linePrec/n,
 				avgTokGold,
+				foundStr,
 				float64(acc.buildTimeMs)/n,
 			)
 		}
 	}
+	fmt.Println("Note: TokensToGold averages over tasks where a gold line was retrieved (GoldFound; -1.0 when 0/N). PeakFootprintBytes in JSONL output is process-wide cumulative Maxrss.")
 
 	// Pairwise comparisons at 8,192 primary budget
 	fmt.Printf("\n=== Paired Bootstrap Differences (Primary Budget: 8,192 tokens) ===\n")

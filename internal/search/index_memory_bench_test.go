@@ -24,11 +24,27 @@ import (
 	"github.com/townsendmerino/ken/internal/structural"
 )
 
+func closeIfWorkspaces(v any) {
+	if wsList, ok := v.([]*engine.Workspace); ok {
+		for _, ws := range wsList {
+			if ws != nil {
+				_ = ws.Close()
+			}
+		}
+	}
+}
+
 // measureHeapDeltaStable runs build() up to 3 times and returns the minimum HeapAlloc delta.
+// Any []*engine.Workspace produced by non-retained trials is closed before the next trial
+// so watcher goroutines and heap state do not leak across trials.
 func measureHeapDeltaStable(build func() any) (uint64, any) {
 	best := uint64(math.MaxUint64)
 	var last any
 	for i := 0; i < 3; i++ {
+		if i < 2 && last != nil {
+			closeIfWorkspaces(last)
+			last = nil
+		}
 		runtime.GC()
 		debug.FreeOSMemory()
 		runtime.GC()
@@ -49,7 +65,11 @@ func measureHeapDeltaStable(build func() any) (uint64, any) {
 		}
 		if delta < best {
 			best = delta
+		}
+		if i == 2 {
 			last = obj
+		} else {
+			closeIfWorkspaces(obj)
 		}
 	}
 	return best, last
@@ -416,7 +436,7 @@ func measureSingleCorpus(t *testing.T, name, root string) CorpusMetrics {
 		SumComponents: sumComp,
 	}
 
-	t.Logf("[%s] chunks=%d files=%d | text=%.2fMB bm25(v1.70)=%.2fMB bm25(v1.74)=%.2fMB (savings=%.1f%%) vecsF32=%.2fMB flatI8=%.2fMB struct=%.2fMB modelMmap=%.2fMB | RSS=%.2fMB sum=%.2fMB",
+	t.Logf("[%s] chunks=%d files=%d | text(formula)=%.2fMB bm25(sim-v1.70.1)=%.2fMB bm25(arena)=%.2fMB (savings=%.1f%%) vecsF32(formula)=%.2fMB flatI8(formula)=%.2fMB struct(formula)=%.2fMB modelMmap=%.2fMB | cumulativeMaxRSS=%.2fMB sum=%.2fMB",
 		name, n, filesCount,
 		float64(textFormula)/(1<<20), float64(bm25V170)/(1<<20), float64(bm25Formula)/(1<<20),
 		(1.0-float64(bm25Formula)/float64(bm25V170))*100,

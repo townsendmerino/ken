@@ -129,9 +129,12 @@ func ParseEvaluatorOutput(outPath string) ([]EvaluatedMetric, error) {
 
 		// Handle no_context_extracted edge case (0 hits returned by arm):
 		// evaluate.py outputs error: "no_context_extracted".
-		// Per §4.1 / K18 brief, score as:
+		// Per §4.1 / K18 brief, score ONLY "no_context_extracted" as:
 		// coverage = 0.0, precision = 1.0, auc = 0.0 to preserve denominator N.
-		if raw.Error == "no_context_extracted" || (raw.Error != "" && raw.Final.Line.Coverage == 0) {
+		// Any other non-empty error string from evaluate.py (e.g. missing repo,
+		// checkout failure, malformed prediction) is a real evaluation failure
+		// and must not be silently converted into a valid 0-coverage score.
+		if raw.Error == "no_context_extracted" {
 			results = append(results, EvaluatedMetric{
 				InstanceID:     instID,
 				LineCoverage:   0.0,
@@ -143,6 +146,9 @@ func ParseEvaluatorOutput(outPath string) ([]EvaluatedMetric, error) {
 				Error:          raw.Error,
 			})
 			continue
+		}
+		if raw.Error != "" {
+			return nil, fmt.Errorf("evaluate.py error for instance %q: %s", instID, raw.Error)
 		}
 
 		results = append(results, EvaluatedMetric{
