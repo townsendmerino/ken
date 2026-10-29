@@ -171,6 +171,7 @@ func RunBatch(ctx context.Context, cfg RunnerConfig, tasks []Task) ([]TaskResult
 	var allTrajRecords []TrajRecord
 
 	for taskIdx, task := range tasks {
+		fmt.Printf("  [%d/%d] Running %s (%s, %s)...\n", taskIdx+1, len(tasks), task.InstanceID, task.Repo, task.Language)
 		cachedRepo, err := ResolveRepoPath(cfg.RepoCache, task.Repo, task.RepoURL)
 		if err != nil {
 			return nil, fmt.Errorf("task %s (%s): %w", task.InstanceID, task.Repo, err)

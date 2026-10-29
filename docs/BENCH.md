@@ -724,3 +724,85 @@ Provenance (all harnesses):
 
 - `bench/internal/provenance/` (build tag `bench`) — the shared block builder; `schema_test.go` pins `run_ken.py`'s copy to it.
 - `make vet-bench` — vets the bench tree and runs the provenance + schema tests. A CI step.
+
+## ContextBench CB1 benchmark (agent context retrieval)
+
+[ContextBench](https://github.com/ContextBench/Context-Bench) (Li et al., 2026) measures context retrieval for coding agents across issue-resolution tasks with human-annotated gold context line spans. **CB1** is the pure retrieval-only track: evaluating how well code-search engines retrieve relevant context without an LLM in the loop, under fixed token budgets (2,048, 8,192 primary, 16,384 tokens counted via `cl100k_base`).
+
+The harness (`bench/contextbench/`, `//go:build bench`) implements:
+- **`G`**: Tokenized grep baseline (extracts identifiers from issue statement, ranks files by distinct matches, files packed top-down).
+- **`B`**: ken BM25 mode (regex chunker).
+- **`K`**: ken default hybrid search (`Flat` ANN + Model2Vec + BM25, regex chunker).
+- **`KT`**: ken hybrid with the tree-sitter chunker.
+- External adapters for LEANN (`L1`, `L2`).
+
+### S53 results (53 SWE-bench Pro tasks committed in LEANN benchmark)
+
+The `S53` subset comprises the 53 SWE-bench Pro issue-resolution tasks across 7 repositories (`ansible/ansible`, `internetarchive/openlibrary`, `qutebrowser/qutebrowser`, `flipt-io/flipt`, `NodeBB/NodeBB`, `element-hq/element-web`, `future-architect/vuls`) and 3 languages (Python, Go, JavaScript/TypeScript).
+
+Evaluated with ContextBench's official `evaluate.py` via `bench/contextbench/cmd/cb -slice=S53`:
+
+| Arm | Budget | Line Coverage | Symbol Coverage | File Coverage | Line Precision | Tokens to Gold Line | Build Time (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **G** (grep) | 2,048 | 0.0067 | 0.0000 | 0.0244 | 0.0007 | 0.0 | 0.0 |
+| **G** (grep) | 8,192 | 0.0071 | 0.0000 | 0.0251 | 0.0010 | 898.6 | 0.0 |
+| **G** (grep) | 16,384 | 0.0200 | 0.0087 | 0.0400 | 0.0053 | 5,140.5 | 0.0 |
+| **B** (bm25) | 2,048 | 0.0780 | 0.0967 | 0.2152 | 0.1244 | 537.6 | 1,231.3 |
+| **B** (bm25) | 8,192 | 0.1406 | 0.1565 | 0.2853 | 0.0649 | 1,603.2 | 1,231.3 |
+| **B** (bm25) | 16,384 | 0.1863 | 0.1996 | 0.3400 | 0.0443 | 2,541.8 | 1,231.3 |
+| **K** (hybrid) | 2,048 | 0.0892 | 0.1262 | 0.2890 | 0.1337 | 487.6 | 1,497.8 |
+| **K** (hybrid) | 8,192 | **0.1686** | **0.2124** | **0.5209** | **0.0700** | **960.8** | 1,497.8 |
+| **K** (hybrid) | 16,384 | 0.2305 | 0.2833 | 0.6186 | 0.0467 | 1,797.5 | 1,497.8 |
+| **KT** (treesitter) | 2,048 | 0.0881 | 0.1545 | 0.2823 | 0.1319 | 408.0 | 2,977.9 |
+| **KT** (treesitter) | 8,192 | **0.1653** | **0.2539** | **0.5153** | **0.0691** | **924.6** | 2,977.9 |
+| **KT** (treesitter) | 16,384 | 0.2054 | 0.2958 | 0.5925 | 0.0437 | 1,144.3 | 2,977.9 |
+
+### Paired bootstrap differences (Primary budget: 8,192 tokens, 10,000 resamples, seed 42)
+
+| Comparison | Metric | Budget | Mean Delta (A − B) | 95% Bootstrap CI | N Tasks |
+|---|---|---:|---:|---|---:|
+| K − B | line_coverage | 8192 | +0.0280 | [-0.0225, +0.0782] | 53 |
+| KT − K | line_coverage | 8192 | -0.0033 | [-0.0198, +0.0113] | 53 |
+| K − G | line_coverage | 8192 | +0.1615 | [+0.1182, +0.2074] | 53 |
+
+### Breakdown by language at 8,192 tokens
+
+| Language | Tasks | Arm G (Line / File / Sym) | Arm B (Line / File / Sym) | Arm K (Line / File / Sym) | Arm KT (Line / File / Sym) |
+|---|---:|---|---|---|---|
+| **Go** | 6 | 0.0060 / 0.0198 / 0.0000 | 0.0879 / 0.1109 / 0.0784 | **0.3036** / **0.5578** / 0.4472 | **0.3125** / 0.5568 / **0.5096** |
+| **JavaScript** | 4 | 0.0012 / 0.0139 / 0.0000 | 0.0030 / 0.0723 / 0.0000 | **0.0990** / **0.3088** / 0.0639 | **0.1061** / 0.2861 / **0.1164** |
+| **Python** | 43 | 0.0078 / 0.0269 / 0.0000 | 0.1607 / 0.3295 / 0.1819 | 0.1562 / **0.5354** / 0.1935 | 0.1503 / 0.5309 / **0.2310** |
+
+### Key takeaways
+
+1. **File Coverage & Recall Advantage**: At 8,192 tokens, default hybrid `K` achieves **52.1% file coverage** vs **28.5% for BM25** (an 83% relative increase in retrieving the relevant files). The gold line is reached in **960.8 tokens** on average for `K` vs **1,603.2 tokens** for BM25.
+2. **Structural Chunking**: Tree-sitter chunking (`KT`) substantially improves **symbol/block coverage** (+4.15% overall, +6.24% in Go, +5.25% in JS, +3.75% in Python), while line coverage is essentially indistinguishable from regex chunking (−0.33%).
+3. **Grep Baseline**: Whole-file grep severely exhausts token budgets on multi-thousand line files, resulting in only 0.71% line coverage at 8k tokens.
+
+### Provenance block
+
+```json
+{
+  "harness": "bench/contextbench",
+  "captured_at": "2026-10-29T00:56:25Z",
+  "ken": {
+    "version": "v1.12.0",
+    "commit": "574b7d9121d7fceb702d8058809a3189fe8dfe75",
+    "go_version": "go1.27.3",
+    "goos": "darwin",
+    "goarch": "arm64",
+    "gomaxprocs": 8,
+    "deps": {
+      "github.com/odvcencio/gotreesitter": "v0.56.0",
+      "github.com/pkoukk/tiktoken-go": "v0.1.8",
+      "github.com/townsendmerino/aikit": "v1.74.0",
+      "github.com/townsendmerino/aikit/chunk/treesitter": "v1.2.0"
+    }
+  },
+  "corpora": [],
+  "config": {
+    "alpha_symbol": 0.3,
+    "alpha_nl": 0.5
+  }
+}
+```
