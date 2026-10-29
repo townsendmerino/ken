@@ -13,12 +13,14 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
-## [1.12.0] — 2026-10-28 — aikit v1.74.0, index memory composition (K16), drop retained f32 vectors (K17), ContextBench harness (K18)
+## [1.12.0] — 2026-10-28 — ~80% dense memory reduction (K17), BM25 arena (aikit v1.74.0), and ContextBench harness (K18)
 
-K16–K18 for tack's context and memory brief (`docs/briefs/ken-k16-k18-contextbench-memory.md`):
-aikit bump to v1.74.0, exact index memory composition harness, dropping retained f32 vectors
-from `WatchedIndex` with on-demand bit-identical recompute (ADR-049), and pure-Go ContextBench
-CB1 retrieval harness (`bench/contextbench/`).
+**ken v1.12.0** brings dramatic memory reductions across large codebases, deterministic bit-identical vector recomputation, and a pure-Go ContextBench benchmark suite:
+
+- **~80% Dense Memory Reduction on Watched Indexes (ADR-049)**: Long-lived watcher processes no longer hoard 1,024 B/chunk of `f32` vectors in heap. Incremental edits quantize directly into the active dense store (`FlatI8` or `FlatBinaryI8`), and full-precision vectors are recomputed deterministically on-demand from chunk text via Model2Vec table lookups (bit-identical down to the last float bit). With `KEN_ANN=flat-i8`, dense memory drops from 1,308 B down to **260 B/chunk** (saving ~207 MB on `goinfer` and ~612 MB at Linux-kernel scale).
+- **BM25 Postings Arena (aikit v1.74.0)**: Contiguous postings memory cuts BM25 heap usage by **17.0% to 23.5%** across all measured corpora, and multi-workspace processes now share a single zero-copy mmap of Model2Vec embeddings (`MmapModel: true`).
+- **ContextBench CB1 Retrieval Harness (`bench/contextbench/`)**: Pure-Go benchmark suite to measure coding agent retrieval against real-world SWE-bench tasks under token budgets (2,048, 8,192, 16,384 tokens) with paired bootstrap confidence intervals and zero vendored external code.
+- **Index Memory Composition (`K16`)**: Analytic and measured memory harness tracking exact allocations across all 8 index components within 5% precision.
 
 ### Added
 
