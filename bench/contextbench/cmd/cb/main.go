@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -48,6 +49,7 @@ func main() {
 	resume := flag.Bool("resume", false, "Run task by task, appending each task's records to -out and skipping tasks already complete there")
 	evalCheckout := flag.Bool("evaluator-checkout", false, "With -resume: check each task out through the evaluator's own checkout first (fills the cache), and remove the worktree after")
 	errPath := flag.String("errors", "", "With -resume: JSONL file for failed tasks (default <out>.errors.jsonl)")
+	breakdown := flag.Bool("breakdown", false, "Also print per-language, per-source and per-repository tables at 8,192 tokens")
 	var provExtra kvFlag
 	flag.Var(&provExtra, "prov", "key=value recorded in every result's provenance block (repeatable)")
 
@@ -264,6 +266,10 @@ func main() {
 	}
 
 	fmt.Println(contextbench.FormatComparisonTable(comparisons))
+
+	if *breakdown {
+		printBreakdowns(results, arms, comparisons)
+	}
 }
 
 // kvFlag collects repeated key=value flags.
@@ -281,4 +287,89 @@ func (k *kvFlag) Set(v string) error {
 	}
 	(*k)[key] = val
 	return nil
+}
+
+// printBreakdowns prints mean line/file/symbol coverage per arm at the primary
+// budget, grouped by language, source and repository, and the paired
+// comparisons' intervals by language and source.
+func printBreakdowns(results []contextbench.TaskResult, arms []contextbench.Arm, comparisons []contextbench.PairComparison) {
+	groups := []struct {
+		name string
+		key  func(contextbench.TaskResult) string
+	}{
+		{"language", func(r contextbench.TaskResult) string { return r.Language }},
+		{"source", func(r contextbench.TaskResult) string { return r.Source }},
+		{"repository", func(r contextbench.TaskResult) string { return r.Repo }},
+	}
+	type acc struct {
+		line, file, sym float64
+		n               int
+	}
+	for _, g := range groups {
+		cells := map[string]map[string]*acc{}
+		var keys []string
+		for _, r := range results {
+			if r.Budget != contextbench.Budget8K {
+				continue
+			}
+			k := g.key(r)
+			if cells[k] == nil {
+				cells[k] = map[string]*acc{}
+				keys = append(keys, k)
+			}
+			a := cells[k][r.Arm]
+			if a == nil {
+				a = &acc{}
+				cells[k][r.Arm] = a
+			}
+			a.line += r.LineCoverage
+			a.file += r.FileCoverage
+			a.sym += r.SymbolCoverage
+			a.n++
+		}
+		sort.Strings(keys)
+		fmt.Printf("\n=== By %s at 8,192 tokens (Line / File / Sym) ===\n", g.name)
+		fmt.Printf("| %s | Tasks |", g.name)
+		for _, a := range arms {
+			fmt.Printf(" %s |", a.Name())
+		}
+		fmt.Printf("\n|---|---:|%s\n", strings.Repeat("---|", len(arms)))
+		for _, k := range keys {
+			n := 0
+			for _, a := range cells[k] {
+				n = a.n
+				break
+			}
+			fmt.Printf("| %s | %d |", k, n)
+			for _, arm := range arms {
+				a := cells[k][arm.Name()]
+				if a == nil || a.n == 0 {
+					fmt.Printf(" — |")
+					continue
+				}
+				d := float64(a.n)
+				fmt.Printf(" %.4f / %.4f / %.4f |", a.line/d, a.file/d, a.sym/d)
+			}
+			fmt.Println()
+		}
+	}
+	for _, c := range comparisons {
+		for _, part := range []struct {
+			name string
+			m    map[string]contextbench.BootstrapCI
+		}{{"language", c.ByLanguage}, {"source", c.BySource}} {
+			var keys []string
+			for k := range part.m {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			fmt.Printf("\n=== %s − %s line_coverage at 8,192 by %s ===\n", c.ArmA, c.ArmB, part.name)
+			fmt.Println("| group | N | Mean delta | 95% CI |")
+			fmt.Println("|---|---:|---:|---|")
+			for _, k := range keys {
+				ci := part.m[k]
+				fmt.Printf("| %s | %d | %+.4f | [%+.4f, %+.4f] |\n", k, ci.N, ci.Mean, ci.Low, ci.High)
+			}
+		}
+	}
 }
