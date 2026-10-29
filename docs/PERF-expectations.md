@@ -185,21 +185,21 @@ as both an exact byte formula from live data structures (Tier 0) and measured he
 - FlatBinaryI8: Formula 2.92 MB, Measured 2.93 MB (diff: 0.45%)
 - Structural index: Formula 304.8 KB, Measured 301.6 KB (diff: 1.04%)
 
-**aikit bump savings on BM25 postings arena (v1.70.1 vs v1.74.0):**
-The `v1.71.0+` postings arena flattened per-term posting slices into a contiguous arena, eliminating slice headers and append slack:
+**BM25 postings arena savings (`aikit v1.71.0+` arena vs simulated `v1.70.1` per-term slices):**
+The `aikit v1.71.0` postings arena (already present in `ken` via `36575ba`; the `v1.71.0 → v1.74.0` pin bump in `6ff2098` did not modify `bm25`, `ann`, `embed`, or `chunk`) flattened per-term posting slices into a contiguous arena, eliminating per-term slice headers and append growth slack. The table below compares current `bm25.Build` (`FormulaBM25`) against a **simulated** `v1.70.1` layout (`simulateBM25V170` in `internal/search/index_memory_bench_test.go`, modeling per-term slice headers, `append` capacity slack, and term-map overhead rather than building against an `aikit v1.70.1` checkout):
 
-| Corpus | Files | Chunks | BM25 pre-bump (v1.70.1) | BM25 post-bump (v1.74.0) | BM25 Savings |
+| Corpus | Files | Chunks | BM25 pre-arena (`v1.70.1`, simulated) | BM25 arena (`v1.71.0+` / `v1.74.0`, formula) | BM25 Savings |
 |---|---:|---:|---:|---:|---:|
 | tack | 303 | 2,003 | 2.87 MB | 2.20 MB | **−23.5%** |
 | ken | 465 | 4,276 | 6.11 MB | 4.73 MB | **−22.6%** |
 | aikit | 1,104 | 8,582 | 11.84 MB | 9.28 MB | **−21.6%** |
 | goinfer | 25,468 | 197,926 | 205.91 MB | 170.96 MB | **−17.0%** (−34.95 MB) |
 | all 4 combined | 27,340 | 212,787 | 226.73 MB | 187.17 MB | **−17.4%** (−39.56 MB) |
-| Linux kernel (584k) | — | — | *absent* | *absent* | *(skipped)* |
+| Linux kernel (584k) | — | — | *not measured* | *not measured* | *(skipped)* |
 
 **Full component breakdown by corpus (aikit v1.74.0, hybrid mode with Flat):**
 
-| Corpus | Chunks | Chunk Text | BM25 | Retained f32 vecs | FlatI8 | FlatBinaryI8 | Structural | Model2Vec (mmap) | Model2Vec (heap) | Component Sum | Peak RSS |
+| Corpus | Chunks | Chunk Text (formula) | BM25 (formula) | Retained f32 vecs (formula) | FlatI8 (formula) | FlatBinaryI8 (formula) | Structural (formula) | Model2Vec (mmap heap) | Model2Vec (heap load) | Component Sum | Cumulative MaxRSS |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | tack | 2,003 | 2.27 MB | 2.20 MB | 2.00 MB | 0.50 MB | 0.56 MB | 2.15 MB | 3.90 MB | 3.87 MB | 12.51 MB | 606.92 MB |
 | ken | 4,276 | 4.68 MB | 4.73 MB | 4.27 MB | 1.06 MB | 1.19 MB | 3.48 MB | 3.90 MB | 3.90 MB | 21.07 MB | 960.17 MB |
@@ -207,28 +207,31 @@ The `v1.71.0+` postings arena flattened per-term posting slices into a contiguou
 | goinfer | 197,926 | 300.48 MB | 170.96 MB | 197.82 MB | 49.08 MB | 55.12 MB | 107.13 MB | 3.87 MB | 3.90 MB | 780.25 MB | 4,236.20 MB |
 | all 4 (1 proc) | 212,787 | 317.84 MB | 187.17 MB | 212.67 MB | 52.77 MB | 59.26 MB | 119.77 MB | 3.90 MB | 15.57 MB | 841.35 MB | 5,622.61 MB |
 
-> **tack K7 multi-workspace confirmation:** opening all 4 workspaces in one process via `engine.Open` with `MmapModel: true`
-> confirmed that all 4 workspaces share a single page-cached mapping of `model.safetensors` (paying 0 duplicate heap copies).
-> Under `MmapModel: false`, 4 workspaces would hold 4 separate heap copies (15.57 MB heap).
+> **Measurement notes:**
+> - **Formula vs measured columns:** On each corpus, `Chunk Text`, `BM25`, `Retained f32 vecs`, `FlatI8`, `FlatBinaryI8`, and `Structural` report the Tier-0 byte formulas (`FormulaChunkText`, `FormulaBM25`, `N × 1,048 B`, `FormulaFlatI8`, `FormulaFlatBinaryI8`, `FormulaStructural`), which are calibrated within 5% against single-component `HeapAlloc` deltas in `TestMemoryCompositionSynthetic` above.
+> - **`Cumulative MaxRSS`:** Reported via `syscall.Getrusage(RUSAGE_SELF).Maxrss` inside a single sequential test process (`tack` → `ken` → `aikit` → `goinfer` → `all 4`), so each row reflects the process high-water mark up to that point (including temporary tree-sitter parser arenas during `structural.Build`), not an isolated per-corpus process RSS.
+> - **Multi-workspace `MmapModel: true` (`tack` K7):** With `MmapModel: true` (ADR-045), `model.safetensors` (~60 MB) is memory-mapped rather than read onto the Go heap; only the ~3.90 MB tokenizer/mapping metadata lives in `HeapAlloc`, and the OS kernel shares the read-only file-backed physical pages across mappings in the process (OS page-cache sharing is a kernel virtual-memory property, not directly visible in `runtime.MemStats.HeapAlloc`).
 
 ### K17: Dropping retained f32 vectors from WatchedIndex (measured 2026-10-28)
 
 Prior to K17, `WatchedIndex` retained `vecs [][]float32` (1,048 B/chunk) so that incremental flushes could append and compact.
-When `KEN_ANN=flat-i8` was enabled, the quantized store was added *on top* of `vecs`, causing dense memory to cost ~1,284 B/chunk instead of shrinking (ADR-043 guardrail).
+When `KEN_ANN=flat-i8` was enabled, the quantized store was added *on top* of `vecs`, causing dense memory to cost 1,308 B/chunk (`1,048 B` retained `f32` + `260 B` `FlatI8`) instead of shrinking (ADR-043 guardrail).
 
-With K17 (ADR-049), `WatchedIndex` holds only the active `denseStore` (`flatStore`, `flatI8Store`, or `flatBinaryI8Store`).
-Incremental appends quantize directly into the dense store; compactions drop quantized rows in-place.
-When full-precision `f32` vectors are needed (e.g. for `.ken/snapshot.bin` serialization or Centroids), they are recomputed deterministically on demand from `Chunk.Text` via Model2Vec's bit-identical `f64` accumulation.
+With K17 (ADR-049), `WatchedIndex` holds only the active `denseStore` (`flatStore`, `flatI8Store`, or `flatBinaryI8Store`):
+- Incremental appends quantize directly into the dense store; compactions drop rows in place.
+- `(*WatchedIndex).SnapshotBytes()` streams rows directly from the active `denseStore` via `WriteRowF32` (exact `f32` rows for `Flat`; dequantized `int8 × scale` rows for `FlatI8`/`FlatBinaryI8`, which re-quantize to the identical `int8` codes on snapshot reload) with **0 `model.Encode` calls** and no duplicate `[][]float32` allocation (`TestK17_SnapshotBytes_NoReEncode`).
+- `(*Index).Vecs()` returns the stored `[][]float32` directly under `Flat` and recomputes exact `f32` vectors deterministically on demand from `Chunk.Text` via Model2Vec's bit-identical `f64` accumulation when called on a quantized index (`TestK17_Gate1_RecomputeBitIdentity`).
+- Under `KEN_ANN=flat-binary-i8`, `flatBinaryI8Store.Append` and `Compact` retain the initial build's 1-bit centering vector (`pf.center`) so watcher flushes do not repack all `N` existing 1-bit rows; if a corpus shifts heavily across many flushes, 1-bit prefilter candidates can drift slightly relative to a fresh build until the next full rebuild or snapshot load.
 
-**Dense-side resident bytes per chunk on WatchedIndex:**
+**Dense-side resident bytes per chunk on WatchedIndex (formula + Gate 4 `N=10,000` heap verification):**
 
-| Config | Dense Representation | Pre-K17 Bytes/Chunk | Post-K17 Bytes/Chunk | Delta | Goinfer Savings (198k chunks) |
+| Config | Dense Representation | Pre-K17 Bytes/Chunk | Post-K17 Bytes/Chunk | Delta | Goinfer Savings (197,926 chunks, formula) |
 |---|---|---:|---:|---:|---:|
-| Default (`Flat`) | `ann.Flat` (f32) | 1,048 B | 1,024 B | −24 B (−2.3%) | −4.7 MB |
-| `KEN_ANN=flat-i8` | `ann.FlatI8` (int8 + scales) | 1,308 B | **260 B** | **−1,048 B (−80.1%)** | **−207.4 MB** |
-| `KEN_ANN=flat-binary-i8` | `ann.FlatBinaryI8` (1-bit + int8) | 1,340 B | **292 B** | **−1,048 B (−78.2%)** | **−207.4 MB** |
+| Default (`Flat`) | `ann.Flat` (`[][]float32`) | 1,048 B | 1,048 B | 0 B (0%) | 0 MB (single `[][]float32` in `ann.Flat`) |
+| `KEN_ANN=flat-i8` | `ann.FlatI8` (`int8` + `f32` scales) | 1,308 B (`1,309.1 B` heap) | **260 B** (`260.6 B` heap) | **−1,048 B (−80.1%)** | **−207.4 MB** (−197.8 MiB) |
+| `KEN_ANN=flat-binary-i8` | `ann.FlatBinaryI8` (1-bit + `int8`) | 1,340 B | **292 B** | **−1,048 B (−78.2%)** | **−207.4 MB** (−197.8 MiB) |
 
-At 584,019-chunk Linux kernel scale, selecting `KEN_ANN=flat-i8` on `WatchedIndex` drops dense memory from **~764 MB to ~152 MB** (saving **~612 MB**).
+At 584,019-chunk Linux kernel scale, the per-chunk formula projects that selecting `KEN_ANN=flat-i8` on `WatchedIndex` drops dense-store memory from **~763.9 MB to ~151.8 MB** (saving **~612.1 MB** decimal / **~583.8 MiB**; formula projection from `584,019 × 1,308 B` vs `260 B`, not measured in a live kernel run during K16/K17).
 
 **Resident memory at steady state** (after `Build` settles, before
 queries):

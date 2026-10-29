@@ -17,10 +17,10 @@ pre-built binaries.
 
 **ken v1.12.0** is mostly about memory in long-running processes (`ken-mcp`, `ken index --watch`, `engine.Open`), plus two measurement harnesses. There are no CLI, MCP tool, or public API changes, and the on-disk snapshot format is unchanged.
 
-- **~80% Less Dense Memory with Quantized Retrievers on Watched Indexes (ADR-049)**: Watched indexes no longer keep a 1,048 B/chunk `f32` copy of every vector beside the dense store. Incremental edits quantize directly into the active dense store, and full-precision vectors are recomputed on demand from chunk text via Model2Vec (bit-identical to the index-time vectors). With `KEN_ANN=flat-i8`, dense memory drops from 1,308 B to **260 B/chunk** (~207 MB less on `goinfer`, ~612 MB less at Linux-kernel scale). The default `Flat` retriever changes only slightly (1,048 → 1,024 B/chunk, −2.3%).
-- **BM25 Postings Arena (aikit v1.74.0)**: Contiguous postings memory cuts BM25 heap usage by **17.0% to 23.5%** across all measured corpora, with no configuration needed.
+- **~80% Less Dense Memory with Quantized Retrievers on Watched Indexes (ADR-049)**: Watched indexes no longer keep a duplicate 1,048 B/chunk `f32` copy of every vector beside a quantized dense store. Incremental edits quantize directly into the active dense store, `SnapshotBytes()` streams directly from the dense store with zero `model.Encode` calls, and full-precision `f32` vectors are recomputed on demand from chunk text via Model2Vec when requested on a quantized store (bit-identical to the index-time vectors). With `KEN_ANN=flat-i8`, dense memory drops from 1,308 B to **260 B/chunk** (formula-projected ~207 MB / ~198 MiB less on `goinfer`, ~612 MB less at 584k Linux-kernel scale). The default `Flat` retriever keeps its single `[][]float32` store inside `ann.Flat` (1,048 B/chunk).
+- **BM25 Postings Arena Measurement (`K16`, `aikit v1.71.0+` / `v1.74.0`)**: Quantified that the `aikit v1.71.0+` contiguous postings arena cuts BM25 memory by **17.0% to 23.5%** across measured corpora compared against a simulated pre-`v1.71.0` (`v1.70.1`) per-term slice layout.
 - **ContextBench CB1 Retrieval Harness (`bench/contextbench/`)**: Pure-Go benchmark suite to measure coding agent retrieval against real-world SWE-bench tasks under token budgets (2,048, 8,192, 16,384 tokens) with paired bootstrap confidence intervals and zero vendored external code.
-- **Index Memory Composition (`K16`)**: Analytic and measured memory harness tracking exact allocations across all 8 index components within 5% precision.
+- **Index Memory Composition (`K16`)**: Analytic and measured memory harness tracking allocations across index components within 5% on the synthetic calibration gate.
 
 ### Added
 
@@ -45,15 +45,15 @@ pre-built binaries.
 
 ### Changed
 
-- **Drop retained f32 vectors from `WatchedIndex` (`K17`, ADR-049)**: `WatchedIndex` no longer retains
-  `vecs [][]float32` (1,048 B/chunk). Dense representations (`flatStore`, `flatI8Store`, `flatBinaryI8Store`)
-  quantize appends directly and compact rows in place. When full-precision `f32` vectors are needed, they are
+- **Drop retained f32 vectors from `WatchedIndex` (`K17`, ADR-049)**: `WatchedIndex` no longer retains a duplicate
+  `vecs [][]float32` (1,048 B/chunk) alongside quantized retrievers. Dense representations (`flatStore`, `flatI8Store`, `flatBinaryI8Store`)
+  quantize appends directly, compact rows in place, and stream `SnapshotBytes()` rows without re-encoding. When full-precision `f32` vectors are requested via `Vecs()` on a quantized index, they are
   recomputed deterministically on demand from `Chunk.Text` via Model2Vec's bit-identical `f64` accumulation.
-  - Under `KEN_ANN=flat-i8`, dense memory drops from 1,308 B/chunk down to **260 B/chunk** (saving 1,048 B/chunk or ~80% of dense memory, ~207 MB on goinfer, ~612 MB at 584k kernel scale).
-  - Under the default `Flat` retriever the change is small: 1,048 → 1,024 B/chunk (−2.3%).
-  - All 4 pre-registered red-first gates passed (bit-identity byte-for-byte, ranking parity, republish latency 50ms, memory bound ≤300 B/chunk).
-- **Bump `aikit` to `v1.74.0`**:
-  - BM25 postings arena reduces BM25 index memory by **17.0% to 23.5%** across repos.
+  - Under `KEN_ANN=flat-i8`, dense memory drops from 1,308 B/chunk down to **260 B/chunk** (saving 1,048 B/chunk or ~80% of dense memory; formula-projected ~207 MB decimal / ~198 MiB on `goinfer` and ~612 MB at 584k kernel scale).
+  - Under the default `Flat` retriever, `ann.Flat` retains its single `[][]float32` store (1,048 B/chunk).
+  - All 4 pre-registered red-first gates and the zero-re-encode snapshot gate passed (`internal/search/k17_gates_test.go`).
+- **Bump `aikit` to `v1.74.0` and quantify `v1.71.0+` BM25 postings arena savings (`K16`)**:
+  - Compared against a simulated `v1.70.1` per-term slice layout, the `v1.71.0+` BM25 postings arena reduces BM25 index memory by **17.0% to 23.5%** across measured repos.
 
 ## [1.11.0] — 2026-10-22 — `engine`: structural spans, SymbolAt, Refresh, qualified names, TestsFor
 

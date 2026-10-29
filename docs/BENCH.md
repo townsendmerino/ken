@@ -757,6 +757,11 @@ Evaluated with ContextBench's official `evaluate.py` via `bench/contextbench/cmd
 | **KT** (treesitter) | 8,192 | **0.1653** | **0.2539** | **0.5153** | **0.0691** | **924.6** | 2,977.9 |
 | **KT** (treesitter) | 16,384 | 0.2054 | 0.2958 | 0.5925 | 0.0437 | 1,144.3 | 2,977.9 |
 
+> **Metric notes:**
+> - **`Tokens to Gold Line` is conditional on retrieving a gold line:** it averages `TokensToFirstGoldLine` over tasks where at least one gold line was packed within the budget (`TokensToFirstGoldLine >= 0`; `cmd/cb` prints `GoldFound` `found/N` beside `TokensToGold`). Because an arm that retrieves gold on more tasks includes harder, deeper-ranked hits in its average (while `G` at 2,048 tokens matched a gold line on only 1 of 53 tasks at offset `0.0`), always read `Tokens to Gold Line` alongside `Line Coverage` / `File Coverage`.
+> - **`AUCCov` in CB1 JSONL output:** because CB1 is single-turn retrieval (each task emits one `traj_data` step containing the budget-packed chunks), `evaluate.py`'s trajectory `auc_line` equals final `line_coverage`.
+> - **`PeakFootprintBytes` in JSONL output:** reports `syscall.Getrusage(RUSAGE_SELF).Maxrss`, which is the process-wide cumulative high-water mark across tasks/arms in the batch run rather than per-task isolated RSS.
+
 ### Paired bootstrap differences (Primary budget: 8,192 tokens, 10,000 resamples, seed 42)
 
 | Comparison | Metric | Budget | Mean Delta (A − B) | 95% Bootstrap CI | N Tasks |
@@ -775,7 +780,7 @@ Evaluated with ContextBench's official `evaluate.py` via `bench/contextbench/cmd
 
 ### Key takeaways
 
-1. **File Coverage & Recall Advantage**: At 8,192 tokens, default hybrid `K` achieves **52.1% file coverage** vs **28.5% for BM25** (an 83% relative increase in retrieving the relevant files). The gold line is reached in **960.8 tokens** on average for `K` vs **1,603.2 tokens** for BM25.
+1. **File Coverage & Recall Advantage**: At 8,192 tokens, default hybrid `K` achieves **52.1% file coverage** vs **28.5% for BM25** (an 83% relative increase in retrieving the relevant files). Among tasks where a gold line was retrieved, the first gold line is reached in **960.8 tokens** on average for `K` vs **1,603.2 tokens** for BM25.
 2. **Structural Chunking**: Tree-sitter chunking (`KT`) substantially improves **symbol/block coverage** (+4.15% overall, +6.24% in Go, +5.25% in JS, +3.75% in Python), while line coverage is essentially indistinguishable from regex chunking (−0.33%).
 3. **Grep Baseline**: Whole-file grep severely exhausts token budgets on multi-thousand line files, resulting in only 0.71% line coverage at 8k tokens.
 
