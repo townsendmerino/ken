@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/townsendmerino/ken/bench/contextbench"
+	"github.com/townsendmerino/ken/internal/structural"
 )
 
 func defaultPath(sub ...string) string {
@@ -119,6 +120,13 @@ func main() {
 		Arms:            arms,
 		Evaluate:        *runEval,
 		ProvenanceExtra: provExtra,
+	}
+
+	if b := os.Getenv("KEN_ENRICH_FILE_BUDGET_MS"); b != "" {
+		fmt.Printf("Enrichment parse budget: KEN_ENRICH_FILE_BUDGET_MS=%s (skips are logged and counted per record)\n", b)
+		structural.SetParseBudgetLogf(func(path string, d time.Duration) {
+			fmt.Printf("    parse-budget skip: %s (%v)\n", path, d.Round(time.Millisecond))
+		})
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
