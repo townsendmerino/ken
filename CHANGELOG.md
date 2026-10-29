@@ -13,6 +13,43 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [1.12.0] — 2026-10-28 — aikit v1.74.0, index memory composition (K16), drop retained f32 vectors (K17), ContextBench harness (K18)
+
+K16–K18 for tack's context and memory brief (`docs/briefs/ken-k16-k18-contextbench-memory.md`):
+aikit bump to v1.74.0, exact index memory composition harness, dropping retained f32 vectors
+from `WatchedIndex` with on-demand bit-identical recompute (ADR-049), and pure-Go ContextBench
+CB1 retrieval harness (`bench/contextbench/`).
+
+### Added
+
+- **ContextBench retrieval benchmark harness (`K18`)**: Pure-Go CB1 retrieval-only harness under
+  `bench/contextbench/` (`//go:build bench`), runnable via CLI (`bench/contextbench/cmd/cb`).
+  - Supports arms `G` (tokenized grep), `B` (ken BM25), `K` (ken hybrid default), `KT` (ken hybrid with tree-sitter chunker), and external `L1`/`L2` adapters.
+  - Token budget packing with `cl100k_base` across 2,048, 8,192 (primary), and 16,384 tokens with the top-chunk-always-kept rule.
+  - Trajectory emitter producing generic ContextBench `traj_data` JSONL and invoking ContextBench's external `evaluate.py`.
+  - Direct tokens-to-first-gold-line computation and paired bootstrap 95% confidence intervals (10,000 resamples, deterministic seed 42) for macro and stratified comparisons.
+  - Pre-registered Tier-0 unit tests (`budget_test.go`, `gold_test.go`, `determinism_test.go`) proven red first.
+  - Strict license isolation: zero ContextBench or LEANN code/data vendored into ken.
+- **Index memory composition harness (`K16`)**: `-tags=bench` harness in `internal/search/index_memory.go`
+  and `internal/search/index_memory_bench_test.go`.
+  - Tier-0 exact formula calculators for all index components (chunk text, BM25, retained f32 vectors, FlatI8, FlatBinaryI8, structural, Model2Vec mmap/heap).
+  - Calibration test verifying formulas against single-component heap deltas within 5% on 10k-chunk synthetic fixture.
+  - Empirical component measurements across 6 real corpora recorded in `docs/PERF-expectations.md`.
+- **Pluggable `denseStore` (`K17`)**: `internal/search/dense_store.go` providing `flatStore`, `flatI8Store`,
+  and `flatBinaryI8Store` with zero-copy row appends and compactions.
+
+### Changed
+
+- **Drop retained f32 vectors from `WatchedIndex` (`K17`, ADR-049)**: `WatchedIndex` no longer retains
+  `vecs [][]float32` (1,048 B/chunk). Dense representations (`flatStore`, `flatI8Store`, `flatBinaryI8Store`)
+  quantize appends directly and compact rows in place. When full-precision `f32` vectors are needed, they are
+  recomputed deterministically on demand from `Chunk.Text` via Model2Vec's bit-identical `f64` accumulation.
+  - Under `KEN_ANN=flat-i8`, dense memory drops from 1,308 B/chunk down to **260 B/chunk** (saving 1,024 B/chunk or ~80% of dense memory, ~207 MB on goinfer, ~612 MB at 584k kernel scale).
+  - All 4 pre-registered red-first gates passed (bit-identity byte-for-byte, ranking parity, republish latency 50ms, memory bound ≤300 B/chunk).
+- **Bump `aikit` to `v1.74.0`**:
+  - BM25 postings arena reduces BM25 index memory by **17.0% to 23.5%** across repos.
+  - Enables zero-copy mmap model sharing across workspaces (`MmapModel: true`).
+
 ## [1.11.0] — 2026-10-22 — `engine`: structural spans, SymbolAt, Refresh, qualified names, TestsFor
 
 K10–K15 for `tack`: exact hit text, line spans on every structural
