@@ -995,7 +995,7 @@ func (ix *Index) WithExtraChunks(extras []chunk.Chunk) (*Index, error) {
 		}
 		extraVecs := make([][]float32, len(extras))
 		for i, c := range extras {
-			extraVecs[i] = ix.model.Encode(c.Text)
+			extraVecs[i] = encodeChunkText(ix.model, c.Text)
 		}
 		mergedVecs = make([][]float32, 0, len(baseVecs)+len(extras))
 		mergedVecs = append(mergedVecs, baseVecs...)
@@ -1042,19 +1042,43 @@ func (ix *Index) BM25() *bm25.Index { return ix.bm }
 // free aggregation that requires no new compute at index time.
 // Read-only; the caller MUST NOT mutate.
 //
-// When vecs was not retained at build time (e.g. WatchedIndex under K17 / ADR-049),
-// Vecs recomputes the f32 vectors deterministically on demand from Chunk.Text
-// using ix.model.
+// When vecs was not retained on Index (WatchedIndex under K17 / ADR-049):
+//   - If the active dense store is *flatStore (or *ann.Flat), Vecs returns the
+//     f32 matrix already held inside the store with zero allocations and zero
+//     model.Encode calls.
+//   - If the active dense store is quantized (FlatI8 / FlatBinaryI8), Vecs
+//     recomputes the exact f32 vectors deterministically on demand from
+//     Chunk.Text using ix.model.
 func (ix *Index) Vecs() [][]float32 {
 	if ix.vecs != nil {
 		return ix.vecs
 	}
-	if ix.mode == ModeBM25 || ix.model == nil || len(ix.chunks) == 0 {
+	if ix.mode == ModeBM25 || len(ix.chunks) == 0 {
 		return nil
 	}
-	vecs := make([][]float32, len(ix.chunks))
-	for i, c := range ix.chunks {
-		vecs[i] = ix.model.Encode(c.Text)
+	switch s := ix.flat.(type) {
+	case *flatStore:
+		if v := s.vecs(); len(v) == len(ix.chunks) {
+			return v
+		}
+	case *ann.Flat:
+		if v := newFlatStore(s).vecs(); len(v) == len(ix.chunks) {
+			return v
+		}
+	}
+	if ix.model == nil {
+		return nil
+	}
+	return recomputeVecsFromChunks(ix.chunks, ix.model)
+}
+
+func recomputeVecsFromChunks(chunks []chunk.Chunk, model *embed.StaticModel) [][]float32 {
+	if model == nil || len(chunks) == 0 {
+		return nil
+	}
+	vecs := make([][]float32, len(chunks))
+	for i, c := range chunks {
+		vecs[i] = encodeChunkText(model, c.Text)
 	}
 	return vecs
 }

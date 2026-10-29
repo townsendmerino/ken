@@ -16,9 +16,21 @@ package search
 
 import (
 	"crypto/sha256"
+	"sync/atomic"
 
 	"github.com/townsendmerino/aikit/embed"
 )
+
+// chunkEncodeCount counts per-chunk model.Encode calls across build, flush,
+// WithExtraChunks, and on-demand Vecs() recomputation. Package tests read it
+// to verify that snapshot persistence (SnapshotBytes / WriteSnapshot) and
+// cache-hit builds do not re-encode chunks.
+var chunkEncodeCount atomic.Int64
+
+func encodeChunkText(model *embed.StaticModel, text string) []float32 {
+	chunkEncodeCount.Add(1)
+	return model.Encode(text)
+}
 
 // VecCache is a content-hash → embedding cache. The key is a hash of the chunk
 // text (see hashText); the value is the Model2Vec vector for that text under the
@@ -48,13 +60,13 @@ func encodeCached(c VecCache, model *embed.StaticModel, text string) []float32 {
 		return nil
 	}
 	if c == nil {
-		return model.Encode(text)
+		return encodeChunkText(model, text)
 	}
 	key := hashText(text)
 	if v, ok := c.Get(key); ok {
 		return v
 	}
-	v := model.Encode(text)
+	v := encodeChunkText(model, text)
 	c.Put(key, v)
 	return v
 }

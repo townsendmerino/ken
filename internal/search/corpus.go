@@ -378,10 +378,19 @@ func (w *WatchedIndex) refoldMigrationDir(dir string) int {
 // built snapshot. The reranker instance is shared across rebuilds so
 // its content-hash LRU cache carries forward.
 func (w *WatchedIndex) buildUnionedIndexLocked() *Index {
+	// R5-1: if w.dense and w.chunks ever lose 1:1 alignment (a partial-flush
+	// bug, or a corrupt snapshot seed that slipped past LoadSerializedCorpus),
+	// ann.Flat queries return indices past len(w.chunks) or silently stop
+	// scoring the tail chunks. Degrade to BM25 for this snapshot and self-heal
+	// by clearing w.dense instead of panicking or serving wrong hits.
 	if w.dense != nil && w.dense.Len() != len(w.chunks) {
 		w.logf("BUG: dense/chunks misaligned (dense=%d chunks=%d); dropping dense store, serving BM25 for this snapshot", w.dense.Len(), len(w.chunks))
 		w.dense = nil
 	}
+	// Token cache (cold-start M4): reuse per-chunk []string across flushes
+	// and SetExtraChunks swaps; only newly-appended chunks tokenize. Lazily
+	// init here so tests that construct &WatchedIndex{...} literals directly
+	// without going through assembleWatched still work.
 	if w.tokens == nil {
 		w.tokens = newTokenCache()
 	}
@@ -393,11 +402,20 @@ func (w *WatchedIndex) buildUnionedIndexLocked() *Index {
 		merged := make([]chunk.Chunk, 0, len(w.chunks)+len(w.extraChunks))
 		merged = append(merged, w.chunks...)
 		merged = append(merged, w.extraChunks...)
-		var mergedDense denseRetriever
+		var mergedDense denseStore
 		if w.dense != nil && len(w.extraVecs) > 0 {
 			mergedDense = w.dense.Append(w.extraVecs)
 		} else if w.dense != nil {
 			mergedDense = w.dense
+		} else if len(w.extraVecs) > 0 && len(w.chunks) == 0 && !w.stagedPending {
+			mergedDense = makeDenseStore(denseRetrieverKind(w.fsOpts.DenseRetriever), w.extraVecs)
+		}
+		// R5-1: same invariant for the union — e.g. w.dense was intact
+		// (or nil on an empty repo) while extraVecs was nil or short under
+		// a non-nil model, producing mergedDense.Len() != len(merged).
+		if mergedDense != nil && mergedDense.Len() != len(merged) {
+			w.logf("BUG: mergedDense/merged misaligned (dense=%d chunks=%d); serving BM25 for this snapshot", mergedDense.Len(), len(merged))
+			mergedDense = nil
 		}
 		docs := make([][]string, 0, len(merged))
 		docs = append(docs, tokenizeDocs(w.chunks, w.tokens)...)

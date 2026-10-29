@@ -237,7 +237,7 @@ func LoadSerializedIndex(data []byte, opts LoadOptions) (*Index, error) {
 }
 
 // serializeIndex is the in-package primitive that produces a
-// well-formed v1 serialized index from a chunks slice + parallel vecs
+// well-formed serialized index from a chunks slice + parallel vecs
 // slice. Called by BuildAndSerializeIndex; exported in the package for
 // testability (the determinism regression test calls it directly).
 func serializeIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, chunkerName string) ([]byte, error) {
@@ -263,7 +263,40 @@ func serializeIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, chunkerNa
 			}
 		}
 	}
+	return serializeIndexWithRows(chunks, mode, chunkerName, embedDim, func(i int, _ []float32) []float32 {
+		return vecs[i]
+	})
+}
 
+// serializeIndexFromStore serializes chunks and vectors directly from a
+// denseStore one row at a time via WriteRowF32, without calling model.Encode
+// or allocating a duplicate [][]float32 matrix (K17 / ADR-049).
+func serializeIndexFromStore(chunks []chunk.Chunk, ds denseStore, mode Mode, chunkerName string) ([]byte, error) {
+	if mode != ModeBM25 && mode != ModeSemantic && mode != ModeHybrid && mode != ModeHybridRerank {
+		return nil, fmt.Errorf("search: serializeIndex: unknown mode %d", mode)
+	}
+	var embedDim uint32
+	if mode != ModeBM25 && len(chunks) > 0 {
+		if ds == nil {
+			return nil, fmt.Errorf("search: serializeIndex: dense store is nil for mode %v with %d chunks", mode, len(chunks))
+		}
+		if ds.Len() != len(chunks) {
+			return nil, fmt.Errorf("search: serializeIndex: dense store count %d != chunk count %d", ds.Len(), len(chunks))
+		}
+		embedDim = uint32(ds.Dim())
+	}
+	return serializeIndexWithRows(chunks, mode, chunkerName, embedDim, func(i int, scratch []float32) []float32 {
+		return ds.WriteRowF32(i, scratch)
+	})
+}
+
+func serializeIndexWithRows(
+	chunks []chunk.Chunk,
+	mode Mode,
+	chunkerName string,
+	embedDim uint32,
+	rowAt func(i int, scratch []float32) []float32,
+) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.Grow(estimatedSize(chunks, int(embedDim)))
 
@@ -311,24 +344,24 @@ func serializeIndex(chunks []chunk.Chunk, vecs [][]float32, mode Mode, chunkerNa
 	vecsLenOff := buf.Len()
 	binfmt.WriteU32(&buf, 0) // length placeholder
 	vecsStart := buf.Len()
-	if mode != ModeBM25 {
+	if mode != ModeBM25 && len(chunks) > 0 {
 		// Write one row at a time through a ~1 KB reusable scratch (audit §21):
 		// the prior code accumulated the ENTIRE vecs section into a second
 		// full-size []byte before buf.Write, so both it and the pre-grown buf
 		// were live at once (~2× the vecs size — ~64 MB extra on a 64k×256
 		// index). buf was already grown to estimatedSize, so each row Write
 		// appends without reallocating; peak is now buf + one row scratch.
-		if len(vecs) > 0 {
-			row := make([]byte, len(vecs[0])*4)
-			for _, v := range vecs {
-				if len(v)*4 != len(row) { // ragged (shouldn't happen); resize
-					row = make([]byte, len(v)*4)
-				}
-				for i, f := range v {
-					binary.LittleEndian.PutUint32(row[i*4:], math.Float32bits(f))
-				}
-				buf.Write(row)
+		f32Scratch := make([]float32, int(embedDim))
+		row := make([]byte, int(embedDim)*4)
+		for idx := range len(chunks) {
+			v := rowAt(idx, f32Scratch)
+			if len(v)*4 != len(row) { // ragged (shouldn't happen); resize
+				row = make([]byte, len(v)*4)
 			}
+			for i, f := range v {
+				binary.LittleEndian.PutUint32(row[i*4:], math.Float32bits(f))
+			}
+			buf.Write(row)
 		}
 	}
 	binary.LittleEndian.PutUint32(buf.Bytes()[vecsLenOff:], uint32(buf.Len()-vecsStart))

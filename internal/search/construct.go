@@ -26,6 +26,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/townsendmerino/aikit/ann"
 	"github.com/townsendmerino/aikit/chunk"
 	"github.com/townsendmerino/aikit/embed"
 	"github.com/townsendmerino/ken/internal/repo"
@@ -244,6 +245,11 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 // under <repo>/.ken/index.bin (ADR-039). It reads the published *Index —
 // whose chunks are already compacted (no tombstones) — so it needs no lock
 // and captures a consistent snapshot even if a flush is mid-flight.
+//
+// K17 (ADR-049): streams vectors directly from the published Index's active
+// denseStore (WriteRowF32) rather than calling ix.Vecs(), so snapshot writes
+// never re-encode chunks with model.Encode and never allocate a duplicate
+// [][]float32 matrix.
 func (w *WatchedIndex) SnapshotBytes() ([]byte, error) {
 	ix := w.Load()
 	if ix == nil {
@@ -254,5 +260,16 @@ func (w *WatchedIndex) SnapshotBytes() ([]byte, error) {
 	// ix.Mode() is also the correct value — it matches the very chunks/vecs
 	// being serialized (a staged pre-warm snapshot is BM25 + vector-less
 	// together). w.chunkerName is set once at construction and never mutated.
+	if ix.Mode() != ModeBM25 && ix.vecs == nil {
+		if ds, ok := ix.flat.(denseStore); ok {
+			return serializeIndexFromStore(ix.Chunks(), ds, ix.Mode(), w.chunkerName)
+		}
+		if af, ok := ix.flat.(*ann.Flat); ok && af != nil {
+			return serializeIndexFromStore(ix.Chunks(), newFlatStore(af), ix.Mode(), w.chunkerName)
+		}
+		if len(ix.Chunks()) > 0 {
+			return nil, fmt.Errorf("search: SnapshotBytes: published index has no dense store in mode %v", ix.Mode())
+		}
+	}
 	return serializeIndex(ix.Chunks(), ix.Vecs(), ix.Mode(), w.chunkerName)
 }

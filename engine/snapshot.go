@@ -20,9 +20,17 @@ import (
 
 // snapshotConfigKey builds the invalidation key for the workspace's current
 // config. See search.SnapshotConfigKey for the exact fields it covers.
+// When a non-default DenseRetriever (e.g. "flat-i8" or "flat-binary-i8") is
+// configured, its name is appended so a quantized snapshot (whose on-disk f32
+// vectors were reconstructed from int8*scale) is invalidated if the caller
+// switches back to exact f32 Flat.
 func snapshotConfigKey(mode search.Mode, chunker string, model *embed.StaticModel, modelDir string, fsOpts search.FSOptions) string {
-	return search.SnapshotConfigKey(mode, chunker, search.ModelFingerprint(model, modelDir),
+	key := search.SnapshotConfigKey(mode, chunker, search.ModelFingerprint(model, modelDir),
 		!fsOpts.DisableEnrichment, fsOpts.LazyEnrichment, fsOpts.StagedEmbedding)
+	if fsOpts.DenseRetriever != "" {
+		key += "|ann=" + fsOpts.DenseRetriever
+	}
+	return key
 }
 
 // currentManifest walks root and stamps each file, swallowing a walk error

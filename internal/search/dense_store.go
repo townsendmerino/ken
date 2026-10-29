@@ -1,24 +1,34 @@
 package search
 
 import (
+	"sync"
 	"unsafe"
 
 	"github.com/townsendmerino/aikit/ann"
 	"github.com/townsendmerino/aikit/linalg"
 )
 
-// Memory layouts mirroring internal aikit/ann structs for zero-copy row compaction and appends.
+// Memory layouts mirroring internal aikit/ann structs for zero-copy row compaction,
+// appends, and snapshot row streaming. Verified at compile time below via
+// unsafe.Sizeof and at test time via reflect.TypeFor in TestDenseStore_LayoutCanary.
 type flatRaw struct {
 	vecs [][]float32
 	dim  int
 }
 
 type flatI8Raw struct {
-	bq     []int8
-	scales []float32
-	n, dim int
-	mmap   []byte
-	closed bool
+	bq           []int8
+	scales       []float32
+	n, dim       int
+	mmap         []byte
+	closed       bool
+	pager        uintptr
+	blockRows    int
+	pagerMu      sync.Mutex
+	gpu          ann.I8Index
+	gpuShard     ann.I8Index
+	gpuShardRows int
+	ws           linalg.Workspace
 }
 
 type binaryPrefilterRaw struct {
@@ -33,6 +43,16 @@ type flatBinaryI8Raw struct {
 	exact *ann.FlatI8
 }
 
+// Compile-time struct size assertions against aikit/ann types.
+var (
+	_ [unsafe.Sizeof(ann.Flat{}) - unsafe.Sizeof(flatRaw{})]byte
+	_ [unsafe.Sizeof(flatRaw{}) - unsafe.Sizeof(ann.Flat{})]byte
+	_ [unsafe.Sizeof(ann.FlatI8{}) - unsafe.Sizeof(flatI8Raw{})]byte
+	_ [unsafe.Sizeof(flatI8Raw{}) - unsafe.Sizeof(ann.FlatI8{})]byte
+	_ [unsafe.Sizeof(ann.FlatBinaryI8{}) - unsafe.Sizeof(flatBinaryI8Raw{})]byte
+	_ [unsafe.Sizeof(flatBinaryI8Raw{}) - unsafe.Sizeof(ann.FlatBinaryI8{})]byte
+)
+
 // denseStore is a mutable/appendable/compactable dense vector store that holds
 // only the active representation (f32 for Flat, int8 for FlatI8, 1-bit+int8 for FlatBinaryI8)
 // without retaining duplicate [][]float32 in WatchedIndex (ADR-049 / K17).
@@ -40,6 +60,12 @@ type denseStore interface {
 	denseRetriever
 	Append(newVecs [][]float32) denseStore
 	Compact(kept []int) denseStore
+	// WriteRowF32 returns or reconstructs row i as a float32 slice without calling
+	// model.Encode. For flatStore it returns the stored f32 row directly; for
+	// flatI8Store / flatBinaryI8Store it dequantizes int8 * scale into dst
+	// (allocating only if cap(dst) < Dim()), which round-trips bit-identically
+	// back into the same int8 codes when reloaded into FlatI8.
+	WriteRowF32(i int, dst []float32) []float32
 	Len() int
 	Dim() int
 	Kind() denseRetrieverKind
@@ -81,6 +107,19 @@ func (s *flatStore) Dim() int {
 
 func (s *flatStore) Kind() denseRetrieverKind {
 	return denseFlat
+}
+
+func (s *flatStore) vecs() [][]float32 {
+	if s == nil || s.f == nil {
+		return nil
+	}
+	raw := (*flatRaw)(unsafe.Pointer(s.f))
+	return raw.vecs
+}
+
+func (s *flatStore) WriteRowF32(i int, _ []float32) []float32 {
+	raw := (*flatRaw)(unsafe.Pointer(s.f))
+	return raw.vecs[i]
 }
 
 func (s *flatStore) Append(newVecs [][]float32) denseStore {
@@ -125,6 +164,22 @@ func (s *flatI8Store) Dim() int {
 
 func (s *flatI8Store) Kind() denseRetrieverKind {
 	return denseFlatI8
+}
+
+func (s *flatI8Store) WriteRowF32(i int, dst []float32) []float32 {
+	raw := (*flatI8Raw)(unsafe.Pointer(s.f))
+	d := raw.dim
+	if cap(dst) < d {
+		dst = make([]float32, d)
+	} else {
+		dst = dst[:d]
+	}
+	row := raw.bq[i*d : (i+1)*d]
+	scale := raw.scales[i]
+	for j, q := range row {
+		dst[j] = float32(q) * scale
+	}
+	return dst
 }
 
 func (s *flatI8Store) Append(newVecs [][]float32) denseStore {
@@ -220,6 +275,18 @@ func (s *flatBinaryI8Store) Kind() denseRetrieverKind {
 	return denseFlatBinaryI8
 }
 
+func (s *flatBinaryI8Store) WriteRowF32(i int, dst []float32) []float32 {
+	raw := (*flatBinaryI8Raw)(unsafe.Pointer(s.f))
+	return newFlatI8Store(raw.exact).WriteRowF32(i, dst)
+}
+
+// Append quantizes newVecs into the underlying FlatI8 store and packs 1-bit
+// sign codes against the initial build's pf.center. Retaining pf.center avoids
+// recomputing the corpus mean and repacking all N existing 1-bit rows on every
+// watcher flush (ADR-049); if a corpus shifts substantially across many flushes,
+// 1-bit Hamming prefilter candidates can drift slightly from a fresh
+// ann.NewFlatBinaryI8 build until the next full rebuild or snapshot load
+// ( whereas the int8 rerank stage uses exact per-row scales).
 func (s *flatBinaryI8Store) Append(newVecs [][]float32) denseStore {
 	raw := (*flatBinaryI8Raw)(unsafe.Pointer(s.f))
 	exactStore := newFlatI8Store(raw.exact)
@@ -267,6 +334,8 @@ func (s *flatBinaryI8Store) Append(newVecs [][]float32) denseStore {
 	return newFlatBinaryI8Store(nf)
 }
 
+// Compact drops tombstoned rows from both the 1-bit code array and the
+// underlying FlatI8 store while retaining pf.center (see Append comment).
 func (s *flatBinaryI8Store) Compact(kept []int) denseStore {
 	raw := (*flatBinaryI8Raw)(unsafe.Pointer(s.f))
 	exactStore := newFlatI8Store(raw.exact)
