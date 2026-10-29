@@ -1,5 +1,7 @@
 # ken
 
+ken is code search built for coding agents: a pure-Go, single-binary engine that runs a 16M-parameter Model2Vec model in-process, with no cgo, Python, vector database, or API key. On [ContextBench](docs/BENCH.md#contextbench-cb1-benchmark-agent-context-retrieval) (53 SWE-bench Pro tasks, 8k-token budget), its default hybrid mode covered 52% of the relevant files versus 29% for BM25 alone, and reached the first gold line in about 40% fewer tokens. Warm queries take a millisecond or two, and with `KEN_ANN=flat-i8` the vector store uses about 80% less memory.
+
 **Fast hybrid code search for agents.** Pure Go, single static binary, drop-in MCP-compatible with [MinishLab/semble](https://github.com/MinishLab/semble) — same tool schemas, same output format, install steps swapped to a Go binary.
 
 [![CI](https://github.com/townsendmerino/ken/actions/workflows/ci.yml/badge.svg)](https://github.com/townsendmerino/ken/actions/workflows/ci.yml)
