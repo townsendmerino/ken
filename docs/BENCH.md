@@ -811,3 +811,21 @@ Evaluated with ContextBench's official `evaluate.py` via `bench/contextbench/cmd
   }
 }
 ```
+
+### Lite registration (committed before the run, 2026-10-29)
+
+Registered on branch `cb1-lite` before any Lite task ran, per the CB1 design (tack `docs/research/contextbench-leann-2026-10-28.md` §4.2, §8.1).
+
+- **Slice.** ContextBench-Lite: all 500 rows of `Context-Bench/data/contextbench_verified.parquet` at ContextBench commit `cd5f62e4f3a426ed2a497ad7d1584e1c4b219058` (58 repositories; Python 266, TypeScript 66, JavaScript 60, Go 40, C 23, Rust 20, Java 15, C++ 10; Verified 174, Multi 156, Poly 116, Pro 54). Gold from the same file.
+- **Arms.** `G`, `B`, `K`, `KT` as above, paired on every task. Budgets 2,048, 8,192 (primary) and 16,384 cl100k tokens. No LEANN arm on Lite (L100 is a separate slice).
+- **Decided here: `K` against `B`**, line coverage at 8,192 tokens, mean paired difference over the 500 tasks, 95% paired bootstrap interval (10,000 resamples, seed 42, as S53).
+- **Margin `m = 0.028`** line coverage. From the 5-task pilot's paired standard deviation of `K − B` at 8,192 tokens (0.1935): with n = 500, SE = 0.0087 and the interval's half-width is 0.0170; `m = (1.96 + 1.28) × SE` gives an equal pair of arms an 80% chance of landing inside ±m, and the "K ahead" rule 80% power at a true difference of `m + 2.80 × SE = 0.052`. The pilot is 5 Go tasks; if Lite's own SD differs, the run reports what m it implies, but m stays 0.028.
+- **Outcomes.**
+  - lower bound above +0.028: **K ahead of B** — ken's semantic arm adds line coverage on human-annotated gold at this budget;
+  - upper bound below −0.028: **B ahead of K** — recorded; a retrieval investigation becomes an owner decision (ken treats retrieval as closed for 1.0);
+  - interval inside ±0.028: **no measured difference at n = 500**;
+  - anything else (the interval crosses +m or −m): **not settled at n = 500**; no claim either way.
+- **Reported, not decided:** `KT − K` and `K − G` with intervals; symbol and file coverage, line precision, tokens to the first gold line; every metric by language, source and repository.
+- **Validity.** The run counts only if every one of the 500 tasks scores on all four arms and three budgets (6,000 records); a task that fails is retried, never dropped. G, B, K and KT must stay bit-reproducible: one Lite task re-run must match its records byte for byte (timings and provenance aside).
+- **Run.** On mbp2 (Linux x86_64, 8 cores), serially, holding goinfer's timing lock (build times are reported, not decided on):
+  `cb -tasks …/contextbench_verified.parquet -gold …/contextbench_verified.parquet -slice Lite -arms G,B,K,KT -resume -evaluator-checkout -out cb1_lite.jsonl`
