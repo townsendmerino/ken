@@ -94,6 +94,10 @@ func main() {
 			arms = append(arms, contextbench.NewArmBR())
 		case "KA":
 			arms = append(arms, contextbench.NewArmKA())
+		case "KNS":
+			arms = append(arms, contextbench.NewArmKNS())
+		case "KNC":
+			arms = append(arms, contextbench.NewArmKNC())
 		case "L1":
 			arms = append(arms, contextbench.NewArmLEANN("L1", *leannRunner, *pythonBin, "l1"))
 		case "L2":

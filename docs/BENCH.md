@@ -100,7 +100,7 @@ The three modes triangulate where any gap is coming from:
 2. **Per-language table narrows it further.** A consistent loss across all languages points at the retrieval/ranker; a loss isolated to specific languages points at chunker rules. ken's regex chunker covers 5 languages (Python / Go / TypeScript / Java / Rust); the other 14 fall through to the line chunker and a per-language gap there is expected, not a regression. Within the 5: Python typically tracks semble closely; go/rust/typescript/java may diverge more because semble's tree-sitter chunker (via Chonkie) draws different chunk boundaries on those grammars.
 3. **Per-category drift** (architecture / semantic / symbol — surfaced in the per-repo `by_category` field of the result JSON) localizes to a boost type: low symbol-query NDCG ⇒ definition-boost issue, low architecture-query NDCG ⇒ embedding/semantic issue.
 
-Don't tune ken's constants to match the benchmark — the constants are ported verbatim from semble's source and any divergence is a port bug to find, not a hyperparameter to twist. The known and documented expected divergence is the regex-vs-tree-sitter chunker mismatch; that gap is a dependency tradeoff (pure-Go, no cgo) called out in `docs/DESIGN.md` §2, not a regression.
+Don't tune ken's constants to match the benchmark — the constants are ported verbatim from semble's source and any divergence is a port bug to find, not a hyperparameter to twist. (Since [ADR-050](internal/DECISIONS.md#adr-050-ranking-may-diverge-from-the-verbatim-semble-port), 2026-10-30, ken's shipped ranking may diverge from semble under a measured gate; this rule still governs the semble reference comparison, which runs at semble's values.) The known and documented expected divergence is the regex-vs-tree-sitter chunker mismatch; that gap is a dependency tradeoff (pure-Go, no cgo) called out in `docs/DESIGN.md` §2, not a regression.
 
 ## Empirical findings (v0.1.0)
 
@@ -953,3 +953,49 @@ The same pattern holds at 2,048 (BR − B: NF +0.94 [+0.62, +1.26], DEPTH −0.1
 The second clause ("accounts for most of K's deficit") is met by the letter of the rule (BR − B LC −0.029 against K − B LC −0.012, same sign, ratio 2.36) but **is not informative**: on this 50-task sample K − B is near zero (−0.012 [−0.086, +0.064], against −0.061 over all 174 Verified Python tasks), so the ratio's interval is [−8.1, +9.3]. What the sample does show is direction. Line coverage drops when the pipeline is added (−0.029) and partly comes back when the semantic arm is added (+0.017). So the semantic arm offsets some of the pipeline's line cost and is not its source.
 
 **Reading.** The +file / −line trade on Lite comes from ken's rerank pipeline, whose file-saturation decay (threshold 1, decay 0.5: a file's second chunk counts half, its third a quarter) and file-coherence boost spread a ranked list across files. That suits ranked search (semble's design target: one good chunk per file in the top 10) and gets an agent to more of the right files. A single budget-filling call rewards stacking chunks from one file, which raw BM25 does. Which component (saturation, coherence boost, path penalties, query boosts) carries the effect is not separated here; that would need ablating ken's constants, which this diagnostic did not do.
+
+### Lite ablation registration: which rerank stage spreads the budget? (committed before the run, 2026-10-30)
+
+Chosen by Francis (2026-10-30 08:23, option C) after the diagnostic above. Bench-only: ken's shipped ranking is unchanged ([ADR-050](internal/DECISIONS.md#adr-050-ranking-may-diverge-from-the-verbatim-semble-port) now allows a divergence, but none is made here; any proposal goes to Francis as a decision).
+
+- **Question.** The diagnostic showed ken's rerank pipeline spreads a budget across files. Which stage does it: the file-saturation decay (threshold 1, decay 0.5) or the file-coherence boost (`boostMultiChunkFiles`, +0.2 × max score scaled by the file's share)? And does switching one off recover line coverage, at what cost in file coverage?
+- **Seam.** `search.RankAblation{NoFileSaturation, NoCoherenceBoost}` through `Index.SearchModeAblated`; the zero value is the shipped pipeline. Checks before registering: unit tests (saturation off leaves same-file scores undecayed; coherence off lowers the boosted chunk), and arm `KA` (zero ablation through the new path) reproduced Lite's `K` records byte for byte on two tasks.
+- **Arms.** `KNS` = K with saturation off; `KNC` = K with the coherence boost off. Each separately, both against `K` (records reused from the diagnostic run, which matched Lite's byte for byte), with `B` reported for reference.
+- **Tasks and metrics.** The diagnostic's 50 Verified Python tasks (same list, sha256 `09d06f0b…26de7`), budgets 2,048 / 8,192 (primary) / 16,384, hits saved; `LC`, `NF`, `GF`, `CPG`, `DEPTH` as in the diagnostic, plus the evaluator's file coverage `FC`. Paired bootstrap 95% intervals (numpy, 10,000 resamples, seed 42).
+- **Outcomes, per stage X (X-off − K at 8,192).**
+  - **X carries the spread:** `NF` upper bound < 0 and `DEPTH` lower bound > 0.
+  - **X costs lines:** `LC` lower bound > 0 (switching X off recovers line coverage). At n = 50 this needs about +0.04; a smaller gain shows as an interval including 0 and is reported as such.
+  - **X earns files:** `FC` upper bound < 0 (switching X off loses file coverage).
+- **What each would mean (for the proposal that follows, not decided here).** X carries the spread and costs lines without earning files → X is a candidate for a ranking divergence, gated on full Lite plus semble's NDCG check. X carries the spread and earns files → a trade that makes a budget-packing mode the candidate, not a default change. Neither stage carries it alone → the spread comes from their interaction or from the path penalties or query boosts, and no single-stage change is proposed.
+- **Run.** Serially on mbp2 under goinfer's timing lock, `KEN_ENRICH_FILE_BUDGET_MS=10000`, about 30 minutes.
+
+### Lite ablation results (2026-10-30)
+
+Run of the registration above on mbp2, 08:27–08:44 PDT under goinfer's timing lock: 300 records (50 tasks × KNS, KNC × 3 budgets), 0 errors, budget skips only on the three known matplotlib C++ files. `K` and `B` records are the diagnostic's (byte-identical to Lite).
+
+**Means at 8,192 tokens (50 tasks; `FC` = evaluator file coverage).**
+
+| Arm | LC | FC | NF | GF | CPG | DEPTH |
+|---|---:|---:|---:|---:|---:|---:|
+| B (raw BM25) | 0.2077 | 0.3970 | 13.96 | 0.68 | 2.64 | 0.457 |
+| K (shipped) | 0.1954 | 0.5803 | 21.26 | 1.00 | 1.28 | 0.275 |
+| KNS (K, no file saturation) | **0.2544** | 0.5603 | 14.12 | 0.98 | 2.55 | 0.368 |
+| KNC (K, no coherence boost) | 0.1954 | 0.5803 | 21.24 | 1.00 | 1.28 | 0.275 |
+
+**Paired differences** (numpy bootstrap, 10,000 resamples, seed 42; `DEPTH` over tasks where both arms touch a gold file):
+
+| | Budget | LC | FC | NF | DEPTH |
+|---|---:|---|---|---|---|
+| KNS − K | 2,048 | +0.002 [−0.044, +0.041] | −0.048 [−0.115, +0.003] | −1.24 [−1.68, −0.80] | +0.086 [+0.005, +0.181] |
+| KNS − K | **8,192** | **+0.059 [+0.021, +0.106]** | −0.020 [−0.060, 0.000] | −7.14 [−8.04, −6.24] | +0.085 [+0.033, +0.149] |
+| KNS − K | 16,384 | +0.039 [+0.007, +0.075] | −0.060 [−0.117, −0.016] | −15.34 [−16.70, −13.84] | +0.069 [+0.026, +0.117] |
+| KNC − K | 2,048 | −0.023 [−0.065, 0.000] | −0.033 [−0.087, +0.004] | −0.12 [−0.36, +0.10] | −0.005 [−0.015, 0.000] |
+| KNC − K | **8,192** | 0.000 [0.000, 0.000] | 0.000 [0.000, 0.000] | −0.02 [−0.42, +0.36] | 0.000 [0.000, 0.000] |
+| KNC − K | 16,384 | +0.001 [−0.008, +0.010] | −0.007 [−0.020, 0.000] | −0.12 [−0.56, +0.32] | +0.001 [−0.010, +0.013] |
+| KNS − B | 8,192 | +0.047 [−0.015, +0.114] | +0.163 [+0.038, +0.291] | +0.16 [−1.08, +1.34] | −0.001 [−0.044, +0.043] |
+
+**Outcomes under the registration (8,192).**
+- **File saturation carries the spread** (NF upper bound < 0, DEPTH lower bound > 0) **and costs lines** (LC +0.059, lower bound > 0). **It earns files only at the margin**: FC −0.020 with an upper bound of exactly 0.000, so "X earns files" is not met at 8,192; it is met at 16,384 (−0.060 [−0.117, −0.016]) and nearly at 2,048.
+- **The coherence boost carries nothing at 8,192**: K and KNC pack the same chunks on every task but one. At 2,048 it helps a little (switching it off costs −0.023 LC, interval touching 0).
+
+**Reading.** The file-saturation decay (a file's second chunk counts half, its third a quarter) is the stage that spreads a budget. Without it ken packs about as many files as raw BM25 (KNS − B NF +0.16) but chooses better ones: KNS keeps most of ken's file-coverage advantage over BM25 (+0.163 [+0.038, +0.291]) and recovers BM25's line coverage (+0.047 [−0.015, +0.114] over B; +0.059 over K). The price is 0.02–0.06 file coverage depending on budget. These are 50 Verified Python tasks; any change to ken's ranking needs its own gate on full Lite and semble's NDCG check (ADR-050), which this run does not provide.

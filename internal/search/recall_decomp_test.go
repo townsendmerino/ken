@@ -257,7 +257,7 @@ func decompPenaltyOffTop10Hit(ix *Index, query string, qVec []float32, targets [
 	}
 	boostMultiChunkFiles(combined, ix.chunks)
 	combined = applyQueryBoost(combined, query, ix.chunks, nil)
-	ranked := rerankTopK(combined, ix.chunks, topK, false) // penalties OFF
+	ranked := rerankTopK(combined, ix.chunks, topK, false, true) // penalties OFF
 	for _, r := range ranked {
 		if decompTargetMatch(ix.chunks[r.idx].File, targets) {
 			return true

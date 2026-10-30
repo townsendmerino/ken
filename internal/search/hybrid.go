@@ -48,6 +48,7 @@ func hybridSearch(
 	topK int,
 	alphas AlphaPair,
 	predicted []string,
+	abl RankAblation,
 ) []rankedItem {
 	alpha := resolveAlpha(query, alphas)
 	candidateCount := topK * candidateOverfetch
@@ -85,7 +86,9 @@ func hybridSearch(
 		combined[r.Key] = r.Score
 	}
 
-	boostMultiChunkFiles(combined, chunks)
+	if !abl.NoCoherenceBoost {
+		boostMultiChunkFiles(combined, chunks)
+	}
 	applyQueryBoostInPlace(combined, query, chunks, predicted)
-	return rerankTopK(combined, chunks, topK, alpha < 1.0)
+	return rerankTopK(combined, chunks, topK, alpha < 1.0, !abl.NoFileSaturation)
 }

@@ -57,6 +57,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-047](#adr-047-engine-section-level-retrieval-for-markdown--hitheadingpath-workspacesections-workspacesearchfiles) | `engine` section-level retrieval for markdown — `Hit.HeadingPath`, `Workspace.Sections`, `Workspace.SearchFiles` | Accepted |
 | [ADR-048](#adr-048-engine-structural-spans-symbolat-refresh-qualified-names-testsfor-k10k15) | `engine` structural spans, SymbolAt, Refresh, qualified names, TestsFor (K10–K15) | Accepted |
 | [ADR-049](#adr-049-drop-retained-f32-vectors-from-watchedindex-recompute-on-demand-k17) | Drop retained f32 vectors from WatchedIndex; recompute on demand (K17) | Accepted |
+| [ADR-050](#adr-050-ranking-may-diverge-from-the-verbatim-semble-port) | Ranking may diverge from the verbatim semble port (amends ADR-002) | Accepted |
 
 ---
 
@@ -85,7 +86,7 @@ semble is a Python tool with native dependencies (Rust-backed `tokenizers`, etc.
 
 ## ADR-002: Verbatim port of semble's algorithm
 
-**Status:** Accepted
+**Status:** Accepted; amended by [ADR-050](#adr-050-ranking-may-diverge-from-the-verbatim-semble-port) (2026-10-30): ranking constants may now diverge from semble, each change with its own measured gate and ADR
 **Date:** 2026-05-19
 
 ### Context
@@ -2894,3 +2895,26 @@ Model2Vec embeddings are completely deterministic (`f64` accumulation, `docs/DES
 - Layout canary (`TestDenseStore_LayoutCanary` in `internal/search/dense_store_test.go` plus compile-time `unsafe.Sizeof` assertions in `internal/search/dense_store.go`) pins the field count, field names, byte offsets, and sizes of `ann.Flat`, `ann.FlatI8`, `ann.FlatBinaryI8`, and `binaryPrefilter` against the mirror structs used for zero-copy row compaction and streaming.
 - Under `KEN_ANN=flat-binary-i8`, `flatBinaryI8Store.Append` and `Compact` retain the initial build's 1-bit centering vector (`pf.center`) so incremental flushes do not repack all `N` existing 1-bit rows; heavy corpus drift across many flushes can slightly shift 1-bit Hamming prefilter candidates relative to a fresh cold build until the next full cold rebuild. A snapshot reload under `flat-binary-i8` also recomputes `pf.center` from the persisted dequantized (`int8 × scale`) vectors rather than raw `f32` vectors, so borderline 1-bit sign codes can differ slightly from a cold build (while the `int8` rerank stage's codes and per-row scales round-trip, and subsequent snapshot reloads are bit-identical; see `TestDenseStore_FlatBinaryI8_SnapshotReloadGuarantees`).
 - `(*WatchedIndex).SnapshotBytes()` now returns an error in `ModeHybrid` / `ModeSemantic` when the R5-1 alignment guard has dropped the dense store (`ix.flat == nil` on a non-empty corpus). In v1.12.0 it fell through `ix.Vecs()` to `recomputeVecsFromChunks` and wrote a snapshot by re-encoding every chunk; streaming snapshots directly from `denseStore` refuses to persist a degraded BM25-fallback index as a hybrid snapshot or trigger an unguarded full-corpus re-encode on the flush path.
+
+## ADR-050: Ranking may diverge from the verbatim semble port
+
+**Status:** Accepted
+**Date:** 2026-10-30
+**Decided by:** Francis (2026-10-30 08:22): "I think we can diverge from the 'direct port of semble' rule now."
+
+### Context
+ADR-002 made ken's retrieval a verbatim port of semble: constants are upstream values to preserve, not hyperparameters, and any gap to semble's NDCG is a port bug or a chunker effect. That held while semble's benchmark was the yardstick: ken reproduces semble within 0.012 NDCG@10. ContextBench CB1 (docs/BENCH.md, "ContextBench CB1") measured ken against human-annotated gold context on 500 Lite tasks and found ken's hybrid ahead of raw BM25 on file coverage (+0.153) but behind it on line coverage at a fixed token budget (−0.026). A follow-up diagnostic traced the trade to the rerank pipeline inherited from semble (`BR − B`: +5.5 files per 8,192 tokens, half the depth per gold file), whose design target is a ranked top 10, not a budget fill.
+
+### Decision
+ken's ranking (fusion weights, boosts, penalties, file saturation, candidate counts) may diverge from semble. Divergence is allowed, not required: the shipped constants stay until a change is measured and accepted.
+
+### Rules for a divergence
+- One change per ADR, with a pre-registered gate on a benchmark that measures what the change is for (for example ContextBench Lite for budget fills), and a regression check on semble's benchmark (NDCG@10 on the 63-repo set) reported alongside.
+- `docs/DESIGN.md` §7 keeps semble's value and source line for every constant, and marks each diverged one with its ken value and ADR.
+- No ranking change ships without Francis's yes.
+
+### Consequences
+- BENCH.md's "don't tune ken's constants" rule now applies to the semble comparison (the reference run stays at semble's values, so port bugs stay findable), not to ken's shipped values.
+- The README, `docs/DESIGN.md` §7 and `CLAUDE.md` describe the pipeline as "ported verbatim"; that stays accurate until the first divergence lands, and the PR that lands it updates them.
+- The ContextBench ablation seam (`search.RankAblation`, `Index.SearchModeAblated`; zero value = shipped pipeline) is the first bench-only tool for measuring a divergence.
+

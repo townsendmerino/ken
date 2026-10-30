@@ -354,6 +354,7 @@ type ArmKenAlpha struct {
 	name    string
 	chunker string
 	alphas  search.AlphaPair
+	abl     search.RankAblation
 }
 
 // NewArmBR creates arm BR: BM25 candidates through ken's full rerank
@@ -366,6 +367,16 @@ func NewArmBR() Arm {
 // adaptive constants; it must reproduce K exactly (a check on the seam).
 func NewArmKA() Arm {
 	return &ArmKenAlpha{name: "KA", chunker: "regex", alphas: search.AdaptiveAlphas}
+}
+
+// NewArmKNS creates arm KNS: arm K with the file-saturation decay off.
+func NewArmKNS() Arm {
+	return &ArmKenAlpha{name: "KNS", chunker: "regex", alphas: search.AdaptiveAlphas, abl: search.RankAblation{NoFileSaturation: true}}
+}
+
+// NewArmKNC creates arm KNC: arm K with the file-coherence boost off.
+func NewArmKNC() Arm {
+	return &ArmKenAlpha{name: "KNC", chunker: "regex", alphas: search.AdaptiveAlphas, abl: search.RankAblation{NoCoherenceBoost: true}}
 }
 
 func (a *ArmKenAlpha) Name() string { return a.name }
@@ -387,7 +398,7 @@ func (a *ArmKenAlpha) Retrieve(ctx context.Context, repoDir, problemStatement st
 
 	t1 := time.Now()
 	ix := ws.WatchedIndex().Load()
-	results, _ := ix.SearchModeAlphas(problemStatement, 500, search.ModeHybrid, a.alphas)
+	results, _ := ix.SearchModeAblated(problemStatement, 500, search.ModeHybrid, a.alphas, a.abl)
 	queryLatency := time.Since(t1).Milliseconds()
 
 	hits := make([]Hit, len(results))
