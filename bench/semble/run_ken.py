@@ -157,6 +157,7 @@ def run_repo(
     alpha_pairs: list[str] | None = None,
     per_task: list[dict] | None = None,
     budget_packing: bool = False,
+    saturation_threshold: int = 0,
 ) -> RepoOutcome:
     """Run all queries for one repo through ken bench; return per-task NDCG@10 + median p50."""
     # Send each query latency_runs times so we can take the median of warm-
@@ -205,6 +206,8 @@ def run_repo(
     # engine.SearchOptions{BudgetPacking: true}: file-saturation decay off.
     if budget_packing:
         args.append("--budget-packing")
+    if saturation_threshold:
+        args.extend(["--saturation-threshold", str(saturation_threshold)])
 
     proc = subprocess.run(
         args,
@@ -1123,6 +1126,12 @@ def main() -> int:
         help="score ken's BudgetPacking search option (file-saturation decay off); results file gets a -packing suffix.",
     )
     p.add_argument(
+        "--saturation-threshold",
+        type=int,
+        default=0,
+        help="file-saturation threshold for ken bench (0 = shipped); results file gets a -satN suffix.",
+    )
+    p.add_argument(
         "--latency-runs",
         type=int,
         default=5,
@@ -1279,6 +1288,7 @@ def main() -> int:
             alpha_nl=args.alpha_nl,
             per_task=per_query,
             budget_packing=args.budget_packing,
+            saturation_threshold=args.saturation_threshold,
         )
         outcomes.append(o)
         sys.stderr.write(
@@ -1319,6 +1329,8 @@ def main() -> int:
     suffix = "" if args.chunker == "regex" else f"-{args.chunker}"
     if args.budget_packing:
         suffix += "-packing"
+    if args.saturation_threshold:
+        suffix += f"-sat{args.saturation_threshold}"
     out_path = out_dir / f"ken-{args.mode}{suffix}.json"
 
     # One corpus entry per scored repo. semble's RepoSpec may already

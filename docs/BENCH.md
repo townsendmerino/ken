@@ -1073,5 +1073,21 @@ Francis (2026-10-30 11:52): "try a milder setting but also can you investigate o
 - **Reported:** all budgets, by language and source, `KS2 − KP`, semble NDCG@10 (63 repos) for the setting.
 - **Validity:** 1,500 records, known parse skips only, nine-task re-run byte-identical.
 - **Not decided here:** how a passing setting would be exposed (an engine option value); that goes to Francis with the read.
-- **A second look at the same benchmark.** This is the second setting gated on Lite, so a pass is weaker evidence than the first gate's would have been. That is why exactly one setting is registered, chosen before running. Further variants go through the options note (`docs/research/budget-packing-options-2026-10-30.md`) and a held-out split registered there first.
+- **A second look at the same benchmark.** This is the second setting gated on Lite, so a pass is weaker evidence than the first gate's would have been. That is why exactly one setting is registered, chosen before running. Further variants go through the options note (`docs/internal/budget-packing-options-2026-10-30.md`) and a held-out split registered there first.
 - **Run:** serially on mbp2 under goinfer's timing lock, `KEN_ENRICH_FILE_BUDGET_MS=10000`, about 2 hours. A second run afterward saves `KP`'s full ranked lists (`cmd/cb -save-ranked`) for offline screening of the options note's ideas; it decides nothing.
+
+### Milder-saturation gate results (2026-10-30)
+
+Run of the registration above on mbp2, 12:01–14:01 PDT under goinfer's timing lock: `KS2` on all 500 Lite tasks, 1,500 records, 0 errors, budget skips only on the six known files.
+
+**Means at 8,192 tokens.** B 0.1852 lines / 0.3530 files; K 0.1588 / 0.5061; **KS2 0.1870 / 0.4766**; KP 0.2299 / 0.4433. Symbol coverage: K 0.2421, KS2 0.2649, KP 0.2860.
+
+| Paired (bootstrap, seed 42) | Budget | Line coverage | File coverage | Symbol coverage |
+|---|---:|---|---|---|
+| KS2 − K | 2,048 | +0.017 [+0.008, +0.027] | −0.027 [−0.040, −0.016] | +0.010 [+0.000, +0.019] |
+| KS2 − K | **8,192** | **+0.028 [+0.018, +0.039]** | **−0.030 [−0.041, −0.019]** | +0.023 [+0.012, +0.035] |
+| KS2 − K | 16,384 | +0.026 [+0.017, +0.036] | −0.038 [−0.051, −0.026] | +0.023 [+0.012, +0.036] |
+| KS2 − KP | 8,192 | −0.043 [−0.058, −0.029] | +0.033 [+0.021, +0.046] | −0.021 [−0.036, −0.006] |
+| KS2 − B | 8,192 | +0.002 [−0.018, +0.022] | +0.124 [+0.095, +0.152] | +0.027 [+0.005, +0.049] |
+
+**Gate read (8,192): gain met, floor missed by 0.001.** Line coverage +0.028 with lower bound +0.018 (> +0.01). File coverage −0.030 with lower bound −0.0413, just past the −0.04 floor. Under the registration that is again **"file cost too high under the rule"**, by the narrowest margin. KS2 roughly halves both of KP's effects (lines +0.028 against +0.071, files −0.030 against −0.063); it ties raw BM25 on lines and keeps 81% of ken's file-coverage lead over it. By language, the file cost now sits in C (−0.095) and C++ (−0.162, 10 tasks), with Go, Rust and TypeScript near zero; by source, Pro −0.044 and Multi −0.039. Reproducibility re-run and semble NDCG for KS2 follow below when run.
