@@ -122,7 +122,7 @@ usage:
   ken index           <path>           [--watch|--no-watch] [--write-snapshot] [--chunker regex|treesitter|line] [--mode bm25|semantic|hybrid|hybrid-rerank] [--model DIR]
   ken search          <path> <query>...  [-k N] [--json] [--verbose] [--stream] [--no-stats] [--chunker ...] [--mode ...] [--model DIR]
                                          [--rerank-model DIR] [--rerank-top-n N] [--rerank-beta β] [--rerank-quant f32|int8] [--rerank-adaptive THRESHOLD:MINN]
-  ken bench           <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR] [--alpha-symbol F] [--alpha-nl F]
+  ken bench           <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR] [--alpha-symbol F] [--alpha-nl F] [--budget-packing]
                                          [--rerank-model DIR] [--rerank-top-n N] [--rerank-beta β] [--rerank-quant f32|int8] [--rerank-adaptive THRESHOLD:MINN]
   ken perf            <subcmd> [args]    (index|search|watch — see 'ken perf' for full usage)
   ken build-index     <corpus>         -o <path> [--chunker ...] [--mode ...] [--model DIR]
@@ -152,7 +152,8 @@ for one query class (0..1; unset = the shipped adaptive 0.3 / 0.5). Bench
 only — they exist for the alpha-sensitivity sweep and are deliberately
 absent from 'ken search'; docs/BENCH.md's "don't tune ken's constants"
 rule keeps (0.3, 0.5) the verbatim-parity reference. Pinned runs report
-zero telemetry timings.
+zero telemetry timings. --budget-packing scores the engine's BudgetPacking
+search option (file-saturation decay off), also with zero timings.
 
 ken perf is the speed/memory measurement harness (sibling to ken bench;
 they share no state). Each invocation emits one JSON record on stdout
@@ -1162,6 +1163,21 @@ func cmdBench(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
+	// --budget-packing scores engine.SearchOptions{BudgetPacking: true}
+	// (file-saturation decay off) for the ContextBench packing gate's
+	// semble NDCG report. Bench only; absent from 'ken search'.
+	budgetPacking := false
+	{
+		kept := rest[:0:0]
+		for _, a := range rest {
+			if a == "--budget-packing" {
+				budgetPacking = true
+				continue
+			}
+			kept = append(kept, a)
+		}
+		rest = kept
+	}
 	k, err := strconv.Atoi(kStr)
 	if err != nil || k < 0 {
 		fmt.Fprintln(os.Stderr, "ken: -k expects a non-negative integer")
@@ -1236,7 +1252,10 @@ func cmdBench(args []string) int {
 				results []search.Result
 				tel     search.Telemetry
 			)
-			if a == search.AdaptiveAlphas {
+			if budgetPacking {
+				// No telemetry variant of the ablated path; timings report zero.
+				results, _ = ix.SearchModeAblated(q, k, mode, a, search.RankAblation{NoFileSaturation: true})
+			} else if a == search.AdaptiveAlphas {
 				results, _, tel = ix.SearchModeWithTelemetry(q, k, mode)
 			} else {
 				// The telemetry path has no α-pinning variant (rerank

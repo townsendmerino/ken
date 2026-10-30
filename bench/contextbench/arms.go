@@ -186,6 +186,7 @@ type ArmKen struct {
 	name    string
 	mode    string
 	chunker string
+	packing bool // engine.SearchOptions.BudgetPacking
 }
 
 func (a *ArmKen) Name() string { return a.name }
@@ -215,7 +216,7 @@ func (a *ArmKen) Retrieve(ctx context.Context, repoDir, problemStatement string,
 		mode = search.ModeHybrid
 	}
 
-	engineHits, _, err := ws.SearchMode(ctx, problemStatement, 500, mode)
+	engineHits, _, err := ws.SearchWith(ctx, problemStatement, 500, mode, engine.SearchOptions{BudgetPacking: a.packing})
 	if err != nil {
 		return nil, ArmStats{}, fmt.Errorf("search: %w", err)
 	}
@@ -247,6 +248,11 @@ func NewArmB() Arm {
 // NewArmK creates arm K (ken hybrid default, regex chunker, Flat).
 func NewArmK() Arm {
 	return &ArmKen{name: "K", mode: "hybrid", chunker: "regex"}
+}
+
+// NewArmKP creates arm KP: arm K through engine.SearchOptions{BudgetPacking: true}.
+func NewArmKP() Arm {
+	return &ArmKen{name: "KP", mode: "hybrid", chunker: "regex", packing: true}
 }
 
 // NewArmKT creates arm KT (ken hybrid, tree-sitter chunker).

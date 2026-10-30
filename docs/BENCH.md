@@ -999,3 +999,21 @@ Run of the registration above on mbp2, 08:27–08:44 PDT under goinfer's timing 
 - **The coherence boost carries nothing at 8,192**: K and KNC pack the same chunks on every task but one. At 2,048 it helps a little (switching it off costs −0.023 LC, interval touching 0).
 
 **Reading.** The file-saturation decay (a file's second chunk counts half, its third a quarter) is the stage that spreads a budget. Without it ken packs about as many files as raw BM25 (KNS − B NF +0.16) but chooses better ones: KNS keeps most of ken's file-coverage advantage over BM25 (+0.163 [+0.038, +0.291]) and recovers BM25's line coverage (+0.047 [−0.015, +0.114] over B; +0.059 over K). The price is 0.02–0.06 file coverage depending on budget. These are 50 Verified Python tasks; any change to ken's ranking needs its own gate on full Lite and semble's NDCG check (ADR-050), which this run does not provide.
+
+### Budget-packing gate registration (committed before the run, 2026-10-30)
+
+Francis chose a budget-packing mode with the default unchanged (2026-10-30 08:56). Under [ADR-050](internal/DECISIONS.md#adr-050-ranking-may-diverge-from-the-verbatim-semble-port), the mode needs a registered gate before it ships. Nothing ships until this gate is read; the read and any release go to Francis.
+
+- **The change.** `engine.SearchOptions{BudgetPacking: true}` on `Workspace.SearchWith`: the hybrid rerank pipeline runs with the file-saturation decay off (`search.RankAblation{NoFileSaturation: true}`). The zero value of `SearchOptions` is `SearchMode` exactly (tested), so `ken search`, ken-mcp and every existing engine call are unchanged. Arm `KP` in `bench/contextbench` uses this engine path; on two tasks it reproduced the ablation arm `KNS` byte for byte.
+- **Slice and pairing.** All 500 Lite tasks, `KP` against Lite's `K` records (paired per task); `B` reported for reference. Budgets 2,048, 8,192 (primary), 16,384.
+- **Primary rule (8,192 tokens, paired bootstrap 95%, numpy, 10,000 resamples, seed 42).**
+  - **Line-coverage gain:** `KP − K` line coverage lower bound > **+0.01**.
+  - **File-coverage floor:** `KP − K` file coverage lower bound > **−0.04** (the mode may give up at most about a quarter of ken's +0.153 file-coverage lead over BM25 on Lite).
+- **Power (from the ablation's paired SDs, 0.156 lines and 0.141 files, n = 500).** The gain rule has 80% power at a true gain of 0.030; the floor passes with about 89% probability at a true file loss of −0.020 (the ablation's estimate).
+- **Outcomes.**
+  - both met → **pass**: propose shipping `BudgetPacking` as an opt-in to Francis;
+  - gain upper bound < +0.01 → **no gain**: do not ship;
+  - floor not met (file lower bound ≤ −0.04) → **file cost too high under the rule**: shipping becomes Francis's call on the trade;
+  - otherwise → **not settled at n = 500**.
+- **Reported, not gated.** All metrics by budget, language and source; `KP − B`; semble's NDCG@10 on its 63-repo benchmark for `--mode hybrid` with and without `ken bench --budget-packing` (a ranked-search view of a budget mode, so a drop is expected and is reported to inform the read, with any drop over 0.02 called out).
+- **Validity.** All 500 tasks scored for `KP` (1,500 records); budget skips only on files that exceed 60 s alone at full clock (any new one re-timed); a re-run of the nine reproducibility tasks must match `KP` byte for byte. Run serially on mbp2 under goinfer's timing lock with `KEN_ENRICH_FILE_BUDGET_MS=10000`; power stops resume from the last completed task.

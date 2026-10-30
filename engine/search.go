@@ -206,12 +206,40 @@ func (w *Workspace) Search(ctx context.Context, query string, k int) ([]Hit, err
 // against a BM25-only index downgrades to ModeBM25 rather than erroring;
 // see search.(*Index).SearchMode).
 func (w *Workspace) SearchMode(ctx context.Context, query string, k int, mode Mode) ([]Hit, Mode, error) {
+	return w.SearchWith(ctx, query, k, mode, SearchOptions{})
+}
+
+// SearchOptions adjusts one search call. The zero value is SearchMode's
+// behavior.
+type SearchOptions struct {
+	// BudgetPacking is for callers that fill a token budget from the
+	// ranked list (an agent's context fill) rather than show a ranked
+	// list: it turns off the rerank pipeline's file-saturation decay, so a
+	// file's second and later chunks keep their full scores and a budget
+	// can take several chunks from the files that matter. On ContextBench
+	// Lite's Verified Python tasks this raised line coverage at 8,192
+	// tokens (+0.059) for a small file-coverage cost (−0.020); see
+	// docs/BENCH.md, "Lite ablation results". Affects the hybrid modes
+	// only (BM25 and semantic have no rerank). Leave it off for ranked
+	// search, where spreading results across files is the point.
+	BudgetPacking bool
+}
+
+// SearchWith is SearchMode with per-call options; SearchWith with a zero
+// SearchOptions is exactly SearchMode.
+func (w *Workspace) SearchWith(ctx context.Context, query string, k int, mode Mode, opts SearchOptions) ([]Hit, Mode, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, mode, fmt.Errorf("engine: search: %w", err)
 	}
 	ix := w.index.Load()
 	gen := w.index.Generation()
-	results, eff := ix.SearchMode(query, k, mode)
+	var results []search.Result
+	var eff Mode
+	if opts.BudgetPacking {
+		results, eff = ix.SearchModeAblated(query, k, mode, search.AdaptiveAlphas, search.RankAblation{NoFileSaturation: true})
+	} else {
+		results, eff = ix.SearchMode(query, k, mode)
+	}
 	return w.toHits(ix, results, eff, gen, query, k), eff, nil
 }
 

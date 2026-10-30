@@ -156,6 +156,7 @@ def run_repo(
     alpha_nl: float | None = None,
     alpha_pairs: list[str] | None = None,
     per_task: list[dict] | None = None,
+    budget_packing: bool = False,
 ) -> RepoOutcome:
     """Run all queries for one repo through ken bench; return per-task NDCG@10 + median p50."""
     # Send each query latency_runs times so we can take the median of warm-
@@ -201,6 +202,9 @@ def run_repo(
     # α is the difference between 13 passes over the corpus and 2.
     if alpha_pairs:
         args.extend(["--alpha-pairs", ",".join(alpha_pairs)])
+    # engine.SearchOptions{BudgetPacking: true}: file-saturation decay off.
+    if budget_packing:
+        args.append("--budget-packing")
 
     proc = subprocess.run(
         args,
@@ -1114,6 +1118,11 @@ def main() -> int:
     p.add_argument("--ken", default="ken", help="path to the ken binary (default: ken on $PATH).")
     p.add_argument("--top-k", type=int, default=10)
     p.add_argument(
+        "--budget-packing",
+        action="store_true",
+        help="score ken's BudgetPacking search option (file-saturation decay off); results file gets a -packing suffix.",
+    )
+    p.add_argument(
         "--latency-runs",
         type=int,
         default=5,
@@ -1269,6 +1278,7 @@ def main() -> int:
             alpha_symbol=args.alpha_symbol,
             alpha_nl=args.alpha_nl,
             per_task=per_query,
+            budget_packing=args.budget_packing,
         )
         outcomes.append(o)
         sys.stderr.write(
@@ -1307,6 +1317,8 @@ def main() -> int:
     # treesitter one, and they would otherwise clobber each other.
     # regex stays unsuffixed so existing paths in docs keep resolving.
     suffix = "" if args.chunker == "regex" else f"-{args.chunker}"
+    if args.budget_packing:
+        suffix += "-packing"
     out_path = out_dir / f"ken-{args.mode}{suffix}.json"
 
     # One corpus entry per scored repo. semble's RepoSpec may already
