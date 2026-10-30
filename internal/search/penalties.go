@@ -91,7 +91,9 @@ type rankedItem struct {
 // rerankTopK is semble penalties.rerank_topk: apply path penalties (when
 // penalisePaths), sort desc, then a greedy pass with file-saturation decay
 // and the same safe early-exit, returning the final top-k.
-func rerankTopK(scores map[int]float64, chunks []chunk.Chunk, topK int, penalisePaths, saturate bool) []rankedItem {
+// satThresh is the per-file chunk count after which file-saturation decay
+// applies (fileSaturationThresh in the shipped pipeline); 0 turns it off.
+func rerankTopK(scores map[int]float64, chunks []chunk.Chunk, topK int, penalisePaths bool, satThresh int) []rankedItem {
 	if len(scores) == 0 {
 		return nil
 	}
@@ -149,8 +151,8 @@ func rerankTopK(scores map[int]float64, chunks []chunk.Chunk, topK int, penalise
 		fp := chunks[idx].File
 		already := fileSelected[fp]
 		eff := pen
-		if saturate && already >= fileSaturationThresh {
-			excess := already - fileSaturationThresh + 1
+		if satThresh > 0 && already >= satThresh {
+			excess := already - satThresh + 1
 			eff *= math.Pow(fileSaturationDecay, float64(excess))
 		}
 		selected = append(selected, sel{eff, idx})

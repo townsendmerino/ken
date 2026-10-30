@@ -1064,3 +1064,14 @@ By source: Verified +0.096 lines / −0.047 files, Multi +0.065 / −0.091, Poly
 | `BudgetPacking` | 0.821 | 3.4 ms |
 
 Paired over repositories: −0.023 [−0.027, −0.018] (numpy bootstrap over the 63 repos, seed 42); 58 repos worse, 4 the same, 1 better. **This exceeds the 0.02 the registration said to call out.** It is the expected direction: semble's queries each have a few target locations across files, and a ranked top 10 without file saturation fills with neighboring chunks of the best file. It is why the mode is opt-in for budget fills and not a default change. The shipped number also confirms the port on this newer semble checkout (0.844 against the 0.842 recorded at v0.1.0).
+
+### Milder-saturation gate registration (committed before the run, 2026-10-30)
+
+Francis (2026-10-30 11:52): "try a milder setting but also can you investigate other approaches". One setting, fixed here before any run: **file-saturation threshold 2** (a file's first two chunks keep their scores; decay 0.5 applies from the third), arm `KS2` (`search.RankAblation{SaturationThreshold: 2}`, bench-only; unit-tested; the refactored seam still reproduces Lite's `K` and the gate's `KP` byte for byte on two tasks).
+
+- **Rules (same as the packing gate):** all 500 Lite tasks, `KS2 − K` at 8,192 tokens, paired bootstrap 95% (numpy, 10,000 resamples, seed 42): line-coverage lower bound > **+0.01** and file-coverage lower bound > **−0.04**. Outcomes as registered for `KP`.
+- **Reported:** all budgets, by language and source, `KS2 − KP`, semble NDCG@10 (63 repos) for the setting.
+- **Validity:** 1,500 records, known parse skips only, nine-task re-run byte-identical.
+- **Not decided here:** how a passing setting would be exposed (an engine option value); that goes to Francis with the read.
+- **A second look at the same benchmark.** This is the second setting gated on Lite, so a pass is weaker evidence than the first gate's would have been. That is why exactly one setting is registered, chosen before running. Further variants go through the options note (`docs/research/budget-packing-options-2026-10-30.md`) and a held-out split registered there first.
+- **Run:** serially on mbp2 under goinfer's timing lock, `KEN_ENRICH_FILE_BUDGET_MS=10000`, about 2 hours. A second run afterward saves `KP`'s full ranked lists (`cmd/cb -save-ranked`) for offline screening of the options note's ideas; it decides nothing.

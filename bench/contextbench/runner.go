@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/townsendmerino/ken/bench/internal/provenance"
+	"github.com/townsendmerino/ken/bench/tokens"
 	"github.com/townsendmerino/ken/internal/structural"
 )
 
@@ -33,6 +34,10 @@ type RunnerConfig struct {
 	// budget) as <instance>.<arm>.<budget>.jsonl (file, lines, tokens,
 	// score; no text), for diagnostics that need per-chunk detail.
 	HitsDir string
+	// RankedDir, when set, receives each (task, arm)'s full ranked list
+	// before packing (up to the arm's candidate count, with token counts),
+	// as <instance>.<arm>.ranked.jsonl, for offline packing simulations.
+	RankedDir string
 }
 
 // ResolveRepoPath finds the cached repository path in repoCache.
@@ -130,10 +135,21 @@ func RunTaskOnArm(
 	budgets []int,
 	prov provenance.Provenance,
 	hitsDir string,
+	rankedDir string,
 ) ([]TaskResult, []TrajRecord, error) {
 	skips0 := structural.ParseBudgetSkips()
 	hits, stats, err := arm.Retrieve(ctx, repoDir, task.ProblemStatement, modelDir)
 	parseSkips := int(structural.ParseBudgetSkips() - skips0)
+	if rankedDir != "" {
+		for i := range hits {
+			if hits[i].Tokens <= 0 && hits[i].Text != "" {
+				hits[i].Tokens = tokens.Count(hits[i].Text)
+			}
+		}
+		if err := writeHits(filepath.Join(rankedDir, fmt.Sprintf("%s.%s.ranked.jsonl", task.InstanceID, arm.Name())), hits); err != nil {
+			return nil, nil, err
+		}
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("arm %s retrieve: %w", arm.Name(), err)
 	}
@@ -202,7 +218,7 @@ func RunBatch(ctx context.Context, cfg RunnerConfig, tasks []Task) ([]TaskResult
 		}
 
 		for _, arm := range cfg.Arms {
-			results, trajs, err := RunTaskOnArm(ctx, task, arm, checkoutDir, cfg.ModelDir, cfg.Budgets, prov, cfg.HitsDir)
+			results, trajs, err := RunTaskOnArm(ctx, task, arm, checkoutDir, cfg.ModelDir, cfg.Budgets, prov, cfg.HitsDir, cfg.RankedDir)
 			if err != nil {
 				_ = os.RemoveAll(checkoutDir)
 				return nil, fmt.Errorf("task %s arm %s: %w", task.InstanceID, arm.Name(), err)

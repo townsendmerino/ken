@@ -1376,6 +1376,23 @@ type RankAblation struct {
 	NoFileSaturation bool
 	// NoCoherenceBoost drops boostMultiChunkFiles (the file-coherence boost).
 	NoCoherenceBoost bool
+	// SaturationThreshold, when > 0, replaces fileSaturationThresh: a file's
+	// first SaturationThreshold chunks keep their scores and decay applies
+	// from the next one. Ignored when NoFileSaturation is set.
+	SaturationThreshold int
+}
+
+// saturationThreshold resolves the per-file count rerankTopK decays after;
+// 0 means no saturation.
+func (a RankAblation) saturationThreshold() int {
+	switch {
+	case a.NoFileSaturation:
+		return 0
+	case a.SaturationThreshold > 0:
+		return a.SaturationThreshold
+	default:
+		return fileSaturationThresh
+	}
 }
 
 // SearchModeAblated is [Index.SearchModeAlphas] with rerank stages
