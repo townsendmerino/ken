@@ -968,3 +968,34 @@ Chosen by Francis (2026-10-30 08:23, option C) after the diagnostic above. Bench
   - **X earns files:** `FC` upper bound < 0 (switching X off loses file coverage).
 - **What each would mean (for the proposal that follows, not decided here).** X carries the spread and costs lines without earning files → X is a candidate for a ranking divergence, gated on full Lite plus semble's NDCG check. X carries the spread and earns files → a trade that makes a budget-packing mode the candidate, not a default change. Neither stage carries it alone → the spread comes from their interaction or from the path penalties or query boosts, and no single-stage change is proposed.
 - **Run.** Serially on mbp2 under goinfer's timing lock, `KEN_ENRICH_FILE_BUDGET_MS=10000`, about 30 minutes.
+
+### Lite ablation results (2026-10-30)
+
+Run of the registration above on mbp2, 08:27–08:44 PDT under goinfer's timing lock: 300 records (50 tasks × KNS, KNC × 3 budgets), 0 errors, budget skips only on the three known matplotlib C++ files. `K` and `B` records are the diagnostic's (byte-identical to Lite).
+
+**Means at 8,192 tokens (50 tasks; `FC` = evaluator file coverage).**
+
+| Arm | LC | FC | NF | GF | CPG | DEPTH |
+|---|---:|---:|---:|---:|---:|---:|
+| B (raw BM25) | 0.2077 | 0.3970 | 13.96 | 0.68 | 2.64 | 0.457 |
+| K (shipped) | 0.1954 | 0.5803 | 21.26 | 1.00 | 1.28 | 0.275 |
+| KNS (K, no file saturation) | **0.2544** | 0.5603 | 14.12 | 0.98 | 2.55 | 0.368 |
+| KNC (K, no coherence boost) | 0.1954 | 0.5803 | 21.24 | 1.00 | 1.28 | 0.275 |
+
+**Paired differences** (numpy bootstrap, 10,000 resamples, seed 42; `DEPTH` over tasks where both arms touch a gold file):
+
+| | Budget | LC | FC | NF | DEPTH |
+|---|---:|---|---|---|---|
+| KNS − K | 2,048 | +0.002 [−0.044, +0.041] | −0.048 [−0.115, +0.003] | −1.24 [−1.68, −0.80] | +0.086 [+0.005, +0.181] |
+| KNS − K | **8,192** | **+0.059 [+0.021, +0.106]** | −0.020 [−0.060, 0.000] | −7.14 [−8.04, −6.24] | +0.085 [+0.033, +0.149] |
+| KNS − K | 16,384 | +0.039 [+0.007, +0.075] | −0.060 [−0.117, −0.016] | −15.34 [−16.70, −13.84] | +0.069 [+0.026, +0.117] |
+| KNC − K | 2,048 | −0.023 [−0.065, 0.000] | −0.033 [−0.087, +0.004] | −0.12 [−0.36, +0.10] | −0.005 [−0.015, 0.000] |
+| KNC − K | **8,192** | 0.000 [0.000, 0.000] | 0.000 [0.000, 0.000] | −0.02 [−0.42, +0.36] | 0.000 [0.000, 0.000] |
+| KNC − K | 16,384 | +0.001 [−0.008, +0.010] | −0.007 [−0.020, 0.000] | −0.12 [−0.56, +0.32] | +0.001 [−0.010, +0.013] |
+| KNS − B | 8,192 | +0.047 [−0.015, +0.114] | +0.163 [+0.038, +0.291] | +0.16 [−1.08, +1.34] | −0.001 [−0.044, +0.043] |
+
+**Outcomes under the registration (8,192).**
+- **File saturation carries the spread** (NF upper bound < 0, DEPTH lower bound > 0) **and costs lines** (LC +0.059, lower bound > 0). **It earns files only at the margin**: FC −0.020 with an upper bound of exactly 0.000, so "X earns files" is not met at 8,192; it is met at 16,384 (−0.060 [−0.117, −0.016]) and nearly at 2,048.
+- **The coherence boost carries nothing at 8,192**: K and KNC pack the same chunks on every task but one. At 2,048 it helps a little (switching it off costs −0.023 LC, interval touching 0).
+
+**Reading.** The file-saturation decay (a file's second chunk counts half, its third a quarter) is the stage that spreads a budget. Without it ken packs about as many files as raw BM25 (KNS − B NF +0.16) but chooses better ones: KNS keeps most of ken's file-coverage advantage over BM25 (+0.163 [+0.038, +0.291]) and recovers BM25's line coverage (+0.047 [−0.015, +0.114] over B; +0.059 over K). The price is 0.02–0.06 file coverage depending on budget. These are 50 Verified Python tasks; any change to ken's ranking needs its own gate on full Lite and semble's NDCG check (ADR-050), which this run does not provide.
