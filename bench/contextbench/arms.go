@@ -250,9 +250,16 @@ func NewArmK() Arm {
 	return &ArmKen{name: "K", mode: "hybrid", chunker: "regex"}
 }
 
-// NewArmKP creates arm KP: arm K through engine.SearchOptions{BudgetPacking: true}.
+// NewArmKP creates arm KP: arm K with file saturation off (the first
+// packing gate's setting; before ADR-051 this was engine BudgetPacking).
 func NewArmKP() Arm {
-	return &ArmKen{name: "KP", mode: "hybrid", chunker: "regex", packing: true}
+	return &ArmKenAlpha{name: "KP", chunker: "regex", alphas: search.AdaptiveAlphas, abl: search.RankAblation{NoFileSaturation: true}}
+}
+
+// NewArmKBP creates arm KBP: arm K through engine.SearchOptions{BudgetPacking:
+// true} as shipped (ADR-051: saturation threshold 2); must equal KS2.
+func NewArmKBP() Arm {
+	return &ArmKen{name: "KBP", mode: "hybrid", chunker: "regex", packing: true}
 }
 
 // NewArmKT creates arm KT (ken hybrid, tree-sitter chunker).

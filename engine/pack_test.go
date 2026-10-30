@@ -100,6 +100,6 @@ func TestSearchWith_BudgetPackingKeepsSameFileChunks(t *testing.T) {
 	}
 	shipped, packed := countBig(engine.SearchOptions{}), countBig(engine.SearchOptions{BudgetPacking: true})
 	if packed <= shipped {
-		t.Errorf("BudgetPacking: %d of the top 6 hits from widgets/resize.go, shipped %d; want more (file saturation off)", packed, shipped)
+		t.Errorf("BudgetPacking: %d of the top 6 hits from widgets/resize.go, shipped %d; want more (saturation from the third chunk)", packed, shipped)
 	}
 }

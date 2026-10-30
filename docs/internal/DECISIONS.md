@@ -58,6 +58,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-048](#adr-048-engine-structural-spans-symbolat-refresh-qualified-names-testsfor-k10k15) | `engine` structural spans, SymbolAt, Refresh, qualified names, TestsFor (K10–K15) | Accepted |
 | [ADR-049](#adr-049-drop-retained-f32-vectors-from-watchedindex-recompute-on-demand-k17) | Drop retained f32 vectors from WatchedIndex; recompute on demand (K17) | Accepted |
 | [ADR-050](#adr-050-ranking-may-diverge-from-the-verbatim-semble-port) | Ranking may diverge from the verbatim semble port (amends ADR-002) | Accepted |
+| [ADR-051](#adr-051-opt-in-budgetpacking-search-option-saturation-threshold-2) | Opt-in `BudgetPacking` search option: file saturation from the third chunk | Accepted |
 
 ---
 
@@ -2917,4 +2918,23 @@ ken's ranking (fusion weights, boosts, penalties, file saturation, candidate cou
 - BENCH.md's "don't tune ken's constants" rule now applies to the semble comparison (the reference run stays at semble's values, so port bugs stay findable), not to ken's shipped values.
 - The README, `docs/DESIGN.md` §7 and `CLAUDE.md` describe the pipeline as "ported verbatim"; that stays accurate until the first divergence lands, and the PR that lands it updates them.
 - The ContextBench ablation seam (`search.RankAblation`, `Index.SearchModeAblated`; zero value = shipped pipeline) is the first bench-only tool for measuring a divergence.
+
+## ADR-051: Opt-in BudgetPacking search option (saturation threshold 2)
+
+**Status:** Accepted
+**Date:** 2026-10-30
+**Decided by:** Francis (2026-10-30 14:25), shipping on his call although the registered file floor was missed by 0.001; conditional on semble NDCG@10 dropping no more than the first setting's 0.023.
+
+### Context
+ken's rerank pipeline halves the score of each further chunk from a file already selected (file saturation, threshold 1, decay 0.5; semble's constant). That suits a ranked top 10. For a caller that fills a token budget, it spreads the budget across files: on ContextBench Lite, ken reaches the right files more often than raw BM25 but covers fewer gold lines (docs/BENCH.md, "ContextBench CB1"). Under ADR-050, two pre-registered gates on all 500 Lite tasks (8,192 tokens; rules: line-coverage lower bound > +0.01, file-coverage lower bound > −0.04) measured:
+- saturation off: lines +0.071 [+0.054, +0.089], files −0.063 [−0.080, −0.047]; floor not met; semble NDCG@10 0.844 → 0.821;
+- **threshold 2** (a file's first two chunks keep full score): lines **+0.028 [+0.018, +0.039]**, files **−0.030 [−0.041, −0.019]**; the gain rule is met and the **floor is missed by 0.001** (lower bound −0.0413 against −0.04).
+
+### Decision
+Ship threshold 2 as an **opt-in** per-call option, `engine.SearchOptions{BudgetPacking: true}` on `Workspace.SearchWith`. The registered gate did not pass. Shipping is Francis's call on the trade, recorded here as such. The default is unchanged everywhere: `SearchMode`, `ken search`, ken-mcp, and every existing engine call keep semble's ranking (`SearchWith` with zero options is tested identical to `SearchMode`).
+
+### Consequences
+- Callers that pack a token budget (tack's context fill) can opt in: on Lite they get +0.028 line and +0.023 symbol coverage for −0.030 file coverage. That ties raw BM25 on lines while keeping 81% of ken's file-coverage lead over it. The file cost is largest in C/C++ (−0.095, −0.162).
+- A second ranking path exists. If a later approach in `docs/internal/budget-packing-options-2026-10-30.md` beats threshold 2 on the held-out split, it **replaces** this setting under the same option rather than adding another path (Francis, 2026-10-30).
+- DESIGN §7 records the diverged constant for this option. README and CLAUDE.md describe the default pipeline, which is still the verbatim port, so their wording stands.
 

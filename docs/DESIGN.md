@@ -527,7 +527,7 @@ Training-dataset licenses (CornStack `nomic-ai/cornstack-*`) don't encumber the 
 
 ## 7. Hybrid retrieval & rerank
 
-Ported verbatim from semble's live source (`search.py`, `ranking/{boosting,penalties,weighting}.py`, `tokens.py`), which diverged materially from the scoping reconstruction. Since [ADR-050](internal/DECISIONS.md#adr-050-ranking-may-diverge-from-the-verbatim-semble-port) (2026-10-30, Francis's call) these constants may diverge from semble under a measured gate; none has yet.
+Ported verbatim from semble's live source (`search.py`, `ranking/{boosting,penalties,weighting}.py`, `tokens.py`), which diverged materially from the scoping reconstruction. Since [ADR-050](internal/DECISIONS.md#adr-050-ranking-may-diverge-from-the-verbatim-semble-port) (2026-10-30, Francis's call) these constants may diverge from semble under a measured gate. The default pipeline has not diverged. The opt-in `engine.SearchOptions{BudgetPacking}` uses a file-saturation threshold of 2 instead of semble's 1 ([ADR-051](internal/DECISIONS.md#adr-051-opt-in-budgetpacking-search-option-saturation-threshold-2)).
 
 ### Arm B chunk-level enrichment (Stage 8 close, ADR-035)
 
