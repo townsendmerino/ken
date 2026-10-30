@@ -1055,3 +1055,12 @@ Run of the registration above on mbp2, 09:00–10:57 PDT under goinfer's timing 
 By source: Verified +0.096 lines / −0.047 files, Multi +0.065 / −0.091, Poly +0.056 / −0.029, Pro +0.044 / −0.105.
 
 **Reading.** With file saturation off, ken beats raw BM25 on every measure at every budget. Against shipped ken it trades files for lines: +0.07 lines, +0.04 symbols and +0.01 precision against −0.06 files at 8,192, a cost larger than the registered floor allowed. Where files matter most (C, C++, Rust; Multi-SWE-bench and SWE-bench Pro), the cost reaches −0.10 to −0.24. Semble NDCG@10 for the mode is reported below when run.
+
+**Semble NDCG@10 for the mode (reported, not gated).** semble checkout `4633ee75` (2026-10-29), 63 repos, 1,251 queries, ken `878031e` regex chunker, `bench/semble/run_ken.py --mode hybrid` with and without `--budget-packing`; run by the coordinator session on mbp2 at 11:05–11:08 under the timing lock (Francis approved running semble's benchmark code, 09:12).
+
+| ken hybrid | NDCG@10 | p50 latency |
+|---|---:|---:|
+| shipped (`SearchMode`) | 0.844 | 3.3 ms |
+| `BudgetPacking` | 0.821 | 3.4 ms |
+
+Paired over repositories: −0.023 [−0.027, −0.018] (numpy bootstrap over the 63 repos, seed 42); 58 repos worse, 4 the same, 1 better. **This exceeds the 0.02 the registration said to call out.** It is the expected direction: semble's queries each have a few target locations across files, and a ranked top 10 without file saturation fills with neighboring chunks of the best file. It is why the mode is opt-in for budget fills and not a default change. The shipped number also confirms the port on this newer semble checkout (0.844 against the 0.842 recorded at v0.1.0).
