@@ -727,7 +727,7 @@ Provenance (all harnesses):
 
 ## ContextBench CB1 benchmark (agent context retrieval)
 
-[ContextBench](https://github.com/ContextBench/Context-Bench) (Li et al., 2026) measures context retrieval for coding agents across issue-resolution tasks with human-annotated gold context line spans. **CB1** is the pure retrieval-only track: evaluating how well code-search engines retrieve relevant context without an LLM in the loop, under fixed token budgets (2,048, 8,192 primary, 16,384 tokens counted via `cl100k_base`).
+[ContextBench](https://github.com/anonymousUser2026/ContextBench) (Li et al., 2026, [arXiv 2602.05892](https://arxiv.org/abs/2602.05892)) measures context retrieval for coding agents across issue-resolution tasks with human-annotated gold context line spans. **CB1** is the pure retrieval-only track: evaluating how well code-search engines retrieve relevant context without an LLM in the loop, under fixed token budgets (2,048, 8,192 primary, 16,384 tokens counted via `cl100k_base`).
 
 The harness (`bench/contextbench/`, `//go:build bench`) implements:
 - **`G`**: Tokenized grep baseline (extracts identifiers from issue statement, ranks files by distinct matches, files packed top-down).
@@ -833,3 +833,81 @@ Registered on branch `cb1-lite` before any Lite task ran, per the CB1 design (ta
 - **KT is not bit-reproducible on this box.** Over seven pilot runs (quiet and loaded, budgets off, 2 s and 10 s, KT chunker timeout 1 s and 10 s), `G`, `B` and `K` produced identical records every time; `KT` produced three different outputs, each differing from the others on one task's 8,192 / 16,384 records. A 10 s chunker timeout did not remove the variation, so it is not only aikit's 1 s per-parse timeout (which S53 also ran under). KT stays at aikit's default, as in S53, is reported only, and its flip rate is measured in the reproducibility check below. The validity rule's byte-for-byte condition applies to `G`, `B` and `K`.
 - **Run.** On mbp2 (Linux x86_64, 8 cores), serially, holding goinfer's timing lock (build times are reported, not decided on; other sessions' unlocked builds can still load the box, so build times are indicative only). Estimated wall time about 6 hours (15 s + 0.95 s per MB of base tree; Lite's trees total 13.8 GB; matplotlib's tasks add about 40 s each for the budget skips).
   `KEN_ENRICH_FILE_BUDGET_MS=10000 cb -tasks …/contextbench_verified.parquet -gold …/contextbench_verified.parquet -slice Lite -arms G,B,K,KT -resume -evaluator-checkout -out cb1_lite.jsonl`
+
+### Lite results (N = 500, mbp2, 2026-10-29/30)
+
+Run of the registration above: launch 3, started 18:29 PDT on 2026-10-29, finished 03:45 PDT on 2026-10-30, with three resumes after power stops (charger and throttling on mbp2; a power watcher stopped the run and it resumed from the last completed task). All 500 tasks scored on all four arms and three budgets (6,000 records, 0 evaluator errors). One task (#15) was dropped and re-run because its window touched a 400 MHz clock sample.
+
+**Validity checks (registered before the run).**
+- *Parse-budget skips.* Every record's skips are files that do not parse within 60 s alone at full clock (3.8 GHz): the three matplotlib C++ wrappers (17 tasks), `include/nlohmann/detail/json_pointer.hpp` and `include/nlohmann/detail/meta/type_traits.hpp` (2 nlohmann/json tasks), `benchmark/bench_dom_api.cpp` (2 simdjson tasks). The same files were skipped on B, K and KT for each task. So no G/B/K record depends on the clock speed during the run.
+- *Byte-for-byte re-run.* Nine tasks (one per language, plus a matplotlib, a django and an nlohmann/json task) re-run after the Lite run: all 108 records identical to the run's (timings and provenance aside), KT included. KT flipped in pilot runs on a loaded box (above); on this sample it did not.
+
+**Headline (8,192 tokens, mean over 500 tasks).**
+
+| Arm | Budget | Line Coverage | Symbol Coverage | File Coverage | Line Precision | Tokens to Gold Line | Gold reached | Build Time (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **G** (grep) | 2,048 | 0.0387 | 0.0577 | 0.0341 | 0.0044 | 0.0 | 44/500 | 0 |
+| **G** (grep) | 8,192 | 0.0461 | 0.0647 | 0.0412 | 0.0041 | 910.7 | 51/500 | 0 |
+| **G** (grep) | 16,384 | 0.0612 | 0.0822 | 0.0580 | 0.0037 | 3,332.9 | 64/500 | 0 |
+| **B** (bm25) | 2,048 | 0.1011 | 0.1472 | 0.2305 | 0.0569 | 459.0 | 141/500 | 6,117 |
+| **B** (bm25) | 8,192 | **0.1852** | 0.2383 | 0.3530 | **0.0299** | 1,966.3 | 217/500 | 6,117 |
+| **B** (bm25) | 16,384 | **0.2489** | 0.3060 | 0.4466 | 0.0210 | 3,959.0 | 268/500 | 6,117 |
+| **K** (hybrid) | 2,048 | 0.1029 | **0.1772** | **0.3573** | 0.0520 | 448.9 | 185/500 | 7,724 |
+| **K** (hybrid) | 8,192 | 0.1588 | 0.2421 | **0.5061** | 0.0244 | 1,490.8 | 252/500 | 7,724 |
+| **K** (hybrid) | 16,384 | 0.2012 | 0.2972 | **0.5987** | 0.0166 | 2,865.0 | 291/500 | 7,724 |
+| **KT** (treesitter) | 2,048 | 0.0953 | 0.1749 | 0.3425 | 0.0455 | 463.9 | 181/500 | 18,431 |
+| **KT** (treesitter) | 8,192 | 0.1577 | **0.2486** | 0.5070 | 0.0238 | 1,858.5 | 264/500 | 18,431 |
+| **KT** (treesitter) | 16,384 | 0.1843 | 0.2898 | 0.5903 | 0.0155 | 2,863.6 | 290/500 | 18,431 |
+
+Build times are on mbp2 with other sessions sharing the box and with throttling stops; indicative only. `G` keeps its top whole file even past the budget (the registered "top chunk is always kept" rule), so its 8,192-token records used 54,791 tokens on average.
+
+**Decided: `K − B`, line coverage at 8,192 tokens** (harness bootstrap, 10,000 resamples, seed 42):
+
+| Comparison | Metric | Budget | Mean Delta (A − B) | 95% Bootstrap CI | N Tasks |
+|---|---|---:|---:|---|---:|
+| K − B | line_coverage | 8192 | −0.0263 | [−0.0473, −0.0056] | 500 |
+| KT − K | line_coverage | 8192 | −0.0011 | [−0.0136, +0.0112] | 500 |
+| K − G | line_coverage | 8192 | +0.1127 | [+0.0866, +0.1391] | 500 |
+
+**Outcome under the registered rule: not settled at n = 500.** The interval [−0.0473, −0.0056] crosses −m (−0.028): it is neither inside ±m nor wholly below −m. It does exclude zero on B's side: at this budget BM25 retrieves slightly more gold lines than ken's hybrid, by about 0.026 line coverage. Lite's own paired SD (0.237, against the pilot's 0.194) implies m = 0.034, which gives the same reading.
+
+**Reported (not decided): the rest of the K − B picture** (Python bootstrap, numpy, 10,000 resamples, seed 42; win/tie/loss over tasks):
+
+| K − B | 2,048 | 8,192 | 16,384 |
+|---|---|---|---|
+| line coverage | +0.0018 [−0.017, +0.021], 98/319/83 | −0.0263 [−0.047, −0.006], 103/276/121 | −0.0477 [−0.071, −0.024], 110/237/153 |
+| file coverage | +0.1268 [+0.093, +0.160], 153/312/35 | **+0.1532 [+0.124, +0.183], 174/305/21** | +0.1521 [+0.125, +0.180], 174/307/19 |
+| symbol coverage | +0.0300 [+0.008, +0.052] | +0.0038 [−0.019, +0.026] | −0.0087 [−0.034, +0.016] |
+| line precision | −0.0049 [−0.014, +0.004] | −0.0055 [−0.009, −0.002] | −0.0045 [−0.007, −0.002] |
+
+ken's hybrid finds the right files far more often than BM25 (file coverage +0.15 at every budget ≥ 8,192, winning 174 tasks to 21) and reaches a gold line within budget on more tasks (252 against 217 at 8,192), but fills the budget with fewer gold lines once the files are found. The deficit is concentrated in Python (−0.065 [−0.095, −0.036], 266 tasks) and in SWE-bench Verified (−0.061 [−0.098, −0.025], 174 tasks); ken is ahead on JavaScript (+0.052 [+0.011, +0.109]) and TypeScript (+0.055 [+0.008, +0.109]); Go, Rust, Java, C and C++ intervals include zero. Why ken trades line coverage for file coverage is not measured here; a likely candidate is the ranker's file-saturation decay and file-coherence boosts (DESIGN §7), which spread a budget across files, but CB1 records do not carry per-chunk hits, so this is a hypothesis, not a finding.
+
+`KT − K` (the chunker) is flat at 8,192 (−0.001 [−0.014, +0.011]) and slightly negative at 16,384 (−0.017 [−0.031, −0.003]); C is the one language leaning against tree-sitter (−0.044 [−0.118, +0.006], 23 tasks). Both ken arms and BM25 are far ahead of grep at every budget (`K − G` +0.113 [+0.087, +0.139] at 8,192).
+
+**By language at 8,192 tokens (Line / File / Sym)**
+
+| Language | Tasks | G | B | K | KT |
+|---|---:|---|---|---|---|
+| c | 23 | 0.0000 / 0.0000 / 0.0435 | 0.0829 / 0.2362 / 0.2040 | 0.1236 / 0.5073 / 0.1905 | 0.0793 / 0.4291 / 0.1591 |
+| cpp | 10 | 0.0609 / 0.0333 / 0.1000 | 0.2044 / 0.4095 / 0.3838 | 0.1965 / 0.6810 / 0.3971 | 0.1677 / 0.6083 / 0.3035 |
+| go | 40 | 0.1868 / 0.1618 / 0.1695 | 0.2804 / 0.5601 / 0.2641 | 0.2219 / 0.6687 / 0.2555 | 0.2249 / 0.6904 / 0.3084 |
+| java | 15 | 0.0641 / 0.0667 / 0.0926 | 0.1646 / 0.3513 / 0.2258 | 0.1298 / 0.5474 / 0.2247 | 0.1372 / 0.5379 / 0.2365 |
+| javascript | 60 | 0.0023 / 0.0122 / 0.0000 | 0.0877 / 0.1304 / 0.0995 | 0.1402 / 0.2568 / 0.1586 | 0.1451 / 0.2854 / 0.1693 |
+| python | 266 | 0.0378 / 0.0335 / 0.0360 | 0.2270 / 0.4216 / 0.2755 | 0.1618 / 0.5694 / 0.2598 | 0.1624 / 0.5675 / 0.2604 |
+| rust | 20 | 0.1757 / 0.1332 / 0.2480 | 0.1922 / 0.4508 / 0.2514 | 0.1622 / 0.7047 / 0.2401 | 0.1611 / 0.7011 / 0.2375 |
+| typescript | 66 | 0.0047 / 0.0076 / 0.1162 | 0.0827 / 0.1559 / 0.1879 | 0.1376 / 0.2828 / 0.2376 | 0.1394 / 0.2998 / 0.2659 |
+
+**By source at 8,192 tokens (Line / File / Sym)**
+
+| Source | Tasks | G | B | K | KT |
+|---|---:|---|---|---|---|
+| Multi | 156 | 0.0801 / 0.0662 / 0.1355 | 0.1690 / 0.3459 / 0.2533 | 0.1719 / 0.5254 / 0.2560 | 0.1712 / 0.5166 / 0.2737 |
+| Poly | 116 | 0.0339 / 0.0356 / 0.0397 | 0.1410 / 0.2377 / 0.1628 | 0.1147 / 0.3582 / 0.1985 | 0.1209 / 0.3698 / 0.2019 |
+| Pro | 54 | 0.0097 / 0.0209 / 0.0040 | 0.1452 / 0.2650 / 0.1409 | 0.1469 / 0.4457 / 0.1634 | 0.1465 / 0.4481 / 0.1949 |
+| Verified | 174 | 0.0350 / 0.0289 / 0.0369 | 0.2415 / 0.4634 / 0.3054 | 0.1803 / 0.6063 / 0.2832 | 0.1738 / 0.6082 / 0.2740 |
+
+`K − B` line coverage at 8,192 by source: Multi +0.003 [−0.035, +0.041], Poly −0.026 [−0.069, +0.015], Pro +0.002 [−0.049, +0.050], Verified −0.061 [−0.098, −0.025]. The largest single-repository contributions to the deficit are django/django (80 tasks; B 0.320, K 0.291), sympy/sympy (29; B 0.264, K 0.104) and huggingface/transformers (34; B 0.185, K 0.066); per-repository means for all 58 repositories are in `cmd/cb -breakdown` output.
+
+**Relation to S53.** On S53 (53 SWE-bench Pro tasks), `K − B` was +0.0280 [−0.0225, +0.0782]; on Lite's 54 Pro tasks it is +0.0017 [−0.049, +0.050]. Neither contradicts the other; the Lite shortfall comes from the SWE-bench Verified Python repositories, which S53 does not contain.
+
+**Reproduce.** The evaluator lives outside the tree (ContextBench has no license): ContextBench at `cd5f62e4`, Python 3.10.19 with `tree-sitter==0.20.4`, `tree-sitter-languages==1.10.2`, `pandas==2.3.3`, `pyarrow==25.0.1`, `unidiff==1.0.1`, `datasets==4.8.4`, `tqdm==4.67.3`; model potion-code-16M (`model.safetensors` sha256 `ca6159081a6e96cebe4ad878e5e8437bfccc761e8db16223370149cd2faa6c0b`); `contextbench_verified.parquet` sha256 `e9dcfd504cbfb849ac815a79040c793d0d92f94eecc9b5a4ee3e1445a2f8a791`. Harness at ken `3ba12e2` (branch `cb1-lite`), built with `go build -tags bench ./bench/contextbench/cmd/cb`, run as in the registration with `-cache`, `-python`, `-cb-dir` and `-model-dir` pointing at that environment, `-evaluator-checkout` filling the cache, and `-breakdown` for the tables. Records: `cb1_lite.jsonl` (6,000 lines) and the run, power and re-run logs are kept outside the repository on mbp2 (`~/cb/lite/`).
