@@ -29,6 +29,10 @@ type RunnerConfig struct {
 	// ProvenanceExtra is recorded in every result's provenance block
 	// (e.g. the ContextBench commit and evaluator environment).
 	ProvenanceExtra map[string]string
+	// HitsDir, when set, receives the packed hits of every (task, arm,
+	// budget) as <instance>.<arm>.<budget>.jsonl (file, lines, tokens,
+	// score; no text), for diagnostics that need per-chunk detail.
+	HitsDir string
 }
 
 // ResolveRepoPath finds the cached repository path in repoCache.
@@ -125,6 +129,7 @@ func RunTaskOnArm(
 	modelDir string,
 	budgets []int,
 	prov provenance.Provenance,
+	hitsDir string,
 ) ([]TaskResult, []TrajRecord, error) {
 	skips0 := structural.ParseBudgetSkips()
 	hits, stats, err := arm.Retrieve(ctx, repoDir, task.ProblemStatement, modelDir)
@@ -138,6 +143,11 @@ func RunTaskOnArm(
 
 	for _, b := range budgets {
 		packedHits, usedTokens := PackBudget(hits, b)
+		if hitsDir != "" {
+			if err := writeHits(filepath.Join(hitsDir, fmt.Sprintf("%s.%s.%d.jsonl", task.InstanceID, arm.Name(), b)), packedHits); err != nil {
+				return nil, nil, err
+			}
+		}
 		firstGoldTokens := TokensToFirstGoldLine(packedHits, task.GoldContext)
 
 		traj := BuildTrajRecord(task.InstanceID, packedHits)
@@ -192,7 +202,7 @@ func RunBatch(ctx context.Context, cfg RunnerConfig, tasks []Task) ([]TaskResult
 		}
 
 		for _, arm := range cfg.Arms {
-			results, trajs, err := RunTaskOnArm(ctx, task, arm, checkoutDir, cfg.ModelDir, cfg.Budgets, prov)
+			results, trajs, err := RunTaskOnArm(ctx, task, arm, checkoutDir, cfg.ModelDir, cfg.Budgets, prov, cfg.HitsDir)
 			if err != nil {
 				_ = os.RemoveAll(checkoutDir)
 				return nil, fmt.Errorf("task %s arm %s: %w", task.InstanceID, arm.Name(), err)
@@ -297,4 +307,23 @@ func AttachEvaluatedMetrics(allResults []TaskResult, idxs []int, evalMetrics []E
 		allResults[idx].AUCCov = m.AUCCov
 	}
 	return nil
+}
+
+// writeHits writes packed hits as JSON lines without their text.
+func writeHits(path string, hits []Hit) error {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	for i, h := range hits {
+		if err := enc.Encode(struct {
+			Rank      int     `json:"rank"`
+			File      string  `json:"file"`
+			StartLine int     `json:"start_line"`
+			EndLine   int     `json:"end_line"`
+			Tokens    int     `json:"tokens"`
+			Score     float64 `json:"score"`
+		}{i + 1, NormalizePath(h.File), h.StartLine, h.EndLine, h.Tokens, h.Score}); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(path, buf.Bytes(), 0o644)
 }

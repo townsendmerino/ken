@@ -22,6 +22,7 @@ import (
 	_ "github.com/townsendmerino/aikit/chunk/treesitter"
 	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/search"
+	"github.com/townsendmerino/ken/internal/structural"
 )
 
 var (
@@ -339,4 +340,69 @@ func parseLEANNOutput(out []byte) ([]Hit, error) {
 		return nil, fmt.Errorf("scan LEANN output: %w", err)
 	}
 	return hits, nil
+}
+
+// --- Diagnostic arm: ken hybrid pipeline with pinned α ---
+
+// ArmKenAlpha runs ken's hybrid pipeline (RRF fusion, file-coherence and
+// query boosts, path penalties, file-saturation decay) with the adaptive-α
+// constants pinned through search.Index.SearchModeAlphas, the seam the
+// α-sensitivity harness uses. α is the semantic weight: {0, 0} keeps the
+// whole rerank pipeline over BM25 alone ("BR"), and search.AdaptiveAlphas
+// reproduces arm K. Bench-only; it changes nothing in ken's ranking.
+type ArmKenAlpha struct {
+	name    string
+	chunker string
+	alphas  search.AlphaPair
+}
+
+// NewArmBR creates arm BR: BM25 candidates through ken's full rerank
+// pipeline (α = 0 for both query classes), regex chunker.
+func NewArmBR() Arm {
+	return &ArmKenAlpha{name: "BR", chunker: "regex", alphas: search.AlphaPair{Symbol: 0, NL: 0}}
+}
+
+// NewArmKA creates arm KA: arm K through the pinned-α path with the shipped
+// adaptive constants; it must reproduce K exactly (a check on the seam).
+func NewArmKA() Arm {
+	return &ArmKenAlpha{name: "KA", chunker: "regex", alphas: search.AdaptiveAlphas}
+}
+
+func (a *ArmKenAlpha) Name() string { return a.name }
+
+func (a *ArmKenAlpha) Retrieve(ctx context.Context, repoDir, problemStatement string, modelDir string) ([]Hit, ArmStats, error) {
+	opts := engine.Options{
+		Mode:      "hybrid",
+		Chunker:   a.chunker,
+		ModelDir:  modelDir,
+		LogWriter: io.Discard,
+	}
+	t0 := time.Now()
+	ws, err := engine.Open(ctx, repoDir, opts)
+	if err != nil {
+		return nil, ArmStats{}, fmt.Errorf("open workspace: %w", err)
+	}
+	defer ws.Close()
+	buildTime := time.Since(t0).Milliseconds()
+
+	t1 := time.Now()
+	ix := ws.WatchedIndex().Load()
+	results, _ := ix.SearchModeAlphas(problemStatement, 500, search.ModeHybrid, a.alphas)
+	queryLatency := time.Since(t1).Milliseconds()
+
+	hits := make([]Hit, len(results))
+	for i, r := range results {
+		hits[i] = Hit{
+			File:      r.Chunk.File,
+			StartLine: r.Chunk.StartLine,
+			EndLine:   r.Chunk.EndLine,
+			Text:      structural.StripLabel(r.Chunk.Text),
+			Score:     r.Score,
+		}
+	}
+	return hits, ArmStats{
+		IndexBuildTimeMs:   buildTime,
+		QueryLatencyMs:     queryLatency,
+		PeakFootprintBytes: getPeakRSS(),
+	}, nil
 }

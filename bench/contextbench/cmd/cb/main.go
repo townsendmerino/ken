@@ -53,6 +53,7 @@ func main() {
 	evalCheckout := flag.Bool("evaluator-checkout", false, "With -resume: check each task out through the evaluator's own checkout first (fills the cache), and remove the worktree after")
 	errPath := flag.String("errors", "", "With -resume: JSONL file for failed tasks (default <out>.errors.jsonl)")
 	tsTimeoutMs := flag.Int("ts-timeout-ms", -1, "Re-register the treesitter chunker with this per-parse timeout in ms (0 = none); -1 keeps aikit's default (1 s)")
+	hitsDir := flag.String("save-hits", "", "Directory for each (task, arm, budget)'s packed hits as JSONL (no text)")
 	breakdown := flag.Bool("breakdown", false, "Also print per-language, per-source and per-repository tables at 8,192 tokens")
 	var provExtra kvFlag
 	flag.Var(&provExtra, "prov", "key=value recorded in every result's provenance block (repeatable)")
@@ -89,6 +90,10 @@ func main() {
 			arms = append(arms, contextbench.NewArmK())
 		case "KT":
 			arms = append(arms, contextbench.NewArmKT())
+		case "BR":
+			arms = append(arms, contextbench.NewArmBR())
+		case "KA":
+			arms = append(arms, contextbench.NewArmKA())
 		case "L1":
 			arms = append(arms, contextbench.NewArmLEANN("L1", *leannRunner, *pythonBin, "l1"))
 		case "L2":
@@ -123,6 +128,13 @@ func main() {
 		Arms:            arms,
 		Evaluate:        *runEval,
 		ProvenanceExtra: provExtra,
+		HitsDir:         *hitsDir,
+	}
+	if *hitsDir != "" {
+		if err := os.MkdirAll(*hitsDir, 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: -save-hits: %v\n", err)
+			os.Exit(2)
+		}
 	}
 
 	if *tsTimeoutMs >= 0 {

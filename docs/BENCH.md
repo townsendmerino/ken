@@ -911,3 +911,45 @@ ken's hybrid finds the right files far more often than BM25 (file coverage +0.15
 **Relation to S53.** On S53 (53 SWE-bench Pro tasks), `K − B` was +0.0280 [−0.0225, +0.0782]; on Lite's 54 Pro tasks it is +0.0017 [−0.049, +0.050]. Neither contradicts the other; the Lite shortfall comes from the SWE-bench Verified Python repositories, which S53 does not contain.
 
 **Reproduce.** The evaluator lives outside the tree (ContextBench has no license): ContextBench at `cd5f62e4`, Python 3.10.19 with `tree-sitter==0.20.4`, `tree-sitter-languages==1.10.2`, `pandas==2.3.3`, `pyarrow==25.0.1`, `unidiff==1.0.1`, `datasets==4.8.4`, `tqdm==4.67.3`; model potion-code-16M (`model.safetensors` sha256 `ca6159081a6e96cebe4ad878e5e8437bfccc761e8db16223370149cd2faa6c0b`); `contextbench_verified.parquet` sha256 `e9dcfd504cbfb849ac815a79040c793d0d92f94eecc9b5a4ee3e1445a2f8a791`. Harness at ken `3ba12e2` (branch `cb1-lite`), built with `go build -tags bench ./bench/contextbench/cmd/cb`, run as in the registration with `-cache`, `-python`, `-cb-dir` and `-model-dir` pointing at that environment, `-evaluator-checkout` filling the cache, and `-breakdown` for the tables. Records: `cb1_lite.jsonl` (6,000 lines) and the run, power and re-run logs are kept outside the repository on mbp2 (`~/cb/lite/`).
+
+### Lite diagnostic registration: does ken's ranking pipeline spread the budget? (committed before the run, 2026-10-30)
+
+Follow-up chosen by Francis (2026-10-30 05:58) to the Lite result above (K − B not settled; K ahead on file coverage, behind on line coverage). A diagnostic, not a decision about ken's ranking: nothing here changes ken's ranking, and any change it might suggest is an owner decision (ken treats retrieval as closed for 1.0).
+
+- **Question.** `--mode bm25` (arm B) is raw BM25 with no rerank; arm K adds both the semantic arm and ken's rerank pipeline (file-coherence boost, query boosts, path penalties, file-saturation decay with threshold 1 and decay 0.5). Does the rerank pipeline spread a budget across more files at the cost of depth within the gold files, and does that account for K's line-coverage deficit against B?
+- **Arms.** `B` (as Lite), `K` (as Lite), and **`BR`**: BM25 candidates through ken's full hybrid pipeline with the semantic weight pinned to 0 (`search.Index.SearchModeAlphas` with α = {0, 0}, the existing α-sensitivity seam; bench-only arm). Seam check before registering: the same code path with the shipped α (`KA`) reproduced Lite's `K` records byte for byte on two tasks. So `BR − B` is the pipeline's effect over BM25 alone, and `K − BR` is the semantic arm's effect inside the pipeline.
+- **Tasks.** 50 of Lite's 174 SWE-bench Verified Python tasks: `numpy.random.default_rng(42).choice(sorted ids, 50, replace=False)` (list sha256 `09d06f0b…26de7`; django 22, sympy 8, scikit-learn 5, matplotlib 5, sphinx 4, xarray 4, pylint 1, pytest 1). Budgets 2,048, 8,192 (primary) and 16,384; per-chunk packed hits saved (`cmd/cb -save-hits`).
+- **Metrics per task (8,192 primary).** `LC` line coverage (official evaluator); `NF` distinct files in the packed hits; `GF` gold files touched; `CPG` packed chunks per touched gold file; `DEPTH` gold lines covered ÷ gold lines in the touched gold files (tasks where both arms touch at least one gold file). Paired differences with 95% bootstrap intervals (numpy, 10,000 resamples, seed 42).
+- **Outcomes.**
+  - **Pipeline spreads:** `BR − B` has `NF` lower bound > 0 and `DEPTH` upper bound < 0, with mean `LC` < 0. It *accounts for most of K's deficit* if mean `BR − B` LC is at least half of mean `K − B` LC on these 50 tasks (same sign); the ratio is reported with its interval.
+  - **Semantic arm, not the pipeline:** `BR − B` fails the first condition (NF interval includes 0, or mean LC ≥ 0) while `K − BR` LC has upper bound < 0.
+  - **Mixed or neither:** anything else, reported as such.
+- **Validity.** All 50 tasks × 3 arms × 3 budgets scored; the B and K records must match Lite's byte for byte (a second reproducibility check); budget skips only on the known >60 s files. Run serially on mbp2 under goinfer's timing lock, `KEN_ENRICH_FILE_BUDGET_MS=10000`, estimated 40 minutes.
+
+### Lite diagnostic results (2026-10-30)
+
+Run of the registration above on mbp2, 07:29–07:53 PDT under goinfer's timing lock: 450 records (50 tasks × B, BR, K × 3 budgets), 0 errors, budget skips only on the three known matplotlib C++ files. Validity: the B and K records match Lite's byte for byte (300 of 300).
+
+**Means at 8,192 tokens (50 tasks).** `NF` distinct files in the packed result, `GF` gold files touched, `CPG` packed chunks per touched gold file, `DEPTH` gold lines covered ÷ gold lines in the touched gold files, `GTOK` share of packed tokens in gold files.
+
+| Arm | LC | NF | GF | CPG | DEPTH | GTOK |
+|---|---:|---:|---:|---:|---:|---:|
+| B (raw BM25) | 0.2077 | 13.96 | 0.68 | 2.64 | 0.457 | 0.083 |
+| BR (BM25 + ken pipeline) | 0.1787 | 19.46 | 0.98 | 1.19 | 0.253 | 0.048 |
+| K (hybrid + ken pipeline) | 0.1954 | 21.26 | 1.00 | 1.28 | 0.275 | 0.052 |
+
+**Paired differences at 8,192** (numpy bootstrap, 10,000 resamples, seed 42; `CPG`/`DEPTH` over tasks where both arms touch a gold file):
+
+| | LC | NF | GF | CPG | DEPTH |
+|---|---|---|---|---|---|
+| BR − B (pipeline) | −0.029 [−0.098, +0.040] | **+5.50 [+4.20, +6.66]** | +0.30 [+0.14, +0.48] | **−1.36 [−2.22, −0.59]** (n=23) | **−0.109 [−0.217, −0.011]** (n=23) |
+| K − BR (semantic arm) | +0.017 [−0.017, +0.060] | +1.80 [+1.22, +2.40] | +0.02 [−0.10, +0.14] | +0.09 [+0.02, +0.18] (n=35) | +0.007 [−0.025, +0.039] (n=35) |
+| K − B | −0.012 [−0.086, +0.064] | +7.30 [+6.14, +8.44] | +0.32 [+0.12, +0.52] | −1.26 [−2.14, −0.50] (n=23) | −0.134 [−0.242, −0.038] (n=23) |
+
+The same pattern holds at 2,048 (BR − B: NF +0.94 [+0.62, +1.26], DEPTH −0.141 [−0.292, −0.002]) and 16,384 (NF +11.8 [+9.6, +13.8], DEPTH −0.083 [−0.150, −0.013]).
+
+**Outcome under the registration: "pipeline spreads".** With BM25 held fixed, ken's rerank pipeline packs 5.5 more files into 8,192 tokens, about one chunk per gold file instead of 2.6, and covers less of each gold file it touches (DEPTH −0.11). In exchange it touches more gold files (+0.30). The semantic arm does not cause the trade: inside the pipeline it adds files but leaves depth and line coverage unchanged within noise.
+
+The second clause ("accounts for most of K's deficit") is met by the letter of the rule (BR − B LC −0.029 against K − B LC −0.012, same sign, ratio 2.36) but **is not informative**: on this 50-task sample K − B is near zero (−0.012 [−0.086, +0.064], against −0.061 over all 174 Verified Python tasks), so the ratio's interval is [−8.1, +9.3]. What the sample does show is direction. Line coverage drops when the pipeline is added (−0.029) and partly comes back when the semantic arm is added (+0.017). So the semantic arm offsets some of the pipeline's line cost and is not its source.
+
+**Reading.** The +file / −line trade on Lite comes from ken's rerank pipeline, whose file-saturation decay (threshold 1, decay 0.5: a file's second chunk counts half, its third a quarter) and file-coherence boost spread a ranked list across files. That suits ranked search (semble's design target: one good chunk per file in the top 10) and gets an agent to more of the right files. A single budget-filling call rewards stacking chunks from one file, which raw BM25 does. Which component (saturation, coherence boost, path penalties, query boosts) carries the effect is not separated here; that would need ablating ken's constants, which this diagnostic did not do.
