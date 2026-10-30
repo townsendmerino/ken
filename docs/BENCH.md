@@ -1017,3 +1017,41 @@ Francis chose a budget-packing mode with the default unchanged (2026-10-30 08:56
   - otherwise → **not settled at n = 500**.
 - **Reported, not gated.** All metrics by budget, language and source; `KP − B`; semble's NDCG@10 on its 63-repo benchmark for `--mode hybrid` with and without `ken bench --budget-packing` (a ranked-search view of a budget mode, so a drop is expected and is reported to inform the read, with any drop over 0.02 called out).
 - **Validity.** All 500 tasks scored for `KP` (1,500 records); budget skips only on files that exceed 60 s alone at full clock (any new one re-timed); a re-run of the nine reproducibility tasks must match `KP` byte for byte. Run serially on mbp2 under goinfer's timing lock with `KEN_ENRICH_FILE_BUDGET_MS=10000`; power stops resume from the last completed task.
+
+### Budget-packing gate results (2026-10-30)
+
+Run of the registration above on mbp2, 09:00–10:57 PDT under goinfer's timing lock: `KP` on all 500 Lite tasks, 1,500 records, 0 errors. Budget skips only on files known to exceed 60 s alone (the six from the Lite run). The nine reproducibility tasks re-ran byte-identical (27 of 27 records). `K` and `B` are Lite's records.
+
+**Means at 8,192 tokens (500 tasks).**
+
+| Arm | Line Coverage | File Coverage | Symbol Coverage | Line Precision | Gold reached |
+|---|---:|---:|---:|---:|---:|
+| B (raw BM25) | 0.1852 | 0.3530 | 0.2383 | 0.0299 | 217/500 |
+| K (shipped) | 0.1588 | **0.5061** | 0.2421 | 0.0244 | 252/500 |
+| KP (BudgetPacking) | **0.2299** | 0.4433 | **0.2860** | **0.0355** | 255/500 |
+
+**Paired differences** (numpy bootstrap, 10,000 resamples, seed 42; win/tie/loss over tasks):
+
+| | Budget | Line coverage | File coverage | Symbol coverage | Line precision |
+|---|---:|---|---|---|---|
+| KP − K | 2,048 | +0.027 [+0.016, +0.038], 70/409/21 | −0.029 [−0.043, −0.017] | +0.019 [+0.008, +0.030] | +0.016 [+0.010, +0.022] |
+| KP − K | **8,192** | **+0.071 [+0.054, +0.089]**, 138/321/41 | **−0.063 [−0.080, −0.047]**, 1/422/77 | +0.044 [+0.026, +0.062] | +0.011 [+0.008, +0.015] |
+| KP − K | 16,384 | +0.086 [+0.066, +0.107] | −0.085 [−0.104, −0.067] | +0.051 [+0.031, +0.073] | +0.008 [+0.006, +0.011] |
+| KP − B | 8,192 | +0.045 [+0.027, +0.063] | +0.090 [+0.063, +0.119] | +0.048 [+0.028, +0.067] | +0.006 [+0.002, +0.009] |
+
+**Gate read under the registration (8,192): gain met, floor not met.** Line coverage gains +0.071 with lower bound +0.054 (> +0.01). File coverage loses −0.063 with lower bound −0.080 (≤ −0.04). The registered outcome is **"file cost too high under the rule"**: shipping `BudgetPacking` is Francis's call on the trade. The file cost on all of Lite is three times the ablation sample's (−0.020 on 50 Verified Python tasks), and it is concentrated outside Python:
+
+| KP − K at 8,192 | Tasks | Line coverage | File coverage |
+|---|---:|---|---|
+| python | 266 | +0.096 [+0.071, +0.122] | −0.051 [−0.072, −0.032] |
+| go | 40 | +0.179 [+0.096, +0.272] | −0.026 [−0.050, −0.007] |
+| typescript | 66 | +0.025 [−0.008, +0.062] | −0.012 [−0.027, 0.000] |
+| javascript | 60 | −0.016 [−0.060, +0.020] | −0.071 [−0.121, −0.029] |
+| java | 15 | +0.057 [−0.006, +0.146] | −0.099 [−0.215, −0.017] |
+| c | 23 | +0.033 [−0.007, +0.084] | −0.162 [−0.315, −0.042] |
+| cpp | 10 | +0.014 [−0.064, +0.091] | −0.241 [−0.457, −0.067] |
+| rust | 20 | +0.023 [−0.014, +0.064] | −0.206 [−0.372, −0.067] |
+
+By source: Verified +0.096 lines / −0.047 files, Multi +0.065 / −0.091, Poly +0.056 / −0.029, Pro +0.044 / −0.105.
+
+**Reading.** With file saturation off, ken beats raw BM25 on every measure at every budget. Against shipped ken it trades files for lines: +0.07 lines, +0.04 symbols and +0.01 precision against −0.06 files at 8,192, a cost larger than the registered floor allowed. Where files matter most (C, C++, Rust; Multi-SWE-bench and SWE-bench Pro), the cost reaches −0.10 to −0.24. Semble NDCG@10 for the mode is reported below when run.
