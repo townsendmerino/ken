@@ -156,6 +156,8 @@ def run_repo(
     alpha_nl: float | None = None,
     alpha_pairs: list[str] | None = None,
     per_task: list[dict] | None = None,
+    no_file_saturation: bool = False,
+    saturation_threshold: int = 0,
 ) -> RepoOutcome:
     """Run all queries for one repo through ken bench; return per-task NDCG@10 + median p50."""
     # Send each query latency_runs times so we can take the median of warm-
@@ -201,6 +203,11 @@ def run_repo(
     # α is the difference between 13 passes over the corpus and 2.
     if alpha_pairs:
         args.extend(["--alpha-pairs", ",".join(alpha_pairs)])
+    # File-saturation decay off (the packing gate's KP setting).
+    if no_file_saturation:
+        args.append("--no-file-saturation")
+    if saturation_threshold:
+        args.extend(["--saturation-threshold", str(saturation_threshold)])
 
     proc = subprocess.run(
         args,
@@ -1114,6 +1121,17 @@ def main() -> int:
     p.add_argument("--ken", default="ken", help="path to the ken binary (default: ken on $PATH).")
     p.add_argument("--top-k", type=int, default=10)
     p.add_argument(
+        "--no-file-saturation",
+        action="store_true",
+        help="file-saturation decay off (the packing gate's KP setting); results file gets a -packing suffix.",
+    )
+    p.add_argument(
+        "--saturation-threshold",
+        type=int,
+        default=0,
+        help="file-saturation threshold for ken bench (0 = shipped; 2 = the engine's BudgetPacking, ADR-051); results file gets a -satN suffix.",
+    )
+    p.add_argument(
         "--latency-runs",
         type=int,
         default=5,
@@ -1269,6 +1287,8 @@ def main() -> int:
             alpha_symbol=args.alpha_symbol,
             alpha_nl=args.alpha_nl,
             per_task=per_query,
+            no_file_saturation=args.no_file_saturation,
+            saturation_threshold=args.saturation_threshold,
         )
         outcomes.append(o)
         sys.stderr.write(
@@ -1307,6 +1327,10 @@ def main() -> int:
     # treesitter one, and they would otherwise clobber each other.
     # regex stays unsuffixed so existing paths in docs keep resolving.
     suffix = "" if args.chunker == "regex" else f"-{args.chunker}"
+    if args.no_file_saturation:
+        suffix += "-packing"
+    if args.saturation_threshold:
+        suffix += f"-sat{args.saturation_threshold}"
     out_path = out_dir / f"ken-{args.mode}{suffix}.json"
 
     # One corpus entry per scored repo. semble's RepoSpec may already

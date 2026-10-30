@@ -206,12 +206,44 @@ func (w *Workspace) Search(ctx context.Context, query string, k int) ([]Hit, err
 // against a BM25-only index downgrades to ModeBM25 rather than erroring;
 // see search.(*Index).SearchMode).
 func (w *Workspace) SearchMode(ctx context.Context, query string, k int, mode Mode) ([]Hit, Mode, error) {
+	return w.SearchWith(ctx, query, k, mode, SearchOptions{})
+}
+
+// SearchOptions adjusts one search call. The zero value is SearchMode's
+// behavior.
+type SearchOptions struct {
+	// BudgetPacking is for callers that fill a token budget from the
+	// ranked list (an agent's context fill) rather than show a ranked
+	// list. It relaxes the rerank pipeline's file-saturation decay: a
+	// file's first two chunks keep their full scores (decay applies from
+	// the third, instead of the second), so a budget takes more of the
+	// files that matter. On all 500 ContextBench Lite tasks at 8,192 tokens
+	// it raised line coverage by +0.028 for −0.030 file coverage (ADR-051,
+	// docs/BENCH.md "Milder-saturation gate results"). Affects the hybrid
+	// modes only (BM25 and semantic have no rerank). Leave it off for
+	// ranked search, where spreading results across files is the point.
+	BudgetPacking bool
+}
+
+// budgetPackingSaturationThreshold is the file-saturation threshold
+// BudgetPacking uses (shipped ranking: 1). ADR-051.
+const budgetPackingSaturationThreshold = 2
+
+// SearchWith is SearchMode with per-call options; SearchWith with a zero
+// SearchOptions is exactly SearchMode.
+func (w *Workspace) SearchWith(ctx context.Context, query string, k int, mode Mode, opts SearchOptions) ([]Hit, Mode, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, mode, fmt.Errorf("engine: search: %w", err)
 	}
 	ix := w.index.Load()
 	gen := w.index.Generation()
-	results, eff := ix.SearchMode(query, k, mode)
+	var results []search.Result
+	var eff Mode
+	if opts.BudgetPacking {
+		results, eff = ix.SearchModeAblated(query, k, mode, search.AdaptiveAlphas, search.RankAblation{SaturationThreshold: budgetPackingSaturationThreshold})
+	} else {
+		results, eff = ix.SearchMode(query, k, mode)
+	}
 	return w.toHits(ix, results, eff, gen, query, k), eff, nil
 }
 

@@ -53,6 +53,7 @@ func main() {
 	evalCheckout := flag.Bool("evaluator-checkout", false, "With -resume: check each task out through the evaluator's own checkout first (fills the cache), and remove the worktree after")
 	errPath := flag.String("errors", "", "With -resume: JSONL file for failed tasks (default <out>.errors.jsonl)")
 	tsTimeoutMs := flag.Int("ts-timeout-ms", -1, "Re-register the treesitter chunker with this per-parse timeout in ms (0 = none); -1 keeps aikit's default (1 s)")
+	rankedDir := flag.String("save-ranked", "", "Directory for each (task, arm)'s full ranked list before packing, with token counts (no text)")
 	hitsDir := flag.String("save-hits", "", "Directory for each (task, arm, budget)'s packed hits as JSONL (no text)")
 	breakdown := flag.Bool("breakdown", false, "Also print per-language, per-source and per-repository tables at 8,192 tokens")
 	var provExtra kvFlag
@@ -94,8 +95,14 @@ func main() {
 			arms = append(arms, contextbench.NewArmBR())
 		case "KA":
 			arms = append(arms, contextbench.NewArmKA())
+		case "KP":
+			arms = append(arms, contextbench.NewArmKP())
+		case "KBP":
+			arms = append(arms, contextbench.NewArmKBP())
 		case "KNS":
 			arms = append(arms, contextbench.NewArmKNS())
+		case "KS2":
+			arms = append(arms, contextbench.NewArmKS2())
 		case "KNC":
 			arms = append(arms, contextbench.NewArmKNC())
 		case "L1":
@@ -133,6 +140,13 @@ func main() {
 		Evaluate:        *runEval,
 		ProvenanceExtra: provExtra,
 		HitsDir:         *hitsDir,
+		RankedDir:       *rankedDir,
+	}
+	if *rankedDir != "" {
+		if err := os.MkdirAll(*rankedDir, 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: -save-ranked: %v\n", err)
+			os.Exit(2)
+		}
 	}
 	if *hitsDir != "" {
 		if err := os.MkdirAll(*hitsDir, 0o755); err != nil {

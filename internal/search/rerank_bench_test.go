@@ -78,7 +78,7 @@ func BenchmarkRerank(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				boosted := applyQueryBoost(fused, tc.query, chunks, nil)
-				_ = rerankTopK(boosted, chunks, 20, true, true)
+				_ = rerankTopK(boosted, chunks, 20, true, fileSaturationThresh)
 			}
 		})
 	}
@@ -96,7 +96,7 @@ func BenchmarkRerank_Scale(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				boosted := applyQueryBoost(fused, "build index from path", chunks, nil)
-				_ = rerankTopK(boosted, chunks, 20, true, true)
+				_ = rerankTopK(boosted, chunks, 20, true, fileSaturationThresh)
 			}
 		})
 	}

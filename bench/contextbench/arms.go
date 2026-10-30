@@ -186,6 +186,7 @@ type ArmKen struct {
 	name    string
 	mode    string
 	chunker string
+	packing bool // engine.SearchOptions.BudgetPacking
 }
 
 func (a *ArmKen) Name() string { return a.name }
@@ -215,7 +216,7 @@ func (a *ArmKen) Retrieve(ctx context.Context, repoDir, problemStatement string,
 		mode = search.ModeHybrid
 	}
 
-	engineHits, _, err := ws.SearchMode(ctx, problemStatement, 500, mode)
+	engineHits, _, err := ws.SearchWith(ctx, problemStatement, 500, mode, engine.SearchOptions{BudgetPacking: a.packing})
 	if err != nil {
 		return nil, ArmStats{}, fmt.Errorf("search: %w", err)
 	}
@@ -247,6 +248,18 @@ func NewArmB() Arm {
 // NewArmK creates arm K (ken hybrid default, regex chunker, Flat).
 func NewArmK() Arm {
 	return &ArmKen{name: "K", mode: "hybrid", chunker: "regex"}
+}
+
+// NewArmKP creates arm KP: arm K with file saturation off (the first
+// packing gate's setting; before ADR-051 this was engine BudgetPacking).
+func NewArmKP() Arm {
+	return &ArmKenAlpha{name: "KP", chunker: "regex", alphas: search.AdaptiveAlphas, abl: search.RankAblation{NoFileSaturation: true}}
+}
+
+// NewArmKBP creates arm KBP: arm K through engine.SearchOptions{BudgetPacking:
+// true} as shipped (ADR-051: saturation threshold 2); must equal KS2.
+func NewArmKBP() Arm {
+	return &ArmKen{name: "KBP", mode: "hybrid", chunker: "regex", packing: true}
 }
 
 // NewArmKT creates arm KT (ken hybrid, tree-sitter chunker).
@@ -372,6 +385,12 @@ func NewArmKA() Arm {
 // NewArmKNS creates arm KNS: arm K with the file-saturation decay off.
 func NewArmKNS() Arm {
 	return &ArmKenAlpha{name: "KNS", chunker: "regex", alphas: search.AdaptiveAlphas, abl: search.RankAblation{NoFileSaturation: true}}
+}
+
+// NewArmKS2 creates arm KS2: arm K with file saturation from a file's third
+// chunk (threshold 2) instead of its second.
+func NewArmKS2() Arm {
+	return &ArmKenAlpha{name: "KS2", chunker: "regex", alphas: search.AdaptiveAlphas, abl: search.RankAblation{SaturationThreshold: 2}}
 }
 
 // NewArmKNC creates arm KNC: arm K with the file-coherence boost off.
