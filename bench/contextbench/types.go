@@ -92,6 +92,13 @@ type TaskResult struct {
 	QueryLatencyMs     int64 `json:"query_latency_ms"`
 	PeakFootprintBytes int64 `json:"peak_footprint_bytes"`
 
+	// ParseBudgetSkips counts files whose Arm B enrichment parse hit
+	// KEN_ENRICH_FILE_BUDGET_MS during this arm's index build (0 when the
+	// budget is off). A wall-clock skip is load-dependent, so a record with
+	// skips is reproducible only while each skipped file stays far past the
+	// budget.
+	ParseBudgetSkips int `json:"parse_budget_skips,omitempty"`
+
 	// Provenance metadata
 	Provenance provenance.Provenance `json:"provenance"`
 }

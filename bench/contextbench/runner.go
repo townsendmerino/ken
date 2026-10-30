@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/townsendmerino/ken/bench/internal/provenance"
+	"github.com/townsendmerino/ken/internal/structural"
 )
 
 // RunnerConfig configures ContextBench CB1 execution.
@@ -25,6 +26,9 @@ type RunnerConfig struct {
 	Budgets         []int
 	Arms            []Arm
 	Evaluate        bool
+	// ProvenanceExtra is recorded in every result's provenance block
+	// (e.g. the ContextBench commit and evaluator environment).
+	ProvenanceExtra map[string]string
 }
 
 // ResolveRepoPath finds the cached repository path in repoCache.
@@ -122,7 +126,9 @@ func RunTaskOnArm(
 	budgets []int,
 	prov provenance.Provenance,
 ) ([]TaskResult, []TrajRecord, error) {
+	skips0 := structural.ParseBudgetSkips()
 	hits, stats, err := arm.Retrieve(ctx, repoDir, task.ProblemStatement, modelDir)
+	parseSkips := int(structural.ParseBudgetSkips() - skips0)
 	if err != nil {
 		return nil, nil, fmt.Errorf("arm %s retrieve: %w", arm.Name(), err)
 	}
@@ -150,6 +156,7 @@ func RunTaskOnArm(
 			IndexBuildTimeMs:      stats.IndexBuildTimeMs,
 			QueryLatencyMs:        stats.QueryLatencyMs,
 			PeakFootprintBytes:    stats.PeakFootprintBytes,
+			ParseBudgetSkips:      parseSkips,
 			Provenance:            prov,
 		}
 		results = append(results, res)
@@ -164,7 +171,9 @@ func RunBatch(ctx context.Context, cfg RunnerConfig, tasks []Task) ([]TaskResult
 		cfg.Budgets = DefaultBudgets
 	}
 	prov := provenance.Collect(provenance.Options{
-		Harness: "bench/contextbench",
+		Harness:  "bench/contextbench",
+		ModelDir: cfg.ModelDir,
+		Extra:    cfg.ProvenanceExtra,
 	})
 
 	var allResults []TaskResult

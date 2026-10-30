@@ -258,7 +258,7 @@ func TestParseEvaluatorOutput_ErrorHandling(t *testing.T) {
 	// 1. "no_context_extracted" is the only error mapped to coverage=0, precision=1.0, auc=0.0.
 	validPath := filepath.Join(tmpDir, "valid.jsonl")
 	validContent := `{"instance_id":"task-1","error":"no_context_extracted"}
-{"instance_id":"task-2","final":{"line":{"coverage":0.75,"precision":0.5},"symbol":{"coverage":1.0,"precision":0.8},"file":{"coverage":1.0,"precision":1.0}},"trajectory":{"auc_line":0.75}}
+{"instance_id":"task-2","final":{"line":{"coverage":0.75,"precision":0.5},"symbol":{"coverage":1.0,"precision":0.8},"file":{"coverage":1.0,"precision":1.0}},"trajectory":{"auc_coverage":{"line":0.75},"redundancy":{"line":0.0}}}
 `
 	if err := os.WriteFile(validPath, []byte(validContent), 0o644); err != nil {
 		t.Fatal(err)
