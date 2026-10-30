@@ -122,7 +122,7 @@ usage:
   ken index           <path>           [--watch|--no-watch] [--write-snapshot] [--chunker regex|treesitter|line] [--mode bm25|semantic|hybrid|hybrid-rerank] [--model DIR]
   ken search          <path> <query>...  [-k N] [--json] [--verbose] [--stream] [--no-stats] [--chunker ...] [--mode ...] [--model DIR]
                                          [--rerank-model DIR] [--rerank-top-n N] [--rerank-beta β] [--rerank-quant f32|int8] [--rerank-adaptive THRESHOLD:MINN]
-  ken bench           <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR] [--alpha-symbol F] [--alpha-nl F] [--no-file-saturation] [--saturation-threshold N]
+  ken bench           <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR] [--alpha-symbol F] [--alpha-nl F] [--no-file-saturation] [--saturation-threshold N] [--saturation-decay F]
                                          [--rerank-model DIR] [--rerank-top-n N] [--rerank-beta β] [--rerank-quant f32|int8] [--rerank-adaptive THRESHOLD:MINN]
   ken perf            <subcmd> [args]    (index|search|watch — see 'ken perf' for full usage)
   ken build-index     <corpus>         -o <path> [--chunker ...] [--mode ...] [--model DIR]
@@ -154,8 +154,9 @@ absent from 'ken search'; docs/BENCH.md's "don't tune ken's constants"
 rule keeps (0.3, 0.5) the verbatim-parity reference. Pinned runs report
 zero telemetry timings. --no-file-saturation turns the file-saturation
 decay off, and --saturation-threshold N decays from a file's (N+1)th chunk
-(2 = the engine's BudgetPacking search option, ADR-051); both report zero
-timings.
+(2 = the engine's BudgetPacking search option, ADR-051), and
+--saturation-decay F sets the per-chunk decay (shipped 0.5); all report
+zero timings.
 
 ken perf is the speed/memory measurement harness (sibling to ken bench;
 they share no state). Each invocation emits one JSON record on stdout
@@ -1193,6 +1194,17 @@ func cmdBench(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: --saturation-threshold expects a non-negative integer")
 		return 2
 	}
+	// --saturation-decay F: per-chunk decay past the threshold (shipped 0.5).
+	rest, satDecayStr, err := extractFlag(rest, "saturation-decay", "0")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+		return 2
+	}
+	satDecay, err := strconv.ParseFloat(satDecayStr, 64)
+	if err != nil || satDecay < 0 || satDecay > 1 {
+		fmt.Fprintln(os.Stderr, "ken: --saturation-decay expects a number in [0, 1]")
+		return 2
+	}
 	k, err := strconv.Atoi(kStr)
 	if err != nil || k < 0 {
 		fmt.Fprintln(os.Stderr, "ken: -k expects a non-negative integer")
@@ -1267,9 +1279,9 @@ func cmdBench(args []string) int {
 				results []search.Result
 				tel     search.Telemetry
 			)
-			if noFileSaturation || satThresh > 0 {
+			if noFileSaturation || satThresh > 0 || satDecay > 0 {
 				// No telemetry variant of the ablated path; timings report zero.
-				results, _ = ix.SearchModeAblated(q, k, mode, a, search.RankAblation{NoFileSaturation: noFileSaturation, SaturationThreshold: satThresh})
+				results, _ = ix.SearchModeAblated(q, k, mode, a, search.RankAblation{NoFileSaturation: noFileSaturation, SaturationThreshold: satThresh, SaturationDecay: satDecay})
 			} else if a == search.AdaptiveAlphas {
 				results, _, tel = ix.SearchModeWithTelemetry(q, k, mode)
 			} else {

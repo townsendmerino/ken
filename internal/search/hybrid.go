@@ -90,5 +90,5 @@ func hybridSearch(
 		boostMultiChunkFiles(combined, chunks)
 	}
 	applyQueryBoostInPlace(combined, query, chunks, predicted)
-	return rerankTopK(combined, chunks, topK, alpha < 1.0, abl.saturationThreshold())
+	return rerankTopK(combined, chunks, topK, alpha < 1.0, abl.saturationThreshold(), abl.saturationDecay())
 }

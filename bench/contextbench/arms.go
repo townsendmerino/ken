@@ -393,6 +393,12 @@ func NewArmKS2() Arm {
 	return &ArmKenAlpha{name: "KS2", chunker: "regex", alphas: search.AdaptiveAlphas, abl: search.RankAblation{SaturationThreshold: 2}}
 }
 
+// NewArmKD8 creates arm KD8: arm K with the shipped threshold 1 and a
+// gentler file-saturation decay, 0.8 instead of 0.5 (options note, option 1).
+func NewArmKD8() Arm {
+	return &ArmKenAlpha{name: "KD8", chunker: "regex", alphas: search.AdaptiveAlphas, abl: search.RankAblation{SaturationDecay: 0.8}}
+}
+
 // NewArmKNC creates arm KNC: arm K with the file-coherence boost off.
 func NewArmKNC() Arm {
 	return &ArmKenAlpha{name: "KNC", chunker: "regex", alphas: search.AdaptiveAlphas, abl: search.RankAblation{NoCoherenceBoost: true}}

@@ -290,7 +290,7 @@ func hybridSearchAnyMatch(r denseRetriever, ix *Index, qVec []float32, query str
 	}
 	boostMultiChunkFiles(combined, ix.chunks)
 	combined = applyQueryBoost(combined, query, ix.chunks, nil)
-	ranked := rerankTopK(combined, ix.chunks, topK, alpha < 1.0, fileSaturationThresh)
+	ranked := rerankTopK(combined, ix.chunks, topK, alpha < 1.0, fileSaturationThresh, fileSaturationDecay)
 	for _, item := range ranked {
 		if decompTargetMatch(ix.chunks[item.idx].File, targets) {
 			return true

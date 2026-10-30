@@ -33,7 +33,7 @@ func TestRerankTopK_SaturationDecay(t *testing.T) {
 	}
 	chunks[1].StartLine, chunks[1].EndLine = 2, 2
 	chunks[2].StartLine, chunks[2].EndLine = 3, 3
-	got := rerankTopK(map[int]float64{0: 1.0, 1: 1.0, 2: 1.0}, chunks, 5, false, fileSaturationThresh)
+	got := rerankTopK(map[int]float64{0: 1.0, 1: 1.0, 2: 1.0}, chunks, 5, false, fileSaturationThresh, fileSaturationDecay)
 	// Same file: 1st keeps 1.0, 2nd ×0.5, 3rd ×0.25.
 	want := []float64{1.0, 0.5, 0.25}
 	if len(got) != 3 {
@@ -51,7 +51,7 @@ func TestRerankTopK_PenaltyGatingAndTopK(t *testing.T) {
 	chunks[1].StartLine, chunks[1].EndLine = 2, 2
 
 	// penalise on: test file drops to 0.3, so svc.go (1.0) ranks first.
-	on := rerankTopK(map[int]float64{0: 1.0, 1: 1.0}, chunks, 5, true, fileSaturationThresh)
+	on := rerankTopK(map[int]float64{0: 1.0, 1: 1.0}, chunks, 5, true, fileSaturationThresh, fileSaturationDecay)
 	if on[0].idx != 1 {
 		t.Errorf("with penalties, top idx = %d, want 1 (test file penalised)", on[0].idx)
 	}
@@ -59,12 +59,12 @@ func TestRerankTopK_PenaltyGatingAndTopK(t *testing.T) {
 		t.Errorf("penalised test-file score = %v, want %v", on[1].score, strongPenalty)
 	}
 	// penalise off: tie, deterministic order by start line ⇒ idx 0 first.
-	off := rerankTopK(map[int]float64{0: 1.0, 1: 1.0}, chunks, 5, false, fileSaturationThresh)
+	off := rerankTopK(map[int]float64{0: 1.0, 1: 1.0}, chunks, 5, false, fileSaturationThresh, fileSaturationDecay)
 	if off[0].score != 1.0 || off[1].score != 1.0 {
 		t.Errorf("penalties not gated off: %+v", off)
 	}
 	// topK truncation.
-	if k := rerankTopK(map[int]float64{0: 1.0, 1: 1.0}, chunks, 1, false, fileSaturationThresh); len(k) != 1 {
+	if k := rerankTopK(map[int]float64{0: 1.0, 1: 1.0}, chunks, 1, false, fileSaturationThresh, fileSaturationDecay); len(k) != 1 {
 		t.Errorf("topK=1 returned %d items", len(k))
 	}
 }
@@ -76,12 +76,12 @@ func TestRerankTopK_SaturationAblation(t *testing.T) {
 	scores := map[int]float64{0: 1.0, 1: 1.0, 2: 1.0}
 
 	// Shipped: a file's second chunk decays by fileSaturationDecay, the third by its square.
-	on := rerankTopK(scores, chunks, 5, false, fileSaturationThresh)
+	on := rerankTopK(scores, chunks, 5, false, fileSaturationThresh, fileSaturationDecay)
 	if !approx(on[1].score, fileSaturationDecay) || !approx(on[2].score, fileSaturationDecay*fileSaturationDecay) {
 		t.Errorf("saturation on: scores %v, %v; want %v, %v", on[1].score, on[2].score, fileSaturationDecay, fileSaturationDecay*fileSaturationDecay)
 	}
 	// Ablated: no decay.
-	off := rerankTopK(scores, chunks, 5, false, 0)
+	off := rerankTopK(scores, chunks, 5, false, 0, fileSaturationDecay)
 	for i, it := range off {
 		if it.score != 1.0 {
 			t.Errorf("saturation off: rank %d score = %v, want 1.0", i, it.score)
@@ -93,7 +93,7 @@ func TestRerankTopK_SaturationThreshold2(t *testing.T) {
 	chunks := []chunk.Chunk{mkChunk("a.go", "x"), mkChunk("a.go", "y"), mkChunk("a.go", "z")}
 	chunks[1].StartLine, chunks[1].EndLine = 2, 2
 	chunks[2].StartLine, chunks[2].EndLine = 3, 3
-	got := rerankTopK(map[int]float64{0: 1.0, 1: 1.0, 2: 1.0}, chunks, 5, false, 2)
+	got := rerankTopK(map[int]float64{0: 1.0, 1: 1.0, 2: 1.0}, chunks, 5, false, 2, fileSaturationDecay)
 	// First two chunks of a.go keep their score; the third decays once.
 	if got[0].score != 1.0 || got[1].score != 1.0 || !approx(got[2].score, fileSaturationDecay) {
 		t.Errorf("threshold 2: scores %v %v %v, want 1, 1, %v", got[0].score, got[1].score, got[2].score, fileSaturationDecay)
@@ -101,5 +101,20 @@ func TestRerankTopK_SaturationThreshold2(t *testing.T) {
 	if (RankAblation{}).saturationThreshold() != fileSaturationThresh || (RankAblation{SaturationThreshold: 2}).saturationThreshold() != 2 ||
 		(RankAblation{NoFileSaturation: true, SaturationThreshold: 2}).saturationThreshold() != 0 {
 		t.Error("RankAblation.saturationThreshold resolution wrong")
+	}
+}
+
+func TestRerankTopK_SaturationDecayOverride(t *testing.T) {
+	chunks := []chunk.Chunk{mkChunk("a.go", "x"), mkChunk("a.go", "y"), mkChunk("a.go", "z")}
+	chunks[1].StartLine, chunks[1].EndLine = 2, 2
+	chunks[2].StartLine, chunks[2].EndLine = 3, 3
+	abl := RankAblation{SaturationDecay: 0.8}
+	got := rerankTopK(map[int]float64{0: 1.0, 1: 1.0, 2: 1.0}, chunks, 5, false, abl.saturationThreshold(), abl.saturationDecay())
+	// Threshold 1 (shipped): the second chunk decays once, the third twice, by 0.8.
+	if got[0].score != 1.0 || !approx(got[1].score, 0.8) || !approx(got[2].score, 0.64) {
+		t.Errorf("decay 0.8: scores %v %v %v, want 1, 0.8, 0.64", got[0].score, got[1].score, got[2].score)
+	}
+	if (RankAblation{}).saturationDecay() != fileSaturationDecay {
+		t.Error("zero RankAblation must use the shipped fileSaturationDecay")
 	}
 }

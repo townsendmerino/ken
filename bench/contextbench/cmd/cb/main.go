@@ -103,6 +103,8 @@ func main() {
 			arms = append(arms, contextbench.NewArmKNS())
 		case "KS2":
 			arms = append(arms, contextbench.NewArmKS2())
+		case "KD8":
+			arms = append(arms, contextbench.NewArmKD8())
 		case "KNC":
 			arms = append(arms, contextbench.NewArmKNC())
 		case "L1":
