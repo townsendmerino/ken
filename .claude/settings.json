@@ -7,5 +7,20 @@
       "Bash(gh run watch *)",
       "mcp__ken__search"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|EnterWorktree",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/go/bin/claude-guard\"",
+            "timeout": 10,
+            "statusMessage": "claude-guard: checking the call against the repo rules"
+          }
+        ]
+      }
+    ]
   }
 }
