@@ -257,7 +257,8 @@ func NewArmKP() Arm {
 }
 
 // NewArmKBP creates arm KBP: arm K through engine.SearchOptions{BudgetPacking:
-// true} as shipped (ADR-051: saturation threshold 2); must equal KS2.
+// true} as shipped (ADR-052: decay 0.8; ADR-051's threshold 2 before it);
+// must equal KD8.
 func NewArmKBP() Arm {
 	return &ArmKen{name: "KBP", mode: "hybrid", chunker: "regex", packing: true}
 }

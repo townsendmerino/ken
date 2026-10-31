@@ -58,7 +58,8 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-048](#adr-048-engine-structural-spans-symbolat-refresh-qualified-names-testsfor-k10k15) | `engine` structural spans, SymbolAt, Refresh, qualified names, TestsFor (K10–K15) | Accepted |
 | [ADR-049](#adr-049-drop-retained-f32-vectors-from-watchedindex-recompute-on-demand-k17) | Drop retained f32 vectors from WatchedIndex; recompute on demand (K17) | Accepted |
 | [ADR-050](#adr-050-ranking-may-diverge-from-the-verbatim-semble-port) | Ranking may diverge from the verbatim semble port (amends ADR-002) | Accepted |
-| [ADR-051](#adr-051-opt-in-budgetpacking-search-option-saturation-threshold-2) | Opt-in `BudgetPacking` search option: file saturation from the third chunk | Accepted |
+| [ADR-051](#adr-051-opt-in-budgetpacking-search-option-saturation-threshold-2) | Opt-in `BudgetPacking` search option: file saturation from the third chunk | Superseded by ADR-052 |
+| [ADR-052](#adr-052-budgetpacking-uses-a-gentler-decay-08-instead-of-threshold-2) | `BudgetPacking` uses a gentler decay (0.8) instead of threshold 2 | Accepted |
 
 ---
 
@@ -2921,7 +2922,7 @@ ken's ranking (fusion weights, boosts, penalties, file saturation, candidate cou
 
 ## ADR-051: Opt-in BudgetPacking search option (saturation threshold 2)
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-052](#adr-052-budgetpacking-uses-a-gentler-decay-08-instead-of-threshold-2) (2026-10-30): the option and its default-unchanged contract stand; its setting is now threshold 1 with decay 0.8
 **Date:** 2026-10-30
 **Decided by:** Francis (2026-10-30 14:25), shipping on his call although the registered file floor was missed by 0.001; conditional on semble NDCG@10 dropping no more than the first setting's 0.023.
 
@@ -2937,4 +2938,28 @@ Ship threshold 2 as an **opt-in** per-call option, `engine.SearchOptions{BudgetP
 - Callers that pack a token budget (tack's context fill) can opt in: on Lite they get +0.028 line and +0.023 symbol coverage for −0.030 file coverage. That ties raw BM25 on lines while keeping 81% of ken's file-coverage lead over it. The file cost is largest in C/C++ (−0.095, −0.162).
 - A second ranking path exists. If a later approach in `docs/internal/budget-packing-options-2026-10-30.md` beats threshold 2 on the held-out split, it **replaces** this setting under the same option rather than adding another path (Francis, 2026-10-30).
 - DESIGN §7 records the diverged constant for this option. README and CLAUDE.md describe the default pipeline, which is still the verbatim port, so their wording stands.
+
+## ADR-052: BudgetPacking uses a gentler decay (0.8) instead of threshold 2
+
+**Status:** Accepted
+**Date:** 2026-10-30
+**Decided by:** Francis (2026-10-30 17:33), on a registered gate that passed.
+**Supersedes:** ADR-051's setting (threshold 2). ADR-051's option, API and default-unchanged contract stand.
+
+### Context
+ADR-051 shipped `engine.SearchOptions{BudgetPacking}` with file-saturation threshold 2 on Francis's call, after its gate missed the file floor by 0.001 on full Lite. The options note (`docs/internal/budget-packing-options-2026-10-30.md`) screened 18 packing shapes offline on a seed-fixed tuning half of Lite. A gentler decay at the shipped threshold traded lines for files best. Decay 0.8 was registered and gated on the **held-out half** (250 tasks never screened; rules as before: line lower bound > +0.01, file lower bound > −0.04 at 8,192 tokens).
+
+### Result (held-out half, 8,192 tokens; docs/BENCH.md "Gentler-decay gate results")
+- **Decay 0.8 − default:** lines **+0.026 [+0.014, +0.040]**, files **−0.012 [−0.020, −0.005]**. **Passes.**
+- **Threshold 2 − default, same tasks:** lines +0.021 [+0.011, +0.033], files −0.019 [−0.032, −0.009].
+- **Decay 0.8 − threshold 2:** lines +0.005 [−0.002, +0.014], files +0.007 [−0.001, +0.018]. At 16,384 tokens: lines +0.021 [+0.007, +0.037].
+- **Semble NDCG@10 (63 repos, 1,251 queries; run by the coordinator, 17:31):** 0.840 against the default's 0.844, a paired drop of −0.004 [−0.006, −0.002]. Threshold 2 dropped −0.012 (0.832).
+
+### Decision
+`BudgetPacking` keeps the shipped threshold 1 and uses decay **0.8** instead of 0.5: a file's second chunk scores 0.8×, its third 0.64×. It replaces threshold 2; no second setting is kept. The default is unchanged everywhere (`SearchMode`, `ken search`, ken-mcp). The bench arm `KBP`, which runs the shipped engine path, reproduces the gated `KD8` records byte for byte.
+
+### Consequences
+- Callers that opted into `BudgetPacking` get slightly more lines and lose fewer files than under threshold 2, and their ranked lists stay closer to the default (semble −0.004 against −0.012).
+- The gentler decay keeps file spreading, so the option is milder than "saturation off". Larger line gains (+0.07) cost files at a rate no gate here has accepted.
+- `docs/DESIGN.md` §7 records decay 0.8 as the option's diverged constant.
 

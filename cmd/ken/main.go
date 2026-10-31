@@ -153,10 +153,9 @@ only — they exist for the alpha-sensitivity sweep and are deliberately
 absent from 'ken search'; docs/BENCH.md's "don't tune ken's constants"
 rule keeps (0.3, 0.5) the verbatim-parity reference. Pinned runs report
 zero telemetry timings. --no-file-saturation turns the file-saturation
-decay off, and --saturation-threshold N decays from a file's (N+1)th chunk
-(2 = the engine's BudgetPacking search option, ADR-051), and
---saturation-decay F sets the per-chunk decay (shipped 0.5); all report
-zero timings.
+decay off, --saturation-threshold N decays from a file's (N+1)th chunk,
+and --saturation-decay F sets the per-chunk decay (shipped 0.5; 0.8 = the
+engine's BudgetPacking search option, ADR-052); all report zero timings.
 
 ken perf is the speed/memory measurement harness (sibling to ken bench;
 they share no state). Each invocation emits one JSON record on stdout
