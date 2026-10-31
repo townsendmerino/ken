@@ -1380,6 +1380,17 @@ type RankAblation struct {
 	// first SaturationThreshold chunks keep their scores and decay applies
 	// from the next one. Ignored when NoFileSaturation is set.
 	SaturationThreshold int
+	// SaturationDecay, when > 0, replaces fileSaturationDecay: each chunk
+	// past the threshold multiplies its score by this factor once more.
+	SaturationDecay float64
+}
+
+// saturationDecay resolves the per-excess-chunk decay factor rerankTopK uses.
+func (a RankAblation) saturationDecay() float64 {
+	if a.SaturationDecay > 0 {
+		return a.SaturationDecay
+	}
+	return fileSaturationDecay
 }
 
 // saturationThreshold resolves the per-file count rerankTopK decays after;

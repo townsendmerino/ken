@@ -158,6 +158,7 @@ def run_repo(
     per_task: list[dict] | None = None,
     no_file_saturation: bool = False,
     saturation_threshold: int = 0,
+    saturation_decay: float = 0.0,
 ) -> RepoOutcome:
     """Run all queries for one repo through ken bench; return per-task NDCG@10 + median p50."""
     # Send each query latency_runs times so we can take the median of warm-
@@ -208,6 +209,8 @@ def run_repo(
         args.append("--no-file-saturation")
     if saturation_threshold:
         args.extend(["--saturation-threshold", str(saturation_threshold)])
+    if saturation_decay:
+        args.extend(["--saturation-decay", str(saturation_decay)])
 
     proc = subprocess.run(
         args,
@@ -1132,6 +1135,12 @@ def main() -> int:
         help="file-saturation threshold for ken bench (0 = shipped; 2 = the engine's BudgetPacking, ADR-051); results file gets a -satN suffix.",
     )
     p.add_argument(
+        "--saturation-decay",
+        type=float,
+        default=0.0,
+        help="file-saturation decay for ken bench (0 = shipped 0.5); results file gets a -decayF suffix.",
+    )
+    p.add_argument(
         "--latency-runs",
         type=int,
         default=5,
@@ -1289,6 +1298,7 @@ def main() -> int:
             per_task=per_query,
             no_file_saturation=args.no_file_saturation,
             saturation_threshold=args.saturation_threshold,
+            saturation_decay=args.saturation_decay,
         )
         outcomes.append(o)
         sys.stderr.write(
@@ -1331,6 +1341,8 @@ def main() -> int:
         suffix += "-packing"
     if args.saturation_threshold:
         suffix += f"-sat{args.saturation_threshold}"
+    if args.saturation_decay:
+        suffix += f"-decay{args.saturation_decay:g}"
     out_path = out_dir / f"ken-{args.mode}{suffix}.json"
 
     # One corpus entry per scored repo. semble's RepoSpec may already

@@ -214,20 +214,21 @@ func (w *Workspace) SearchMode(ctx context.Context, query string, k int, mode Mo
 type SearchOptions struct {
 	// BudgetPacking is for callers that fill a token budget from the
 	// ranked list (an agent's context fill) rather than show a ranked
-	// list. It relaxes the rerank pipeline's file-saturation decay: a
-	// file's first two chunks keep their full scores (decay applies from
-	// the third, instead of the second), so a budget takes more of the
-	// files that matter. On all 500 ContextBench Lite tasks at 8,192 tokens
-	// it raised line coverage by +0.028 for −0.030 file coverage (ADR-051,
-	// docs/BENCH.md "Milder-saturation gate results"). Affects the hybrid
-	// modes only (BM25 and semantic have no rerank). Leave it off for
-	// ranked search, where spreading results across files is the point.
+	// list. It softens the rerank pipeline's file-saturation decay: a
+	// file's second chunk scores 0.8x instead of 0.5x, its third 0.64x
+	// instead of 0.25x, so a budget takes more of the files that matter
+	// while still spreading across files. On the held-out half of
+	// ContextBench Lite at 8,192 tokens it raised line coverage by +0.026
+	// for −0.012 file coverage (ADR-052, docs/BENCH.md "Gentler-decay gate
+	// results"). Affects the hybrid modes only (BM25 and semantic have no
+	// rerank). Leave it off for ranked search, where spreading results
+	// across files is the point.
 	BudgetPacking bool
 }
 
-// budgetPackingSaturationThreshold is the file-saturation threshold
-// BudgetPacking uses (shipped ranking: 1). ADR-051.
-const budgetPackingSaturationThreshold = 2
+// budgetPackingSaturationDecay is the file-saturation decay BudgetPacking
+// uses (shipped ranking: 0.5). ADR-052, superseding ADR-051's threshold 2.
+const budgetPackingSaturationDecay = 0.8
 
 // SearchWith is SearchMode with per-call options; SearchWith with a zero
 // SearchOptions is exactly SearchMode.
@@ -240,7 +241,7 @@ func (w *Workspace) SearchWith(ctx context.Context, query string, k int, mode Mo
 	var results []search.Result
 	var eff Mode
 	if opts.BudgetPacking {
-		results, eff = ix.SearchModeAblated(query, k, mode, search.AdaptiveAlphas, search.RankAblation{SaturationThreshold: budgetPackingSaturationThreshold})
+		results, eff = ix.SearchModeAblated(query, k, mode, search.AdaptiveAlphas, search.RankAblation{SaturationDecay: budgetPackingSaturationDecay})
 	} else {
 		results, eff = ix.SearchMode(query, k, mode)
 	}

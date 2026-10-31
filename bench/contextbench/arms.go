@@ -257,7 +257,8 @@ func NewArmKP() Arm {
 }
 
 // NewArmKBP creates arm KBP: arm K through engine.SearchOptions{BudgetPacking:
-// true} as shipped (ADR-051: saturation threshold 2); must equal KS2.
+// true} as shipped (ADR-052: decay 0.8; ADR-051's threshold 2 before it);
+// must equal KD8.
 func NewArmKBP() Arm {
 	return &ArmKen{name: "KBP", mode: "hybrid", chunker: "regex", packing: true}
 }
@@ -391,6 +392,12 @@ func NewArmKNS() Arm {
 // chunk (threshold 2) instead of its second.
 func NewArmKS2() Arm {
 	return &ArmKenAlpha{name: "KS2", chunker: "regex", alphas: search.AdaptiveAlphas, abl: search.RankAblation{SaturationThreshold: 2}}
+}
+
+// NewArmKD8 creates arm KD8: arm K with the shipped threshold 1 and a
+// gentler file-saturation decay, 0.8 instead of 0.5 (options note, option 1).
+func NewArmKD8() Arm {
+	return &ArmKenAlpha{name: "KD8", chunker: "regex", alphas: search.AdaptiveAlphas, abl: search.RankAblation{SaturationDecay: 0.8}}
 }
 
 // NewArmKNC creates arm KNC: arm K with the file-coherence boost off.
