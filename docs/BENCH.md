@@ -1106,3 +1106,33 @@ Option 1 of [`docs/internal/budget-packing-options-2026-10-30.md`](internal/budg
 - **Reported beside it:** `KS2 − K` and `KD8 − KS2` on the same 250 tasks (the comparison Francis's decision turns on); all budgets; by language and source; semble NDCG@10 (63 repos) for decay 0.8 with `ken bench --saturation-decay 0.8`.
 - **Power.** At n = 250 the intervals are about √2 wider than a 500-task gate's. From the threshold-2 gate's paired SDs, the line rule has 80% power at a true gain of about 0.03, and the file floor holds with high probability at a true loss of −0.02 (the screen's estimate).
 - **Validity.** 750 records (250 × 3 budgets), budget skips only on files known to exceed 60 s, nine-task re-run byte-identical. Serially on mbp2 under goinfer's timing lock, `KEN_ENRICH_FILE_BUDGET_MS=10000`, about 1 hour.
+
+### Gentler-decay gate results (2026-10-30)
+
+Run of the registration above on mbp2, 16:26–17:25 PDT under goinfer's timing lock: `KD8` on the 250 held-out Lite tasks, 750 records, 0 errors, budget skips only on files known to exceed 60 s. Nine held-out tasks re-ran byte-identical (27 of 27; the Lite run's nine reproducibility tasks include only two held-out ones, so seven more were drawn from the held-out half with seed 7).
+
+**Means at 8,192 tokens (held-out half, 250 tasks).**
+
+| Arm | Line Coverage | File Coverage | Symbol Coverage | Line Precision |
+|---|---:|---:|---:|---:|
+| B (raw BM25) | 0.1577 | 0.3185 | 0.2205 | 0.0278 |
+| K (shipped default) | 0.1409 | **0.4735** | 0.2377 | 0.0231 |
+| KS2 (threshold 2, shipped `BudgetPacking`) | 0.1622 | 0.4546 | 0.2507 | 0.0278 |
+| **KD8 (threshold 1, decay 0.8)** | **0.1672** | 0.4616 | **0.2533** | 0.0276 |
+
+**Paired differences (numpy bootstrap, 10,000 resamples, seed 42).**
+
+| | Budget | Line coverage | File coverage | Symbol coverage |
+|---|---:|---|---|---|
+| KD8 − K | 2,048 | +0.004 [+0.001, +0.010] | −0.005 [−0.012, −0.000] | +0.000 [−0.007, +0.006] |
+| **KD8 − K** | **8,192** | **+0.026 [+0.014, +0.040]** | **−0.012 [−0.020, −0.005]** | +0.016 [+0.007, +0.025] |
+| KD8 − K | 16,384 | +0.047 [+0.029, +0.067] | −0.041 [−0.060, −0.025] | +0.029 [+0.015, +0.044] |
+| KS2 − K | 8,192 | +0.021 [+0.011, +0.033] | −0.019 [−0.032, −0.009] | +0.013 [−0.000, +0.025] |
+| KS2 − K | 16,384 | +0.025 [+0.012, +0.040] | −0.050 [−0.071, −0.032] | +0.023 [+0.008, +0.038] |
+| KD8 − KS2 | 8,192 | +0.005 [−0.002, +0.014] | +0.007 [−0.001, +0.018] | +0.003 [−0.007, +0.014] |
+| KD8 − KS2 | 16,384 | +0.021 [+0.007, +0.037] | +0.009 [+0.000, +0.021] | +0.007 [−0.004, +0.017] |
+| KD8 − B | 8,192 | +0.010 [−0.016, +0.035] | +0.143 [+0.103, +0.186] | +0.033 [+0.004, +0.062] |
+
+**Gate read (8,192): passes.** Line-coverage lower bound +0.014 (> +0.01) and file-coverage lower bound −0.020 (> −0.04). Against the shipped threshold-2 setting on the same 250 tasks, decay 0.8 is ahead on both lines and files at 8,192. Both intervals touch zero there (lines +0.005 [−0.002, +0.014], files +0.007 [−0.001, +0.018]). At 16,384 it is clearly ahead on lines (+0.021 [+0.007, +0.037]) and not worse on files (+0.009 [+0.000, +0.021]). By source at 8,192, the file cost relative to `K` is smaller than threshold 2's on Pro (−0.016 against −0.040) and Verified (−0.019 against −0.031), and equal on Multi and Poly. Note that threshold 2 would also have cleared the file floor on this half (lower bound −0.032): its full-Lite miss was by 0.001.
+
+Replacing threshold 2 inside `BudgetPacking` with decay 0.8 is Francis's decision (a ranking change; ADR-051 says a better setting replaces threshold 2 rather than adding a path). Semble NDCG@10 for decay 0.8 is reported below when run.
