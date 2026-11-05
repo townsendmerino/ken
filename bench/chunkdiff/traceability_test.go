@@ -164,7 +164,7 @@ func TestAnalyze_SplitAndMixedAreCountedAsDefined(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("def alpha():\n    return 1\n\n")
 	b.WriteString("def beta():\n")
-	for i := 0; i < 400; i++ {
+	for i := range 400 {
 		b.WriteString("    x = " + itoa(i) + "\n")
 	}
 	src := []byte(b.String())

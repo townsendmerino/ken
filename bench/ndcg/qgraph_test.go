@@ -252,7 +252,7 @@ func ndcgAtK(ranked []rankedHit, qrels map[string]float64, k int) float64 {
 	limit := min(k, len(ranked))
 
 	var dcg float64
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		if rel, ok := gold[filepath.Base(ranked[i].File)]; ok {
 			dcg += rel / log2Plus1(i+1)
 		}

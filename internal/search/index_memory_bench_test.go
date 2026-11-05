@@ -40,7 +40,7 @@ func closeIfWorkspaces(v any) {
 func measureHeapDeltaStable(build func() any) (uint64, any) {
 	best := uint64(math.MaxUint64)
 	var last any
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if i < 2 && last != nil {
 			closeIfWorkspaces(last)
 			last = nil
@@ -117,11 +117,11 @@ func genSynthetic10kChunks() []chunk.Chunk {
 		vocab[i] = fmt.Sprintf("tok%03d", i)
 	}
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		var sb strings.Builder
 		sb.WriteString("func syntheticHandler() {\n")
 		numWords := 30 + rng.Intn(20)
-		for w := 0; w < numWords; w++ {
+		for range numWords {
 			sb.WriteString(vocab[rng.Intn(len(vocab))])
 			sb.WriteByte(' ')
 		}
@@ -217,7 +217,7 @@ func TestMemoryCompositionSynthetic(t *testing.T) {
 
 	// 6. Structural Index
 	tempDir := t.TempDir()
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		code := fmt.Sprintf(`package main
 func FuncA%d() { FuncB%d() }
 func FuncB%d() {}

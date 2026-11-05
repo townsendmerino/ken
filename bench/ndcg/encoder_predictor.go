@@ -190,7 +190,7 @@ func newEncoderPredictor(
 			}
 			a.count++
 			v := vecs[i]
-			for d := 0; d < dim; d++ {
+			for d := range dim {
 				a.sum[d] += float64(v[d])
 			}
 		}
@@ -210,7 +210,7 @@ func newEncoderPredictor(
 		v := make([]float32, dim)
 		invN := 1.0 / float64(a.count)
 		var sumSq float64
-		for d := 0; d < dim; d++ {
+		for d := range dim {
 			f := a.sum[d] * invN
 			v[d] = float32(f)
 			sumSq += f * f
@@ -219,7 +219,7 @@ func newEncoderPredictor(
 			continue
 		}
 		invNorm := float32(1.0 / math.Sqrt(sumSq))
-		for d := 0; d < dim; d++ {
+		for d := range dim {
 			v[d] *= invNorm
 		}
 		tokens = append(tokens, k)

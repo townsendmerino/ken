@@ -47,7 +47,7 @@ func PairedBootstrapCI(diffs []float64, numResamples int, seed int64) BootstrapC
 
 	for b := 0; b < numResamples; b++ {
 		bSum := 0.0
-		for i := 0; i < n; i++ {
+		for range n {
 			idx := rng.Intn(n)
 			bSum += diffs[idx]
 		}
