@@ -123,7 +123,7 @@ func diff(a, b []string) []string {
 // schema).
 func SchemaPaths() []string {
 	var out []string
-	walkSchema(reflect.TypeOf(Provenance{}), "", &out)
+	walkSchema(reflect.TypeFor[Provenance](), "", &out)
 	sort.Strings(out)
 	return out
 }
