@@ -83,7 +83,7 @@ func main() {
 
 	var peakKB, lastRSSKB int64
 	elapsed := 0
-	for i := 0; i < samples; i++ {
+	for range samples {
 		rss, hwm, ok := readStatus(pid)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "rss-bench: server pid %d gone (crash? see %s)\n", pid, stderrLog.Name())
