@@ -129,8 +129,8 @@ func SchemaPaths() []string {
 }
 
 func walkSchema(t reflect.Type, prefix string, out *[]string) {
-	for i := range t.NumField() {
-		f := t.Field(i)
+	for f := range t.Fields() {
+		f := f
 		tag, _, _ := strings.Cut(f.Tag.Get("json"), ",")
 		if tag == "-" || tag == "" {
 			continue
