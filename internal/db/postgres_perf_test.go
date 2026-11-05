@@ -21,7 +21,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"testing"
 	"time"
 
@@ -64,7 +64,7 @@ func TestPerf_PostgresSampleRows(t *testing.T) {
 	// Per-table timing.
 	t.Log("--- per-table sequential timing ---")
 	perTable, total := pgPerfPerTableTiming(ctx, t, conn)
-	sort.Slice(perTable, func(i, j int) bool { return perTable[i] < perTable[j] })
+	slices.Sort(perTable)
 	var sum time.Duration
 	for _, d := range perTable {
 		sum += d
@@ -82,7 +82,7 @@ func TestPerf_PostgresSampleRows(t *testing.T) {
 		trials = append(trials, d)
 		t.Logf("trial %d: %v", i+1, d)
 	}
-	sort.Slice(trials, func(i, j int) bool { return trials[i] < trials[j] })
+	slices.Sort(trials)
 	sampleMedian := trials[1]
 	t.Logf("sampleRowsImpl median of 3: %v", sampleMedian)
 
@@ -98,7 +98,7 @@ func TestPerf_PostgresSampleRows(t *testing.T) {
 		}
 		fullTrials = append(fullTrials, time.Since(s))
 	}
-	sort.Slice(fullTrials, func(i, j int) bool { return fullTrials[i] < fullTrials[j] })
+	slices.Sort(fullTrials)
 	fullMedian := fullTrials[1]
 	t.Logf("full introspection median: %v", fullMedian)
 	t.Logf("sample-loop fraction of total introspection: %.1f%%",

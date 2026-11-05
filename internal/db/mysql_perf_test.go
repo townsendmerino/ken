@@ -33,7 +33,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"testing"
 	"time"
 
@@ -84,7 +84,7 @@ func TestPerf_MySQLAppendSamples(t *testing.T) {
 	// Per-table timing (sequential): captures the distribution.
 	t.Log("--- per-table sequential timing ---")
 	perTable, total := perfPerTableTiming(ctx, t, conn)
-	sort.Slice(perTable, func(i, j int) bool { return perTable[i] < perTable[j] })
+	slices.Sort(perTable)
 	min := perTable[0]
 	max := perTable[len(perTable)-1]
 	median := perTable[len(perTable)/2]
@@ -104,7 +104,7 @@ func TestPerf_MySQLAppendSamples(t *testing.T) {
 		trials = append(trials, d)
 		t.Logf("trial %d: %v", i+1, d)
 	}
-	sort.Slice(trials, func(i, j int) bool { return trials[i] < trials[j] })
+	slices.Sort(trials)
 	t.Logf("mysqlAppendSamples median of %d: %v", perfTimedRun, trials[perfTimedRun/2])
 
 	// Total introspection timing (the denominator — what fraction is sample-fetch?).
@@ -119,7 +119,7 @@ func TestPerf_MySQLAppendSamples(t *testing.T) {
 		}
 		fullTrials = append(fullTrials, time.Since(s))
 	}
-	sort.Slice(fullTrials, func(i, j int) bool { return fullTrials[i] < fullTrials[j] })
+	slices.Sort(fullTrials)
 	fullMedian := fullTrials[perfTimedRun/2]
 	sampleMedian := trials[perfTimedRun/2]
 	t.Logf("full introspection median: %v", fullMedian)
