@@ -69,7 +69,7 @@ func main() {
 
 	// Parse budgets
 	var budgets []int
-	for _, bStr := range strings.Split(*budgetsFlag, ",") {
+	for bStr := range strings.SplitSeq(*budgetsFlag, ",") {
 		bStr = strings.TrimSpace(bStr)
 		if b, err := strconv.Atoi(bStr); err == nil && b > 0 {
 			budgets = append(budgets, b)
@@ -81,7 +81,7 @@ func main() {
 
 	// Parse arms
 	var arms []contextbench.Arm
-	for _, aName := range strings.Split(*armsFlag, ",") {
+	for aName := range strings.SplitSeq(*armsFlag, ",") {
 		switch strings.ToUpper(strings.TrimSpace(aName)) {
 		case "G":
 			arms = append(arms, &contextbench.ArmGrep{})

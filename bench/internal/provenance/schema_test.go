@@ -123,14 +123,13 @@ func diff(a, b []string) []string {
 // schema).
 func SchemaPaths() []string {
 	var out []string
-	walkSchema(reflect.TypeOf(Provenance{}), "", &out)
+	walkSchema(reflect.TypeFor[Provenance](), "", &out)
 	sort.Strings(out)
 	return out
 }
 
 func walkSchema(t reflect.Type, prefix string, out *[]string) {
-	for i := range t.NumField() {
-		f := t.Field(i)
+	for f := range t.Fields() {
 		tag, _, _ := strings.Cut(f.Tag.Get("json"), ",")
 		if tag == "-" || tag == "" {
 			continue

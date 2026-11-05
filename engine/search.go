@@ -312,13 +312,7 @@ func (w *Workspace) SearchFiles(ctx context.Context, query string, k int, mode M
 	ix := w.index.Load()
 	gen := w.index.Generation()
 
-	overfetch := ix.Len()
-	if overfetch > searchFilesOverfetchCap {
-		overfetch = searchFilesOverfetchCap
-	}
-	if overfetch < k {
-		overfetch = k
-	}
+	overfetch := max(min(ix.Len(), searchFilesOverfetchCap), k)
 	results, eff := ix.SearchMode(query, overfetch, mode)
 
 	filtered := make([]search.Result, 0, k)

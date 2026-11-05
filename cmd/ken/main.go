@@ -1375,7 +1375,7 @@ func extractAlphaPairs(args []string, single search.AlphaPair) ([]string, []sear
 	}
 	var out []search.AlphaPair
 	seen := map[search.AlphaPair]bool{}
-	for _, entry := range strings.Split(spec, ",") {
+	for entry := range strings.SplitSeq(spec, ",") {
 		entry = strings.TrimSpace(entry)
 		pair := search.AdaptiveAlphas
 		if entry != "adaptive" {

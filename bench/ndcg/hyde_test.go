@@ -306,10 +306,7 @@ func TestHyDE_M0(t *testing.T) {
 		}
 		// DF ceiling: drop near-corpus-mean tokens whose centroids
 		// point nowhere. max(50, N/100) ≈ 150 on a 14.7k-doc corpus.
-		dfCeil := ix.Len() / 100
-		if dfCeil < 50 {
-			dfCeil = 50
-		}
+		dfCeil := max(ix.Len()/100, 50)
 		if v := os.Getenv("KEN_M0C_DF_CEIL"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				dfCeil = n
@@ -331,7 +328,7 @@ func TestHyDE_M0(t *testing.T) {
 		var prf *prfPredictor
 		var encoder *encoderPredictor
 		hasBaseline := false
-		for _, name := range strings.Split(m0cArms, ",") {
+		for name := range strings.SplitSeq(m0cArms, ",") {
 			name = strings.TrimSpace(name)
 			switch name {
 			case "baseline":
@@ -375,7 +372,7 @@ func TestHyDE_M0(t *testing.T) {
 		weights := []float64{0.0, 0.3, 0.5, 0.7}
 		if v := os.Getenv("KEN_HYDE_WEIGHTS"); v != "" {
 			weights = nil
-			for _, p := range strings.Split(v, ",") {
+			for p := range strings.SplitSeq(v, ",") {
 				f, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
 				if err != nil {
 					t.Fatalf("invalid KEN_HYDE_WEIGHTS=%q: %v", v, err)

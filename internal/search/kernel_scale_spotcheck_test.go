@@ -39,7 +39,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
-	"sort"
+	"slices"
 	"testing"
 	"time"
 )
@@ -145,7 +145,7 @@ func TestKernelScaleRecallSpotCheck(t *testing.T) {
 			}
 			sum += float64(hit) / float64(denom)
 		}
-		sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
+		slices.Sort(lats)
 		p50 := lats[len(lats)*50/100]
 		p95 := lats[min(len(lats)*95/100, len(lats)-1)]
 		return sum / float64(len(queries)), float64(p50.Microseconds()), float64(p95.Microseconds())

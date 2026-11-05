@@ -33,7 +33,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"testing"
 	"time"
 
@@ -77,14 +77,14 @@ func TestPerf_MySQLAppendSamples(t *testing.T) {
 	})
 
 	// Warm the connection pool + MySQL caches.
-	for i := 0; i < perfWarmRuns; i++ {
+	for range perfWarmRuns {
 		_ = perfRunSampleLoop(ctx, conn)
 	}
 
 	// Per-table timing (sequential): captures the distribution.
 	t.Log("--- per-table sequential timing ---")
 	perTable, total := perfPerTableTiming(ctx, t, conn)
-	sort.Slice(perTable, func(i, j int) bool { return perTable[i] < perTable[j] })
+	slices.Sort(perTable)
 	min := perTable[0]
 	max := perTable[len(perTable)-1]
 	median := perTable[len(perTable)/2]
@@ -99,18 +99,18 @@ func TestPerf_MySQLAppendSamples(t *testing.T) {
 	// Full mysqlAppendSamples timing (3-trial median).
 	t.Log("--- mysqlAppendSamples (full function) timing, 3 trials ---")
 	var trials []time.Duration
-	for i := 0; i < perfTimedRun; i++ {
+	for i := range perfTimedRun {
 		d := perfRunSampleLoop(ctx, conn)
 		trials = append(trials, d)
 		t.Logf("trial %d: %v", i+1, d)
 	}
-	sort.Slice(trials, func(i, j int) bool { return trials[i] < trials[j] })
+	slices.Sort(trials)
 	t.Logf("mysqlAppendSamples median of %d: %v", perfTimedRun, trials[perfTimedRun/2])
 
 	// Total introspection timing (the denominator — what fraction is sample-fetch?).
 	t.Log("--- full introspection (indexSchemaMySQL) timing, 3 trials ---")
 	var fullTrials []time.Duration
-	for i := 0; i < perfTimedRun; i++ {
+	for range perfTimedRun {
 		opts := Options{DSN: dsn, SampleRows: perfSampleN, IncludeSchemas: []string{perfSchema}}
 		s := time.Now()
 		_, err := indexSchemaMySQL(ctx, opts)
@@ -119,7 +119,7 @@ func TestPerf_MySQLAppendSamples(t *testing.T) {
 		}
 		fullTrials = append(fullTrials, time.Since(s))
 	}
-	sort.Slice(fullTrials, func(i, j int) bool { return fullTrials[i] < fullTrials[j] })
+	slices.Sort(fullTrials)
 	fullMedian := fullTrials[perfTimedRun/2]
 	sampleMedian := trials[perfTimedRun/2]
 	t.Logf("full introspection median: %v", fullMedian)
@@ -149,7 +149,7 @@ func perfBuildFixture(ctx context.Context, conn *sql.DB) error {
 	if _, err := conn.ExecContext(ctx, "USE "+perfSchema); err != nil {
 		return err
 	}
-	for i := 0; i < perfTables; i++ {
+	for i := range perfTables {
 		// Three table shapes, rotated, so the sample loop hits varied col types.
 		var createStmt string
 		switch i % 3 {
@@ -168,7 +168,7 @@ func perfBuildFixture(ctx context.Context, conn *sql.DB) error {
 		}
 		// Insert rows in one multi-row statement.
 		var values string
-		for r := 0; r < perfRowsPer; r++ {
+		for r := range perfRowsPer {
 			if r > 0 {
 				values += ", "
 			}
@@ -187,7 +187,7 @@ func perfBuildFixture(ctx context.Context, conn *sql.DB) error {
 		}
 	}
 	// ANALYZE so information_schema.tables.table_rows reflects reality.
-	for i := 0; i < perfTables; i++ {
+	for i := range perfTables {
 		_, _ = conn.ExecContext(ctx, fmt.Sprintf("ANALYZE TABLE `%s`.`t%03d`", perfSchema, i))
 	}
 	return nil
@@ -199,7 +199,7 @@ func perfBuildFixture(ctx context.Context, conn *sql.DB) error {
 func perfRunSampleLoop(ctx context.Context, conn *sql.DB) time.Duration {
 	// Build a minimal schemaSnapshot with the fixture tables.
 	snap := &schemaSnapshot{}
-	for i := 0; i < perfTables; i++ {
+	for i := range perfTables {
 		snap.tables = append(snap.tables, tableDef{
 			schema: perfSchema,
 			name:   fmt.Sprintf("t%03d", i),
@@ -217,7 +217,7 @@ func perfRunSampleLoop(ctx context.Context, conn *sql.DB) time.Duration {
 func perfPerTableTiming(ctx context.Context, t *testing.T, conn *sql.DB) ([]time.Duration, time.Duration) {
 	durations := make([]time.Duration, 0, perfTables)
 	totalStart := time.Now()
-	for i := 0; i < perfTables; i++ {
+	for i := range perfTables {
 		name := fmt.Sprintf("t%03d", i)
 		q := fmt.Sprintf("SELECT * FROM `%s`.`%s` ORDER BY `id` LIMIT ?", perfSchema, name)
 		s := time.Now()

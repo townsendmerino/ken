@@ -42,7 +42,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"testing"
 	"time"
 
@@ -185,10 +185,7 @@ func TestRetrieverEval(t *testing.T) {
 						a.pipeHit10++
 					}
 					for _, n := range retrieverSemNs {
-						nn := n
-						if nn > len(semSorted) {
-							nn = len(semSorted)
-						}
+						nn := min(n, len(semSorted))
 						hit := false
 						for _, h := range semSorted[:nn] {
 							if decompTargetMatch(ix.chunks[h.Index].File, targets) {
@@ -230,7 +227,7 @@ func TestRetrieverEval(t *testing.T) {
 			for _, n := range retrieverSemNs {
 				sr[fmt.Sprintf("%d", n)] = float64(a.semHit[n]) / float64(a.n)
 			}
-			sort.Slice(a.queryLatency, func(i, j int) bool { return a.queryLatency[i] < a.queryLatency[j] })
+			slices.Sort(a.queryLatency)
 			p50 := a.queryLatency[len(a.queryLatency)*50/100]
 			p95 := a.queryLatency[min(len(a.queryLatency)*95/100, len(a.queryLatency)-1)]
 			rep := report{
