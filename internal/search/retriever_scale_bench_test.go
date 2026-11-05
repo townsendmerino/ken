@@ -31,7 +31,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"sort"
+	"slices"
 	"testing"
 	"time"
 )
@@ -114,7 +114,7 @@ func TestRetrieverScaleSweep(t *testing.T) {
 				_ = r.Query(q, 10)
 				lats = append(lats, time.Since(t0))
 			}
-			sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
+			slices.Sort(lats)
 			p50 := lats[len(lats)*50/100]
 			p95 := lats[min(len(lats)*95/100, len(lats)-1)]
 			analyticMB := v.bytesPerVec(scaleDim) * float64(n) / 1e6

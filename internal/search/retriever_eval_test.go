@@ -42,7 +42,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"testing"
 	"time"
 
@@ -227,7 +227,7 @@ func TestRetrieverEval(t *testing.T) {
 			for _, n := range retrieverSemNs {
 				sr[fmt.Sprintf("%d", n)] = float64(a.semHit[n]) / float64(a.n)
 			}
-			sort.Slice(a.queryLatency, func(i, j int) bool { return a.queryLatency[i] < a.queryLatency[j] })
+			slices.Sort(a.queryLatency)
 			p50 := a.queryLatency[len(a.queryLatency)*50/100]
 			p95 := a.queryLatency[min(len(a.queryLatency)*95/100, len(a.queryLatency)-1)]
 			rep := report{
