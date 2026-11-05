@@ -77,7 +77,7 @@ func TestPerf_PostgresSampleRows(t *testing.T) {
 	// Full sampleRowsImpl, 3 trials.
 	t.Log("--- sampleRowsImpl (full function) timing, 3 trials ---")
 	var trials []time.Duration
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		d := pgPerfRunSampleLoop(ctx, conn)
 		trials = append(trials, d)
 		t.Logf("trial %d: %v", i+1, d)
@@ -89,7 +89,7 @@ func TestPerf_PostgresSampleRows(t *testing.T) {
 	// Full introspection (IndexSchema), 3 trials.
 	t.Log("--- full introspection (IndexSchema) timing, 3 trials ---")
 	var fullTrials []time.Duration
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		opts := Options{DSN: dsn, SampleRows: pgPerfSampleN, IncludeSchemas: []string{pgPerfSchema}}
 		s := time.Now()
 		_, err := IndexSchema(ctx, opts)
@@ -123,7 +123,7 @@ func pgPerfBuildFixture(ctx context.Context, conn *pgx.Conn) error {
 	if _, err := conn.Exec(ctx, "CREATE SCHEMA "+pgPerfSchema); err != nil {
 		return err
 	}
-	for i := 0; i < pgPerfTables; i++ {
+	for i := range pgPerfTables {
 		var create string
 		switch i % 3 {
 		case 0:
@@ -141,7 +141,7 @@ func pgPerfBuildFixture(ctx context.Context, conn *pgx.Conn) error {
 		}
 		// Build multi-row insert.
 		var values string
-		for r := 0; r < pgPerfRowsPer; r++ {
+		for r := range pgPerfRowsPer {
 			if r > 0 {
 				values += ", "
 			}
@@ -165,7 +165,7 @@ func pgPerfBuildFixture(ctx context.Context, conn *pgx.Conn) error {
 
 func pgPerfRunSampleLoop(ctx context.Context, conn *pgx.Conn) time.Duration {
 	snap := &schemaSnapshot{}
-	for i := 0; i < pgPerfTables; i++ {
+	for i := range pgPerfTables {
 		snap.tables = append(snap.tables, tableDef{
 			schema: pgPerfSchema,
 			name:   fmt.Sprintf("t%03d", i),
@@ -193,7 +193,7 @@ func pgPerfRunSampleLoop(ctx context.Context, conn *pgx.Conn) time.Duration {
 func pgPerfPerTableTiming(ctx context.Context, t *testing.T, conn *pgx.Conn) ([]time.Duration, time.Duration) {
 	durations := make([]time.Duration, 0, pgPerfTables)
 	totalStart := time.Now()
-	for i := 0; i < pgPerfTables; i++ {
+	for i := range pgPerfTables {
 		name := fmt.Sprintf("t%03d", i)
 		q := fmt.Sprintf(`SELECT * FROM %s."%s" ORDER BY "id" LIMIT $1`, pgPerfSchema, name)
 		s := time.Now()
