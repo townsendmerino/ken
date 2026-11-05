@@ -98,7 +98,7 @@ func checkHits(t *testing.T, root, label string, hits []engine.Hit) {
 		if h.Text != want {
 			t.Errorf("%s: %s:%d-%d Text = %q, want the file's lines %q", label, h.File, h.StartLine, h.EndLine, h.Text, want)
 		}
-		for _, line := range strings.Split(h.Text, "\n") {
+		for line := range strings.SplitSeq(h.Text, "\n") {
 			if strings.HasPrefix(line, "# ken:") {
 				t.Errorf("%s: %s:%d-%d Text carries the enrichment label line %q", label, h.File, h.StartLine, h.EndLine, line)
 			}
