@@ -306,10 +306,7 @@ func TestHyDE_M0(t *testing.T) {
 		}
 		// DF ceiling: drop near-corpus-mean tokens whose centroids
 		// point nowhere. max(50, N/100) ≈ 150 on a 14.7k-doc corpus.
-		dfCeil := ix.Len() / 100
-		if dfCeil < 50 {
-			dfCeil = 50
-		}
+		dfCeil := max(ix.Len()/100, 50)
 		if v := os.Getenv("KEN_M0C_DF_CEIL"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				dfCeil = n

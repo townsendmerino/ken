@@ -162,10 +162,7 @@ func (c *CorpusCache) scoreMatchedSet(matched map[string]bool, targets []string)
 	var totalTokens int
 	for rel := range matched {
 		cf := c.files[rel]
-		t := cf.tok
-		if t > PerFileTokenCap {
-			t = PerFileTokenCap
-		}
+		t := min(cf.tok, PerFileTokenCap)
 		totalTokens += t
 	}
 	recall := false

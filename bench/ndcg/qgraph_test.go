@@ -249,10 +249,7 @@ func ndcgAtK(ranked []rankedHit, qrels map[string]float64, k int) float64 {
 		gold[docID] = s
 		gold[docID+".py"] = s
 	}
-	limit := k
-	if limit > len(ranked) {
-		limit = len(ranked)
-	}
+	limit := min(k, len(ranked))
 
 	var dcg float64
 	for i := 0; i < limit; i++ {

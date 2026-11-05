@@ -185,10 +185,7 @@ func TestRetrieverEval(t *testing.T) {
 						a.pipeHit10++
 					}
 					for _, n := range retrieverSemNs {
-						nn := n
-						if nn > len(semSorted) {
-							nn = len(semSorted)
-						}
+						nn := min(n, len(semSorted))
 						hit := false
 						for _, h := range semSorted[:nn] {
 							if decompTargetMatch(ix.chunks[h.Index].File, targets) {
