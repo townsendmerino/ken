@@ -50,6 +50,61 @@ func hybridSearch(
 	predicted []string,
 	abl RankAblation,
 ) []rankedItem {
+	f := fuseArms(query, qVec, flat, bm, topK, alphas, predicted)
+	combined := f.combined
+	if !abl.NoCoherenceBoost {
+		boostMultiChunkFiles(combined, chunks)
+	}
+	applyQueryBoostInPlace(combined, query, chunks, predicted)
+	return rerankTopK(combined, chunks, topK, f.alpha < 1.0, abl.saturationThreshold(), abl.saturationDecay())
+}
+
+// fusedArms is the first stage of hybridSearch: both arms' candidate lists
+// and their α-weighted RRF fusion, before any boost. SearchFilesMode reuses
+// it so its arms are the same calls, with the same depth and tie-breaks, as
+// the whole ranking's.
+type fusedArms struct {
+	alpha    float64
+	semOrder []int // dense arm, best first
+	bmOrder  []int // BM25 arm (score > 0 only), best first
+	combined map[int]float64
+}
+
+// fuseArms runs the semantic and BM25 arms at depth topK*candidateOverfetch
+// and fuses them with weighted RRF.
+//
+// predicted, when non-empty, is the Stage-7a transform #2 vocab-gap
+// expansion (see hybridSearch).
+func fuseArms(
+	query string,
+	qVec []float32,
+	flat denseRetriever,
+	bm *bm25.Index,
+	topK int,
+	alphas AlphaPair,
+	predicted []string,
+) fusedArms {
+	f := runArms(query, qVec, flat, bm, topK, alphas, predicted)
+	weights := [2]float64{f.alpha, 1.0 - f.alpha}
+	fused := fuse.RRFWeighted(fuse.DefaultK, weights[:], f.semOrder, f.bmOrder)
+	f.combined = make(map[int]float64, len(fused))
+	for _, r := range fused {
+		f.combined[r.Key] = r.Score
+	}
+	return f
+}
+
+// runArms is fuseArms without the fusion: alpha and both arms' candidate
+// lists, combined left nil.
+func runArms(
+	query string,
+	qVec []float32,
+	flat denseRetriever,
+	bm *bm25.Index,
+	topK int,
+	alphas AlphaPair,
+	predicted []string,
+) fusedArms {
 	alpha := resolveAlpha(query, alphas)
 	candidateCount := topK * candidateOverfetch
 
@@ -78,17 +133,5 @@ func hybridSearch(
 			bmOrder = append(bmOrder, r.Doc)
 		}
 	}
-
-	weights := [2]float64{alpha, 1.0 - alpha}
-	fused := fuse.RRFWeighted(fuse.DefaultK, weights[:], semOrder, bmOrder)
-	combined := make(map[int]float64, len(fused))
-	for _, r := range fused {
-		combined[r.Key] = r.Score
-	}
-
-	if !abl.NoCoherenceBoost {
-		boostMultiChunkFiles(combined, chunks)
-	}
-	applyQueryBoostInPlace(combined, query, chunks, predicted)
-	return rerankTopK(combined, chunks, topK, alpha < 1.0, abl.saturationThreshold(), abl.saturationDecay())
+	return fusedArms{alpha: alpha, semOrder: semOrder, bmOrder: bmOrder}
 }

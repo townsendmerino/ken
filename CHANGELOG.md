@@ -13,6 +13,29 @@ patch (1.0.x) releases. Best-effort surfaces (noted per-symbol in
 within 1.x. Each release tag has a corresponding GitHub release page with
 pre-built binaries.
 
+## [Unreleased]
+
+### Fixed
+
+- **`engine.(*Workspace).SearchFiles` is exact at any index size (K9 follow-up, ADR-047 update).** It used to take at most 5,000 candidates from the whole ranking and keep the requested files' hits. Past 5,000 chunks, it silently lost hits that ranked below the cap.
+  - On goinfer (about 80k chunks), tack measured 63 of 94 bm25 answers differing from the whole ranking filtered to the file (tack `docs/measurements/searchfiles-exactness-goinfer-2026-11-08.md`).
+  - It now calls the new `search.(*Index).SearchFilesMode`, which scores only the requested files' chunks against the index's global statistics. It returns exactly the whole ranking (`SearchMode` with k ≥ `Len()`) filtered to those files: the same chunks, scores and order.
+    - bm25 reads `bm25.Index.Scores` at those chunks.
+    - Semantic filters the same dense-retriever call.
+    - Hybrid runs both arms, the RRF fusion and the file-coherence boost globally over dense slices, then the query boosts, penalties and saturation on the requested chunks only.
+    - Hybrid-rerank with a reranker attached falls back to the whole ranking filtered. That is exact, at whole-ranking cost.
+  - `Hit.BM25Rank`/`DenseRank` from `SearchFiles` are now exact whole-index arm ranks.
+  - `Search`/`SearchMode` rankings are unchanged: the shared code was factored, not altered.
+  - **Latency on goinfer** (`9f95557ad`, 79,702 chunks, treesitter chunker, potion-code-16M; mbp2, 8 threads, load average 2.8 at the start). Each mode ran the 94 tack queries (3 `CLAUDE.md` files × their headings + 10 task messages) × k ∈ {5, 20} × 10 rounds, 940 calls:
+
+    | mode | SearchFiles p50 / p95 / max | old capped SearchFiles p50 / p95 | `Search` k=10 p50 / p95 |
+    |---|---|---|---|
+    | bm25 | 5.3 / 14.0 / 36.8 ms | 158 / 251 ms | 4.3 / 7.8 ms |
+    | hybrid | 37.4 / 53.2 / 135.8 ms | 581 / 1,056 ms | 15.7 / 35.8 ms |
+
+    - Exactness on the same run: 0 of 94 answers differ in either mode. The old capped path differed on 63 of 94 (bm25) and 94 of 94 (hybrid).
+  - Tests: `engine/searchfiles_exact_test.go` is a 5,101-file fixture whose guide hit ranks below 5,000; it fails on the capped code in bm25, semantic and hybrid. `internal/search/search_files_test.go` checks equivalence across modes, file sets, k, tombstones and a fake reranker, including the arm ranks.
+
 ## [1.12.1] — 2026-10-29 — snapshot streaming without re-embedding, K17 gate fixes, and K16–K18 measurement corrections
 
 A follow-up release addressing review findings on v1.12.0 (`K16`–`K18`): snapshot persistence now streams directly from the active dense store without re-embedding, quantized dense-store safety and verification gates are hardened, and measurement records are relabeled to match what the code and data show.

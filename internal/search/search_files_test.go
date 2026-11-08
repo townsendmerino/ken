@@ -1,0 +1,170 @@
+package search
+
+import (
+	"fmt"
+	"slices"
+	"testing"
+
+	"github.com/townsendmerino/aikit/chunk"
+)
+
+// wholeFiltered is SearchFilesMode's contract written the slow way: the
+// whole ranking (all, from SearchMode with k = Len()), filtered to keep, cut
+// to k.
+func wholeFiltered(all []Result, k int, keep func(string) bool) []Result {
+	var out []Result
+	for _, r := range all {
+		if keep(r.Chunk.File) {
+			out = append(out, r)
+			if len(out) == k {
+				break
+			}
+		}
+	}
+	return out
+}
+
+func spanKey(c chunk.Chunk) string { return fmt.Sprintf("%s:%d-%d", c.File, c.StartLine, c.EndLine) }
+
+// armPositions is each live chunk's 1-based position in the whole
+// single-arm ranking, the reference for ArmRanks.
+func armPositions(ix *Index, q string, mode Mode) map[string]int {
+	all, _ := ix.SearchMode(q, ix.Len(), mode)
+	m := make(map[string]int, len(all))
+	for i, r := range all {
+		m[spanKey(r.Chunk)] = i + 1
+	}
+	return m
+}
+
+// fakeReranker scores by a deterministic function of the text, so the
+// rerank stage reorders the stage-1 head in a way SearchFilesMode must
+// reproduce.
+type fakeReranker struct{}
+
+func (fakeReranker) Rerank(_ string, cands []chunk.Chunk) []float64 {
+	out := make([]float64, len(cands))
+	for i, c := range cands {
+		out[i] = float64(len(c.Text)%97) / 97
+	}
+	return out
+}
+
+var searchFilesQueries = []string{
+	"Tokenize",      // symbol query: definition boost + non-candidate scan
+	"bm25.Tokenize", // qualified symbol
+	"rerankTopK",    // camelCase symbol
+	"how does the watcher republish the index",               // NL: stem boost
+	"where is SearchMode defined and how is fusion weighted", // NL with embedded symbols
+	"tombstone count over fetch",
+	"the",
+	"zzzzqqq_no_such_token",
+}
+
+// checkSearchFilesExact compares SearchFilesMode with wholeFiltered for every
+// query × mode × file set × k. quick trims the file sets and ks, for the
+// rerank path, whose SearchFilesMode is itself a whole ranking.
+func checkSearchFilesExact(t *testing.T, ix *Index, modes []Mode, quick bool) {
+	t.Helper()
+	var files []string
+	seen := map[string]bool{}
+	for _, c := range ix.Chunks() {
+		if !seen[c.File] {
+			seen[c.File] = true
+			files = append(files, c.File)
+		}
+	}
+	slices.Sort(files)
+	// One-file sets across the corpus, a two-file set, and an unknown file.
+	var sets [][]string
+	for i := 0; i < len(files); i += max(1, len(files)/12) {
+		sets = append(sets, []string{files[i]})
+	}
+	sets = append(sets, []string{files[0], files[len(files)/2]}, []string{"no/such/file.go"})
+	ks := []int{1, 5, 50}
+	if quick {
+		sets = sets[len(sets)-4:]
+		ks = []int{5}
+	}
+
+	for _, mode := range modes {
+		for _, q := range searchFilesQueries {
+			bmPos := armPositions(ix, q, ModeBM25)
+			all, wantEff := ix.SearchMode(q, ix.Len(), mode)
+			var densePos map[string]int
+			if ix.Model() != nil {
+				densePos = armPositions(ix, q, ModeSemantic)
+			}
+			for _, set := range sets {
+				keep := func(f string) bool { return slices.Contains(set, f) }
+				for _, k := range ks {
+					want := wholeFiltered(all, k, keep)
+					got, ranks, eff := ix.SearchFilesMode(q, k, mode, keep)
+					if eff != wantEff {
+						t.Fatalf("mode %v q=%q: effective mode %v, want %v", mode, q, eff, wantEff)
+					}
+					if len(got) != len(want) || len(ranks) != len(got) {
+						t.Errorf("mode %v q=%q files=%v k=%d: %d hits (%d ranks), want %d", mode, q, set, k, len(got), len(ranks), len(want))
+						continue
+					}
+					for i := range got {
+						if spanKey(got[i].Chunk) != spanKey(want[i].Chunk) || got[i].Score != want[i].Score {
+							t.Errorf("mode %v q=%q files=%v k=%d hit %d: %s %v, want %s %v",
+								mode, q, set, k, i, spanKey(got[i].Chunk), got[i].Score, spanKey(want[i].Chunk), want[i].Score)
+							break
+						}
+						key := spanKey(got[i].Chunk)
+						wantBM := 0
+						if mode != ModeSemantic {
+							wantBM = bmPos[key]
+						}
+						wantDense := 0
+						if mode != ModeBM25 {
+							wantDense = densePos[key]
+						}
+						if ranks[i].BM25 != wantBM || ranks[i].Dense != wantDense {
+							t.Errorf("mode %v q=%q %s: ranks %+v, want BM25=%d Dense=%d", mode, q, key, ranks[i], wantBM, wantDense)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestSearchFilesMode_BM25Exact compares SearchFilesMode with the whole
+// ranking filtered, on a real corpus (this repo's internal/ tree), with
+// some chunks tombstoned.
+func TestSearchFilesMode_BM25Exact(t *testing.T) {
+	if testing.Short() {
+		t.Skip("indexes internal/")
+	}
+	ix, err := FromPath("..", ModeBM25, "regex", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 3; i < len(ix.chunks); i += 41 {
+		ix.chunks[i].Tombstoned = true
+	}
+	checkSearchFilesExact(t, ix, []Mode{ModeBM25, ModeHybrid}, false) // hybrid downgrades to bm25
+}
+
+// TestSearchFilesMode_DenseExact is the same for the modes with a dense arm,
+// including hybrid-rerank with a reranker attached. Skips without
+// testdata/model.
+func TestSearchFilesMode_DenseExact(t *testing.T) {
+	if testing.Short() {
+		t.Skip("indexes internal/")
+	}
+	model := modelDirOrSkip(t)
+	ix, err := FromPath("..", ModeHybrid, "regex", model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 3; i < len(ix.chunks); i += 41 {
+		ix.chunks[i].Tombstoned = true
+	}
+	checkSearchFilesExact(t, ix, []Mode{ModeBM25, ModeSemantic, ModeHybrid}, false)
+	ix.SetReranker(fakeReranker{})
+	checkSearchFilesExact(t, ix, []Mode{ModeHybridRerank}, true)
+}
