@@ -120,6 +120,11 @@ func checkSearchFilesExact(t *testing.T, ix *Index, modes []Mode, quick bool) {
 	}
 
 	for _, mode := range modes {
+		// headHits counts checked answers holding a chunk the reranker
+		// scored (one of the whole ranking's first rerankN), so the rerank
+		// check is known to reach the reranked head, not just the stage-1
+		// tail below it.
+		headHits := 0
 		for _, q := range searchFilesQueries {
 			bmPos := armPositions(ix, q, ModeBM25)
 			all, wantEff := ix.SearchMode(q, ix.Len(), mode)
@@ -127,7 +132,16 @@ func checkSearchFilesExact(t *testing.T, ix *Index, modes []Mode, quick bool) {
 			if ix.Model() != nil {
 				densePos = armPositions(ix, q, ModeSemantic)
 			}
-			for _, set := range sets {
+			qSets := sets
+			head := map[string]bool{}
+			if mode == ModeHybridRerank && len(all) > 0 {
+				// The top hit's file: its answer starts inside the head.
+				qSets = append(slices.Clone(sets), []string{all[0].Chunk.File})
+				for _, r := range all[:min(ix.rerankCfg.rerankN, len(all))] {
+					head[spanKey(r.Chunk)] = true
+				}
+			}
+			for _, set := range qSets {
 				keep := func(f string) bool { return slices.Contains(set, f) }
 				for _, k := range ks {
 					want := wholeFiltered(all, k, keep)
@@ -138,6 +152,9 @@ func checkSearchFilesExact(t *testing.T, ix *Index, modes []Mode, quick bool) {
 					if len(got) != len(want) || len(ranks) != len(got) {
 						t.Errorf("mode %v q=%q files=%v k=%d: %d hits (%d ranks), want %d", mode, q, set, k, len(got), len(ranks), len(want))
 						continue
+					}
+					if slices.ContainsFunc(got, func(r Result) bool { return head[spanKey(r.Chunk)] }) {
+						headHits++
 					}
 					for i := range got {
 						if spanKey(got[i].Chunk) != spanKey(want[i].Chunk) || got[i].Score != want[i].Score {
@@ -161,6 +178,27 @@ func checkSearchFilesExact(t *testing.T, ix *Index, modes []Mode, quick bool) {
 				}
 			}
 		}
+		if mode == ModeHybridRerank && headHits == 0 {
+			t.Errorf("mode %v: no checked answer held a reranked-head chunk; the rerank stage went untested", mode)
+		}
+	}
+}
+
+// TestChunksOfFiles_DropsWhollyTombstonedFiles: a file whose chunks are all
+// tombstoned can yield no result, so it is not a target; a partly live
+// file keeps its tombstoned chunks (the whole hybrid ranking counts them in
+// file saturation).
+func TestChunksOfFiles_DropsWhollyTombstonedFiles(t *testing.T) {
+	ix := &Index{chunks: []chunk.Chunk{
+		{File: "a.go"}, {File: "dead.go", Tombstoned: true}, {File: "part.go", Tombstoned: true},
+		{File: "dead.go", Tombstoned: true}, {File: "part.go"}, {File: "other.go"},
+	}}
+	keep := func(f string) bool { return f != "other.go" }
+	if got, want := ix.chunksOfFiles(keep), []int{0, 2, 4}; !slices.Equal(got, want) {
+		t.Errorf("chunksOfFiles = %v, want %v", got, want)
+	}
+	if got := ix.chunksOfFiles(func(f string) bool { return f == "dead.go" }); len(got) != 0 {
+		t.Errorf("chunksOfFiles(dead.go only) = %v, want none", got)
 	}
 }
 

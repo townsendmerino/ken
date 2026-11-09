@@ -228,8 +228,10 @@ package:
   `SearchFiles` restricts hits to a given set of repo-relative paths, for
   "which sections of this one file match" use cases (added in v1.10.0).
   It is exact at any index size: the hits, scores and order are the whole
-  ranking's filtered to those files. It scores only those files' chunks
-  against the index's global statistics, so it never re-ranks. Until the
+  ranking's filtered to those files, so it never re-ranks. It still scores
+  every chunk; bm25 and hybrid save the whole-index ordering and boosts,
+  while semantic and hybrid-rerank cost about what the whole ranking does
+  (see `search.(*Index).SearchFilesMode`). Until the
   release after 1.12.1 it post-filtered a ranking capped at 5,000
   candidates, which lost hits on larger indexes.
 - `Hit{File, StartLine, EndLine, Text, Hash, Score, Rank, Gen, BM25Rank,
