@@ -24,22 +24,27 @@ type ArmRanks struct {
 // chunks, scores and order — at any index size. ranks[i] is results[i]'s
 // whole-index rank in each arm.
 //
-// How each mode gets there without ranking the whole index:
+// Every mode still scores every chunk: the global statistics, the arm ranks
+// and the fusion scale need them. What each mode skips is the work that only
+// orders or decorates the rest of the index:
 //
 //   - ModeBM25 scores every document with the index's global statistics
-//     (bm25.Index.Scores, the same scoring TopK uses) and keeps the
-//     requested files' positive scores; order is score desc then chunk
-//     index asc, TopK's tie-break. No sort over the whole index.
+//     (bm25.Index.Scores, the same scoring TopK uses), keeps the requested
+//     files' positive scores and sorts only those (score desc then chunk
+//     index asc, TopK's tie-break). The arm ranks take one more pass over
+//     every score. Skipped: TopK's selection over the whole index.
 //   - ModeSemantic runs the dense arm at the whole ranking's depth (the same
 //     retriever call, so the same scores and tie-breaks for every retriever
-//     kind) and filters it.
-//   - ModeHybrid runs both arms and their RRF fusion at the whole ranking's
-//     depth, then the file-coherence boost over every candidate, since its
-//     scale (the max score and the largest file aggregate) is global. The
-//     query boosts, path penalties and file saturation are per chunk given
-//     that scale, or per file, so they run on the requested files' chunks
-//     only, with the global max passed in. That skips the definition-regex
-//     scan and the final sort over the rest of the index, which dominate a
+//     kind), which scores and sorts every chunk, and filters it. It costs
+//     about what the whole semantic ranking costs.
+//   - ModeHybrid runs both arms at the whole ranking's depth (each scores and
+//     sorts every chunk) and their RRF fusion, then the file-coherence boost
+//     over every candidate, since its scale (the max score and the largest
+//     file aggregate) is global. The query boosts, path penalties and file
+//     saturation are per chunk given that scale, or per file, so they run on
+//     the requested files' chunks only, with the global max passed in.
+//     Skipped: the definition-regex and stem scans and the penalty-and-
+//     saturation sort over the rest of the candidates, which dominate a
 //     whole-index hybrid ranking.
 //   - ModeHybridRerank with a reranker attached reranks the global stage-1
 //     head, whose membership depends on every chunk, so it runs the whole
@@ -56,9 +61,10 @@ func (ix *Index) SearchFilesMode(query string, k int, mode Mode, keep func(file 
 	if len(target) == 0 {
 		return nil, nil, mode
 	}
-	// The whole ranking's depth: SearchMode(query, Len(), mode) over-fetches
-	// by the tombstone count; any n ≥ Len() gives the same ranking.
-	whole := len(ix.chunks) + ix.tombstoneCount()
+	// The whole ranking's depth. Len() counts every chunk, tombstoned or
+	// not, so it already reaches every candidate; any n ≥ Len() gives the
+	// same ranking.
+	whole := len(ix.chunks)
 
 	switch mode {
 	case ModeSemantic:
@@ -130,6 +136,10 @@ func (ix *Index) SearchFilesMode(query string, k int, mode Mode, keep func(file 
 			if s := scores[i]; s > 0 && !ix.chunks[i].Tombstoned {
 				cand = append(cand, topk.ItemWithScore[int]{Item: i, Score: s})
 			}
+		}
+		if len(cand) == 0 {
+			// No requested chunk matches: skip the rank pass over every score.
+			return nil, nil, mode
 		}
 		slices.SortFunc(cand, topk.ItemCmp[int])
 		if len(cand) > k {
@@ -266,22 +276,37 @@ func denseMax(scores []float64, in []bool) float64 {
 }
 
 // chunksOfFiles returns, ascending, the indices of every chunk whose file
-// keep accepts. keep is called once per distinct file.
+// keep accepts and that has at least one live chunk. keep is called once per
+// distinct file. A wholly tombstoned file can yield no result, so it is left
+// out, and a request for only such files short-circuits. A partly live
+// file keeps its tombstoned chunks: the whole hybrid ranking still counts
+// them in that file's saturation before it drops them.
 func (ix *Index) chunksOfFiles(keep func(string) bool) []int {
 	var out []int
 	seen := map[string]bool{}
+	live := map[string]bool{}
+	accepted := 0
 	for i := range ix.chunks {
 		fp := ix.chunks[i].File
 		ok, done := seen[fp]
 		if !done {
 			ok = keep(fp)
 			seen[fp] = ok
+			if ok {
+				accepted++
+			}
 		}
 		if ok {
 			out = append(out, i)
+			if !ix.chunks[i].Tombstoned {
+				live[fp] = true
+			}
 		}
 	}
-	return out
+	if len(live) == accepted {
+		return out
+	}
+	return slices.DeleteFunc(out, func(i int) bool { return !live[ix.chunks[i].File] })
 }
 
 // liveRanks maps each chunk index in order (best first) to its 1-based rank

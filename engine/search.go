@@ -286,10 +286,13 @@ func (w *Workspace) FindRelated(ctx context.Context, filePath string, line, k in
 // "which sections of CLAUDE.md match this message" without pulling in
 // hits from the rest of the repo. It is exact at any index size: the hits
 // are the ones the whole ranking (SearchMode with k past the index size)
-// has in files, with the same scores, in the same order, cut to k. It does
-// that without ranking the whole index — see search.(*Index).SearchFilesMode
-// for how each mode scores just the requested files' chunks against the
-// index's global statistics.
+// has in files, with the same scores, in the same order, cut to k. It still
+// scores every chunk (the global statistics and arm ranks need them) but
+// orders and decorates only the requested files' chunks where the mode
+// allows: bm25 skips the whole-index selection, hybrid skips the query
+// boosts and final sort for the rest of the index, and semantic and
+// hybrid-rerank cost about what the whole ranking costs. See
+// search.(*Index).SearchFilesMode for the per-mode detail.
 //
 // Each Hit's BM25Rank and DenseRank are its exact rank in that arm's
 // whole-index ranking (0 if it isn't in the arm), not limited to the
