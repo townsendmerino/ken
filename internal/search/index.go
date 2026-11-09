@@ -1248,9 +1248,7 @@ func (ix *Index) searchCore(query string, qVec []float32, predicted []string, k 
 		// BEFORE the neural pass (don't spend rerank budget on dropped chunks),
 		// then truncate to k AFTER rerank so k<rerankN keeps the reordering.
 		fetch := max(ix.rerankCfg.rerankN, k)
-		ranked := hybridSearch(query, qVec, ix.flat, ix.bm, ix.chunks, fetch, alphas, predicted, abl)
-		results := ix.collectResults(len(ranked), len(ranked), func(i int) (int, float64) { return ranked[i].idx, ranked[i].score })
-		results = applyReranker(ix.reranker, query, results, ix.rerankCfg)
+		results := ix.rerankFused(query, fuseArms(query, qVec, ix.flat, ix.bm, fetch, alphas, predicted), fetch, predicted, abl)
 		if len(results) > k {
 			results = results[:k]
 		}
@@ -1259,6 +1257,16 @@ func (ix *Index) searchCore(query string, qVec []float32, predicted []string, k 
 		hits := ix.bm.TopK(bm25.Tokenize(query), overFetch)
 		return ix.collectResults(len(hits), k, func(i int) (int, float64) { return hits[i].Doc, hits[i].Score })
 	}
+}
+
+// rerankFused is searchCore's ModeHybridRerank body after the arms: stage-1
+// hybrid ranking of f (from fuseArms at depth fetch, consumed), tombstones
+// dropped, then the neural rerank of its head. Not cut to k. SearchFilesMode
+// calls it with the arms it also reads ranks from, so they run once.
+func (ix *Index) rerankFused(query string, f fusedArms, fetch int, predicted []string, abl RankAblation) []Result {
+	ranked := hybridRankFused(f, query, ix.chunks, fetch, predicted, abl)
+	results := ix.collectResults(len(ranked), len(ranked), func(i int) (int, float64) { return ranked[i].idx, ranked[i].score })
+	return applyReranker(ix.reranker, query, results, ix.rerankCfg)
 }
 
 // searchRerankTelemetryCore is the instrumented ModeHybridRerank body shared by

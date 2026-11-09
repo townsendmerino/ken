@@ -6,7 +6,39 @@ import (
 	"testing"
 
 	"github.com/townsendmerino/aikit/chunk"
+	"github.com/townsendmerino/aikit/topk"
 )
+
+// TestBM25Ranks_MatchesCount checks the one-pass rank count against the
+// direct definition, with ties, zero scores and tombstones.
+func TestBM25Ranks_MatchesCount(t *testing.T) {
+	const n = 400
+	ix := &Index{chunks: make([]chunk.Chunk, n)}
+	scores := make([]float64, n)
+	for d := range n {
+		scores[d] = float64((d*37)%11) / 4 // many ties, some zeros
+		ix.chunks[d].Tombstoned = d%13 == 0
+	}
+	var hits []topk.ItemWithScore[int]
+	for d := range n {
+		if d%3 == 0 && scores[d] > 0 && !ix.chunks[d].Tombstoned {
+			hits = append(hits, topk.ItemWithScore[int]{Item: d, Score: scores[d]})
+		}
+	}
+	slices.SortFunc(hits, topk.ItemCmp[int])
+	got := ix.bm25Ranks(scores, hits)
+	for j, h := range hits {
+		want := 1
+		for d, sd := range scores {
+			if sd > 0 && !ix.chunks[d].Tombstoned && (sd > h.Score || (sd == h.Score && d < h.Item)) {
+				want++
+			}
+		}
+		if got[j] != want {
+			t.Errorf("hit %d (doc %d, score %v): rank %d, want %d", j, h.Item, h.Score, got[j], want)
+		}
+	}
+}
 
 // wholeFiltered is SearchFilesMode's contract written the slow way: the
 // whole ranking (all, from SearchMode with k = Len()), filtered to keep, cut

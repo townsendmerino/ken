@@ -50,7 +50,13 @@ func hybridSearch(
 	predicted []string,
 	abl RankAblation,
 ) []rankedItem {
-	f := fuseArms(query, qVec, flat, bm, topK, alphas, predicted)
+	return hybridRankFused(fuseArms(query, qVec, flat, bm, topK, alphas, predicted), query, chunks, topK, predicted, abl)
+}
+
+// hybridRankFused is hybridSearch after the arms: the boosts, penalties and
+// saturation over f.combined (which it consumes), cut to topK. f must come
+// from fuseArms at the same topK.
+func hybridRankFused(f fusedArms, query string, chunks []chunk.Chunk, topK int, predicted []string, abl RankAblation) []rankedItem {
 	combined := f.combined
 	if !abl.NoCoherenceBoost {
 		boostMultiChunkFiles(combined, chunks)

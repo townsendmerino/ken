@@ -1,6 +1,7 @@
 package search
 
 import (
+	"cmp"
 	"slices"
 
 	"github.com/townsendmerino/aikit/bm25"
@@ -86,10 +87,11 @@ func (ix *Index) SearchFilesMode(query string, k int, mode Mode, keep func(file 
 		return ix.searchFilesHybrid(query, k, whole, target, keep)
 
 	case ModeHybridRerank:
-		qVec := ix.model.Encode(query)
-		all := ix.searchCore(query, qVec, nil, whole, mode, AdaptiveAlphas, RankAblation{})
-		f := runArms(query, qVec, ix.flat, ix.bm, whole, AdaptiveAlphas, nil)
-		bmRank, denseRank := ix.liveRanks(f.bmOrder), ix.liveRanks(f.semOrder)
+		// searchCore's ModeHybridRerank branch at the whole ranking's depth,
+		// keeping the arms to read ranks from instead of running them twice.
+		fetch := max(ix.rerankCfg.rerankN, whole)
+		f := fuseArms(query, ix.model.Encode(query), ix.flat, ix.bm, fetch, AdaptiveAlphas, nil)
+		all := ix.rerankFused(query, f, fetch, nil, RankAblation{})
 		var res []Result
 		var ranks []ArmRanks
 		for _, r := range all {
@@ -102,6 +104,10 @@ func (ix *Index) SearchFilesMode(query string, k int, mode Mode, keep func(file 
 				break
 			}
 		}
+		if len(res) == 0 {
+			return nil, nil, mode
+		}
+		bmRank, denseRank := ix.liveRanks(f.bmOrder), ix.liveRanks(f.semOrder)
 		// all carries chunks by value; recover their indices to look up ranks.
 		// Results are live, so only live chunks can match a span.
 		idxOf := make(map[chunkSpan]int, len(target))
@@ -131,9 +137,9 @@ func (ix *Index) SearchFilesMode(query string, k int, mode Mode, keep func(file 
 		}
 		res := make([]Result, len(cand))
 		ranks := make([]ArmRanks, len(cand))
-		for j, c := range cand {
-			res[j] = Result{Chunk: ix.chunks[c.Item], Score: c.Score}
-			ranks[j] = ArmRanks{BM25: ix.bm25RankOf(scores, c.Item)}
+		for j, r := range ix.bm25Ranks(scores, cand) {
+			res[j] = Result{Chunk: ix.chunks[cand[j].Item], Score: cand[j].Score}
+			ranks[j] = ArmRanks{BM25: r}
 		}
 		return res, ranks, mode
 	}
@@ -224,19 +230,26 @@ func (ix *Index) searchFilesHybrid(query string, k, whole int, target []int, kee
 	applyQueryBoostWithMax(sub, ms, query, ix.chunks, nil, target)
 	ranked := rerankTopK(sub, ix.chunks, len(sub), f.alpha < 1.0, fileSaturationThresh, fileSaturationDecay)
 
-	bmRank, denseRank := ix.liveRanks(f.bmOrder), ix.liveRanks(f.semOrder)
 	var res []Result
-	var ranks []ArmRanks
+	var picked []int
 	for _, it := range ranked {
 		c := ix.chunks[it.idx]
 		if c.Tombstoned || !keep(c.File) {
 			continue
 		}
 		res = append(res, Result{Chunk: c, Score: it.score})
-		ranks = append(ranks, ArmRanks{BM25: bmRank[it.idx], Dense: denseRank[it.idx]})
+		picked = append(picked, it.idx)
 		if len(res) == k {
 			break
 		}
+	}
+	if len(res) == 0 {
+		return nil, nil, ModeHybrid
+	}
+	bmRank, denseRank := ix.liveRanks(f.bmOrder), ix.liveRanks(f.semOrder)
+	ranks := make([]ArmRanks, len(picked))
+	for j, i := range picked {
+		ranks[j] = ArmRanks{BM25: bmRank[i], Dense: denseRank[i]}
 	}
 	return res, ranks, ModeHybrid
 }
@@ -286,21 +299,42 @@ func (ix *Index) liveRanks(order []int) []int {
 	return m
 }
 
-// bm25RankOf is doc's 1-based rank among live documents with a positive
-// score, under TopK's order (score desc, then doc asc): one plus the number
-// that rank ahead of it. A count over the scores, not a sort.
-func (ix *Index) bm25RankOf(scores []float64, doc int) int {
-	s := scores[doc]
-	ahead := 0
+// bm25Ranks returns each of hits' 1-based rank among live documents with a
+// positive score, under TopK's order (score desc, then doc asc): one plus the
+// number that rank ahead of it. hits must be sorted in that order. One pass
+// over the scores with a binary search per document — O(N log k), a count,
+// not a sort.
+func (ix *Index) bm25Ranks(scores []float64, hits []topk.ItemWithScore[int]) []int {
+	// ahead[j] counts documents ranked before hits[j]. A document ranked
+	// before hits[p] is ranked before every later hit too, so count it once
+	// at its first such p and prefix-sum.
+	ahead := make([]int, len(hits)+1)
 	for d, sd := range scores {
 		if sd <= 0 || ix.chunks[d].Tombstoned {
 			continue
 		}
-		if sd > s || (sd == s && d < doc) {
-			ahead++
+		p, _ := slices.BinarySearchFunc(hits, d, func(h topk.ItemWithScore[int], d int) int {
+			// h before d → -1, so p lands on the first hit d precedes.
+			if h.Score != sd {
+				if h.Score > sd {
+					return -1
+				}
+				return 1
+			}
+			return cmp.Compare(h.Item, d)
+		})
+		if p < len(hits) && hits[p].Item == d {
+			p++ // d is that hit; it precedes only the ones after it
 		}
+		ahead[p]++
 	}
-	return ahead + 1
+	ranks := make([]int, len(hits))
+	run := 0
+	for j := range hits {
+		run += ahead[j]
+		ranks[j] = run + 1
+	}
+	return ranks
 }
 
 type chunkSpan struct {
