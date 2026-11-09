@@ -225,9 +225,13 @@ package:
   enrichment's fixed 64 KiB cap.
 - `Workspace.{Search, SearchMode, SearchFiles, FindRelated}` — return
   `[]Hit`; `SearchMode`/`SearchFiles` also return the effective `Mode`.
-  `SearchFiles` restricts hits to a given set of repo-relative paths (post-
-  filters an over-fetched ranking; never re-ranks — added in v1.10.0 for
-  "which sections of this one file match" use cases).
+  `SearchFiles` restricts hits to a given set of repo-relative paths, for
+  "which sections of this one file match" use cases (added in v1.10.0).
+  It is exact at any index size: the hits, scores and order are the whole
+  ranking's filtered to those files. It scores only those files' chunks
+  against the index's global statistics, so it never re-ranks. Until the
+  release after 1.12.1 it post-filtered a ranking capped at 5,000
+  candidates, which lost hits on larger indexes.
 - `Hit{File, StartLine, EndLine, Text, Hash, Score, Rank, Gen, BM25Rank,
   DenseRank, HeadingPath}` — `Text` is exactly the file's lines
   `StartLine..EndLine`, without the Arm B enrichment label (fixed in the

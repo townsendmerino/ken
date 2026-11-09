@@ -282,21 +282,22 @@ func (w *Workspace) FindRelated(ctx context.Context, filePath string, line, k in
 	return hits, nil
 }
 
-// searchFilesOverfetchCap bounds how many candidates SearchFiles pulls
-// from the unrestricted ranking before filtering to the requested files.
-// Generous enough that a small set of target files (the K9 use case: one
-// or two instruction files) is very unlikely to lose a relevant hit to the
-// cutoff, while keeping the cost bounded on a huge corpus.
-const searchFilesOverfetchCap = 5000
-
 // SearchFiles is SearchMode restricted to hits whose File is in files —
 // "which sections of CLAUDE.md match this message" without pulling in
-// hits from the rest of the repo. It does not re-rank: it runs the exact
-// same SearchMode pipeline over a larger candidate pool, then keeps only
-// the hits already ranked inside files, preserving their relative scores
-// and order. files must be non-empty; paths not present in the index are
-// silently ignored rather than erroring (a typo'd path just yields no
-// hits from it, matching SearchMode's own graceful-degradation style).
+// hits from the rest of the repo. It is exact at any index size: the hits
+// are the ones the whole ranking (SearchMode with k past the index size)
+// has in files, with the same scores, in the same order, cut to k. It does
+// that without ranking the whole index — see search.(*Index).SearchFilesMode
+// for how each mode scores just the requested files' chunks against the
+// index's global statistics.
+//
+// Each Hit's BM25Rank and DenseRank are its exact rank in that arm's
+// whole-index ranking (0 if it isn't in the arm), not limited to the
+// armOverfetch depth SearchMode's best-effort lookups use.
+//
+// files must be non-empty; paths not present in the index are silently
+// ignored rather than erroring (a typo'd path just yields no hits from it,
+// matching SearchMode's own graceful-degradation style).
 func (w *Workspace) SearchFiles(ctx context.Context, query string, k int, mode Mode, files []string) ([]Hit, Mode, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, mode, fmt.Errorf("engine: search: %w", err)
@@ -312,18 +313,24 @@ func (w *Workspace) SearchFiles(ctx context.Context, query string, k int, mode M
 	ix := w.index.Load()
 	gen := w.index.Generation()
 
-	overfetch := max(min(ix.Len(), searchFilesOverfetchCap), k)
-	results, eff := ix.SearchMode(query, overfetch, mode)
-
-	filtered := make([]search.Result, 0, k)
-	for _, r := range results {
-		if !want[r.Chunk.File] {
-			continue
-		}
-		filtered = append(filtered, r)
-		if len(filtered) >= k {
-			break
+	results, ranks, eff := ix.SearchFilesMode(query, k, mode, func(f string) bool { return want[f] })
+	sectionCache := make(map[string][]Section)
+	hits := make([]Hit, len(results))
+	for i, r := range results {
+		text, hash := hitText(r)
+		hits[i] = Hit{
+			File:        r.Chunk.File,
+			StartLine:   r.Chunk.StartLine,
+			EndLine:     r.Chunk.EndLine,
+			Text:        text,
+			Hash:        hash,
+			Score:       r.Score,
+			Rank:        i + 1,
+			Gen:         gen,
+			BM25Rank:    ranks[i].BM25,
+			DenseRank:   ranks[i].Dense,
+			HeadingPath: w.headingPathFor(r.Chunk.File, r.Chunk.StartLine, sectionCache),
 		}
 	}
-	return w.toHits(ix, filtered, eff, gen, query, k), eff, nil
+	return hits, eff, nil
 }

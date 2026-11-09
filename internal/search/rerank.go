@@ -350,14 +350,38 @@ func applyQueryBoostInPlace(scores map[int]float64, query string, chunks []chunk
 	if len(scores) == 0 {
 		return scores
 	}
-	ms := maxScore(scores)
+	applyQueryBoostWithMax(scores, maxScore(scores), query, chunks, predicted, nil)
+	return scores
+}
+
+// applyQueryBoostWithMax is applyQueryBoostInPlace with the boost scale ms
+// supplied by the caller and the non-candidate scans limited to scan (nil
+// scans every chunk, which is applyQueryBoostInPlace). SearchFilesMode passes
+// the whole candidate set's max with scores and scan restricted to the
+// requested files: every boost is per chunk given ms, so each restricted
+// chunk gets exactly the boost the whole ranking gives it.
+func applyQueryBoostWithMax(scores map[int]float64, ms float64, query string, chunks []chunk.Chunk, predicted []string, scan []int) {
 	if isSymbolQuery(query) {
-		boostSymbolDefinitions(scores, query, ms, chunks)
+		boostSymbolDefinitions(scores, query, ms, chunks, scan)
 	} else {
 		boostStemMatches(scores, query, ms, chunks)
-		boostEmbeddedSymbols(scores, query, ms, chunks, predicted)
+		boostEmbeddedSymbols(scores, query, ms, chunks, predicted, scan)
 	}
-	return scores
+}
+
+// scanLen and scanAt walk scan, or every chunk index when scan is nil.
+func scanLen(scan []int, chunks []chunk.Chunk) int {
+	if scan == nil {
+		return len(chunks)
+	}
+	return len(scan)
+}
+
+func scanAt(scan []int, i int) int {
+	if scan == nil {
+		return i
+	}
+	return scan[i]
 }
 
 // applyQueryBoost is semble boosting.apply_query_boost. Returns a new map
@@ -377,7 +401,7 @@ func applyQueryBoost(combined map[int]float64, query string, chunks []chunk.Chun
 	return applyQueryBoostInPlace(boosted, query, chunks, predicted)
 }
 
-func boostSymbolDefinitions(boosted map[int]float64, query string, ms float64, chunks []chunk.Chunk) {
+func boostSymbolDefinitions(boosted map[int]float64, query string, ms float64, chunks []chunk.Chunk, scan []int) {
 	sym := extractSymbolName(query)
 	names := []string{sym}
 	if q := strings.TrimSpace(query); sym != q {
@@ -390,12 +414,12 @@ func boostSymbolDefinitions(boosted map[int]float64, query string, ms float64, c
 		}
 	}
 	symLower := strings.ToLower(sym)
-	scanNonCandidates(boosted, names, boostUnit, chunks, func(stem string) bool {
+	scanNonCandidates(boosted, names, boostUnit, chunks, scan, func(stem string) bool {
 		return stemMatches(stem, symLower)
 	})
 }
 
-func boostEmbeddedSymbols(boosted map[int]float64, query string, ms float64, chunks []chunk.Chunk, predicted []string) {
+func boostEmbeddedSymbols(boosted map[int]float64, query string, ms float64, chunks []chunk.Chunk, predicted []string, scan []int) {
 	names := dedupe(embeddedSymbolRE.FindAllString(query, -1))
 	// Stage-7a transform #2: appended predicted identifiers ride the
 	// same embedded-symbol scale. dedupe again so a name that's both
@@ -421,7 +445,8 @@ func boostEmbeddedSymbols(boosted map[int]float64, query string, ms float64, chu
 	var lastOK bool
 	fileOK := make(map[string]bool, 64)
 
-	for idx := range chunks {
+	for i := range scanLen(scan, chunks) {
+		idx := scanAt(scan, i)
 		if _, in := boosted[idx]; in {
 			continue
 		}
@@ -459,14 +484,15 @@ func boostEmbeddedSymbols(boosted map[int]float64, query string, ms float64, chu
 
 // scanNonCandidates is semble boosting._scan_non_candidates: SET (not +=)
 // the tier on non-candidate chunks whose stem passes stemOK and which
-// define one of names.
+// define one of names. scan limits the walk (nil = every chunk).
 func scanNonCandidates(boosted map[int]float64, names []string, boostUnit float64,
-	chunks []chunk.Chunk, stemOK func(string) bool) {
+	chunks []chunk.Chunk, scan []int, stemOK func(string) bool) {
 	var lastFile string
 	var lastOK bool
 	fileOK := make(map[string]bool, 64)
 
-	for idx := range chunks {
+	for i := range scanLen(scan, chunks) {
+		idx := scanAt(scan, i)
 		if _, in := boosted[idx]; in {
 			continue
 		}
