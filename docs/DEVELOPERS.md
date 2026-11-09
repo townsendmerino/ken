@@ -231,9 +231,14 @@ package:
   ranking's filtered to those files, so it never re-ranks. It still scores
   every chunk; bm25 and hybrid save the whole-index ordering and boosts,
   while semantic and hybrid-rerank cost about what the whole ranking does
-  (see `search.(*Index).SearchFilesMode`). Until the
-  release after 1.12.1 it post-filtered a ranking capped at 5,000
+  (see `search.(*Index).SearchFilesMode`). Before
+  1.13.0 it post-filtered a ranking capped at 5,000
   candidates, which lost hits on larger indexes.
+- `Workspace.SearchWith(ctx, query, k, mode, SearchOptions)` — `SearchMode`
+  with per-call options (added in v1.13.0). `SearchOptions.BudgetPacking`
+  softens file-saturation decay (0.5 → 0.8) for callers that fill a token
+  budget from the list; hybrid modes only. The zero value is exactly
+  `SearchMode` (ADR-051/052).
 - `Hit{File, StartLine, EndLine, Text, Hash, Score, Rank, Gen, BM25Rank,
   DenseRank, HeadingPath}` — `Text` is exactly the file's lines
   `StartLine..EndLine`, without the Arm B enrichment label (fixed in the
