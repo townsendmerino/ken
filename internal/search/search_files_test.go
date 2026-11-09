@@ -120,11 +120,13 @@ func checkSearchFilesExact(t *testing.T, ix *Index, modes []Mode, quick bool) {
 	}
 
 	for _, mode := range modes {
-		// headHits counts checked answers holding a chunk the reranker
-		// scored (one of the whole ranking's first rerankN), so the rerank
-		// check is known to reach the reranked head, not just the stage-1
-		// tail below it.
-		headHits := 0
+		// For hybrid-rerank, rescored counts checked answers holding a
+		// reranked-head chunk (one of the whole ranking's first rerankN)
+		// whose score differs from its stage-1 hybrid score, and reordered
+		// counts answers holding two head chunks in a different order from
+		// stage 1. Both must be non-zero, so the equivalence check is known
+		// to cover what the reranker does, not just the stage-1 tail.
+		rescored, reordered := 0, 0
 		for _, q := range searchFilesQueries {
 			bmPos := armPositions(ix, q, ModeBM25)
 			all, wantEff := ix.SearchMode(q, ix.Len(), mode)
@@ -134,11 +136,31 @@ func checkSearchFilesExact(t *testing.T, ix *Index, modes []Mode, quick bool) {
 			}
 			qSets := sets
 			head := map[string]bool{}
+			stage1Score := map[string]float64{}
+			stage1Pos := map[string]int{}
 			if mode == ModeHybridRerank && len(all) > 0 {
-				// The top hit's file: its answer starts inside the head.
-				qSets = append(slices.Clone(sets), []string{all[0].Chunk.File})
-				for _, r := range all[:min(ix.rerankCfg.rerankN, len(all))] {
+				if wantEff != ModeHybridRerank {
+					t.Fatalf("q=%q: SearchMode ran as %v, not hybrid-rerank; no reranker attached?", q, wantEff)
+				}
+				s1, _ := ix.SearchMode(q, ix.Len(), ModeHybrid)
+				for i, r := range s1 {
+					stage1Score[spanKey(r.Chunk)] = r.Score
+					stage1Pos[spanKey(r.Chunk)] = i
+				}
+				// The top hit's file, and the files of the first adjacent
+				// head pair the reranker inverted relative to stage 1, whose
+				// answer shows that reordering.
+				n := min(ix.rerankCfg.rerankN, len(all))
+				for _, r := range all[:n] {
 					head[spanKey(r.Chunk)] = true
+				}
+				qSets = append(slices.Clone(sets), []string{all[0].Chunk.File})
+				for i := 0; i+1 < n; i++ {
+					a, b := all[i].Chunk, all[i+1].Chunk
+					if stage1Pos[spanKey(a)] > stage1Pos[spanKey(b)] {
+						qSets = append(qSets, []string{a.File, b.File})
+						break
+					}
 				}
 			}
 			for _, set := range qSets {
@@ -153,8 +175,20 @@ func checkSearchFilesExact(t *testing.T, ix *Index, modes []Mode, quick bool) {
 						t.Errorf("mode %v q=%q files=%v k=%d: %d hits (%d ranks), want %d", mode, q, set, k, len(got), len(ranks), len(want))
 						continue
 					}
-					if slices.ContainsFunc(got, func(r Result) bool { return head[spanKey(r.Chunk)] }) {
-						headHits++
+					if slices.ContainsFunc(got, func(r Result) bool {
+						key := spanKey(r.Chunk)
+						return head[key] && r.Score != stage1Score[key]
+					}) {
+						rescored++
+					}
+					var headOrder []int
+					for _, r := range got {
+						if key := spanKey(r.Chunk); head[key] {
+							headOrder = append(headOrder, stage1Pos[key])
+						}
+					}
+					if !slices.IsSorted(headOrder) {
+						reordered++
 					}
 					for i := range got {
 						if spanKey(got[i].Chunk) != spanKey(want[i].Chunk) || got[i].Score != want[i].Score {
@@ -178,8 +212,8 @@ func checkSearchFilesExact(t *testing.T, ix *Index, modes []Mode, quick bool) {
 				}
 			}
 		}
-		if mode == ModeHybridRerank && headHits == 0 {
-			t.Errorf("mode %v: no checked answer held a reranked-head chunk; the rerank stage went untested", mode)
+		if mode == ModeHybridRerank && (rescored == 0 || reordered == 0) {
+			t.Errorf("mode %v: %d checked answers held a rescored head chunk and %d a reordered pair; both must be non-zero, or the rerank stage went untested", mode, rescored, reordered)
 		}
 	}
 }
@@ -199,6 +233,10 @@ func TestChunksOfFiles_DropsWhollyTombstonedFiles(t *testing.T) {
 	}
 	if got := ix.chunksOfFiles(func(f string) bool { return f == "dead.go" }); len(got) != 0 {
 		t.Errorf("chunksOfFiles(dead.go only) = %v, want none", got)
+	}
+	// Every accepted file has a live chunk: the no-filter fast path.
+	if got, want := ix.chunksOfFiles(func(f string) bool { return f == "a.go" || f == "part.go" }), []int{0, 2, 4}; !slices.Equal(got, want) {
+		t.Errorf("chunksOfFiles(a.go, part.go) = %v, want %v", got, want)
 	}
 }
 

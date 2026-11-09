@@ -15,6 +15,17 @@ pre-built binaries.
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-11-08 — exact `SearchFiles` at any index size, and opt-in `BudgetPacking` search
+
+`engine.(*Workspace).SearchFiles` now returns exactly the whole ranking filtered to the requested files, at any index size; before, it lost hits past a 5,000-candidate cap. New `engine.(*Workspace).SearchWith` adds an opt-in `BudgetPacking` option for callers that fill a token budget. Default rankings (`Search`, `SearchMode`, `ken search`, ken-mcp) are unchanged.
+
+### Added
+
+- **`engine.(*Workspace).SearchWith(ctx, query, k, mode, SearchOptions)` and `SearchOptions.BudgetPacking` (ADR-051, setting per ADR-052).** For callers that fill a token budget from the ranked list (an agent's context fill) rather than show a ranked list. It softens the rerank pipeline's file-saturation decay from 0.5 to 0.8: a file's second chunk scores 0.8× and its third 0.64×.
+  - On ContextBench Lite's held-out half at 8,192 tokens: lines +0.026 [+0.014, +0.040], files −0.012 [−0.020, −0.005] (`docs/BENCH.md`, "Gentler-decay gate results").
+  - Semble NDCG@10 is 0.840, against the default's 0.844.
+  - Hybrid modes only. A zero `SearchOptions` is exactly `SearchMode`, and the default is unchanged everywhere.
+
 ### Fixed
 
 - **`engine.(*Workspace).SearchFiles` is exact at any index size (K9 follow-up, ADR-047 update).** It used to take at most 5,000 candidates from the whole ranking and keep the requested files' hits. Past 5,000 chunks, it silently lost hits that ranked below the cap.
@@ -24,7 +35,7 @@ pre-built binaries.
     - Semantic filters the same dense-retriever call, which scores and sorts every chunk. It costs about what the whole semantic ranking does.
     - Hybrid runs both arms at full depth, plus the RRF fusion and the file-coherence boost over every candidate (on dense slices). It then runs the query boosts, penalties and saturation on the requested chunks only, skipping those scans and the final sort for the rest of the index.
     - Hybrid-rerank with a reranker attached falls back to the whole ranking filtered. That is exact, at whole-ranking cost.
-  - A request for files with no matching chunk, or only wholly deleted files, returns early.
+  - A request for only wholly deleted files returns early in every mode. In bm25, a request whose files have no matching chunk returns once the index is scored, skipping the sort and the rank pass.
   - `Hit.BM25Rank`/`DenseRank` from `SearchFiles` are now exact whole-index arm ranks.
   - `Search`/`SearchMode` rankings are unchanged: the shared code was factored, not altered.
   - **Latency on goinfer, indicative only.** tack's night run on the Mac is the measurement that counts.
@@ -40,7 +51,7 @@ pre-built binaries.
     - Exactness on the same tree and code, in an untimed pass: 0 of 94 answers differ in either mode. The old capped path differed on 63 of 94 (bm25) and 94 of 94 (hybrid).
   - Tests:
     - `engine/searchfiles_exact_test.go` builds 5,301 files. In every mode, every guide hit ranks past 5,000 in the whole ranking: bm25 5,301; semantic 5,301–5,302; hybrid 5,224–5,302. The test asserts that, then checks that `SearchFiles` returns those hits field for field (span, `Score`, `Text`, `Hash`, `Gen`, `BM25Rank`/`DenseRank`, `HeadingPath`, `Rank`, effective mode). On the capped code it fails in bm25, semantic and hybrid, with 0 hits returned.
-    - `internal/search/search_files_test.go` checks equivalence across modes, file sets, k, tombstones and a fake reranker, including the arm ranks, plus the one-pass BM25 rank count against brute force. The hybrid-rerank check asserts that some checked answer holds a chunk from the reranked head, so the rerank stage itself is covered. `TestChunksOfFiles_DropsWhollyTombstonedFiles` pins the target set.
+    - `internal/search/search_files_test.go` checks equivalence across modes, file sets, k, tombstones and a fake reranker, including the arm ranks, plus the one-pass BM25 rank count against brute force. The hybrid-rerank check asserts that some checked answers hold a reranked-head chunk whose score differs from stage 1, and some hold two head chunks in a different order from stage 1, so what the reranker does is itself covered. `TestChunksOfFiles_DropsWhollyTombstonedFiles` pins the target set.
 
 ## [1.12.1] — 2026-10-29 — snapshot streaming without re-embedding, K17 gate fixes, and K16–K18 measurement corrections
 
