@@ -15,6 +15,10 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Changed
+
+- **`engine`'s escape hatches are now documented as best-effort.** The `engine.Index`, `engine.WatchedIndex` and `engine.StructuralIndex` aliases, and the `Workspace.WatchedIndex`, `Workspace.Structural` and `Workspace.StructuralIfBuilt` accessors that return them, are outside the 1.0 stability promise. They alias `internal/search` and `internal/structural` types, so they carry about 53 of those packages' methods, which can change in any release. Their comments said "1.0-stable" before. Nothing was removed or renamed.
+
 ## [1.13.0] — 2026-11-08 — exact `SearchFiles` at any index size, and opt-in `BudgetPacking` search
 
 `engine.(*Workspace).SearchFiles` now returns exactly the whole ranking filtered to the requested files, at any index size; before, it lost hits past a 5,000-candidate cap. New `engine.(*Workspace).SearchWith` adds an opt-in `BudgetPacking` option for callers that fill a token budget. Default rankings (`Search`, `SearchMode`, `ken search`, ken-mcp) are unchanged.

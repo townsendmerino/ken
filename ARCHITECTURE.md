@@ -119,7 +119,7 @@ Every constant and the pipeline order are pinned to semble's Python — see DESI
 
 ## Stability tiers
 
-**1.0-stable:** `mcp.Run` + `mcp.Options`, the MCP tool wire format (semble-compatible), `aikit/chunk`'s `Chunker` interface, the documented env vars. **Best-effort:** concrete chunkers (treesitter especially — gotreesitter-backed), `mcp.NewServer`/`Cache` internals. **No promises:** everything under `internal/`.
+**1.0-stable:** `mcp.Run` + `mcp.Options`, the `engine` package apart from its escape hatches (the full list is in [DEVELOPERS.md](docs/DEVELOPERS.md#public-api-surface)), the MCP tool wire format (semble-compatible), `aikit/chunk`'s `Chunker` interface, the documented env vars. **Best-effort:** concrete chunkers (treesitter especially — gotreesitter-backed), `mcp.NewServer`/`Cache` internals, and engine's escape hatches: the `engine.Index`, `engine.WatchedIndex` and `engine.StructuralIndex` aliases and the `Workspace.WatchedIndex`, `Workspace.Structural` and `Workspace.StructuralIfBuilt` accessors that return them. An alias carries every exported method of its target, so these expose `internal/search`'s and `internal/structural`'s methods, which change without notice. **No promises:** everything under `internal/`, including the methods those aliases expose.
 
 ## Where to look
 

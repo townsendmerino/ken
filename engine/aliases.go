@@ -9,6 +9,14 @@ package engine
 // mcp/api_aliases.go) — an external implementer never needs to import
 // internal/search to satisfy the Reranker interface, since its only method
 // is expressed in terms of aikit's public chunk.Chunk.
+//
+// Index, WatchedIndex and StructuralIndex are different: they alias
+// concrete internal types, and an alias carries every exported method of
+// its target. Their method sets are internal/search's and
+// internal/structural's, which change without notice, so these three
+// aliases and the Workspace accessors that return them (WatchedIndex,
+// Structural, StructuralIfBuilt) are best-effort and outside engine's
+// stability promise.
 
 import (
 	"context"
@@ -19,24 +27,30 @@ import (
 )
 
 // Index is a point-in-time index snapshot — what WatchedIndex.Load
-// returns. 1.0-stable alias for search.Index.
+// returns. Alias for search.Index; best-effort, outside engine's stability
+// promise: its methods are internal/search's and may change in any release.
 type Index = search.Index
 
-// WatchedIndex is the live, file-watched index a Workspace wraps.
-// 1.0-stable alias for search.WatchedIndex. Exposed via
-// Workspace.WatchedIndex for advanced/in-module callers (ken-mcp's
+// WatchedIndex is the live, file-watched index a Workspace wraps. Alias
+// for search.WatchedIndex; best-effort, outside engine's stability promise:
+// its methods are internal/search's and may change in any release. Exposed
+// via Workspace.WatchedIndex for advanced/in-module callers (ken-mcp's
 // existing query pipeline: per-call telemetry, filters, token budgeting)
 // that need internal/search's lower-level surface beyond what
 // Search/SearchMode/FindRelated model. Most callers should prefer those.
 type WatchedIndex = search.WatchedIndex
 
 // WatchedIndex returns the underlying watched index this Workspace wraps.
+// Best-effort, outside engine's stability promise, like the WatchedIndex
+// type it returns.
 func (w *Workspace) WatchedIndex() *WatchedIndex { return w.index }
 
-// StructuralIndex is the raw structural (symbol) index snapshot.
-// 1.0-stable alias for structural.Index. Exposed via
-// Workspace.StructuralIfBuilt for callers (ken-mcp's `status` tool) that
-// need Files()/Stats() beyond what Definition/References/Callers/
+// StructuralIndex is the raw structural (symbol) index snapshot. Alias for
+// structural.Index; best-effort, outside engine's stability promise: its
+// methods are internal/structural's and may change in any release. Exposed
+// via Workspace.Structural and Workspace.StructuralIfBuilt for callers
+// (ken-mcp's structural tools and `status` tool) that need Files()/Stats()
+// or their own lookups beyond what Definition/References/Callers/
 // Outline/Symbols model.
 type StructuralIndex = structural.Index
 
@@ -46,6 +60,8 @@ type StructuralIndex = structural.Index
 // over it. Errors are ErrStructuralBuilding and ErrNoStructuralIndex, as
 // for the other structural methods. The index is immutable; after a file
 // change (Refresh or the watcher) the next call returns a new one.
+// Best-effort, outside engine's stability promise, like the StructuralIndex
+// type it returns.
 func (w *Workspace) Structural(ctx context.Context) (*StructuralIndex, error) {
 	return w.structuralIndex(ctx)
 }
@@ -54,7 +70,8 @@ func (w *Workspace) Structural(ctx context.Context) (*StructuralIndex, error) {
 // Definition/References/Callers/Outline/Symbols call already finished
 // building it; unlike those methods, it never triggers a build itself. The
 // index is immutable; a later file change publishes a new one, so call
-// again rather than holding the result.
+// again rather than holding the result. Best-effort, outside engine's
+// stability promise, like the StructuralIndex type it returns.
 func (w *Workspace) StructuralIfBuilt() *StructuralIndex {
 	return w.structural.cur.Load()
 }
