@@ -157,6 +157,65 @@ fastest (~26µs, essentially tied with `flat-i8`), `hnsw` is the **slowest**
 (49µs — 48% slower than today's `flat-f32`) because graph traversal
 overhead exceeds a brute-force scan of a few hundred-to-thousand vectors.
 
+### NDCG@10 by store (added 2026-11-10, ken `b6d8ae5`)
+
+The recall table above is coarse: it records whether a target is in the top
+10, not where. NDCG@10 was measured for the three wired stores on 2026-11-10,
+when ADR-054 made `KEN_ANN` reach `ken-mcp`. A record, not a gate.
+
+Setup: ken `main` at `b6d8ae5`, semble's benchmark at `a1ba6c1` (63 repos at
+their pinned revisions, 1,251 queries), `KEN_ANN=<store> python
+bench/semble/run_ken.py --mode <mode> --latency-runs 1`, one run per row, with
+`flat` run twice to measure run-to-run noise. The interval is a 95% paired
+bootstrap over the 63 per-repo NDCG@10 values (10,000 resamples). "Repos
+moved" counts repos whose NDCG@10 differs from the first `flat` run.
+
+Hybrid (the shipped pipeline):
+
+| Store | NDCG@10 | difference from `flat` | 95% interval over repos | repos moved (up / down) |
+|---|--:|--:|--:|--:|
+| `flat` | 0.8439 | | | |
+| `flat`, repeat run | 0.8436 | −0.0003 | [−0.0009, 0.0000] | 0 / 1 |
+| `flat-i8` | 0.8431 | −0.0008 | [−0.0022, +0.0006] | 3 / 8 |
+| `flat-binary-i8` | 0.8428 | −0.0011 | [−0.0024, +0.0001] | 3 / 9 |
+
+Semantic arm alone (no BM25, no ranker):
+
+| Store | NDCG@10 | difference from `flat` | 95% interval over repos | repos moved (up / down) |
+|---|--:|--:|--:|--:|
+| `flat` | 0.6402 | | | |
+| `flat`, repeat run | 0.6402 | 0.0000 | identical | 0 / 0 |
+| `flat-i8` | 0.6404 | +0.0002 | [−0.0004, +0.0009] | 9 / 11 |
+| `flat-binary-i8` | 0.6393 | −0.0009 | [−0.0025, +0.0005] | 13 / 15 |
+
+The hybrid repeat-run difference (one repo, vapor, −0.0185) is not caused by
+the store. It is the CLI's wall-clock parse budget acting on one slow Swift
+file (docs/BENCH.md, "Repeatability: hybrid runs depend on the parse budget"),
+and vapor also sits inside both quantized rows above. So the hybrid runs were
+repeated the same day with `KEN_ENRICH_FILE_BUDGET_MS=0`, which makes them
+exactly repeatable and isolates the store:
+
+Hybrid, parse budget off:
+
+| Store | NDCG@10 | difference from `flat` | 95% interval over repos | repos moved (up / down) |
+|---|--:|--:|--:|--:|
+| `flat` | 0.8436 | | | |
+| `flat`, repeat run | 0.8436 | 0.0000 | identical | 0 / 0 |
+| `flat-i8` | 0.8431 | −0.0005 | [−0.0018, +0.0008] | 3 / 7 |
+| `flat-binary-i8` | 0.8428 | −0.0008 | [−0.0020, +0.0003] | 3 / 8 |
+
+**Conclusion: the quantized stores change rankings by about 0.001 NDCG@10 in
+hybrid, and every interval includes zero.** With the parse-budget noise
+removed the differences are −0.0005 (`flat-i8`) and −0.0008
+(`flat-binary-i8`); as first measured, with that noise in, −0.0008 and
+−0.0011. The change is real rather than noise: with the budget off `flat`
+repeats exactly while the quantized stores move 10 and 11 repos, and the
+semantic arm, which also repeated exactly, shows +0.0002 and −0.0009. It is
+also small: the largest per-repo moves are ±0.0185, one query changing rank in
+a 20-query repo. This is consistent with the recall table (0.974 for every
+store) and says nothing new about kernel scale, where there are no relevance
+labels.
+
 ### Scale ramp — latency / build time / memory (`TestRetrieverScaleSweep`, synthetic unit vectors, dim=256, this machine)
 
 | N | Retriever | Build | Query p50 | Query p95 | Memory (measured) |

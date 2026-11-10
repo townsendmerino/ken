@@ -21,10 +21,13 @@ pre-built binaries.
   - `KEN_ENRICH=off` now builds an unenriched index in `ken-mcp`, `ken index`, `ken build-index` and `mcp.Run`.
   - `KEN_ANN=flat-i8` / `flat-binary-i8` now selects the dense store in `ken-mcp`, `ken index` and `mcp.Run`, and for a pre-built index when it is loaded. This is what makes the watched index's ~80% dense-memory saving reachable in `ken-mcp`.
   - **If you had set either variable on a server, its results change**, because it now takes effect. With both unset nothing changes: old and new builds return identical output.
-  - Recall cost of the quantized stores, as measured 2026-09-06: full-pipeline recall@10 on the semble benchmark is 0.974 for all three stores. At Linux-kernel scale `flat-i8` agrees with exact search (1.00 / 0.98 in the top 10) and `flat-binary-i8` is at 0.96, so use `flat-i8` there.
+  - Cost of the quantized stores on the semble benchmark: full-pipeline recall@10 is 0.974 for all three stores (measured 2026-09-06), and hybrid NDCG@10 is 0.8436 for `flat`, 0.8431 for `flat-i8` and 0.8428 for `flat-binary-i8` (measured 2026-11-10 at `b6d8ae5`; both differences are within their 95% interval of zero). At Linux-kernel scale `flat-i8` agrees with exact search (1.00 / 0.98 in the top 10) and `flat-binary-i8` is at 0.96, so use `flat-i8` there.
   - A pre-built or embedded-corpus index keeps its full-precision vectors, so there `KEN_ANN` changes query speed, not memory. `KEN_ENRICH` cannot change a pre-built index.
   - `Index.WithExtraChunks` (the `mcp.Run` DB-refresh path) keeps the index's dense store. It used to rebuild with the exact store.
 - **The `status` tool reports what the loaded index actually has.** The live-index section gains `enrichment` (how many chunks carry a structural label, counted from the index) and `dense store` (the store being served); the JSON form gains `Index.EnrichedChunks` and `Index.DenseRetriever`. Before, `status` showed only the `KEN_ENRICH` setting, and reported enrichment as off over an enriched index.
+
+- **Recall figures in the docs are re-measured (documentation correction).** docs/BENCH.md's recall@10 table carried figures measured in June with `KEN_ENRICH=off`. Re-measured at `b6d8ae5` with the shipped defaults: hybrid 0.974 overall / 0.970 NL / 0.995 symbol (was quoted as 0.971 / 0.967 / 0.995), BM25-only 0.840 / 0.831 / 0.892 (was 0.841 / 0.832 / 0.892). Enrichment shifts BM25-only recall@10 by 0.002, not the "<0.001" the doc stated. README and docs/USERS.md quote the new NL figure. No code changed.
+- **docs/BENCH.md documents why two identical hybrid benchmark runs can differ.** The CLI's default 2000 ms per-file parse budget is wall-clock, so a file whose parse takes about that long is labelled fully, labelled from a less-recovered tree, or skipped, depending on machine load. Set `KEN_ENRICH_FILE_BUDGET_MS=0` for a repeatable run.
 
 ### Changed
 

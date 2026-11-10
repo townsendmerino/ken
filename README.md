@@ -13,7 +13,7 @@ ken is a Go port of [semble](https://github.com/MinishLab/semble): BM25 lexical 
 
 ## Why ken
 
-- **~97% recall@10 in the default (hybrid) mode** — **0.967 NL / 0.995 symbol** on semble's 1,251-query benchmark, vs grep's ~99.9% — while costing an agent **~46× fewer tokens** than `grep + Read` (4,120 vs 189,773 median tokens on NL queries — measured in the same default hybrid mode). For "find the chunk that answers this," that's a 1–2 order-of-magnitude token win at near-parity recall. (Reproduce: [`docs/BENCH.md`](docs/BENCH.md#default-mode-hybrid-recall--the-number-that-matters).)
+- **~97% recall@10 in the default (hybrid) mode** — **0.970 NL / 0.995 symbol** on semble's 1,251-query benchmark, vs grep's ~99.9% — while costing an agent **~46× fewer tokens** than `grep + Read` (4,120 vs 189,773 median tokens on NL queries — measured in the same default hybrid mode). For "find the chunk that answers this," that's a 1–2 order-of-magnitude token win at near-parity recall. (Reproduce: [`docs/BENCH.md`](docs/BENCH.md#default-mode-hybrid-recall--the-number-that-matters).)
 - **Single static binary.** Pure Go, no cgo, no Python interpreter on cold start, no GIL on indexing. Cross-compiles to Linux / macOS / Windows (amd64/arm64) for free.
 - **Drop-in for semble.** Same `search` / `find_related` MCP tool schemas and the same markdown-string wire format — swap the `command:` path and existing agents work unchanged.
 - **Local, CPU-only.** Embedding inference, BM25, and fusion all run on the CPU. No API keys, no GPU, no vector DB, air-gapped friendly.
@@ -149,7 +149,7 @@ Guards: HTTP mode **refuses to start without a token** (no insecure default, no 
 | `KEN_MCP_STAGED` | `0` | Staged readiness: on a cold hybrid build, serve **BM25 (lexical-only) instantly** (~4× faster first query on PHP), then enrich + embed in the background and upgrade to hybrid. Tool responses carry `"semantic":"warming"` until the upgrade lands. Takes precedence over `KEN_MCP_LAZY_ENRICH`. Opt-in; only affects a from-scratch build (a snapshot load is already full). |
 | `KEN_MCP_MMAP_MODEL` | `1` | mmap the embedding model instead of reading it onto the heap, at every ken-mcp model load (live build, pre-built index, snapshot). A read-only mmap's pages are shared across every cached repo's copy of the same model, so the saving grows with `KEN_MCP_CACHE_SIZE`. `0` reads it onto the heap (for a filesystem where mmap misbehaves). The CLI and the embedded-corpus path never mmap. |
 | `KEN_ENRICH` | (enabled) | Arm B structural enrichment: a one-line label (`func: … \| calls: …`) prepended to each chunk at index time. `off` / `0` / `false` / `no` builds the index without it. Applies to every index build: `ken search`, `ken index`, `ken build-index`, `ken-mcp` and `mcp.Run`. A pre-built `.ken/index.bin` keeps whatever it was built with; the `status` tool reports what the loaded index actually has. |
-| `KEN_ANN` | (exact `flat`) | Dense vector store: `flat-i8` (int8, about 80% less dense-store memory on the watched index, the choice at large-repository scale) or `flat-binary-i8` (fastest at repo scale). Applies to `ken search`, `ken index`, `ken-mcp` and `mcp.Run`, and to a pre-built index when it is loaded. Measured recall cost and where each store holds: [dense-retriever-adoption](docs/internal/dense-retriever-adoption-2026-09.md). A pre-built or embedded-corpus index keeps its full-precision vectors too, so there the store changes query speed, not memory. |
+| `KEN_ANN` | (exact `flat`) | Dense vector store: `flat-i8` (int8, about 80% less dense-store memory on the watched index, the choice at large-repository scale) or `flat-binary-i8` (fastest at repo scale). Applies to `ken search`, `ken index`, `ken-mcp` and `mcp.Run`, and to a pre-built index when it is loaded. The measured cost on the semble benchmark is about 0.001 NDCG@10 in hybrid (`flat` 0.844, `flat-i8` 0.843, `flat-binary-i8` 0.843, each difference within its 95% interval of zero) with recall@10 unchanged at 0.974; at Linux-kernel scale only `flat-i8` keeps agreeing with exact search. Details: [dense-retriever-adoption](docs/internal/dense-retriever-adoption-2026-09.md). A pre-built or embedded-corpus index keeps its full-precision vectors too, so there the store changes query speed, not memory. |
 | `KEN_MAX_FILE_BYTES` | `2MiB` | Skip files larger than this from indexing (`512KiB` / byte count). Applies to `ken index` and `ken-mcp`. Lower it on artifact-heavy repos to shrink the index + memory. |
 | `KEN_STRUCTURAL_MAX_FILE_BYTES` | `1MiB` | Largest file the structural tools (`definition`, `outline`, `callers`, …) parse (`256KiB` / byte count); larger files are left out of them. Separate from the Arm B enrichment's fixed 64 KiB parse cap, so it never changes search ranking. `KEN_MAX_FILE_BYTES` still applies first. |
 | `KEN_MAX_AVG_LINE_BYTES` | `1000` | Skip **minified** files whose sampled head averages more than this many bytes per line (built JS/CSS bundles, single-line JSON). `0` disables the heuristic. |
@@ -239,7 +239,7 @@ The retrieval algorithm is a verbatim port of semble's `search.py` + `ranking/*.
 | Cold start | ~500 ms (interpreter + numpy + model) | ~10–20 ms `ken search` over a tiny index |
 | Retrieval algorithm | reference implementation | verbatim port (constants + pipeline order from `search.py` + `ranking/*.py`) |
 | NDCG@10 on semble's benchmark | 0.854 | **0.842 hybrid** (gap 0.012, full 63 repos × 1,251 queries) |
-| Recall@10 on agent queries | (not measured) | **~0.97 hybrid** (0.967 NL / 0.995 symbol); BM25-only fallback ~0.84 |
+| Recall@10 on agent queries | (not measured) | **~0.97 hybrid** (0.970 NL / 0.995 symbol); BM25-only fallback ~0.84 |
 | Tokens to recall@10 | (not measured) | **~46× fewer than grep+Read** on NL queries (4,120 vs 189,773 median, hybrid) |
 | MCP server | yes | yes — drop-in (same schemas + wire format) |
 | Binary size | n/a | release (slim) `ken` ~22 MB · `ken-mcp` ~38 MB |
@@ -260,7 +260,7 @@ The crowded part of this category splits on one axis: **what you have to run.** 
 | Embeddings | **in-process, pure Go** (Model2Vec) | external **Ollama** daemon | external provider (OpenAI / Voyage / Gemini, or Ollama) |
 | **External services needed** | **none** — auto-fetches a ~60 MB model, then runs offline | Ollama (daemon + model) | **vector DB** (Milvus/Docker or Zilliz Cloud) **+** an embedding API/daemon |
 | Retrieval | BM25 + dense + RRF + code-aware rerank | dense + call graphs | hybrid (BM25 + dense) |
-| Recall / NDCG | **0.967 recall@10 · 0.842 NDCG@10**, with a reproduction harness | not published | not published |
+| Recall / NDCG | **0.970 NL recall@10 · 0.844 NDCG@10**, with a reproduction harness | not published | not published |
 | Token savings | **~46× vs grep+Read**, measured + reproducible | not published | vendor-claimed −39% vs a baseline |
 | Speed | index ~1.6 s / 13 k chunks; hybrid search p50 ~1.5 ms (measured) | vendor: "10 k files in seconds, ms queries" | depends on the vector DB + network |
 | Languages (structural) | 13 (tree-sitter) | 10 | chunk-level, language-agnostic |
