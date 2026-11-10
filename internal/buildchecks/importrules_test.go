@@ -67,7 +67,7 @@ var importRules = map[string][]string{
 
 	// Public library packages.
 	"engine": {"internal/repo", "internal/search", "internal/structural"},
-	"mcp":    {"internal/search", "internal/status", "internal/structural"},
+	"mcp":    {"internal/mcplog", "internal/search", "internal/status", "internal/structural"},
 	"mcp/db": {"internal/db", "mcp"},
 
 	// Internal packages.
@@ -77,7 +77,8 @@ var importRules = map[string][]string{
 	"internal/db":          {},
 	"internal/devtools":    {},
 	"internal/embedcache":  {},
-	"internal/envcfg":      {"mcp"}, // upward edge: for mcp.Logger and mcp.ValidateEnum
+	"internal/envcfg":      {"internal/mcplog"},
+	"internal/mcplog":      {},
 	"internal/modelfetch":  {},
 	"internal/perf":        {},
 	"internal/repo":        {"internal/bytesize"},

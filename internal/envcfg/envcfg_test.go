@@ -9,15 +9,15 @@ import (
 	"time"
 
 	"github.com/townsendmerino/ken/internal/envcfg"
-	kenmcp "github.com/townsendmerino/ken/mcp"
+	"github.com/townsendmerino/ken/internal/mcplog"
 )
 
-// newCapturedLogger returns a kenmcp.Logger that writes to a buffer
+// newCapturedLogger returns a mcplog.Logger that writes to a buffer
 // (level=LogDebug so every call is captured). Used to assert that bad input
 // produces the documented warn message.
-func newCapturedLogger() (*kenmcp.Logger, *bytes.Buffer) {
+func newCapturedLogger() (*mcplog.Logger, *bytes.Buffer) {
 	buf := &bytes.Buffer{}
-	return kenmcp.NewLogger(buf, kenmcp.LogDebug), buf
+	return mcplog.NewLogger(buf, mcplog.LogDebug), buf
 }
 
 // withEnv temporarily sets env vars for the duration of the test. Each test
