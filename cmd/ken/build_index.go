@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 
 	"github.com/townsendmerino/aikit/embed"
+	"github.com/townsendmerino/ken/internal/envcfg"
 	"github.com/townsendmerino/ken/internal/search"
 )
 
@@ -103,6 +104,7 @@ func cmdBuildIndex(args []string) int {
 		Mode:    mode,
 		Chunker: chunker,
 		Model:   staticModel,
+		Walk:    envcfg.WalkLimits(),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())

@@ -287,6 +287,13 @@ func buildOrLoadSnapshot(ctx context.Context, dir string, mode search.Mode, mode
 		MmapModel:             fsOpts.MmapModel,
 		DenseRetriever:        fsOpts.DenseRetriever,
 		EmbedCache:            fsOpts.EmbedCache,
+		// engine does not read the environment; these four walk limits and
+		// the structural cap are the KEN_* values read at this binary's edge.
+		MaxFileBytes:           fsOpts.Walk.MaxFileBytes,
+		MaxAvgLineBytes:        fsOpts.Walk.MaxAvgLineBytes,
+		MaxFiles:               fsOpts.Walk.MaxFiles,
+		SkipGenerated:          fsOpts.Walk.SkipGenerated,
+		StructuralMaxFileBytes: envcfg.StructuralMaxFileBytes(),
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -863,6 +870,11 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 		LazyEnrichment:        rb.lazyEnrich,
 		StagedEmbedding:       rb.staged,
 		MmapModel:             rb.mmapModel,
+		// KEN_MAX_FILE_BYTES, KEN_MAX_AVG_LINE_BYTES, KEN_MAX_FILES and
+		// KEN_SKIP_GENERATED. KEN_ENRICH and KEN_ANN are deliberately not
+		// read here: ken-mcp has never applied them, and wiring them in
+		// would change what a running server returns.
+		Walk: envcfg.WalkLimits(),
 	}
 	// Assign the interface only when non-nil so a nil *Cache doesn't become
 	// a non-nil VecCache holding a nil pointer.
@@ -925,7 +937,10 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 	// and the Track 2 tools degrade to a clear "no structural index
 	// available" message.
 	structuralBuilder := func(ctx context.Context) (*structural.Index, error) {
-		six, sErr := structural.BuildWithContext(ctx, dir)
+		six, sErr := structural.BuildWithOptions(ctx, dir, structural.BuildOptions{
+			MaxFileBytes: envcfg.StructuralMaxFileBytes(),
+			Walk:         fsOpts.Walk,
+		})
 		if sErr != nil {
 			rb.logger.Logf(kenmcp.LogWarn, "structural index build failed for %s: %v "+
 				"(track 2 tools will report no structure available; will retry on next call)", dir, sErr)

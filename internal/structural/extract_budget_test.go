@@ -50,7 +50,7 @@ func TestParseBudget_ExhaustionSkipsCountsLogs(t *testing.T) {
 // override) leaves the budget OFF — the determinism-preserving default. A
 // normal file extracts, and nothing is counted as a budget skip.
 func TestParseBudget_DisabledByDefault(t *testing.T) {
-	t.Setenv("KEN_ENRICH_FILE_BUDGET_MS", "") // empty → disabled
+	parseBudgetMicros.Store(0)
 	parseBudgetOverrideMicros.Store(0)
 	clearParserPools()
 	t.Cleanup(clearParserPools)
@@ -65,14 +65,24 @@ func TestParseBudget_DisabledByDefault(t *testing.T) {
 	}
 }
 
-// TestEnvParseBudgetMicros covers the env parse: whole-ms → micros, empty and
-// invalid → disabled (0).
-func TestEnvParseBudgetMicros(t *testing.T) {
-	cases := map[string]uint64{"": 0, "0": 0, "500": 500_000, "1": 1_000, "bogus": 0, " 250 ": 250_000}
-	for in, want := range cases {
-		t.Setenv("KEN_ENRICH_FILE_BUDGET_MS", in)
-		if got := envParseBudgetMicros(); got != want {
-			t.Errorf("envParseBudgetMicros(%q) = %d, want %d", in, got, want)
+// TestSetParseBudget covers the setter that replaced the package's own
+// KEN_ENRICH_FILE_BUDGET_MS read (parsed in internal/envcfg now): the value
+// is stored in microseconds, a negative duration is "disabled", and an
+// ambient env value is ignored.
+func TestSetParseBudget(t *testing.T) {
+	t.Cleanup(func() { parseBudgetMicros.Store(0) })
+	parseBudgetOverrideMicros.Store(0)
+	t.Setenv("KEN_ENRICH_FILE_BUDGET_MS", "500")
+	parseBudgetMicros.Store(0)
+	if got := effectiveParseBudgetMicros(); got != 0 {
+		t.Errorf("budget with only the env var set = %d µs, want 0 (the package must not read it)", got)
+	}
+	for d, want := range map[time.Duration]uint64{
+		0: 0, 500 * time.Millisecond: 500_000, time.Millisecond: 1_000, -time.Second: 0,
+	} {
+		SetParseBudget(d)
+		if got := effectiveParseBudgetMicros(); got != want {
+			t.Errorf("SetParseBudget(%v): budget = %d µs, want %d", d, got, want)
 		}
 	}
 }

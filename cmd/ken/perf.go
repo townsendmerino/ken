@@ -204,7 +204,7 @@ func cmdPerfIndex(args []string) int {
 	runtime.GC()
 	allocStart := perf.StartAlloc()
 	started := time.Now()
-	ix, err := search.FromFS(os.DirFS(rest[0]), mode, chunker, model)
+	ix, err := search.FromFSWithOptions(os.DirFS(rest[0]), mode, chunker, model, envFSOptions())
 	indexMs := float64(time.Since(started).Microseconds()) / 1000.0
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
@@ -350,7 +350,7 @@ func cmdPerfSearch(args []string) int {
 	// Build the index once; all latency samples come from ix.Search on
 	// the warm index.
 	indexStart := time.Now()
-	ix, err := search.FromFS(os.DirFS(rest[0]), mode, chunker, model)
+	ix, err := search.FromFSWithOptions(os.DirFS(rest[0]), mode, chunker, model, envFSOptions())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1
@@ -483,7 +483,7 @@ func cmdPerfWatch(args []string) int {
 	}
 
 	initStart := time.Now()
-	wix, err := search.NewWatchedIndex(tmp, mode, chunker, model, true)
+	wix, err := search.NewWatchedIndexWithOptions(tmp, mode, chunker, model, true, envWatchFSOptions())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1

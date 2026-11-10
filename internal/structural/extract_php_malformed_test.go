@@ -35,7 +35,7 @@ func TestBuild_PhpTruncatedController(t *testing.T) {
 	// assertions. The fixture is tiny (parses in <1 ms, far under any real
 	// budget), but a sibling test's 1 µs override could otherwise leak a
 	// cached pool — pin it down explicitly and rebuild pools clean.
-	t.Setenv("KEN_ENRICH_FILE_BUDGET_MS", "")
+	parseBudgetMicros.Store(0)
 	parseBudgetOverrideMicros.Store(0)
 	clearParserPools()
 

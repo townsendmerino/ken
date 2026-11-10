@@ -18,10 +18,7 @@ import (
 	"os"
 	gopath "path"
 	"path/filepath"
-	"strconv"
 	"strings"
-
-	"github.com/townsendmerino/ken/internal/bytesize"
 )
 
 // DefaultMaxFiles is the admission ceiling on indexable file COUNT — a
@@ -74,12 +71,34 @@ const (
 
 // Options configures a walk.
 //
-// Root is consumed by the deprecated Walk wrapper to construct an
-// os.DirFS; WalkFS ignores it (the fs.FS already encodes the root).
-// MaxFileBytes applies to both entry points.
+// Root is consumed by the deprecated Walk wrapper and by NewMatcher to
+// construct an os.DirFS; WalkFS ignores it (the fs.FS already encodes the
+// root). The limits apply to every entry point.
+//
+// This package does not read the environment. The KEN_MAX_FILE_BYTES,
+// KEN_MAX_AVG_LINE_BYTES, KEN_MAX_FILES and KEN_SKIP_GENERATED variables
+// are read at the edge (internal/envcfg.WalkLimits) and arrive here as
+// these fields. In each numeric field 0 means "use the default", so
+// switching a limit off is a negative value.
 type Options struct {
-	Root         string // used only by the deprecated Walk; ignored by WalkFS
-	MaxFileBytes int64  // 0 ⇒ DefaultMaxFileBytes
+	Root string // used by Walk and NewMatcher; ignored by WalkFS
+
+	// MaxFileBytes is the per-file size cap. 0 ⇒ DefaultMaxFileBytes.
+	MaxFileBytes int64
+
+	// MaxAvgLineBytes is the minified-file threshold: a file whose sampled
+	// head averages more bytes per line is skipped. 0 ⇒
+	// DefaultMaxAvgLineBytes; negative ⇒ the heuristic is off.
+	MaxAvgLineBytes int
+
+	// MaxFiles is the admission cap on indexable file count; a walk that
+	// exceeds it fails. 0 ⇒ DefaultMaxFiles; negative ⇒ unlimited.
+	MaxFiles int
+
+	// SkipGenerated also skips files whose header carries a
+	// machine-generated-code marker (see looksGenerated). Off by default:
+	// some corpora want their generated surface searchable.
+	SkipGenerated bool
 }
 
 // WalkFS returns repo-relative, slash-separated paths of indexable files
@@ -98,9 +117,9 @@ type Options struct {
 // concrete path.
 func WalkFS(fsys fs.FS, opts Options) ([]string, error) {
 	maxBytes := resolveMaxFileBytes(opts.MaxFileBytes)
-	maxAvgLine := resolveMaxAvgLineBytes()
-	maxFiles := resolveMaxFiles()
-	skipGenerated := resolveSkipGenerated()
+	maxAvgLine := resolveMaxAvgLineBytes(opts.MaxAvgLineBytes)
+	maxFiles := resolveMaxFiles(opts.MaxFiles)
+	skipGenerated := opts.SkipGenerated
 
 	// Active scope stack — outer-first, inner-last. Lazily extended
 	// each time fs.WalkDir descends into a new directory; truncated on
@@ -222,8 +241,8 @@ func NewMatcher(opts Options) *Matcher {
 		root:            opts.Root,
 		scopes:          collectGitignores(os.DirFS(opts.Root)),
 		maxFileBytes:    resolveMaxFileBytes(opts.MaxFileBytes),
-		maxAvgLineBytes: resolveMaxAvgLineBytes(),
-		skipGenerated:   resolveSkipGenerated(),
+		maxAvgLineBytes: resolveMaxAvgLineBytes(opts.MaxAvgLineBytes),
+		skipGenerated:   opts.SkipGenerated,
 	}
 }
 
@@ -335,60 +354,38 @@ func (m *Matcher) ShouldIndex(relPath string) bool {
 	return true
 }
 
-// resolveMaxFileBytes picks the per-file size cap: an explicit
-// opts.MaxFileBytes wins; otherwise KEN_MAX_FILE_BYTES (byte count or a
-// KiB/MiB/GiB suffix) if set and valid; otherwise DefaultMaxFileBytes.
+// resolveMaxFileBytes picks the per-file size cap: optsMax if positive,
+// else DefaultMaxFileBytes.
 func resolveMaxFileBytes(optsMax int64) int64 {
 	if optsMax > 0 {
 		return optsMax
 	}
-	if raw := os.Getenv("KEN_MAX_FILE_BYTES"); raw != "" {
-		if n, ok := bytesize.Parse(raw); ok && n > 0 {
-			return n
-		}
-	}
 	return DefaultMaxFileBytes
 }
 
-// resolveMaxAvgLineBytes picks the minified-file threshold from
-// KEN_MAX_AVG_LINE_BYTES (a plain byte count; 0 disables the heuristic),
-// falling back to DefaultMaxAvgLineBytes.
-func resolveMaxAvgLineBytes() int {
-	if raw := os.Getenv("KEN_MAX_AVG_LINE_BYTES"); raw != "" {
-		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n >= 0 {
-			return n
-		}
+// resolveMaxAvgLineBytes maps Options.MaxAvgLineBytes to the walker's
+// threshold, where 0 means "heuristic off": 0 ⇒ DefaultMaxAvgLineBytes,
+// negative ⇒ 0.
+func resolveMaxAvgLineBytes(opt int) int {
+	switch {
+	case opt > 0:
+		return opt
+	case opt < 0:
+		return 0
 	}
 	return DefaultMaxAvgLineBytes
 }
 
-// resolveMaxFiles picks the indexable-file-count admission cap from
-// KEN_MAX_FILES (a plain count; 0 = unlimited), falling back to
-// DefaultMaxFiles.
-func resolveMaxFiles() int {
-	if raw := os.Getenv("KEN_MAX_FILES"); raw != "" {
-		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n >= 0 {
-			return n
-		}
+// resolveMaxFiles maps Options.MaxFiles to the walker's cap, where 0 means
+// "unlimited": 0 ⇒ DefaultMaxFiles, negative ⇒ 0.
+func resolveMaxFiles(opt int) int {
+	switch {
+	case opt > 0:
+		return opt
+	case opt < 0:
+		return 0
 	}
 	return DefaultMaxFiles
-}
-
-// resolveSkipGenerated reads KEN_SKIP_GENERATED (default OFF). When on, files
-// whose header carries a machine-generated-code marker (see looksGenerated) are
-// skipped at index time. Opt-in, not default-on: some corpora legitimately want
-// their generated surface searchable (an agent asking "where is the typed
-// client for X" wants the generated client-go file), so the filter is a
-// deliberate choice the operator makes, not a silent default. Distinct from the
-// KEN_MAX_AVG_LINE_BYTES minified sniff (which catches built bundles by line
-// shape); this is a header-marker sniff for source that is generated but
-// otherwise normally-shaped (protobuf stubs, client-go listers, mocks).
-func resolveSkipGenerated() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("KEN_SKIP_GENERATED"))) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
 }
 
 // looksGenerated reports whether a sampled file head carries a machine-

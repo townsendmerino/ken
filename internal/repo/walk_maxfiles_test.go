@@ -19,16 +19,14 @@ func TestWalkFS_MaxFilesAdmissionCap(t *testing.T) {
 	}
 
 	t.Run("exceeding the cap errors", func(t *testing.T) {
-		t.Setenv("KEN_MAX_FILES", "2")
-		_, err := WalkFS(fsys, Options{})
+		_, err := WalkFS(fsys, Options{MaxFiles: 2})
 		if !errors.Is(err, ErrTooManyFiles) {
 			t.Fatalf("WalkFS err = %v, want ErrTooManyFiles", err)
 		}
 	})
 
 	t.Run("at/under the cap succeeds", func(t *testing.T) {
-		t.Setenv("KEN_MAX_FILES", "10")
-		got, err := WalkFS(fsys, Options{})
+		got, err := WalkFS(fsys, Options{MaxFiles: 10})
 		if err != nil {
 			t.Fatalf("WalkFS: %v", err)
 		}
@@ -37,9 +35,8 @@ func TestWalkFS_MaxFilesAdmissionCap(t *testing.T) {
 		}
 	})
 
-	t.Run("0 means unlimited", func(t *testing.T) {
-		t.Setenv("KEN_MAX_FILES", "0")
-		got, err := WalkFS(fsys, Options{})
+	t.Run("negative means unlimited", func(t *testing.T) {
+		got, err := WalkFS(fsys, Options{MaxFiles: -1})
 		if err != nil {
 			t.Fatalf("WalkFS: %v", err)
 		}

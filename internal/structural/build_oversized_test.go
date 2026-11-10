@@ -39,7 +39,6 @@ func writeBigAndSmall(t *testing.T, bigBytes int) string {
 // definitions are found, while its enrichment label is still skipped and
 // the Arm B output can't change.
 func TestBuild_StructuralCapIsSeparateFromEnrichment(t *testing.T) {
-	t.Setenv("KEN_STRUCTURAL_MAX_FILE_BYTES", "")
 	dir := writeBigAndSmall(t, maxEnrichBytes+16<<10)
 	data, err := os.ReadFile(filepath.Join(dir, "big.go"))
 	if err != nil {
@@ -69,13 +68,12 @@ func TestBuild_StructuralCapGuardsAndConfigures(t *testing.T) {
 	dir := writeBigAndSmall(t, 80<<10)
 	ctx := context.Background()
 
-	t.Setenv("KEN_STRUCTURAL_MAX_FILE_BYTES", "64KiB")
-	ix, err := Build(dir)
+	ix, err := BuildWithOptions(ctx, dir, BuildOptions{MaxFileBytes: 64 << 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ix.File("big.go") != nil {
-		t.Error("big.go (80 KiB) indexed under KEN_STRUCTURAL_MAX_FILE_BYTES=64KiB")
+		t.Error("big.go (80 KiB) indexed under a 64 KiB MaxFileBytes")
 	}
 	if ix.File("small.go") == nil {
 		t.Error("small.go not indexed: the guard over-skipped a normal file")
@@ -103,10 +101,13 @@ func TestBuild_StructuralCapGuardsAndConfigures(t *testing.T) {
 		t.Errorf("Update logged %d lines for the dropped file, want 1", len(logged))
 	}
 
-	for _, bad := range []string{"nope", "-5", "0"} {
-		t.Setenv("KEN_STRUCTURAL_MAX_FILE_BYTES", bad)
-		if got := ResolveMaxStructuralFileBytes(0); got != DefaultMaxStructuralFileBytes {
-			t.Errorf("KEN_STRUCTURAL_MAX_FILE_BYTES=%q resolved to %d, want the default", bad, got)
+	// The package no longer reads KEN_STRUCTURAL_MAX_FILE_BYTES (its
+	// parsing is tested in internal/envcfg): an ambient value must not
+	// change the cap.
+	t.Setenv("KEN_STRUCTURAL_MAX_FILE_BYTES", "64KiB")
+	for _, opt := range []int64{0, -5} {
+		if got := ResolveMaxStructuralFileBytes(opt); got != DefaultMaxStructuralFileBytes {
+			t.Errorf("ResolveMaxStructuralFileBytes(%d) = %d, want the default", opt, got)
 		}
 	}
 }

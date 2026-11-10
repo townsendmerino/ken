@@ -60,6 +60,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-050](#adr-050-ranking-may-diverge-from-the-verbatim-semble-port) | Ranking may diverge from the verbatim semble port (amends ADR-002) | Accepted |
 | [ADR-051](#adr-051-opt-in-budgetpacking-search-option-saturation-threshold-2) | Opt-in `BudgetPacking` search option: file saturation from the third chunk | Superseded by ADR-052 |
 | [ADR-052](#adr-052-budgetpacking-uses-a-gentler-decay-08-instead-of-threshold-2) | `BudgetPacking` uses a gentler decay (0.8) instead of threshold 2 | Accepted |
+| [ADR-053](#adr-053-environment-variables-are-read-at-the-edge) | Environment variables are read at the edge | Accepted |
 
 ---
 
@@ -2971,3 +2972,30 @@ ADR-051 shipped `engine.SearchOptions{BudgetPacking}` with file-saturation thres
 - The gentler decay keeps file spreading, so the option is milder than "saturation off". Larger line gains (+0.07) cost files at a rate no gate here has accepted.
 - `docs/DESIGN.md` §7 records decay 0.8 as the option's diverged constant.
 
+
+## ADR-053: Environment variables are read at the edge
+
+**Status:** Accepted
+**Date:** 2026-11-10
+**Decided by:** Francis (2026-11-10), on the two questions below.
+
+### Context
+An architecture audit (read at be9caeb, after v1.13.0) found `os.Getenv` calls inside library packages: `internal/repo` (`KEN_MAX_FILE_BYTES`, `KEN_MAX_AVG_LINE_BYTES`, `KEN_MAX_FILES`, `KEN_SKIP_GENERATED`), `internal/search` (`KEN_ENRICH`, `KEN_ANN`), `internal/status` (`KEN_MODEL_DIR`, `KEN_RERANK_MODEL_DIR`, `KEN_USAGE_STATS_PATH`, `KEN_ENRICH`) and, missed by the audit, `internal/structural` (`KEN_STRUCTURAL_MAX_FILE_BYTES`, `KEN_ENRICH_FILE_BUDGET_MS`). A program importing `ken/engine` in-process (tack) therefore had its indexing changed by whatever happened to be set in its environment, with nothing in `engine.Options` saying so. The two binaries even configured the parse budget by calling `os.Setenv` for the library to read back.
+
+The public `mcp` package read the environment too: `KEN_MCP_ALLOWED_REPO_ROOTS`, `KEN_ALLOW_PRIVATE_CLONE_TARGETS` and `KEN_MAX_CLONE_BYTES` directly, and the variables above through `internal/*`.
+
+### Decision
+1. **Library packages do not read the environment.** `engine` and everything under `internal/` except `internal/envcfg` take configuration as options. The readers and their parsing live in `internal/envcfg` (`index.go`); a program's edge calls them and passes the values down.
+2. **`engine` importers lose the implicit variables (Francis: accept).** `engine.Options` gains `MaxFileBytes`, `MaxAvgLineBytes`, `MaxFiles` and `SkipGenerated`; `StructuralMaxFileBytes` 0 is a plain 1 MiB. The parse budget is process-wide (each language's parser pool is shared and built once), so it is a package function, `engine.SetEnrichFileBudget`, not an `Options` field.
+3. **`mcp` is an edge (Francis: keep it one).** A third-party `mcp.Run` or `mcp.NewServer` binary keeps honoring the documented variables. Moving them into `mcp.Config` would have made `KEN_MCP_ALLOWED_REPO_ROOTS` fail open for any such server whose operator had set it. `mcp/env.go` lists what the package reads.
+4. **The edges are:** every `package main`, `internal/envcfg`, `mcp`, and the `bench/` harnesses. `internal/buildchecks`' `TestEnvReadsStayAtTheEdge` fails on an `os.Getenv`, `os.LookupEnv` or `os.ExpandEnv` anywhere else.
+
+### What did not change
+The `ken` and `ken-mcp` binaries behave as before for every variable. Old and new builds were compared on a fixture corpus: `ken` (search, index, bench, build-index, status, doctor, in bm25 and hybrid) over 29 environment settings and `ken-mcp` (search, find_related, the structural tools, status, over JSON-RPC) over 36, with identical output apart from the binaries' own version stamps and the timing-dependent 1 ms parse-budget case, which also differs between two runs of the old binary.
+
+That includes one behavior the documentation gets wrong, kept as it was: `KEN_ENRICH` and `KEN_ANN` reach only the one-shot build paths (`ken search`, `ken bench`, `ken index --no-watch`, `ken perf`). The watched index never applied them, so `ken-mcp`, `ken index` (watch mode), `ken build-index` and `mcp.Run` ignore both, although README and docs/USERS.md describe them as working there, and ken-mcp's `status` tool reports enrichment as off under `KEN_ENRICH=off` while the index is enriched. Fixing it changes what a running server returns, so it is a separate decision.
+
+### Consequences
+- A program that imports `engine` and relied on one of the six variables (`KEN_MAX_FILE_BYTES`, `KEN_MAX_AVG_LINE_BYTES`, `KEN_MAX_FILES`, `KEN_SKIP_GENERATED`, `KEN_STRUCTURAL_MAX_FILE_BYTES`, `KEN_ENRICH_FILE_BUDGET_MS`) must set the matching field or call `SetEnrichFileBudget`. `engine.Options.StructuralMaxFileBytes`'s documented fallback to the variable is gone.
+- The import graph shows who depends on the environment: the packages that import `internal/envcfg` (`cmd/ken`, `cmd/ken-mcp`, `mcp`, and two harnesses).
+- The bench harnesses read their variables through `bench/internal/benchenv`, so the commands in docs/BENCH.md keep working.

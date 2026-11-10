@@ -32,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/townsendmerino/ken/bench/internal/benchenv"
 	"github.com/townsendmerino/ken/bench/internal/provenance"
 	"github.com/townsendmerino/ken/internal/search"
 )
@@ -97,7 +98,7 @@ func TestCoIR_ExportShortlist(t *testing.T) {
 	}
 
 	tBuild := time.Now()
-	ix, err := search.FromPath(corpusDir, search.ModeHybrid, "regex", modelDir)
+	ix, err := benchenv.FromPath(corpusDir, search.ModeHybrid, "regex", modelDir)
 	if err != nil {
 		t.Fatalf("FromPath: %v", err)
 	}

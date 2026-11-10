@@ -62,6 +62,15 @@ import (
 // off, no file watcher — i.e. a one-shot, build-once-and-return workspace.
 // Set Snapshot and Watch for a long-lived server (this is what cmd/ken-mcp
 // does).
+//
+// Options is the whole configuration: engine does not read the
+// environment. The KEN_* variables documented for the ken and ken-mcp
+// binaries are read by those binaries, which pass the values here; a
+// program that imports engine sets the fields itself. (Through v1.13
+// engine picked up KEN_MAX_FILE_BYTES, KEN_MAX_AVG_LINE_BYTES,
+// KEN_MAX_FILES, KEN_SKIP_GENERATED, KEN_STRUCTURAL_MAX_FILE_BYTES and
+// KEN_ENRICH_FILE_BUDGET_MS implicitly; see MaxFileBytes, MaxAvgLineBytes,
+// MaxFiles, SkipGenerated, StructuralMaxFileBytes and SetEnrichFileBudget.)
 type Options struct {
 	// Mode selects the retrieval pipeline: "bm25", "semantic", "hybrid", or
 	// "hybrid-rerank" — the same strings search.ParseMode accepts. ""
@@ -121,12 +130,30 @@ type Options struct {
 
 	// StructuralMaxFileBytes is the largest file the structural index
 	// (Definition, Outline, SymbolAt, …) parses; larger files are left out
-	// of it. 0 defers to the KEN_STRUCTURAL_MAX_FILE_BYTES environment
-	// variable, else 1 MiB. Independent of the Arm B enrichment's fixed
-	// 64 KiB parse cap, so it never changes search ranking. Files over the
-	// walk's own KEN_MAX_FILE_BYTES (2 MiB by default) are never indexed
-	// at all.
+	// of it. 0 means 1 MiB. Independent of the Arm B enrichment's fixed
+	// 64 KiB parse cap, so it never changes search ranking. Files over
+	// MaxFileBytes are never indexed at all.
 	StructuralMaxFileBytes int64
+
+	// MaxFileBytes is the largest file the walk indexes; larger files are
+	// skipped by both the search and the structural index. 0 means 2 MiB.
+	MaxFileBytes int64
+
+	// MaxAvgLineBytes is the minified-file threshold: a file whose sampled
+	// head averages more bytes per line (built JS/CSS bundles, single-line
+	// JSON) is skipped. 0 means 1000; a negative value switches the
+	// heuristic off.
+	MaxAvgLineBytes int
+
+	// MaxFiles is the admission cap on indexable file count: Open fails on
+	// a root with more. 0 means 1,000,000; a negative value is unlimited.
+	MaxFiles int
+
+	// SkipGenerated also skips source whose header carries a
+	// machine-generated marker (`@generated`, or a "Code generated … DO
+	// NOT EDIT" banner). Off by default, since some callers want their
+	// generated surface searchable.
+	SkipGenerated bool
 
 	// DisableFoldMigrations turns off Tier-1 SQL migration-history folding
 	// (search.FSOptions.DisableFoldMigrations).
@@ -182,7 +209,11 @@ type Workspace struct {
 // admit reports whether the initial walk would have indexed rel — the
 // same rules the search side re-checks on every flush.
 func (w *Workspace) admit(rel string) bool {
-	w.matcherOnce.Do(func() { w.matcher = repo.NewMatcher(repo.Options{Root: w.root}) })
+	w.matcherOnce.Do(func() {
+		walk := w.fsOpts.Walk
+		walk.Root = w.root
+		w.matcher = repo.NewMatcher(walk)
+	})
 	return w.matcher.ShouldIndex(rel)
 }
 
@@ -256,12 +287,18 @@ func Open(ctx context.Context, root string, opts Options) (*Workspace, error) {
 			DenseRetriever:        opts.DenseRetriever,
 			MmapModel:             opts.MmapModel,
 			EmbedCache:            opts.EmbedCache,
+			Walk: repo.Options{
+				MaxFileBytes:    opts.MaxFileBytes,
+				MaxAvgLineBytes: opts.MaxAvgLineBytes,
+				MaxFiles:        opts.MaxFiles,
+				SkipGenerated:   opts.SkipGenerated,
+			},
 		},
 		logf: func(format string, args ...any) { fmt.Fprintf(logWriter, format+"\n", args...) },
 	}
 	w.structural.builder = func(ctx context.Context) (*structural.Index, error) {
 		start := time.Now()
-		idx, err := structural.BuildWithOptions(ctx, w.root, structural.BuildOptions{MaxFileBytes: opts.StructuralMaxFileBytes})
+		idx, err := structural.BuildWithOptions(ctx, w.root, structural.BuildOptions{MaxFileBytes: opts.StructuralMaxFileBytes, Walk: w.fsOpts.Walk})
 		if err != nil {
 			w.logf("engine: structural index build for %s failed (%v); structural calls report no index and retry after a cooldown", w.root, err)
 			return nil, err

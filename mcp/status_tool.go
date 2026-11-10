@@ -6,6 +6,7 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/townsendmerino/ken/internal/envcfg"
 	"github.com/townsendmerino/ken/internal/search"
 	"github.com/townsendmerino/ken/internal/status"
 	"github.com/townsendmerino/ken/internal/structural"
@@ -54,7 +55,7 @@ func handleStatus(ctx context.Context, cfg *Config, args StatusArgs) (*sdk.CallT
 		}
 	}
 
-	return renderStatusResult(status.Build(opts), args)
+	return renderStatusResult(status.Build(withStatusEnv(opts)), args)
 }
 
 // runStatus is the mcp.Run path's status handler. Embedded-
@@ -67,7 +68,20 @@ func runStatus(ix *search.Index, args StatusArgs) (*sdk.CallToolResult, any, err
 	if ix != nil {
 		opts.LiveIndex = liveIndexInfo("(embedded corpus)", ix)
 	}
-	return renderStatusResult(status.Build(opts), args)
+	return renderStatusResult(status.Build(withStatusEnv(opts)), args)
+}
+
+// withStatusEnv fills the fields the status report reads from the
+// environment: KEN_MODEL_DIR, KEN_RERANK_MODEL_DIR, KEN_USAGE_STATS_PATH
+// and KEN_ENRICH. internal/status no longer reads them itself; this
+// package is a server edge (see env.go), so it does, through
+// internal/envcfg.
+func withStatusEnv(opts status.BuildOptions) status.BuildOptions {
+	opts.EmbedModelDir = envcfg.ModelDir()
+	opts.RerankModelDir = envcfg.RerankModelDir()
+	opts.SavingsPath = envcfg.UsageStatsPath()
+	opts.EnrichEnv = envcfg.EnrichRaw()
+	return opts
 }
 
 func renderStatusResult(s status.Status, args StatusArgs) (*sdk.CallToolResult, any, error) {

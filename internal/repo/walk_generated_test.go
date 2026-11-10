@@ -73,9 +73,8 @@ func TestWalkFS_SkipGenerated(t *testing.T) {
 		}
 	})
 
-	t.Run("KEN_SKIP_GENERATED=1: generated file is skipped", func(t *testing.T) {
-		t.Setenv("KEN_SKIP_GENERATED", "1")
-		got, err := WalkFS(base, Options{})
+	t.Run("SkipGenerated: generated file is skipped", func(t *testing.T) {
+		got, err := WalkFS(base, Options{SkipGenerated: true})
 		if err != nil {
 			t.Fatalf("WalkFS: %v", err)
 		}

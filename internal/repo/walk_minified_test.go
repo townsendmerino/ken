@@ -37,9 +37,8 @@ func TestWalkFS_MinifiedSkip(t *testing.T) {
 		}
 	})
 
-	t.Run("KEN_MAX_AVG_LINE_BYTES=0 disables the heuristic", func(t *testing.T) {
-		t.Setenv("KEN_MAX_AVG_LINE_BYTES", "0")
-		got, err := WalkFS(base, Options{})
+	t.Run("negative MaxAvgLineBytes disables the heuristic", func(t *testing.T) {
+		got, err := WalkFS(base, Options{MaxAvgLineBytes: -1})
 		if err != nil {
 			t.Fatalf("WalkFS: %v", err)
 		}
@@ -50,9 +49,8 @@ func TestWalkFS_MinifiedSkip(t *testing.T) {
 		}
 	})
 
-	t.Run("KEN_MAX_AVG_LINE_BYTES tightened flags the wide file too", func(t *testing.T) {
-		t.Setenv("KEN_MAX_AVG_LINE_BYTES", "10") // avg ~16 > 10
-		got, err := WalkFS(base, Options{})
+	t.Run("MaxAvgLineBytes tightened flags the wide file too", func(t *testing.T) {
+		got, err := WalkFS(base, Options{MaxAvgLineBytes: 10}) // avg ~16 > 10
 		if err != nil {
 			t.Fatalf("WalkFS: %v", err)
 		}
@@ -64,16 +62,15 @@ func TestWalkFS_MinifiedSkip(t *testing.T) {
 	})
 }
 
-// TestWalkFS_MaxFileBytesEnv covers KEN_MAX_FILE_BYTES overriding the default
+// TestWalkFS_MaxFileBytesOption covers Options.MaxFileBytes overriding the default
 // size cap when Options.MaxFileBytes is unset.
-func TestWalkFS_MaxFileBytesEnv(t *testing.T) {
+func TestWalkFS_MaxFileBytesOption(t *testing.T) {
 	fsys := fstest.MapFS{
 		"big.go":   {Data: []byte("package main\n" + strings.Repeat("// x\n", 60))}, // >100 B
 		"small.go": {Data: []byte("package a\n")},                                   // <100 B
 	}
-	t.Run("env caps below default", func(t *testing.T) {
-		t.Setenv("KEN_MAX_FILE_BYTES", "100")
-		got, err := WalkFS(fsys, Options{})
+	t.Run("option caps below default", func(t *testing.T) {
+		got, err := WalkFS(fsys, Options{MaxFileBytes: 100})
 		if err != nil {
 			t.Fatalf("WalkFS: %v", err)
 		}
@@ -84,9 +81,8 @@ func TestWalkFS_MaxFileBytesEnv(t *testing.T) {
 		}
 	})
 
-	t.Run("suffix form parses", func(t *testing.T) {
-		t.Setenv("KEN_MAX_FILE_BYTES", "1MiB")
-		got, err := WalkFS(fsys, Options{})
+	t.Run("1 MiB keeps both", func(t *testing.T) {
+		got, err := WalkFS(fsys, Options{MaxFileBytes: 1 << 20})
 		if err != nil {
 			t.Fatalf("WalkFS: %v", err)
 		}

@@ -183,21 +183,29 @@ type ProcessInfo struct {
 	StartedAt    time.Time // for `--verbose`; CLI sets to time.Now()
 }
 
-// BuildOptions tells Build which surface is calling. CLI passes the
-// zero value. MCP passes pointers / values for the live fields it
-// can populate.
+// BuildOptions tells Build which surface is calling. MCP also passes
+// pointers / values for the live fields it can populate.
+//
+// This package does not read the environment. The callers (cmd/ken and
+// the mcp status tool) read KEN_MODEL_DIR, KEN_RERANK_MODEL_DIR,
+// KEN_USAGE_STATS_PATH and KEN_ENRICH through internal/envcfg and pass
+// them in the first four fields.
 type BuildOptions struct {
-	// EmbedModelDir overrides the default lookup
-	// (KEN_MODEL_DIR > ~/.ken/model). Empty = use the default.
+	// EmbedModelDir is the embedding model directory to report on
+	// (callers pass KEN_MODEL_DIR). Empty = ~/.ken/model.
 	EmbedModelDir string
 
-	// RerankModelDir overrides the default
-	// (KEN_RERANK_MODEL_DIR > ~/.ken/rerank-model).
+	// RerankModelDir is the reranker model directory to report on
+	// (callers pass KEN_RERANK_MODEL_DIR). Empty = ~/.ken/rerank-model.
 	RerankModelDir string
 
-	// SavingsPath overrides the savings store path. Empty = use
-	// KEN_USAGE_STATS_PATH > ~/.ken/savings.jsonl.
+	// SavingsPath is the savings store path (callers pass
+	// KEN_USAGE_STATS_PATH). Empty = ~/.ken/savings.jsonl.
 	SavingsPath string
+
+	// EnrichEnv is the raw KEN_ENRICH value, reported verbatim; any of
+	// 0/off/false/no (case-insensitive) reports enrichment as disabled.
+	EnrichEnv string
 
 	// LiveIndex / LiveStructural / LiveCache are populated by the
 	// MCP `status` handler when it has a live RepoBundle. CLI
@@ -221,7 +229,7 @@ func Build(opts BuildOptions) Status {
 		Versions:    discoverVersions(),
 		EmbedModel:  inspectModel(resolveEmbedModelDir(opts.EmbedModelDir)),
 		RerankModel: inspectModel(resolveRerankModelDir(opts.RerankModelDir)),
-		Enrichment:  readEnrichmentEnv(),
+		Enrichment:  enrichmentInfo(opts.EnrichEnv),
 		Process: ProcessInfo{
 			GOOS:       runtime.GOOS,
 			GOARCH:     runtime.GOARCH,
@@ -280,9 +288,6 @@ func resolveEmbedModelDir(override string) string {
 	if override != "" {
 		return override
 	}
-	if v := os.Getenv("KEN_MODEL_DIR"); v != "" {
-		return v
-	}
 	if home, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(home, ".ken", "model")
 	}
@@ -293,9 +298,6 @@ func resolveRerankModelDir(override string) string {
 	if override != "" {
 		return override
 	}
-	if v := os.Getenv("KEN_RERANK_MODEL_DIR"); v != "" {
-		return v
-	}
 	if home, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(home, ".ken", "rerank-model")
 	}
@@ -305,9 +307,6 @@ func resolveRerankModelDir(override string) string {
 func resolveSavingsPath(override string) string {
 	if override != "" {
 		return override
-	}
-	if v := os.Getenv("KEN_USAGE_STATS_PATH"); v != "" {
-		return v
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(home, ".ken", "savings.jsonl")
@@ -330,8 +329,7 @@ func inspectModel(dir string) ModelInfo {
 	return info
 }
 
-func readEnrichmentEnv() EnrichmentInfo {
-	raw := os.Getenv("KEN_ENRICH")
+func enrichmentInfo(raw string) EnrichmentInfo {
 	info := EnrichmentInfo{EnvValue: raw, Enabled: true}
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "0", "off", "false", "no":

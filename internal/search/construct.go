@@ -162,7 +162,7 @@ func assembleWatched(root string, mode Mode, chunkerName, modelDir string, model
 		modelDir:      modelDir,
 		chunks:        chunks,
 		model:         model,
-		matcher:       repo.NewMatcher(repo.Options{Root: root}),
+		matcher:       repo.NewMatcher(matcherOptions(root, opts.Walk)),
 		done:          make(chan struct{}),
 		debounce:      debounce,
 		fsOpts:        opts,
@@ -272,4 +272,11 @@ func (w *WatchedIndex) SnapshotBytes() ([]byte, error) {
 		}
 	}
 	return serializeIndex(ix.Chunks(), ix.Vecs(), ix.Mode(), w.chunkerName)
+}
+
+// matcherOptions is the walk limits with Root set, for the watch path's
+// admission Matcher: it must apply the same limits the initial walk did.
+func matcherOptions(root string, walk repo.Options) repo.Options {
+	walk.Root = root
+	return walk
 }

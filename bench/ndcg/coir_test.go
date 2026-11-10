@@ -40,6 +40,7 @@ import (
 	// transitively pulls in optional chunkers.
 	_ "github.com/townsendmerino/aikit/chunk/treesitter"
 	"github.com/townsendmerino/aikit/encoder"
+	"github.com/townsendmerino/ken/bench/internal/benchenv"
 	"github.com/townsendmerino/ken/bench/internal/provenance"
 	"github.com/townsendmerino/ken/internal/search"
 )
@@ -186,7 +187,7 @@ func TestCoIR_CSNPython(t *testing.T) {
 
 		t.Logf("[%s] building index over %s...", modeStr, corpusDir)
 		tBuild := time.Now()
-		ix, err := search.FromPath(corpusDir, mode, chunker, modelDir)
+		ix, err := benchenv.FromPath(corpusDir, mode, chunker, modelDir)
 		if err != nil {
 			t.Fatalf("[%s] FromPath: %v", modeStr, err)
 		}

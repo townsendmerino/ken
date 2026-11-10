@@ -73,6 +73,7 @@ import (
 	"time"
 
 	"github.com/townsendmerino/aikit/encoder"
+	"github.com/townsendmerino/ken/bench/internal/benchenv"
 	"github.com/townsendmerino/ken/internal/search"
 )
 
@@ -185,7 +186,7 @@ func TestHyDE_M0(t *testing.T) {
 
 	t.Logf("building index over %s (chunker=%s)...", corpusDir, chunker)
 	tBuild := time.Now()
-	ix, err := search.FromPath(corpusDir, search.ModeHybrid, chunker, modelDir)
+	ix, err := benchenv.FromPath(corpusDir, search.ModeHybrid, chunker, modelDir)
 	if err != nil {
 		t.Fatalf("FromPath: %v", err)
 	}

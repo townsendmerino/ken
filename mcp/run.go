@@ -13,6 +13,7 @@ import (
 
 	"github.com/townsendmerino/aikit/chunk"
 	"github.com/townsendmerino/aikit/embed"
+	"github.com/townsendmerino/ken/internal/envcfg"
 	"github.com/townsendmerino/ken/internal/search"
 )
 
@@ -172,6 +173,7 @@ func Run(ctx context.Context, fsys fs.FS, opts Options) error {
 // accumulate. See *search.Index.WithExtraChunks for the rebuild
 // contract.
 func runOnTransport(ctx context.Context, fsys fs.FS, opts Options, transport sdk.Transport) error {
+	applyParseBudgetEnv()
 	ix, logger, err := buildEmbeddedIndex(fsys, opts)
 	if err != nil {
 		return err
@@ -276,7 +278,7 @@ func buildEmbeddedIndex(fsys fs.FS, opts Options) (*search.Index, *Logger, error
 		return ix, logger, nil
 	}
 
-	ix, err := search.FromFSWithModel(fsys, mode, chunkerName, model)
+	ix, err := search.FromFSWithModelWalk(fsys, mode, chunkerName, model, envcfg.WalkLimits())
 	if err != nil {
 		return nil, nil, fmt.Errorf("build index from fsys: %w", err)
 	}

@@ -157,6 +157,8 @@ Guards: HTTP mode **refuses to start without a token** (no insecure default, no 
 | `KEN_ALLOW_PRIVATE_CLONE_TARGETS` | `0` | Off by default: for `http(s)` `repo` URLs, ken rejects loopback / link-local / RFC1918 addresses (SSRF guard). Set `1` to allow internal git hosts. |
 | `KEN_MCP_ALLOWED_REPO_ROOTS` | (unset) | Confine **agent-supplied** local-path `repo` arguments to these roots (OS-path-list-separated, like `PATH`). Unset = no confinement (any local path) — and ken-mcp logs a **loud startup security warning** in that case, since a long-lived server whose agent also handles untrusted content could be steered into reading arbitrary files. The local-path analogue of the clone SSRF guard: setting it stops the agent pointing ken at `/etc`, `~/.ssh`, etc. (and silences the warning). `KEN_MCP_DEFAULT_REPO` is exempt (the operator vouched for it). Symlinks are resolved before the check. |
 
+These variables configure the `ken` and `ken-mcp` binaries, and servers built on the [`mcp`](mcp/) package. A program that imports [`engine`](engine/) is not affected by them: it sets the matching `engine.Options` fields (see [DEVELOPERS.md](docs/DEVELOPERS.md#public-api-surface)).
+
 The full env reference — including the `KEN_DB_*` database variables — is in [docs/USERS.md](docs/USERS.md) and [docs/db-indexing.md](docs/db-indexing.md). For agents that should route between ken and grep deliberately (rather than ken's default "prefer ken" instruction), see the routing snippet in [docs/USERS.md](docs/USERS.md).
 
 ## Tools

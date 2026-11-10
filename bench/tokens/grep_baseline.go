@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/townsendmerino/aikit/bm25"
+	"github.com/townsendmerino/ken/internal/envcfg"
 	"github.com/townsendmerino/ken/internal/repo"
 )
 
@@ -89,7 +90,9 @@ type cachedFile struct {
 // caches the result. Returns an error only on Walk failure; individual
 // file read errors are skipped silently (same as MeasureKen's tolerance).
 func NewCorpusCache(root string) (*CorpusCache, error) {
-	files, err := repo.Walk(repo.Options{Root: root})
+	walk := envcfg.WalkLimits() // the same KEN_MAX_* limits the ken arm's walk gets
+	walk.Root = root
+	files, err := repo.Walk(walk)
 	if err != nil {
 		return nil, err
 	}

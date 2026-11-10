@@ -148,7 +148,7 @@ func TestRecallDecomp(t *testing.T) {
 		}
 
 		tRepo := time.Now()
-		ix, err := FromPath(benchDir, ModeHybrid, "regex", modelDir)
+		ix, err := fromPathEnv(benchDir, ModeHybrid, "regex", modelDir)
 		if err != nil {
 			t.Logf("[%s] skip — index build: %v", repo.Name, err)
 			continue
@@ -348,7 +348,7 @@ func TestRecallDecomp_BM25Baseline(t *testing.T) {
 		if err != nil || len(tasks) == 0 {
 			continue
 		}
-		ix, err := FromPath(benchDir, ModeBM25, "regex", "")
+		ix, err := fromPathEnv(benchDir, ModeBM25, "regex", "")
 		if err != nil {
 			continue
 		}
@@ -440,7 +440,7 @@ func TestRecallDecomp_Rerank(t *testing.T) {
 		if err != nil || len(tasks) == 0 {
 			continue
 		}
-		ix, err := FromPath(benchDir, ModeHybrid, "regex", modelDir)
+		ix, err := fromPathEnv(benchDir, ModeHybrid, "regex", modelDir)
 		if err != nil {
 			continue
 		}

@@ -69,6 +69,7 @@ import (
 	"github.com/townsendmerino/aikit/chunk"
 	"github.com/townsendmerino/aikit/embed"
 	"github.com/townsendmerino/ken/internal/binfmt"
+	"github.com/townsendmerino/ken/internal/repo"
 )
 
 const (
@@ -164,6 +165,10 @@ type BuildOptions struct {
 	// callers reload the model independently at load time
 	// (LoadOptions.Model).
 	Model *embed.StaticModel
+
+	// Walk carries the walker's limits (see FSOptions.Walk). The zero
+	// value is the walker's defaults.
+	Walk repo.Options
 }
 
 // LoadOptions configures LoadSerializedIndex. The Expected fields are
@@ -216,7 +221,7 @@ func BuildAndSerializeIndex(fsys fs.FS, opts BuildOptions) ([]byte, error) {
 	if opts.Mode.needsModel() && opts.Model == nil {
 		return nil, fmt.Errorf("search: BuildAndSerializeIndex: mode %v requires Options.Model", opts.Mode)
 	}
-	chunks, vecs, _, _, err := walkAndChunkFSWithModel(context.Background(), fsys, opts.Mode, opts.Chunker, opts.Model, FSOptions{})
+	chunks, vecs, _, _, err := walkAndChunkFSWithModel(context.Background(), fsys, opts.Mode, opts.Chunker, opts.Model, FSOptions{Walk: opts.Walk})
 	if err != nil {
 		return nil, fmt.Errorf("search: BuildAndSerializeIndex: %w", err)
 	}

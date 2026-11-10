@@ -40,16 +40,17 @@ import (
 var importRules = map[string][]string{
 	// Benchmark harnesses (//go:build bench).
 	"bench/chunkdiff":             {"internal/structural"},
-	"bench/contextbench":          {"bench/internal/provenance", "bench/tokens", "engine", "internal/search", "internal/structural"},
-	"bench/contextbench/cmd/cb":   {"bench/contextbench", "internal/structural"},
+	"bench/contextbench":          {"bench/internal/benchenv", "bench/internal/provenance", "bench/tokens", "engine", "internal/search", "internal/structural"},
+	"bench/contextbench/cmd/cb":   {"bench/contextbench", "bench/internal/benchenv", "internal/structural"},
+	"bench/internal/benchenv":     {"engine", "internal/envcfg", "internal/search", "internal/structural"},
 	"bench/internal/provenance":   {"internal/search"},
 	"bench/internal/semblecorpus": {},
 	"bench/ndcg":                  {"internal/search"},
 	"bench/temporal":              {},
-	"bench/tokens":                {"internal/repo", "internal/search", "mcp"},
+	"bench/tokens":                {"internal/envcfg", "internal/repo", "internal/search", "mcp"},
 
 	// Programs.
-	"cmd/ken":                   {"internal/modelfetch", "internal/perf", "internal/search", "internal/status", "internal/structural", "internal/usage"},
+	"cmd/ken":                   {"internal/envcfg", "internal/modelfetch", "internal/perf", "internal/search", "internal/status", "internal/structural", "internal/usage"},
 	"cmd/ken-mcp":               {"engine", "internal/bytesize", "internal/embedcache", "internal/envcfg", "internal/modelfetch", "internal/search", "internal/structural", "internal/usage", "mcp", "mcp/db"},
 	"cmd/ken-mcp-docs":          {"mcp"},
 	"demos/go-stdlib":           {"mcp"},
@@ -59,7 +60,7 @@ var importRules = map[string][]string{
 	"tools/build-docs-mcp":      {"internal/devtools"},
 	"tools/build-subset":        {"internal/devtools"},
 	"tools/gen-licenses":        {"internal/devtools"},
-	"tools/k8-structural":       {"engine"},
+	"tools/k8-structural":       {"engine", "internal/envcfg"},
 	"tools/peakrss":             {},
 	"tools/perf-startup-m2":     {"internal/devtools"},
 	"tools/rss-bench":           {},
@@ -67,7 +68,7 @@ var importRules = map[string][]string{
 
 	// Public library packages.
 	"engine": {"internal/repo", "internal/search", "internal/structural"},
-	"mcp":    {"internal/mcplog", "internal/search", "internal/status", "internal/structural"},
+	"mcp":    {"internal/envcfg", "internal/mcplog", "internal/search", "internal/status", "internal/structural"},
 	"mcp/db": {"internal/db", "mcp"},
 
 	// Internal packages.
@@ -77,15 +78,15 @@ var importRules = map[string][]string{
 	"internal/db":          {},
 	"internal/devtools":    {},
 	"internal/embedcache":  {},
-	"internal/envcfg":      {"internal/mcplog"},
+	"internal/envcfg":      {"internal/bytesize", "internal/mcplog", "internal/repo"},
 	"internal/mcplog":      {},
 	"internal/modelfetch":  {},
 	"internal/perf":        {},
-	"internal/repo":        {"internal/bytesize"},
+	"internal/repo":        {},
 	"internal/search":      {"internal/binfmt", "internal/repo", "internal/sql", "internal/structural"},
 	"internal/sql":         {},
 	"internal/status":      {"internal/usage"},
-	"internal/structural":  {"internal/bytesize", "internal/repo"},
+	"internal/structural":  {"internal/repo"},
 	"internal/usage":       {},
 }
 

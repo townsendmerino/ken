@@ -30,11 +30,13 @@ import (
 	_ "github.com/townsendmerino/aikit/chunk/treesitter"
 
 	"github.com/townsendmerino/aikit/chunk"
+	"github.com/townsendmerino/ken/bench/internal/benchenv"
 	"github.com/townsendmerino/ken/bench/internal/provenance"
 	"github.com/townsendmerino/ken/internal/repo"
 )
 
 func TestTraceability_SembleCorpus(t *testing.T) {
+	benchenv.ApplyParseBudget(0) // KEN_ENRICH_FILE_BUDGET_MS, when set
 	corpusRoot := os.Getenv("KEN_SEMBLE_CORPUS_ROOT")
 	if corpusRoot == "" {
 		corpusRoot = filepath.Join(os.Getenv("HOME"), ".cache", "semble-bench")

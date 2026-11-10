@@ -20,6 +20,7 @@ import (
 	"time"
 
 	_ "github.com/townsendmerino/aikit/chunk/treesitter"
+	"github.com/townsendmerino/ken/bench/internal/benchenv"
 	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/search"
 	"github.com/townsendmerino/ken/internal/structural"
@@ -200,7 +201,7 @@ func (a *ArmKen) Retrieve(ctx context.Context, repoDir, problemStatement string,
 	}
 
 	t0 := time.Now()
-	ws, err := engine.Open(ctx, repoDir, opts)
+	ws, err := engine.Open(ctx, repoDir, benchenv.EngineOptions(opts))
 	if err != nil {
 		return nil, ArmStats{}, fmt.Errorf("open workspace: %w", err)
 	}
@@ -415,7 +416,7 @@ func (a *ArmKenAlpha) Retrieve(ctx context.Context, repoDir, problemStatement st
 		LogWriter: io.Discard,
 	}
 	t0 := time.Now()
-	ws, err := engine.Open(ctx, repoDir, opts)
+	ws, err := engine.Open(ctx, repoDir, benchenv.EngineOptions(opts))
 	if err != nil {
 		return nil, ArmStats{}, fmt.Errorf("open workspace: %w", err)
 	}

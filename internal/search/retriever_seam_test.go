@@ -56,26 +56,8 @@ func typeName(v any) string {
 	}
 }
 
-func TestDefaultFSOptions_KenAnnEnvVar(t *testing.T) {
-	cases := []struct {
-		env  string
-		want string
-	}{
-		{"", ""},
-		{"flat-i8", "flat-i8"},
-		{"flat-binary-i8", "flat-binary-i8"},
-		{"FLAT-I8", "flat-i8"}, // case-insensitive
-		{"hnsw", ""},           // not a wired option (didn't clear the bar) — falls back
-		{"nonsense", ""},       // unrecognized — falls back, no panic
-	}
-	for _, tc := range cases {
-		t.Setenv("KEN_ANN", tc.env)
-		opts := defaultFSOptions()
-		if opts.DenseRetriever != tc.want {
-			t.Errorf("KEN_ANN=%q: DenseRetriever = %q, want %q", tc.env, opts.DenseRetriever, tc.want)
-		}
-	}
-}
+// KEN_ANN's parsing is tested where it is read: internal/envcfg's
+// TestDenseRetriever.
 
 func TestBuildIndex_AlwaysDenseFlat_IgnoresEnv(t *testing.T) {
 	// BuildIndex is the public, stable entry point — Phase 2 must not let

@@ -70,7 +70,6 @@ import (
 	"runtime"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -466,20 +465,28 @@ var (
 // ParseStopReason guard turns a timeout into a clean skip, not a corrupt
 // partial-tree label, and (b) off-by-default keeps the deterministic path
 // deterministic.
-func envParseBudgetMicros() uint64 {
-	v := strings.TrimSpace(os.Getenv("KEN_ENRICH_FILE_BUDGET_MS"))
-	if v == "" {
-		return 0
+var parseBudgetMicros atomic.Uint64
+
+// SetParseBudget sets the process-wide per-file parse budget; 0 disables
+// it. A program calls it once at startup, before the first parse: each
+// grammar's parser pool is built on first use with the budget in force at
+// that moment and keeps it. This package does not read
+// KEN_ENRICH_FILE_BUDGET_MS itself; the binaries read it at their edge
+// (internal/envcfg.EnrichFileBudgetMicros) and call this.
+func SetParseBudget(d time.Duration) {
+	if d < 0 {
+		d = 0
 	}
-	ms, err := strconv.ParseUint(v, 10, 64)
-	if err != nil {
-		return 0 // invalid → disabled (lenient, matching the other size knobs)
-	}
-	return ms * 1000
+	parseBudgetMicros.Store(uint64(d / time.Microsecond))
+}
+
+// ParseBudget returns the budget SetParseBudget last set (0 = disabled).
+func ParseBudget() time.Duration {
+	return time.Duration(parseBudgetMicros.Load()) * time.Microsecond
 }
 
 // parseBudgetOverrideMicros lets tests set a sub-millisecond budget (the env
-// knob is whole-ms). 0 = use the env. Test-only. NOTE: a small wall-clock
+// knob is whole-ms). 0 = use SetParseBudget's value. Test-only. NOTE: a small wall-clock
 // budget does NOT reliably produce a timeout — gotreesitter checks its deadline
 // only at parse-step boundaries, so a trivial file can finish before the first
 // check (that made TestParseBudget_ExhaustionSkipsCountsLogs flaky on fast
@@ -497,7 +504,7 @@ func effectiveParseBudgetMicros() uint64 {
 	if v := parseBudgetOverrideMicros.Load(); v != 0 {
 		return v
 	}
-	return envParseBudgetMicros()
+	return parseBudgetMicros.Load()
 }
 
 // parseBudgetSkips counts files skipped because their parse hit the budget.
@@ -582,12 +589,16 @@ func BuildWithContext(ctx context.Context, corpusDir string) (*Index, error) {
 // BuildWithContext's behavior.
 type BuildOptions struct {
 	// MaxFileBytes is the largest file the structural index parses;
-	// larger files are left out of it. <= 0 resolves through
-	// ResolveMaxStructuralFileBytes (KEN_STRUCTURAL_MAX_FILE_BYTES, else
-	// DefaultMaxStructuralFileBytes). Index.Update keeps the cap the
+	// larger files are left out of it. <= 0 means
+	// DefaultMaxStructuralFileBytes. Index.Update keeps the cap the
 	// index was built with. It doesn't affect enrichment, whose 64 KiB
 	// cap is fixed.
 	MaxFileBytes int64
+
+	// Walk carries the walker's limits, so the structural index covers
+	// the same files the search index does. Root is ignored. The zero
+	// value is the walker's defaults.
+	Walk repo.Options
 }
 
 // BuildWithOptions is BuildWithContext with options.
@@ -604,7 +615,7 @@ func BuildWithOptions(ctx context.Context, corpusDir string, opts BuildOptions) 
 	// the chunker uses. WalkFS returns repo-relative slash paths
 	// in deterministic lexical order; binary files and oversized
 	// files are already skipped at the walker layer.
-	relPaths, err := repo.WalkFS(os.DirFS(corpusDir), repo.Options{})
+	relPaths, err := repo.WalkFS(os.DirFS(corpusDir), opts.Walk)
 	if err != nil {
 		return nil, fmt.Errorf("structural.Build: walk %s: %w", corpusDir, err)
 	}
