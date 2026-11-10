@@ -18,6 +18,7 @@ pre-built binaries.
 ### Changed
 
 - **`engine`'s escape hatches are now documented as best-effort.** The `engine.Index`, `engine.WatchedIndex` and `engine.StructuralIndex` aliases, and the `Workspace.WatchedIndex`, `Workspace.Structural` and `Workspace.StructuralIfBuilt` accessors that return them, are outside the 1.0 stability promise. They alias `internal/search` and `internal/structural` types, so they carry about 53 of those packages' methods, which can change in any release. Their comments said "1.0-stable" before. Nothing was removed or renamed.
+- **`mcp.Logger`, `mcp.LogLevel` and `mcp.ValidateEnum` are now aliases and wrappers over `internal/mcplog`.** The names, signatures and behavior are unchanged. `internal/envcfg` no longer imports the public `mcp` package, which was the import graph's one internal-to-public edge.
 
 ## [1.13.0] — 2026-11-08 — exact `SearchFiles` at any index size, and opt-in `BudgetPacking` search
 

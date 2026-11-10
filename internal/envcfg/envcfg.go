@@ -25,21 +25,21 @@ import (
 	"strings"
 	"time"
 
-	kenmcp "github.com/townsendmerino/ken/mcp"
+	"github.com/townsendmerino/ken/internal/mcplog"
 )
 
 // EnvInt parses an integer env var. Empty/unset returns fallback;
 // invalid input warns and returns fallback. Negative values are
 // passed through unchanged — the caller decides whether to reject (e.g.
 // CACHE_SIZE rejects negatives but allows 0 for "no caching").
-func EnvInt(name string, fallback int, l *kenmcp.Logger) int {
+func EnvInt(name string, fallback int, l *mcplog.Logger) int {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return fallback
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil {
-		l.Logf(kenmcp.LogWarn, "invalid %s=%q: %v — using default %d", name, raw, err, fallback)
+		l.Logf(mcplog.LogWarn, "invalid %s=%q: %v — using default %d", name, raw, err, fallback)
 		return fallback
 	}
 	return n
@@ -47,24 +47,24 @@ func EnvInt(name string, fallback int, l *kenmcp.Logger) int {
 
 // EnvEnum returns the env var value if it exactly matches one of allowed
 // (case-sensitive); empty/unset returns fallback; any mismatch warns and
-// returns fallback. Thin wrapper around kenmcp.ValidateEnum so the warn
+// returns fallback. Thin wrapper around mcplog.ValidateEnum so the warn
 // format stays identical across env-var and Options.Mode validation.
-func EnvEnum(name string, allowed []string, fallback string, l *kenmcp.Logger) string {
-	return kenmcp.ValidateEnum(name, os.Getenv(name), allowed, fallback, l)
+func EnvEnum(name string, allowed []string, fallback string, l *mcplog.Logger) string {
+	return mcplog.ValidateEnum(name, os.Getenv(name), allowed, fallback, l)
 }
 
 // EnvFloat parses a float64 env var. Empty/unset returns fallback;
 // invalid input warns and returns fallback. Range-checking is the
 // caller's responsibility (KEN_MCP_RERANK_BETA clamps to [0,1] via
 // search.WithRerankBlendBeta, for example).
-func EnvFloat(name string, fallback float64, l *kenmcp.Logger) float64 {
+func EnvFloat(name string, fallback float64, l *mcplog.Logger) float64 {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return fallback
 	}
 	v, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
-		l.Logf(kenmcp.LogWarn, "invalid %s=%q: %v — using default %v", name, raw, err, fallback)
+		l.Logf(mcplog.LogWarn, "invalid %s=%q: %v — using default %v", name, raw, err, fallback)
 		return fallback
 	}
 	return v
@@ -75,18 +75,18 @@ func EnvFloat(name string, fallback float64, l *kenmcp.Logger) float64 {
 // any existing auto-downgrade logic (e.g. KEN_MCP_MODEL_DIR missing ⇒
 // downgrade to bm25) runs as before; the warn is just the early signal
 // that the path is wrong.
-func EnvPath(name string, l *kenmcp.Logger) string {
+func EnvPath(name string, l *mcplog.Logger) string {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return raw
 	}
 	st, err := os.Stat(raw)
 	if err != nil {
-		l.Logf(kenmcp.LogWarn, "%s=%q: %v — value kept; downstream behavior may downgrade", name, raw, err)
+		l.Logf(mcplog.LogWarn, "%s=%q: %v — value kept; downstream behavior may downgrade", name, raw, err)
 		return raw
 	}
 	if !st.IsDir() {
-		l.Logf(kenmcp.LogWarn, "%s=%q: not a directory — value kept; downstream behavior may downgrade", name, raw)
+		l.Logf(mcplog.LogWarn, "%s=%q: not a directory — value kept; downstream behavior may downgrade", name, raw)
 	}
 	return raw
 }
@@ -94,7 +94,7 @@ func EnvPath(name string, l *kenmcp.Logger) string {
 // EnvPathOrURL is EnvPath plus an http(s) URL escape hatch. KEN_MCP_DEFAULT_REPO
 // is allowed to name either a local directory or a remote URL (cloned
 // on first request); we accept either, warn on neither.
-func EnvPathOrURL(name string, l *kenmcp.Logger) string {
+func EnvPathOrURL(name string, l *mcplog.Logger) string {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return raw
@@ -104,7 +104,7 @@ func EnvPathOrURL(name string, l *kenmcp.Logger) string {
 	}
 	st, err := os.Stat(raw)
 	if err != nil || !st.IsDir() {
-		l.Logf(kenmcp.LogWarn, "%s=%q: not a directory or http(s) URL — value kept; per-request lookups may fail", name, raw)
+		l.Logf(mcplog.LogWarn, "%s=%q: not a directory or http(s) URL — value kept; per-request lookups may fail", name, raw)
 	}
 	return raw
 }
@@ -116,7 +116,7 @@ func EnvPathOrURL(name string, l *kenmcp.Logger) string {
 // pattern the rest of this file uses.
 //
 // v0.7.1: introduced for KEN_SQL_NO_AUTO_MIGRATIONS.
-func EnvBool(name string, fallback bool, l *kenmcp.Logger) bool {
+func EnvBool(name string, fallback bool, l *mcplog.Logger) bool {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return fallback
@@ -127,7 +127,7 @@ func EnvBool(name string, fallback bool, l *kenmcp.Logger) bool {
 	case "0", "false", "no", "n", "off":
 		return false
 	}
-	l.Logf(kenmcp.LogWarn, "invalid %s=%q: expected boolean (1/true/yes/on or 0/false/no/off) — using default %v",
+	l.Logf(mcplog.LogWarn, "invalid %s=%q: expected boolean (1/true/yes/on or 0/false/no/off) — using default %v",
 		name, raw, fallback)
 	return fallback
 }
@@ -136,18 +136,18 @@ func EnvBool(name string, fallback bool, l *kenmcp.Logger) bool {
 // Empty/unset returns fallback; invalid input warns and returns
 // fallback. Used by v0.7.0's KEN_DB_REINDEX_INTERVAL (fallback: 0 =
 // disabled, no periodic reindex).
-func EnvDuration(name string, fallback time.Duration, l *kenmcp.Logger) time.Duration {
+func EnvDuration(name string, fallback time.Duration, l *mcplog.Logger) time.Duration {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return fallback
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil {
-		l.Logf(kenmcp.LogWarn, "invalid %s=%q: %v — using default %s", name, raw, err, fallback)
+		l.Logf(mcplog.LogWarn, "invalid %s=%q: %v — using default %s", name, raw, err, fallback)
 		return fallback
 	}
 	if d < 0 {
-		l.Logf(kenmcp.LogWarn, "invalid %s=%q: must be non-negative — using default %s", name, raw, fallback)
+		l.Logf(mcplog.LogWarn, "invalid %s=%q: must be non-negative — using default %s", name, raw, fallback)
 		return fallback
 	}
 	return d
@@ -178,7 +178,7 @@ var dsnAcceptedSchemes = map[string]bool{
 // rejection at startup rather than a silent connection-time failure
 // later). SQLite URLs do NOT require a host (`sqlite:///abs/path.db`
 // and `sqlite://./rel/path.db` are both valid).
-func EnvDSN(name string, l *kenmcp.Logger) string {
+func EnvDSN(name string, l *mcplog.Logger) string {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return raw
@@ -190,26 +190,26 @@ func EnvDSN(name string, l *kenmcp.Logger) string {
 		if strings.Contains(raw, "@tcp(") || strings.Contains(raw, "@unix(") {
 			return raw
 		}
-		l.Logf(kenmcp.LogWarn,
+		l.Logf(mcplog.LogWarn,
 			"invalid %s: no scheme and not a native MySQL DSN (want postgres://, postgresql://, sqlite://, sqlite3://, mysql://, or user:pass@tcp(host:port)/db) — Tier 2 (DB indexing) disabled",
 			name)
 		return ""
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		l.Logf(kenmcp.LogWarn, "invalid %s: %v — Tier 2 (DB indexing) disabled", name, err)
+		l.Logf(mcplog.LogWarn, "invalid %s: %v — Tier 2 (DB indexing) disabled", name, err)
 		return ""
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if !dsnAcceptedSchemes[scheme] {
-		l.Logf(kenmcp.LogWarn, "invalid %s scheme %q (want postgres://, postgresql://, sqlite://, sqlite3://, or mysql://) — Tier 2 (DB indexing) disabled", name, u.Scheme)
+		l.Logf(mcplog.LogWarn, "invalid %s scheme %q (want postgres://, postgresql://, sqlite://, sqlite3://, or mysql://) — Tier 2 (DB indexing) disabled", name, u.Scheme)
 		return ""
 	}
 	// Postgres/postgresql/mysql REQUIRE a host. SQLite uses the path
 	// component and may have an empty host (`sqlite:///abs/path` or
 	// `sqlite://./rel/path` — relative paths put the leading "." in Host).
 	if (scheme == "postgres" || scheme == "postgresql" || scheme == "mysql") && u.Host == "" {
-		l.Logf(kenmcp.LogWarn, "invalid %s: missing host — Tier 2 (DB indexing) disabled", name)
+		l.Logf(mcplog.LogWarn, "invalid %s: missing host — Tier 2 (DB indexing) disabled", name)
 		return ""
 	}
 	// Don't log the raw DSN itself — it usually contains a password.
