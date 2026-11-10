@@ -247,6 +247,10 @@ func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeS
 			ExpectedMode:    modeStr,
 			ExpectedChunker: chunker,
 			Model:           model,
+			// KEN_ANN picks the retriever built over the file's vectors.
+			// KEN_ENRICH can't apply: a pre-built index is enriched or
+			// not as `ken build-index` made it (status reports which).
+			DenseRetriever: fsOpts.DenseRetriever,
 		})
 		switch {
 		case lErr == nil:
@@ -870,10 +874,12 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 		LazyEnrichment:        rb.lazyEnrich,
 		StagedEmbedding:       rb.staged,
 		MmapModel:             rb.mmapModel,
+		// KEN_ENRICH and KEN_ANN, the same options the ken CLI's one-shot
+		// builds use (ADR-054; before it ken-mcp ignored both).
+		DisableEnrichment: envcfg.EnrichDisabled(),
+		DenseRetriever:    envcfg.DenseRetriever(),
 		// KEN_MAX_FILE_BYTES, KEN_MAX_AVG_LINE_BYTES, KEN_MAX_FILES and
-		// KEN_SKIP_GENERATED. KEN_ENRICH and KEN_ANN are deliberately not
-		// read here: ken-mcp has never applied them, and wiring them in
-		// would change what a running server returns.
+		// KEN_SKIP_GENERATED.
 		Walk: envcfg.WalkLimits(),
 	}
 	// Assign the interface only when non-nil so a nil *Cache doesn't become

@@ -20,8 +20,9 @@ import (
 //   - confine.go: KEN_MCP_ALLOWED_REPO_ROOTS
 //   - status_tool.go: KEN_MODEL_DIR, KEN_RERANK_MODEL_DIR,
 //     KEN_USAGE_STATS_PATH, KEN_ENRICH (reported by the status tool)
-//   - run.go (mcp.Run only): KEN_MAX_FILE_BYTES, KEN_MAX_AVG_LINE_BYTES,
-//     KEN_MAX_FILES, KEN_SKIP_GENERATED, KEN_ENRICH_FILE_BUDGET_MS
+//   - run.go (mcp.Run only): KEN_ENRICH, KEN_ANN, KEN_MAX_FILE_BYTES,
+//     KEN_MAX_AVG_LINE_BYTES, KEN_MAX_FILES, KEN_SKIP_GENERATED,
+//     KEN_ENRICH_FILE_BUDGET_MS
 //
 // internal/buildchecks' TestEnvReadsStayAtTheEdge enforces the rule and
 // names this package as one of the allowed readers.

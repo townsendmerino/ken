@@ -61,6 +61,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-051](#adr-051-opt-in-budgetpacking-search-option-saturation-threshold-2) | Opt-in `BudgetPacking` search option: file saturation from the third chunk | Superseded by ADR-052 |
 | [ADR-052](#adr-052-budgetpacking-uses-a-gentler-decay-08-instead-of-threshold-2) | `BudgetPacking` uses a gentler decay (0.8) instead of threshold 2 | Accepted |
 | [ADR-053](#adr-053-environment-variables-are-read-at-the-edge) | Environment variables are read at the edge | Accepted |
+| [ADR-054](#adr-054-ken_enrich-and-ken_ann-apply-on-every-index-path) | `KEN_ENRICH` and `KEN_ANN` apply on every index path | Accepted |
 
 ---
 
@@ -2993,9 +2994,38 @@ The public `mcp` package read the environment too: `KEN_MCP_ALLOWED_REPO_ROOTS`,
 ### What did not change
 The `ken` and `ken-mcp` binaries behave as before for every variable. Old and new builds were compared on a fixture corpus: `ken` (search, index, bench, build-index, status, doctor, in bm25 and hybrid) over 29 environment settings and `ken-mcp` (search, find_related, the structural tools, status, over JSON-RPC) over 36, with identical output apart from the binaries' own version stamps and the timing-dependent 1 ms parse-budget case, which also differs between two runs of the old binary.
 
-That includes one behavior the documentation gets wrong, kept as it was: `KEN_ENRICH` and `KEN_ANN` reach only the one-shot build paths (`ken search`, `ken bench`, `ken index --no-watch`, `ken perf`). The watched index never applied them, so `ken-mcp`, `ken index` (watch mode), `ken build-index` and `mcp.Run` ignore both, although README and docs/USERS.md describe them as working there, and ken-mcp's `status` tool reports enrichment as off under `KEN_ENRICH=off` while the index is enriched. Fixing it changes what a running server returns, so it is a separate decision.
+That includes one behavior the documentation gets wrong, kept as it was: `KEN_ENRICH` and `KEN_ANN` reach only the one-shot build paths (`ken search`, `ken bench`, `ken index --no-watch`, `ken perf`). The watched index never applied them, so `ken-mcp`, `ken index` (watch mode), `ken build-index` and `mcp.Run` ignore both, although README and docs/USERS.md describe them as working there, and ken-mcp's `status` tool reports enrichment as off under `KEN_ENRICH=off` while the index is enriched. Fixing it changes what a running server returns, so it is a separate decision (taken in ADR-054).
 
 ### Consequences
 - A program that imports `engine` and relied on one of the six variables (`KEN_MAX_FILE_BYTES`, `KEN_MAX_AVG_LINE_BYTES`, `KEN_MAX_FILES`, `KEN_SKIP_GENERATED`, `KEN_STRUCTURAL_MAX_FILE_BYTES`, `KEN_ENRICH_FILE_BUDGET_MS`) must set the matching field or call `SetEnrichFileBudget`. `engine.Options.StructuralMaxFileBytes`'s documented fallback to the variable is gone.
 - The import graph shows who depends on the environment: the packages that import `internal/envcfg` (`cmd/ken`, `cmd/ken-mcp`, `mcp`, and two harnesses).
 - The bench harnesses read their variables through `bench/internal/benchenv`, so the commands in docs/BENCH.md keep working.
+
+## ADR-054: KEN_ENRICH and KEN_ANN apply on every index path
+
+**Status:** Accepted
+**Date:** 2026-11-10
+**Decided by:** Francis (2026-11-10): fix the behavior to match the documentation. Shipping the `KEN_ANN` half is gated on his yes to the recall figures below.
+
+### Context
+`KEN_ENRICH` and `KEN_ANN` were parsed in one place, `internal/search`'s default options for the no-knob one-shot builds. Only `ken search`, `ken bench`, `ken index --no-watch` and `ken perf` applied them. `ken-mcp`, `ken index` in watch mode, `ken build-index` and `mcp.Run` ignored both, while README and docs/USERS.md described them as working there, and ken-mcp's `status` reported enrichment as off under `KEN_ENRICH=off` over an index that was enriched. ADR-053 moved the reads to the edge and kept this as it was.
+
+### Decision
+1. **One set of options on every path.** Each edge passes `FSOptions.DisableEnrichment` (from `KEN_ENRICH`) and `FSOptions.DenseRetriever` (from `KEN_ANN`): `cmd/ken` for all of its index builds, `cmd/ken-mcp` for the watched index it opens through `engine`, and `mcp.Run` for the embedded-corpus build.
+2. **`ken build-index` applies `KEN_ENRICH`** (`BuildOptions.DisableEnrichment`). It has nothing to do for `KEN_ANN`: the file stores full-precision vectors.
+3. **A pre-built index gets its retriever at load** (`LoadOptions.DenseRetriever`, used by `ken-mcp` and `mcp.Run`). `KEN_ENRICH` cannot change a pre-built index; it is enriched or not as `ken build-index` made it.
+4. **`status` reports the loaded index, read from the index:** how many chunks carry an enrichment label (`IndexInfo.EnrichedChunks`) and which dense store is serving (`IndexInfo.DenseRetriever`). The existing "Arm B enrichment" section stays as the configured setting, which governs the next build.
+5. **`Index.WithExtraChunks` keeps the receiver's retriever.** It rebuilt with exact `Flat`, which would have undone `KEN_ANN` on an `mcp.Run` server at its first DB refresh.
+
+`engine` is unchanged: it never read these variables and still doesn't. `engine.Options.DenseRetriever` and `DisableEnrichment` were already the fields, and they already worked.
+
+### Evidence
+- **Both variables unset, old against new build:** `ken` identical in 21 of 22 environment settings (search, index, bench, build-index, status, doctor; bm25 and hybrid) and `ken-mcp` identical in all 30 over JSON-RPC, apart from the two status fields this ADR adds. The one `ken` difference is the timing-dependent 1 ms parse budget, which also differs between two runs of one binary.
+- **Each variable set, server paths against the one-shot path:** on the old build, `ken-mcp` (live and pre-built) returned different results from `ken search` under `KEN_ENRICH=off` in both modes and under either `KEN_ANN` value in hybrid. On the new build they match in all 10 settings (5 settings × bm25/hybrid): same hits, same scores. `ken build-index` and the watched index's snapshot carry 26 labels by default and 0 under `KEN_ENRICH=off`, and `status` names the store being served.
+- **Recall cost of the quantized stores** (measured 2026-09-06, `docs/internal/dense-retriever-adoption-2026-09.md`; not re-measured here). On the semble benchmark (63 repos, 1,251 tasks), full-pipeline recall@10 is 0.974 for exact `flat`, `flat-i8` and `flat-binary-i8` alike (NL 0.971, symbol 0.995 for all three); the semantic arm alone is 0.843 at 10 for `flat` and 0.844 for both quantized stores. At Linux-kernel scale (584k chunks, no relevance labels) agreement with exact search in the top 10 is 1.0000 for `flat-i8` on 16 domain queries and 0.9823 on 300 self-retrieval queries; `flat-binary-i8` is 0.9625 and 0.9590. No NDCG@10 figure has been recorded for the quantized stores.
+
+### Consequences
+- **Behavior fix that changes results for anyone who had set either variable on a server path.** A `ken-mcp` or `ken index` started with `KEN_ENRICH=off` now builds an unenriched index, as documented, so its rankings change. One started with `KEN_ANN` set now serves that store: scores shift slightly and, at kernel scale with `flat-binary-i8`, the top 10 can differ from exact search in about 4% of positions. With both unset nothing changes.
+- A ken-mcp snapshot built under the old behavior is rebuilt once when either variable is set: the snapshot's config key already included both settings.
+- The memory saving is the watched index's (`ken-mcp`, `ken index`, `engine`): it holds only the quantized store. A pre-built or embedded-corpus index keeps its full-precision vectors beside a quantized retriever, so there `KEN_ANN` changes query speed, not memory.
+- The bench harnesses that open repos through `engine.Open` (`bench/contextbench`) are unchanged: `engine` does not read the environment, and they did not apply these variables before either.

@@ -271,7 +271,8 @@ The env vars you'll actually touch:
 | `KEN_MCP_CHUNKER` | `regex` | Chunker: `regex`/`treesitter`/`line`/`markdown`. |
 | `KEN_MCP_CACHE_SIZE` | `16` | Repo LRU bound. `0` disables caching. |
 | `KEN_MCP_LOG_LEVEL` | `warn` | `debug`/`info`/`warn`/`error`. Logs go to stderr. |
-| `KEN_ENRICH` | (enabled) | Arm B structural enrichment. Set to `off` to disable. |
+| `KEN_ENRICH` | (enabled) | Arm B structural enrichment. Set to `off` to build indexes without it (every build path; a pre-built index keeps what it was built with, and `status` shows which). |
+| `KEN_ANN` | (exact `flat`) | Dense vector store: `flat-i8` (about 80% less dense-store memory; use at large-repository scale) or `flat-binary-i8` (fastest at repo scale). `status` shows the store the loaded index is serving. |
 | `KEN_MCP_RERANK` | `off` | Opt into the neural reranker (better quality, +~30 ms per query when warm). |
 
 Most users set `KEN_MCP_DEFAULT_REPO` to their main project and

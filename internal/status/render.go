@@ -88,6 +88,17 @@ func RenderText(s Status, verbose bool) string {
 		if s.Index.Chunker != "" {
 			fmt.Fprintf(&b, "  chunker:     %s\n", s.Index.Chunker)
 		}
+		// What the loaded index holds, read from the index, not the env.
+		if s.Index.ChunkCount > 0 {
+			if s.Index.EnrichedChunks > 0 {
+				fmt.Fprintf(&b, "  enrichment:  %s of %s chunks labeled\n", formatInt(s.Index.EnrichedChunks), formatInt(s.Index.ChunkCount))
+			} else {
+				fmt.Fprintln(&b, "  enrichment:  none (no chunk carries a structural label)")
+			}
+		}
+		if s.Index.DenseRetriever != "" {
+			fmt.Fprintf(&b, "  dense store: %s\n", s.Index.DenseRetriever)
+		}
 		if !s.Index.BuiltAt.IsZero() {
 			age := s.Process.StartedAt.Sub(s.Index.BuiltAt)
 			fmt.Fprintf(&b, "  built:       %s ago\n", formatDuration(age))

@@ -169,6 +169,12 @@ type BuildOptions struct {
 	// Walk carries the walker's limits (see FSOptions.Walk). The zero
 	// value is the walker's defaults.
 	Walk repo.Options
+
+	// DisableEnrichment builds the index without the Arm B enrichment
+	// label (see FSOptions.DisableEnrichment). There is no dense-retriever
+	// field: the file stores full-precision vectors and the retriever is
+	// chosen when it is loaded (LoadOptions.DenseRetriever).
+	DisableEnrichment bool
 }
 
 // LoadOptions configures LoadSerializedIndex. The Expected fields are
@@ -196,6 +202,13 @@ type LoadOptions struct {
 	// space, the query vector in another's). v0.8.3 does not embed a
 	// model fingerprint in the file format; trust the caller.
 	Model *embed.StaticModel
+
+	// DenseRetriever selects the dense-arm implementation built over the
+	// loaded vectors: "" (exact ann.Flat), "flat-i8" or "flat-binary-i8"
+	// (see FSOptions.DenseRetriever). The loaded Index keeps the file's
+	// full-precision vectors beside a quantized retriever, so on this
+	// path the choice changes query speed, not memory.
+	DenseRetriever string
 }
 
 // BuildAndSerializeIndex builds an index from fsys and returns the
@@ -221,7 +234,7 @@ func BuildAndSerializeIndex(fsys fs.FS, opts BuildOptions) ([]byte, error) {
 	if opts.Mode.needsModel() && opts.Model == nil {
 		return nil, fmt.Errorf("search: BuildAndSerializeIndex: mode %v requires Options.Model", opts.Mode)
 	}
-	chunks, vecs, _, _, err := walkAndChunkFSWithModel(context.Background(), fsys, opts.Mode, opts.Chunker, opts.Model, FSOptions{Walk: opts.Walk})
+	chunks, vecs, _, _, err := walkAndChunkFSWithModel(context.Background(), fsys, opts.Mode, opts.Chunker, opts.Model, FSOptions{Walk: opts.Walk, DisableEnrichment: opts.DisableEnrichment})
 	if err != nil {
 		return nil, fmt.Errorf("search: BuildAndSerializeIndex: %w", err)
 	}
@@ -571,7 +584,7 @@ func deserializeIndex(data []byte, opts LoadOptions) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	return BuildIndex(chunks, vecs, mode, model), nil
+	return buildIndexFromDocs(chunks, tokenizeDocs(chunks, nil), vecs, mode, model, denseRetrieverKind(opts.DenseRetriever)), nil
 }
 
 // LoadSerializedCorpus returns the raw chunks + vectors from a serialized index

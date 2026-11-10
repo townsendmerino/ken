@@ -133,7 +133,10 @@ type ModelInfo struct {
 	LastModified time.Time
 }
 
-// EnrichmentInfo reports Arm B enrichment state.
+// EnrichmentInfo reports the configured Arm B enrichment setting: what
+// KEN_ENRICH asks the next index build to do. What a loaded index actually
+// holds is IndexInfo.EnrichedChunks, which can differ (a pre-built or
+// snapshot-loaded index keeps the setting it was built with).
 type EnrichmentInfo struct {
 	// Enabled reflects the KEN_ENRICH env. Default is true; only
 	// the explicit opt-outs ("off", "0", "false", "no") flip this.
@@ -154,6 +157,15 @@ type IndexInfo struct {
 	Chunker     string    // regex / treesitter / line / etc.
 	BuiltAt     time.Time // when the most recent build finished
 	WatchActive bool      // is fsnotify currently watching for changes
+
+	// EnrichedChunks is how many of the index's chunks carry an Arm B
+	// enrichment label, counted from the index itself. 0 means the loaded
+	// index is not enriched, whatever KEN_ENRICH says now.
+	EnrichedChunks int
+
+	// DenseRetriever is the dense arm the index is serving, read from the
+	// index itself: "none" (BM25), "flat", "flat-i8" or "flat-binary-i8".
+	DenseRetriever string
 }
 
 // StructuralInfo describes the structural index next to a search

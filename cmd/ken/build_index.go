@@ -105,6 +105,9 @@ func cmdBuildIndex(args []string) int {
 		Chunker: chunker,
 		Model:   staticModel,
 		Walk:    envcfg.WalkLimits(),
+		// KEN_ENRICH. KEN_ANN has nothing to do here: the file stores
+		// full-precision vectors and the retriever is chosen at load.
+		DisableEnrichment: envcfg.EnrichDisabled(),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())

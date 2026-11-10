@@ -97,11 +97,15 @@ func renderStatusResult(s status.Status, args StatusArgs) (*sdk.CallToolResult, 
 
 func liveIndexInfo(repo string, ix *search.Index) *status.IndexInfo {
 	return &status.IndexInfo{
-		Repo:        repo,
-		ChunkCount:  ix.Len(),
-		Mode:        search.ModeNames()[int(ix.Mode())],
-		FileCount:   countUniqueFiles(ix),
-		WatchActive: true, // ken-mcp v0.3+ always watches; embedded-corpus pointer is reloaded on rebuild
+		Repo:       repo,
+		ChunkCount: ix.Len(),
+		Mode:       search.ModeNames()[int(ix.Mode())],
+		FileCount:  countUniqueFiles(ix),
+		// What this index actually holds, read from the index itself
+		// rather than from KEN_ENRICH / KEN_ANN.
+		EnrichedChunks: ix.EnrichedChunks(),
+		DenseRetriever: denseRetrieverLabel(ix),
+		WatchActive:    true, // ken-mcp v0.3+ always watches; embedded-corpus pointer is reloaded on rebuild
 	}
 }
 
@@ -138,4 +142,17 @@ func buildStructuralInfo(sx *structural.Index) *status.StructuralInfo {
 		info.TopLevelSymbols += len(fs.Classes)
 	}
 	return info
+}
+
+// denseRetrieverLabel names the dense arm the index is serving, for status:
+// "none" for a BM25 index, "flat" for exact cosine, else "flat-i8" or
+// "flat-binary-i8".
+func denseRetrieverLabel(ix *search.Index) string {
+	if ix.Mode() == search.ModeBM25 {
+		return "none"
+	}
+	if k := ix.DenseRetriever(); k != "" {
+		return k
+	}
+	return "flat"
 }

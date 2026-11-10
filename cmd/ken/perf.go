@@ -483,7 +483,7 @@ func cmdPerfWatch(args []string) int {
 	}
 
 	initStart := time.Now()
-	wix, err := search.NewWatchedIndexWithOptions(tmp, mode, chunker, model, true, envWatchFSOptions())
+	wix, err := search.NewWatchedIndexWithOptions(tmp, mode, chunker, model, true, envFSOptions())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1
