@@ -133,7 +133,7 @@ Use **grep** (or `rg`, `ag`, etc.) for:
 - **Exhaustive enumeration**: refactors, pre-rename audits, "find
   EVERY place that uses this string" — grep guarantees 100%
   recall on literal matches; ken optimizes for relevance and
-  reaches ~97% recall at top-10 in its default hybrid mode (0.967
+  reaches ~97% recall at top-10 in its default hybrid mode (0.970
   NL / 0.995 symbol on semble's benchmark). Without the embedding
   model installed it falls back to BM25-only at ~82–91% — run
   `ken download-model` once to stay on the default path. grep
@@ -272,7 +272,7 @@ The env vars you'll actually touch:
 | `KEN_MCP_CACHE_SIZE` | `16` | Repo LRU bound. `0` disables caching. |
 | `KEN_MCP_LOG_LEVEL` | `warn` | `debug`/`info`/`warn`/`error`. Logs go to stderr. |
 | `KEN_ENRICH` | (enabled) | Arm B structural enrichment. Set to `off` to build indexes without it (every build path; a pre-built index keeps what it was built with, and `status` shows which). |
-| `KEN_ANN` | (exact `flat`) | Dense vector store: `flat-i8` (about 80% less dense-store memory; use at large-repository scale) or `flat-binary-i8` (fastest at repo scale). `status` shows the store the loaded index is serving. |
+| `KEN_ANN` | (exact `flat`) | Dense vector store: `flat-i8` (about 80% less dense-store memory; use at large-repository scale) or `flat-binary-i8` (fastest at repo scale). The measured cost of either is about 0.001 NDCG@10 on the semble benchmark in hybrid mode (not distinguishable from zero), with recall@10 unchanged. `status` shows the store the loaded index is serving. |
 | `KEN_MCP_RERANK` | `off` | Opt into the neural reranker (better quality, +~30 ms per query when warm). |
 
 Most users set `KEN_MCP_DEFAULT_REPO` to their main project and
@@ -289,7 +289,7 @@ Run `ken download-model` to fetch it. ~60 MB; one-time. After it
 lands, restart ken-mcp. This is the single biggest retrieval-quality
 lever you control: the BM25-only fallback caps around 82–91%
 recall@10, while the default hybrid mode (model present) reaches
-~97% (0.967 NL / 0.995 symbol) — see
+~97% (0.970 NL / 0.995 symbol) — see
 [`docs/BENCH.md`](BENCH.md#default-mode-hybrid-recall--the-number-that-matters).
 
 ### "ken returns no results / weird results"

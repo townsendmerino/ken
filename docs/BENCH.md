@@ -62,6 +62,35 @@ Each invocation:
 
 Expected wall time on an M-series Mac: roughly 30–90s per mode for a fresh full-corpus run (indexing dominates; once the corpus is in OS page cache, repeat runs are faster).
 
+### Repeatability: hybrid runs depend on the parse budget
+
+Two identical `run_ken.py --mode hybrid` runs can differ by one repo (found
+2026-11-10 at ken `b6d8ae5`: vapor moved −0.0185 between two runs of the same
+command, 0.8439 against 0.8436 overall). The cause is the CLI's default
+per-file parse budget (`KEN_ENRICH_FILE_BUDGET_MS`, 2000 ms for `ken bench`),
+which is wall-clock, not unstable tie-breaking: with the budget off, or at
+60 s, every run is identical.
+
+A file whose tree-sitter parse takes about as long as the budget has three
+outcomes, chosen by how busy the machine is. vapor's
+`HTTP/Server/HTTPServer.swift` takes over a second:
+
+1. The parse and its error-recovery passes finish: the full label.
+2. The first parse finishes but the recovery passes run out of time.
+   gotreesitter then returns the best tree it has and reports success, so ken
+   logs no skip, and the label differs (here it loses one call, `set`). At
+   2000 ms on a quiet machine this is what happened in every run measured
+   (gotreesitter v0.56.0 uses the timeout as a deadline across its retry
+   passes, `parser_retry.go`).
+3. The first parse itself runs out of time: ken skips the file's label and
+   logs it. Under CPU load, or at a 1000 ms budget, this is what happened.
+
+Each outcome changes that file's chunks, and through BM25 statistics the
+scores of a few queries. For a repeatable benchmark run, set
+`KEN_ENRICH_FILE_BUDGET_MS=0` (the recall harnesses in `internal/search`
+already run without a budget). That measures a slightly different index from
+the CLI default on a repo with a slow file, so say which one a figure is.
+
 ## Acceptance thresholds
 
 ken's three modes map to semble's **raw retrieval** rows, not the "+ ranking" rows — `--mode bm25` and `--mode semantic` return retrieval scores directly without the rerank pipeline. Only `--mode hybrid` runs the full ranker. Compare like-for-like:
@@ -313,8 +342,8 @@ For each (query, qrel) pair in two bench corpora:
 > **The `ken recall@K` columns below are BM25-ONLY.** This harness builds
 > the index in `ModeBM25` (no model required), so the recall here is ken's
 > *lexical-only floor*, not the shipped default. ken's default **hybrid**
-> mode reaches **0.967 NL / 0.995 symbol / 0.971 overall** recall@10 on
-> this same corpus — the semantic arm adds +0.13. See
+> mode reaches **0.970 NL / 0.995 symbol / 0.974 overall** recall@10 on
+> this same corpus (ken `b6d8ae5`) — the semantic arm adds +0.13. See
 > [Default-mode (hybrid) recall](#default-mode-hybrid-recall--the-number-that-matters)
 > for the full decomposition. The token counts are mode-independent (K
 > formatted chunks either way), so the cost-vs-grep story is unchanged;
@@ -362,29 +391,51 @@ same semble corpus (1251 tasks; reproduced by
 `internal/search/recall_decomp_test.go`, build-tag `bench`) the semantic
 arm lifts recall@10 by **+0.13**:
 
-| recall@10 | bm25-only (token-bench tables) | **hybrid (default)** |
-|---|---:|---:|
-| NL      | 0.832 | **0.967** |
-| symbol  | 0.892 | **0.995** |
-| overall | 0.841 | **0.971** |
+| recall@10 | bm25-only | **hybrid (default)** | measured at |
+|---|---:|---:|---|
+| NL      | 0.831 | **0.970** | ken `b6d8ae5`, 2026-11-10 |
+| symbol  | 0.892 | **0.995** | ken `b6d8ae5`, 2026-11-10 |
+| overall | 0.840 | **0.974** | ken `b6d8ae5`, 2026-11-10 |
+
+These are the shipped defaults: enrichment on, the regex chunker, exact
+`flat` store, no parse budget (the harness leaves it off, so the figures
+repeat exactly). The same commit with `KEN_ENRICH=off`:
+
+| recall@10, `KEN_ENRICH=off` | bm25-only | hybrid | measured at |
+|---|---:|---:|---|
+| NL      | 0.833 | 0.968 | ken `b6d8ae5`, 2026-11-10 |
+| symbol  | 0.892 | 0.990 | ken `b6d8ae5`, 2026-11-10 |
+| overall | 0.842 | 0.971 | ken `b6d8ae5`, 2026-11-10 |
+
+So enrichment costs BM25-only 0.002 recall@10 overall and gains hybrid 0.003
+(0.005 on symbol queries).
+
+**Correction (2026-11-10).** This table used to read 0.832 / 0.892 / 0.841
+(bm25-only) and 0.967 / 0.995 / 0.971 (hybrid). Those figures were measured
+on 2026-06-05 with `KEN_ENRICH=off`, and they describe that day's ken:
+commit `1fa4139`, where the harness was added, still reproduces the bm25
+column exactly on today's corpus, with enrichment on or off. Today's code
+does not, so the difference is ken's own changes since June, not the corpus
+(which changes has not been traced). The old text also said enrichment shifts BM25
+recall@10 by less than 0.001; that was true in June and is 0.002 now.
 
 **Token cost in hybrid mode.** Running the same token-budget harness in
 hybrid (`KEN_TOKENS_MODE=hybrid go test -tags=bench ./bench/tokens/ -run
 TestTokens_Semble`) confirms the cost story holds at the higher recall:
-at K=10, NL queries cost a median **4,120 tokens at 0.967 recall** (vs
+at K=10 (measured 2026-06, not re-measured with the table below), NL queries cost a median **4,120 tokens at 0.967 recall** (vs
 tokenized grep+Read's 189,773 — **~46× cheaper**); symbol queries **3,647
 tokens at 0.994 recall** (vs 57,291 — ~16×). Formatted output is K fenced
 chunks regardless of mode, so the medians track the BM25-only table
 closely; the recall is what rises.
 
-Decomposing the residual NL miss (1 − 0.967 = 0.033) localizes where any
+Decomposing the residual NL miss (1 − 0.970 = 0.030, ken `b6d8ae5`) localizes where any
 further recall would have to come from — and which lever fixes it:
 
 | component of the miss | value | recoverable by |
 |---|---:|---|
 | candidate-generation loss (target never in the 50/arm fused pool) | 0.010 | wider retrieval / HyDE / a better embedder |
-| ranking loss (in pool, ranked 11–50) | 0.023 | rerank / fusion tuning |
-| — of which path penalties *cost* | −0.005 | nothing: penalties net-**help** recall@10 (they clear test/example noise) |
+| ranking loss (in pool, ranked 11–50) | 0.020 | rerank / fusion tuning |
+| — of which path penalties *cost* | −0.004 | nothing: penalties net-**help** recall@10 (they clear test/example noise) |
 | hard ceiling at N=500, depth 100 | (recall 0.999) | only 0.1% is genuinely unreachable |
 
 Two product consequences:
@@ -398,11 +449,12 @@ Two product consequences:
    / auto-fetch the model) moves recall@10 from ~0.84 to ~0.97 with zero
    algorithm change — a higher-leverage 1.0 item than any reranker work.
 
-Measured with `KEN_ENRICH=off` for a crash-free full-corpus run (a few
-oversized table-driven test files overflow gotreesitter's parser — see the
-`maxEnrichBytes` guard in `internal/structural/extract_file.go`).
-Enrichment-on shifts BM25 recall@10 by <0.001 on this corpus, so the
-hybrid figures are representative of the default.
+The June figures were measured with `KEN_ENRICH=off`, because a few
+oversized table-driven test files then overflowed gotreesitter's parser.
+That was fixed upstream (gotreesitter v0.20.6), so the table above is now
+measured with enrichment on, as shipped. Enrichment shifts BM25-only
+recall@10 by 0.002 on this corpus (0.840 on, 0.842 off) and hybrid by 0.003
+the other way (0.974 on, 0.971 off).
 
 ### Reproduce
 
@@ -417,12 +469,14 @@ KEN_COIR_QUERY_LIMIT=200 go test -tags=bench ./bench/tokens/ -run TestTokens_CoI
 python scripts/plot_token_budget.py
 
 # Default-mode (hybrid) recall decomposition — the table just above
-# (~90s; needs the model at ~/.ken/model. KEN_ENRICH=off avoids the
-# gotreesitter overflow on a few oversized test files):
-KEN_ENRICH=off go test -tags=bench ./internal/search/ -run TestRecallDecomp$ -v -timeout 40m
+# (~3 min with enrichment on, ~90s with KEN_ENRICH=off; needs the model at
+# ~/.ken/model):
+go test -tags=bench ./internal/search/ -run TestRecallDecomp$ -v -timeout 40m
 
-# Confirm the token-bench recall column is BM25-only (reproduces ~0.84 NL):
-KEN_ENRICH=off go test -tags=bench ./internal/search/ -run TestRecallDecomp_BM25Baseline -v
+# The BM25-only column (a few seconds; reproduces 0.831 NL):
+go test -tags=bench ./internal/search/ -run TestRecallDecomp_BM25Baseline -v
+
+# Either with KEN_ENRICH=off for the second table.
 
 # Optional slow neural-rerank arm (opt-in; ~30s/query cold before the M9 cache warms):
 KEN_RERANK=1 go test -tags=bench ./internal/search/ -run TestRecallDecomp_Rerank -v -timeout 60m
