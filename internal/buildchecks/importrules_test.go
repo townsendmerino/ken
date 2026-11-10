@@ -1,6 +1,9 @@
 package buildchecks
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -143,31 +146,45 @@ func moduleImportGraph(t *testing.T) map[string]map[string]bool {
 	t.Helper()
 	statModuleSources(t)
 	graph := map[string]map[string]bool{}
-	format := `{{.ImportPath}}` + "\t" + `{{if .Error}}{{.Error}}{{end}}` + "\t" + `{{join .Imports " "}}`
 	for _, goos := range importRulesGOOS {
-		cmd := exec.Command("go", "list", "-e", "-tags="+strings.Join(importRulesTags, ","), "-f", format, modulePath+"/...")
+		cmd := exec.Command("go", "list", "-e", "-json=ImportPath,Error,Imports",
+			"-tags="+strings.Join(importRulesTags, ","), modulePath+"/...")
 		cmd.Dir = repoPath("")
 		cmd.Env = append(os.Environ(), "GOOS="+goos)
-		out, err := cmd.CombinedOutput()
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr // "go: downloading …" lines on a cold module cache
+		out, err := cmd.Output()
 		if err != nil {
-			t.Fatalf("GOOS=%s go list: %v\n%s", goos, err, out)
+			t.Fatalf("GOOS=%s go list: %v\n%s", goos, err, stderr.Bytes())
 		}
-		for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
-			fields := strings.SplitN(line, "\t", 3)
-			if len(fields) != 3 {
-				t.Fatalf("GOOS=%s go list: unexpected line %q", goos, line)
+		dec := json.NewDecoder(bytes.NewReader(out))
+		for {
+			var p struct {
+				ImportPath string
+				Error      *struct{ Err string }
+				Imports    []string
 			}
-			if fields[1] != "" {
-				t.Fatalf("GOOS=%s go list: package %s: %s", goos, fields[0], fields[1])
+			if err := dec.Decode(&p); err == io.EOF {
+				break
+			} else if err != nil {
+				t.Fatalf("GOOS=%s go list: decoding output: %v", goos, err)
 			}
-			pkg, ok := moduleRel(fields[0])
+			// A //go:embed pattern with no matching files is reported as a
+			// package error but leaves the imports intact. It happens for
+			// cmd/ken-mcp-docs, whose embedded docs/ copy is generated, not
+			// committed. Any other error could mean the imports are
+			// incomplete, so it fails the test.
+			if p.Error != nil && !strings.Contains(p.Error.Err, ": pattern ") {
+				t.Fatalf("GOOS=%s go list: package %s: %s", goos, p.ImportPath, p.Error.Err)
+			}
+			pkg, ok := moduleRel(p.ImportPath)
 			if !ok {
-				t.Fatalf("GOOS=%s go list returned %s, outside module %s", goos, fields[0], modulePath)
+				t.Fatalf("GOOS=%s go list returned %s, outside module %s", goos, p.ImportPath, modulePath)
 			}
 			if graph[pkg] == nil {
 				graph[pkg] = map[string]bool{}
 			}
-			for imp := range strings.FieldsSeq(fields[2]) {
+			for _, imp := range p.Imports {
 				if dep, ok := moduleRel(imp); ok {
 					graph[pkg][dep] = true
 				}
