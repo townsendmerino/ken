@@ -15,6 +15,17 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`KEN_ENRICH` and `KEN_ANN` now do what the documentation says on every path (behavior fix, ADR-054).** Both were applied only by the one-shot builds (`ken search`, `ken bench`, `ken index --no-watch`, `ken perf`). `ken-mcp`, `ken index` in watch mode, `ken build-index` and `mcp.Run` ignored them, although README and docs/USERS.md said otherwise.
+  - `KEN_ENRICH=off` now builds an unenriched index in `ken-mcp`, `ken index`, `ken build-index` and `mcp.Run`.
+  - `KEN_ANN=flat-i8` / `flat-binary-i8` now selects the dense store in `ken-mcp`, `ken index` and `mcp.Run`, and for a pre-built index when it is loaded. This is what makes the watched index's ~80% dense-memory saving reachable in `ken-mcp`.
+  - **If you had set either variable on a server, its results change**, because it now takes effect. With both unset nothing changes: old and new builds return identical output.
+  - Recall cost of the quantized stores, as measured 2026-09-06: full-pipeline recall@10 on the semble benchmark is 0.974 for all three stores. At Linux-kernel scale `flat-i8` agrees with exact search (1.00 / 0.98 in the top 10) and `flat-binary-i8` is at 0.96, so use `flat-i8` there.
+  - A pre-built or embedded-corpus index keeps its full-precision vectors, so there `KEN_ANN` changes query speed, not memory. `KEN_ENRICH` cannot change a pre-built index.
+  - `Index.WithExtraChunks` (the `mcp.Run` DB-refresh path) keeps the index's dense store. It used to rebuild with the exact store.
+- **The `status` tool reports what the loaded index actually has.** The live-index section gains `enrichment` (how many chunks carry a structural label, counted from the index) and `dense store` (the store being served); the JSON form gains `Index.EnrichedChunks` and `Index.DenseRetriever`. Before, `status` showed only the `KEN_ENRICH` setting, and reported enrichment as off over an enriched index.
+
 ### Changed
 
 - **`engine` no longer reads the environment (ADR-053).** `engine.Options` is its whole configuration. Through v1.13 an `engine.Open` caller implicitly picked up `KEN_MAX_FILE_BYTES`, `KEN_MAX_AVG_LINE_BYTES`, `KEN_MAX_FILES`, `KEN_SKIP_GENERATED`, `KEN_STRUCTURAL_MAX_FILE_BYTES` and `KEN_ENRICH_FILE_BUDGET_MS` through `internal/*`. A program that imports `engine` and relied on one of them now sets it explicitly:

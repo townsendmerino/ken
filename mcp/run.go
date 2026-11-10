@@ -278,7 +278,11 @@ func buildEmbeddedIndex(fsys fs.FS, opts Options) (*search.Index, *Logger, error
 		return ix, logger, nil
 	}
 
-	ix, err := search.FromFSWithModelWalk(fsys, mode, chunkerName, model, envcfg.WalkLimits())
+	ix, err := search.FromFSWithModelOptions(fsys, mode, chunkerName, model, search.FSOptions{
+		DisableEnrichment: envcfg.EnrichDisabled(), // KEN_ENRICH
+		DenseRetriever:    envcfg.DenseRetriever(), // KEN_ANN
+		Walk:              envcfg.WalkLimits(),
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("build index from fsys: %w", err)
 	}
@@ -331,6 +335,9 @@ func tryLoadPrebuilt(fsys fs.FS, opts Options, mode search.Mode, chunkerName str
 		ExpectedMode:    search.ModeNames()[int(mode)],
 		ExpectedChunker: chunkerName,
 		Model:           model,
+		// KEN_ANN picks the retriever built over the file's vectors;
+		// KEN_ENRICH can't change a pre-built index.
+		DenseRetriever: envcfg.DenseRetriever(),
 	}
 	ix, err := search.LoadSerializedIndex(data, loadOpts)
 	if err != nil {

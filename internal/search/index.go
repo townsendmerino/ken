@@ -737,18 +737,18 @@ func chunkOneFile(chunkerName, rel string, data []byte, skipSQLStructural bool) 
 // embedded corpora include numbered .sql files in the same directory get
 // folded chunks automatically — no API change required.
 func FromFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel) (*Index, error) {
-	return FromFSWithModelWalk(fsys, mode, chunkerName, model, repo.Options{})
+	return FromFSWithModelOptions(fsys, mode, chunkerName, model, FSOptions{})
 }
 
-// FromFSWithModelWalk is FromFSWithModel with the walker's limits supplied
-// by the caller (mcp.Run passes the KEN_MAX_* / KEN_SKIP_GENERATED values
-// it read at its edge). A zero walk is exactly FromFSWithModel.
-func FromFSWithModelWalk(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel, walk repo.Options) (*Index, error) {
-	chunks, vecs, m, _, err := walkAndChunkFSWithModel(context.Background(), fsys, mode, chunkerName, model, FSOptions{Walk: walk})
+// FromFSWithModelOptions is FromFSWithModel with FSOptions supplied by the
+// caller (mcp.Run passes the enrichment switch, the dense retriever and the
+// walk limits it read at its edge). Zero opts is exactly FromFSWithModel.
+func FromFSWithModelOptions(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel, opts FSOptions) (*Index, error) {
+	chunks, vecs, m, _, err := walkAndChunkFSWithModel(context.Background(), fsys, mode, chunkerName, model, opts)
 	if err != nil {
 		return nil, err
 	}
-	return BuildIndex(chunks, vecs, mode, m), nil
+	return buildIndexFromDocs(chunks, tokenizeDocs(chunks, nil), vecs, mode, m, denseRetrieverKind(opts.DenseRetriever)), nil
 }
 
 // BuildIndex assembles a snapshot *Index from a chunks slice and (for
@@ -953,7 +953,7 @@ func (ix *Index) WithExtraChunks(extras []chunk.Chunk) (*Index, error) {
 		// No-op: rebuild from the receiver's state. Returns a fresh
 		// pointer (not ix itself) so callers can always treat the
 		// return value as a new snapshot to atomic-store.
-		return BuildIndex(ix.chunks, ix.vecs, ix.mode, ix.model), nil
+		return buildIndexFromDocs(ix.chunks, tokenizeDocs(ix.chunks, nil), ix.vecs, ix.mode, ix.model, denseRetrieverKind(ix.DenseRetriever())), nil
 	}
 
 	merged := make([]chunk.Chunk, 0, len(ix.chunks)+len(extras))
@@ -989,7 +989,37 @@ func (ix *Index) WithExtraChunks(extras []chunk.Chunk) (*Index, error) {
 	}
 	// ModeBM25 path: mergedVecs stays nil; BuildIndex builds BM25 only.
 
-	return BuildIndex(merged, mergedVecs, ix.mode, ix.model), nil
+	// Keep the receiver's dense retriever kind: an index built or loaded
+	// with a quantized retriever must not fall back to exact Flat when DB
+	// chunks are unioned in.
+	return buildIndexFromDocs(merged, tokenizeDocs(merged, nil), mergedVecs, ix.mode, ix.model, denseRetrieverKind(ix.DenseRetriever())), nil
+}
+
+// DenseRetriever names the dense-arm implementation this index is
+// actually serving: "" for exact ann.Flat (and for a BM25 index, which has
+// no dense arm), "flat-i8" or "flat-binary-i8". It reads the retriever
+// itself, so it reports what is loaded, not what was asked for.
+func (ix *Index) DenseRetriever() string {
+	switch ix.flat.(type) {
+	case *ann.FlatI8, *flatI8Store:
+		return string(denseFlatI8)
+	case *ann.FlatBinaryI8, *flatBinaryI8Store:
+		return string(denseFlatBinaryI8)
+	}
+	return ""
+}
+
+// EnrichedChunks counts the live chunks that carry an Arm B enrichment
+// label. 0 on an index built with enrichment off; on an enriched index it
+// is the chunks of supported-language files whose parse produced a label.
+func (ix *Index) EnrichedChunks() int {
+	n := 0
+	for i := range ix.chunks {
+		if !ix.chunks[i].Tombstoned && structural.HasLabel(ix.chunks[i].Text) {
+			n++
+		}
+	}
+	return n
 }
 
 // Len is the number of indexed chunks.

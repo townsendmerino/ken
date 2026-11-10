@@ -20,6 +20,9 @@ const labelSentinel = "# ken:"
 // labelLineRE matches a single sentinel-prefixed enrichment label line.
 var labelLineRE = regexp.MustCompile(`^` + regexp.QuoteMeta(labelSentinel) + ` [^\n]*\n`)
 
+// HasLabel reports whether text starts with an Arm B enrichment label line.
+func HasLabel(text string) bool { return labelLineRE.MatchString(text) }
+
 // StripLabel removes a single leading Arm B enrichment label line from text
 // (no-op when text isn't enriched). The one strip helper for BOTH the
 // indexer's idempotent warm pass — so re-running enrichment on an

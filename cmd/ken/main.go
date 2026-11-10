@@ -603,7 +603,7 @@ func cmdIndex(args []string) int {
 		// snapshot to <path>/.ken/snapshot.{bin,manifest}, and exit — so a
 		// later ken-mcp boot on the same repo loads it instead of rebuilding.
 		// Build-once takes precedence over --watch.
-		wix, err := search.NewWatchedIndexWithOptions(rest[0], mode, chunker, model, false, envWatchFSOptions())
+		wix, err := search.NewWatchedIndexWithOptions(rest[0], mode, chunker, model, false, envFSOptions())
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 			return 1
@@ -637,7 +637,7 @@ func cmdIndex(args []string) int {
 	// built (use ken search or ken-mcp for that); this mode is for
 	// "warm an index, observe it, ^C when done" workflows and as a
 	// surface to validate the watcher behavior without ken-mcp.
-	wix, err := search.NewWatchedIndexWithOptions(rest[0], mode, chunker, model, true, envWatchFSOptions())
+	wix, err := search.NewWatchedIndexWithOptions(rest[0], mode, chunker, model, true, envFSOptions())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1
