@@ -1,0 +1,223 @@
+package buildchecks
+
+import (
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// Import rules: the layering contract for every package in the module.
+//
+// importRules maps each package (module-relative path) to the ken packages it
+// may import. TestImportRules checks it against `go list` and fails on any
+// difference, so the table is always an exact copy of the real graph:
+//
+//   - an import the row doesn't list fails, naming the edge;
+//   - a listed import that no longer exists fails too, so a removed edge
+//     can't come back without a reviewed table change;
+//   - a package with no row, or a row for a package that's gone, fails.
+//
+// Adding an edge therefore means editing this table in the same PR, which
+// puts the layering change in front of the reviewer. The intended layers,
+// for judging such a change: aikit (external) → internal/* → the public
+// library packages (engine, mcp, mcp/db) → programs (cmd/*, tools/*,
+// demos/*, bench/*). mcp doesn't import engine (ADR-048), and the mcp
+// package must stay DB-free (mcp/binary_contract_test.go). An internal/*
+// package importing a public one points the wrong way.
+//
+// Only non-test imports are checked; a test may reach across layers. The
+// graph is the union over importRulesGOOS and with every build tag that
+// gates a non-test file switched on (importRulesTags), so a platform- or
+// tag-specific import can't slip past a run on one machine.
+var importRules = map[string][]string{
+	// Benchmark harnesses (//go:build bench).
+	"bench/chunkdiff":             {"internal/structural"},
+	"bench/contextbench":          {"bench/internal/provenance", "bench/tokens", "engine", "internal/search", "internal/structural"},
+	"bench/contextbench/cmd/cb":   {"bench/contextbench", "internal/structural"},
+	"bench/internal/provenance":   {"internal/search"},
+	"bench/internal/semblecorpus": {},
+	"bench/ndcg":                  {"internal/search"},
+	"bench/temporal":              {},
+	"bench/tokens":                {"internal/repo", "internal/search", "mcp"},
+
+	// Programs.
+	"cmd/ken":                   {"internal/modelfetch", "internal/perf", "internal/search", "internal/status", "internal/structural", "internal/usage"},
+	"cmd/ken-mcp":               {"engine", "internal/bytesize", "internal/embedcache", "internal/envcfg", "internal/modelfetch", "internal/search", "internal/structural", "internal/usage", "mcp", "mcp/db"},
+	"cmd/ken-mcp-docs":          {"mcp"},
+	"demos/go-stdlib":           {"mcp"},
+	"demos/kubernetes":          {"mcp"},
+	"demos/postgres":            {"mcp"},
+	"tools/build-demo-binaries": {"internal/devtools"},
+	"tools/build-docs-mcp":      {"internal/devtools"},
+	"tools/build-subset":        {"internal/devtools"},
+	"tools/gen-licenses":        {"internal/devtools"},
+	"tools/k8-structural":       {"engine"},
+	"tools/peakrss":             {},
+	"tools/perf-startup-m2":     {"internal/devtools"},
+	"tools/rss-bench":           {},
+	"tools/subset-tags":         {"internal/devtools"},
+
+	// Public library packages.
+	"engine": {"internal/repo", "internal/search", "internal/structural"},
+	"mcp":    {"internal/search", "internal/status", "internal/structural"},
+	"mcp/db": {"internal/db", "mcp"},
+
+	// Internal packages.
+	"internal/binfmt":      {},
+	"internal/buildchecks": {},
+	"internal/bytesize":    {},
+	"internal/db":          {},
+	"internal/devtools":    {},
+	"internal/embedcache":  {},
+	"internal/envcfg":      {"mcp"}, // upward edge: for mcp.Logger and mcp.ValidateEnum
+	"internal/modelfetch":  {},
+	"internal/perf":        {},
+	"internal/repo":        {"internal/bytesize"},
+	"internal/search":      {"internal/binfmt", "internal/repo", "internal/sql", "internal/structural"},
+	"internal/sql":         {},
+	"internal/status":      {"internal/usage"},
+	"internal/structural":  {"internal/bytesize", "internal/repo"},
+	"internal/usage":       {},
+}
+
+const modulePath = "github.com/townsendmerino/ken"
+
+// importRulesTags is every build tag that gates a non-test file in the
+// module. A tag used only by _test.go files doesn't belong here.
+var importRulesTags = []string{"bench", "embed_corpus", "kendemo"}
+
+// importRulesGOOS are the platforms ken ships for (.goreleaser.yml).
+var importRulesGOOS = []string{"darwin", "linux", "windows"}
+
+// moduleRel strips the module path: "github.com/townsendmerino/ken/mcp" →
+// "mcp", the module root → ".". ok is false for a path outside the module.
+func moduleRel(path string) (rel string, ok bool) {
+	if path == modulePath {
+		return ".", true
+	}
+	if rest, found := strings.CutPrefix(path, modulePath+"/"); found {
+		return rest, true
+	}
+	return "", false
+}
+
+// statModuleSources stats every .go file and go.mod in the module. go test
+// caches a result keyed on the files the test itself reads, and it can't see
+// what the go list subprocess reads, so without this a new import would pass
+// from a stale cached result until this package changed. It skips the
+// directories the go tool ignores (testdata, and names starting with "." or
+// "_"), which can't hold module packages.
+func statModuleSources(t *testing.T) {
+	t.Helper()
+	root := repoPath("")
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if p != root && (name == "testdata" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(p, ".go") || d.Name() == "go.mod" {
+			_, err := os.Stat(p)
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking module sources: %v", err)
+	}
+}
+
+// moduleImportGraph returns package → set of in-module imports for every
+// package in the module, as `go list` sees it, unioned over GOOS values.
+func moduleImportGraph(t *testing.T) map[string]map[string]bool {
+	t.Helper()
+	statModuleSources(t)
+	graph := map[string]map[string]bool{}
+	format := `{{.ImportPath}}` + "\t" + `{{if .Error}}{{.Error}}{{end}}` + "\t" + `{{join .Imports " "}}`
+	for _, goos := range importRulesGOOS {
+		cmd := exec.Command("go", "list", "-e", "-tags="+strings.Join(importRulesTags, ","), "-f", format, modulePath+"/...")
+		cmd.Dir = repoPath("")
+		cmd.Env = append(os.Environ(), "GOOS="+goos)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("GOOS=%s go list: %v\n%s", goos, err, out)
+		}
+		for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+			fields := strings.SplitN(line, "\t", 3)
+			if len(fields) != 3 {
+				t.Fatalf("GOOS=%s go list: unexpected line %q", goos, line)
+			}
+			if fields[1] != "" {
+				t.Fatalf("GOOS=%s go list: package %s: %s", goos, fields[0], fields[1])
+			}
+			pkg, ok := moduleRel(fields[0])
+			if !ok {
+				t.Fatalf("GOOS=%s go list returned %s, outside module %s", goos, fields[0], modulePath)
+			}
+			if graph[pkg] == nil {
+				graph[pkg] = map[string]bool{}
+			}
+			for imp := range strings.FieldsSeq(fields[2]) {
+				if dep, ok := moduleRel(imp); ok {
+					graph[pkg][dep] = true
+				}
+			}
+		}
+	}
+	if len(graph) == 0 {
+		t.Fatal("go list returned no packages")
+	}
+	return graph
+}
+
+// TestImportRules is the layering guard: it fails, naming the edge or
+// package, wherever importRules and the real import graph differ.
+func TestImportRules(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go tool not on PATH; can't list the import graph")
+	}
+	graph := moduleImportGraph(t)
+
+	pkgs := make([]string, 0, len(graph))
+	for pkg := range graph {
+		pkgs = append(pkgs, pkg)
+	}
+	sort.Strings(pkgs)
+	for _, pkg := range pkgs {
+		allowed, ok := importRules[pkg]
+		if !ok {
+			deps := make([]string, 0, len(graph[pkg]))
+			for dep := range graph[pkg] {
+				deps = append(deps, dep)
+			}
+			sort.Strings(deps)
+			t.Errorf("package %s has no importRules row; add one listing the ken packages it imports: %q", pkg, deps)
+			continue
+		}
+		for dep := range graph[pkg] {
+			if !slices.Contains(allowed, dep) {
+				t.Errorf("import rule broken: %s imports %s, which its importRules row does not allow", pkg, dep)
+			}
+		}
+		for _, dep := range allowed {
+			if !graph[pkg][dep] {
+				t.Errorf("importRules allows %s → %s, but %s no longer imports it; delete the entry so the edge can't return unreviewed", pkg, dep, pkg)
+			}
+		}
+	}
+	for pkg := range importRules {
+		if _, ok := graph[pkg]; !ok {
+			t.Errorf("importRules has a row for %s, which is not a package in the module; delete it", pkg)
+		}
+	}
+}
