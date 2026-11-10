@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/townsendmerino/ken/engine"
+	"github.com/townsendmerino/ken/internal/envcfg"
 )
 
 func main() {
@@ -61,7 +62,18 @@ func main() {
 	}
 
 	done := phase(fmt.Sprintf("engine.Open mode=%s snapshot=%v", *mode, *snapshot))
-	ws, err := engine.Open(ctx, root, engine.Options{Mode: *mode, ModelDir: *model, Snapshot: *snapshot})
+	// engine does not read the environment; this tool is the edge, so it
+	// passes the KEN_* limits and the parse budget through itself.
+	walk := envcfg.WalkLimits()
+	if micros, set := envcfg.EnrichFileBudgetMicros(); set {
+		engine.SetEnrichFileBudget(time.Duration(micros) * time.Microsecond)
+	}
+	ws, err := engine.Open(ctx, root, engine.Options{
+		Mode: *mode, ModelDir: *model, Snapshot: *snapshot,
+		MaxFileBytes: walk.MaxFileBytes, MaxAvgLineBytes: walk.MaxAvgLineBytes,
+		MaxFiles: walk.MaxFiles, SkipGenerated: walk.SkipGenerated,
+		StructuralMaxFileBytes: envcfg.StructuralMaxFileBytes(),
+	})
 	if err != nil {
 		fatal(err)
 	}

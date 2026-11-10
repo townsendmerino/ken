@@ -37,17 +37,17 @@ graph LR
         sqlpkg["sql — .sql folding"]
         dbpkg["db — live DB introspection"]
         status["status — doctor/status report"]
-        envcfg["envcfg — validated env parsing"]
+        envcfg["envcfg — every KEN_* env read + parsing"]
         mcplog["mcplog — stderr logger"]
         small["leaves: binfmt · bytesize · usage ·<br/>modelfetch · embedcache · perf"]
     end
-    ken --> search & structural & status
+    ken --> search & structural & status & envcfg
     kenmcp --> engine & mcppkg & mcpdb & search & structural & envcfg
     embedded --> mcppkg
     engine --> search & structural & repo
-    mcppkg --> search & structural & status & mcplog
+    mcppkg --> search & structural & status & mcplog & envcfg
     mcpdb --> mcppkg & dbpkg
-    envcfg --> mcplog
+    envcfg --> mcplog & repo
     search --> structural & repo & sqlpkg
     structural --> repo
     search --> chunk & retr & encoder
@@ -55,7 +55,7 @@ graph LR
     sqlpkg & dbpkg --> chunk
 ```
 
-Arrows are imports and point down the layers: programs → public library packages → `internal/` → aikit. Nothing under `internal/` imports `engine` or `mcp`, and `mcp` does not import `engine` (ADR-048: `cmd/ken-mcp` adapts a `Workspace` to `mcp.StructuralSource` instead). The diagram leaves out the leaf packages' incoming edges (`search → binfmt`, `repo`/`structural → bytesize`, `status → usage`, and the programs' own uses of `usage`, `modelfetch`, `embedcache`, `perf`, `bytesize`), the direct aikit imports of the programs and public packages (chunker registration, model loading, the `chunk.Chunk` type), and `bench/` and `tools/`; the table in the import-rules test has every edge.
+Arrows are imports and point down the layers: programs → public library packages → `internal/` → aikit. Nothing under `internal/` imports `engine` or `mcp`, and `mcp` does not import `engine` (ADR-048: `cmd/ken-mcp` adapts a `Workspace` to `mcp.StructuralSource` instead). The diagram leaves out the leaf packages' incoming edges (`search → binfmt`, `envcfg → bytesize`, `status → usage`, and the programs' own uses of `usage`, `modelfetch`, `embedcache`, `perf`, `bytesize`), the direct aikit imports of the programs and public packages (chunker registration, model loading, the `chunk.Chunk` type), and `bench/` and `tools/`; the table in the import-rules test has every edge.
 
 What moved to aikit and what stayed: tokenizer, BM25, embedding inference, fusion, ANN, and the chunkers are **generic** → aikit. The rerank heuristics ([`rerank.go`](internal/search/rerank.go), [`penalties.go`](internal/search/penalties.go), [`adaptive.go`](internal/search/adaptive.go)) are **semble-specific** and stay in `internal/search` under the verbatim-port precision contract.
 
@@ -133,11 +133,12 @@ Every constant and the pipeline order are pinned to semble's Python — see DESI
 5. **Byte fidelity** — concatenating `Chunk.Text` for a file reproduces the source bytes, across all chunkers.
 6. **`mcp` stays DB-free** — no pgx/sqlite/mysql in `mcp`'s import graph ([`binary_contract_test.go`](mcp/binary_contract_test.go)); DB support enters only via `mcp/db`.
 7. **Import rules** — every package's allowed ken imports are a table in [`internal/buildchecks/importrules_test.go`](internal/buildchecks/importrules_test.go), checked against `go list`. A new edge needs a table change in the same PR; an `internal/` package importing `engine` or `mcp` points the wrong way.
-8. **Pure Go, no cgo** — the single-static-binary posture is the product. Native deps go behind interfaces with pure-Go implementations or don't go in.
+8. **Environment reads stay at the edge** (ADR-053) — `engine` and `internal/*` (apart from `internal/envcfg`) never call `os.Getenv`; they take options. The edges are the programs, `internal/envcfg`, the `mcp` server package ([`mcp/env.go`](mcp/env.go) lists what it reads) and the bench harnesses. Enforced by `TestEnvReadsStayAtTheEdge` in [`internal/buildchecks/envread_test.go`](internal/buildchecks/envread_test.go).
+9. **Pure Go, no cgo** — the single-static-binary posture is the product. Native deps go behind interfaces with pure-Go implementations or don't go in.
 
 ## Stability tiers
 
-**1.0-stable:** `mcp.Run` + `mcp.Options`, the `engine` package apart from its escape hatches (the full list is in [DEVELOPERS.md](docs/DEVELOPERS.md#public-api-surface)), the MCP tool wire format (semble-compatible), `aikit/chunk`'s `Chunker` interface, the documented env vars. **Best-effort:** concrete chunkers (treesitter especially — gotreesitter-backed), `mcp.NewServer`/`Cache` internals, and engine's escape hatches: the `engine.Index`, `engine.WatchedIndex` and `engine.StructuralIndex` aliases and the `Workspace.WatchedIndex`, `Workspace.Structural` and `Workspace.StructuralIfBuilt` accessors that return them. An alias carries every exported method of its target, so these expose `internal/search`'s and `internal/structural`'s methods, which change without notice. **No promises:** everything under `internal/`, including the methods those aliases expose.
+**1.0-stable:** `mcp.Run` + `mcp.Options`, the `engine` package apart from its escape hatches (the full list is in [DEVELOPERS.md](docs/DEVELOPERS.md#public-api-surface)), the MCP tool wire format (semble-compatible), `aikit/chunk`'s `Chunker` interface, the documented env vars (as read by the `ken` and `ken-mcp` binaries and by servers built on `mcp`; `engine` takes `Options`, not env). **Best-effort:** concrete chunkers (treesitter especially — gotreesitter-backed), `mcp.NewServer`/`Cache` internals, and engine's escape hatches: the `engine.Index`, `engine.WatchedIndex` and `engine.StructuralIndex` aliases and the `Workspace.WatchedIndex`, `Workspace.Structural` and `Workspace.StructuralIfBuilt` accessors that return them. An alias carries every exported method of its target, so these expose `internal/search`'s and `internal/structural`'s methods, which change without notice. **No promises:** everything under `internal/`, including the methods those aliases expose.
 
 ## Where to look
 

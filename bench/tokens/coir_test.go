@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/townsendmerino/ken/bench/internal/benchenv"
 	"github.com/townsendmerino/ken/bench/internal/provenance"
 	"github.com/townsendmerino/ken/internal/search"
 )
@@ -117,7 +118,7 @@ func TestTokens_CoIR(t *testing.T) {
 
 	t.Log("building ken index (hybrid would need model; bm25 doesn't)...")
 	tIndex := time.Now()
-	ix, err := search.FromPath(coirCorpusDir, search.ModeBM25, "regex", "")
+	ix, err := benchenv.FromPath(coirCorpusDir, search.ModeBM25, "regex", "")
 	if err != nil {
 		t.Fatalf("FromPath: %v", err)
 	}

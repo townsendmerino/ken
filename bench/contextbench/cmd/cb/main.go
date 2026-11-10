@@ -19,6 +19,7 @@ import (
 	"github.com/townsendmerino/aikit/chunk"
 	"github.com/townsendmerino/aikit/chunk/treesitter"
 	"github.com/townsendmerino/ken/bench/contextbench"
+	"github.com/townsendmerino/ken/bench/internal/benchenv"
 	"github.com/townsendmerino/ken/internal/structural"
 )
 
@@ -161,6 +162,7 @@ func main() {
 		chunk.Register("treesitter", treesitter.New(treesitter.WithParseTimeoutMicros(uint64(*tsTimeoutMs)*1000)))
 		fmt.Printf("Treesitter chunker parse timeout: %d ms\n", *tsTimeoutMs)
 	}
+	benchenv.ApplyParseBudget(0) // KEN_ENRICH_FILE_BUDGET_MS, when set
 	if b := os.Getenv("KEN_ENRICH_FILE_BUDGET_MS"); b != "" {
 		fmt.Printf("Enrichment parse budget: KEN_ENRICH_FILE_BUDGET_MS=%s (skips are logged and counted per record)\n", b)
 		structural.SetParseBudgetLogf(func(path string, d time.Duration) {

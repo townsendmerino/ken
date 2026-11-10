@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/townsendmerino/ken/bench/internal/benchenv"
 	"github.com/townsendmerino/ken/bench/internal/provenance"
 	"github.com/townsendmerino/ken/internal/search"
 )
@@ -138,7 +139,7 @@ func TestTokens_Semble(t *testing.T) {
 			continue
 		}
 
-		ix, err := search.FromPath(benchDir, tokMode, "regex", tokModelDir)
+		ix, err := benchenv.FromPath(benchDir, tokMode, "regex", tokModelDir)
 		if err != nil {
 			t.Logf("[%s] skipped — index build: %v", repo.Name, err)
 			continue

@@ -84,7 +84,7 @@ func TestKernelScaleRecallSpotCheck(t *testing.T) {
 
 	tStart := time.Now()
 	t.Logf("building hybrid index over %s (started %s)…", root, tStart.Format(time.Kitchen))
-	ix, err := FromPath(root, ModeHybrid, "regex", modelDir)
+	ix, err := fromPathEnv(root, ModeHybrid, "regex", modelDir)
 	if err != nil {
 		t.Fatalf("FromPath: %v", err)
 	}

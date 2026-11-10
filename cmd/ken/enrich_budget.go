@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/townsendmerino/ken/internal/envcfg"
 	"github.com/townsendmerino/ken/internal/structural"
 )
 
@@ -27,9 +28,10 @@ import (
 // byte-identical, machine-load-independent output (ADR-040), and a
 // wall-clock budget would reintroduce exactly the non-determinism that ADR
 // closed. It's applied here because these commands make no such promise.
-const defaultCLIEnrichBudgetMS = "2000"
+const defaultCLIEnrichBudgetMS = 2000
 
-// setupEnrichBudget defaults KEN_ENRICH_FILE_BUDGET_MS when unset and routes
+// setupEnrichBudget reads KEN_ENRICH_FILE_BUDGET_MS (defaulting it when
+// unset), hands the budget to internal/structural, and routes
 // budget-exhaustion skips to stderr, so a pathological file degrades to "one
 // file's structural enrichment silently skipped" instead of looking like a
 // hang (the exact user-facing symptom the C# grammar fix, v1.5.1, was
@@ -38,10 +40,23 @@ const defaultCLIEnrichBudgetMS = "2000"
 // same mechanism, CLI-appropriate default and a plain stderr line instead of
 // a leveled logger (this binary has none).
 func setupEnrichBudget() {
-	if os.Getenv("KEN_ENRICH_FILE_BUDGET_MS") == "" {
-		_ = os.Setenv("KEN_ENRICH_FILE_BUDGET_MS", defaultCLIEnrichBudgetMS)
+	micros, set := envcfg.EnrichFileBudgetMicros()
+	if !set {
+		micros = defaultCLIEnrichBudgetMS * 1000
 	}
+	structural.SetParseBudget(time.Duration(micros) * time.Microsecond)
 	structural.SetParseBudgetLogf(func(path string, d time.Duration) {
 		fmt.Fprintf(os.Stderr, "ken: enrichment parse budget exceeded for %s (%v) — skipping structural enrichment for this file (results are unaffected, just unenriched); set KEN_ENRICH_FILE_BUDGET_MS to change, or KEN_ENRICH=off to disable enrichment entirely\n", path, d)
 	})
+}
+
+// applyExplicitEnrichBudget is build-index's half of setupEnrichBudget: it
+// honors a KEN_ENRICH_FILE_BUDGET_MS the operator set, and applies no
+// default when the variable is unset, so the default build stays
+// byte-identical across runs (ADR-040). Setting the variable has always
+// applied to build-index too; it just isn't defaulted there.
+func applyExplicitEnrichBudget() {
+	if micros, set := envcfg.EnrichFileBudgetMicros(); set {
+		structural.SetParseBudget(time.Duration(micros) * time.Microsecond)
+	}
 }

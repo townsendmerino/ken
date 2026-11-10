@@ -219,10 +219,22 @@ package:
   ADR-039 snapshot of a watched + structural index over a local directory.
 - `Options{Mode, Chunker, ModelDir, Watch, Snapshot, DisableEnrichment,
   LazyEnrichment, StagedEmbedding, MmapModel, DenseRetriever,
-  StructuralMaxFileBytes, DisableFoldMigrations, EmbedCache, LogWriter}`.
+  StructuralMaxFileBytes, MaxFileBytes, MaxAvgLineBytes, MaxFiles,
+  SkipGenerated, DisableFoldMigrations, EmbedCache, LogWriter}`.
   `StructuralMaxFileBytes` caps the files the structural index parses
-  (0 → `KEN_STRUCTURAL_MAX_FILE_BYTES`, else 1 MiB); it is separate from
-  enrichment's fixed 64 KiB cap.
+  (0 → 1 MiB); it is separate from enrichment's fixed 64 KiB cap.
+  `MaxFileBytes`, `MaxAvgLineBytes`, `MaxFiles` and `SkipGenerated` are
+  the walk's limits (0 → the default; a negative `MaxAvgLineBytes` or
+  `MaxFiles` switches that limit off).
+- **`engine` does not read the environment (ADR-053).** `Options` is the
+  whole configuration; the `KEN_*` variables in the README are read by the
+  `ken` and `ken-mcp` binaries and by servers built on the `mcp` package,
+  not by `engine`. A program that imports `engine` sets the fields above.
+- `SetEnrichFileBudget(d time.Duration)` — the per-file parse budget
+  behind enrichment and the structural index (what
+  `KEN_ENRICH_FILE_BUDGET_MS` sets in the binaries). Process-wide, because
+  parser pools are shared: call it once before the first `Open`. 0, the
+  default, is no budget.
 - `Workspace.{Search, SearchMode, SearchFiles, FindRelated}` — return
   `[]Hit`; `SearchMode`/`SearchFiles` also return the effective `Mode`.
   `SearchFiles` restricts hits to a given set of repo-relative paths, for

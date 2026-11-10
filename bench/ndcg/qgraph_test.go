@@ -32,6 +32,7 @@ import (
 	"time"
 
 	_ "github.com/townsendmerino/aikit/chunk/treesitter"
+	"github.com/townsendmerino/ken/bench/internal/benchenv"
 	"github.com/townsendmerino/ken/internal/search"
 	"github.com/townsendmerino/ken/internal/structural"
 )
@@ -73,7 +74,7 @@ func TestQGraphExpansion(t *testing.T) {
 
 	t.Logf("building search index over %s...", corpusDir)
 	tBuild := time.Now()
-	ix, err := search.FromPath(corpusDir, search.ModeHybrid, chunker, modelDir)
+	ix, err := benchenv.FromPath(corpusDir, search.ModeHybrid, chunker, modelDir)
 	if err != nil {
 		t.Fatalf("search.FromPath: %v", err)
 	}

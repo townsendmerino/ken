@@ -13,7 +13,9 @@ import (
 // from enrichment's 64 KiB: a type in an 80 KiB file is found, unless
 // Options.StructuralMaxFileBytes lowers the cap below the file.
 func TestStructuralMaxFileBytes(t *testing.T) {
-	t.Setenv("KEN_STRUCTURAL_MAX_FILE_BYTES", "")
+	// engine does not read the environment: an ambient cap below the file
+	// must not change the "default 1 MiB" case.
+	t.Setenv("KEN_STRUCTURAL_MAX_FILE_BYTES", "64KiB")
 	var b strings.Builder
 	b.WriteString("package big\n\ntype Model struct{ n int }\n\nvar table = []string{\n")
 	for b.Len() < 80<<10 {

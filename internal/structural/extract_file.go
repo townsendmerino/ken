@@ -1,14 +1,11 @@
 package structural
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/odvcencio/gotreesitter"
-
-	"github.com/townsendmerino/ken/internal/bytesize"
 )
 
 // maxEnrichBytes is the per-file size ceiling for Arm B enrichment. Files
@@ -50,8 +47,7 @@ func ExtractFile(rel string, data []byte) *FileStruct {
 }
 
 // DefaultMaxStructuralFileBytes is the structural index's per-file size
-// ceiling when neither BuildOptions.MaxFileBytes nor
-// KEN_STRUCTURAL_MAX_FILE_BYTES sets one: 1 MiB. It is separate from
+// ceiling when BuildOptions.MaxFileBytes doesn't set one: 1 MiB. It is separate from
 // maxEnrichBytes (64 KiB), which bounds only the Arm B enrichment parse and
 // stays fixed so the label can't change; before the two were split, a
 // 96 KB Go file's functions and types were missing from Definition,
@@ -60,17 +56,12 @@ func ExtractFile(rel string, data []byte) *FileStruct {
 const DefaultMaxStructuralFileBytes int64 = 1 << 20
 
 // ResolveMaxStructuralFileBytes returns the structural index's size cap:
-// opt if it is > 0, else KEN_STRUCTURAL_MAX_FILE_BYTES (a byte count, with
-// an optional KiB/MiB/KB/MB suffix; invalid or non-positive values are
-// ignored, as with KEN_MAX_FILE_BYTES), else DefaultMaxStructuralFileBytes.
+// opt if it is > 0, else DefaultMaxStructuralFileBytes. The
+// KEN_STRUCTURAL_MAX_FILE_BYTES variable is read at the binaries' edge
+// (internal/envcfg.StructuralMaxFileBytes) and arrives here as opt.
 func ResolveMaxStructuralFileBytes(opt int64) int64 {
 	if opt > 0 {
 		return opt
-	}
-	if raw := os.Getenv("KEN_STRUCTURAL_MAX_FILE_BYTES"); raw != "" {
-		if n, ok := bytesize.Parse(raw); ok && n > 0 {
-			return n
-		}
 	}
 	return DefaultMaxStructuralFileBytes
 }

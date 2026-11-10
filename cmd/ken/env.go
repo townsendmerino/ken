@@ -1,0 +1,46 @@
+package main
+
+import (
+	"github.com/townsendmerino/ken/internal/envcfg"
+	"github.com/townsendmerino/ken/internal/search"
+	"github.com/townsendmerino/ken/internal/status"
+)
+
+// env.go is where the ken CLI turns the indexing environment variables into
+// options. The library packages (internal/search, internal/repo,
+// internal/structural, internal/status) don't read the environment; the
+// CLI reads it here, through internal/envcfg, and passes the values down.
+//
+// The two FSOptions helpers differ on purpose, to keep each subcommand
+// behaving exactly as it did when the library read the variables itself:
+// the one-shot build paths honored KEN_ENRICH and KEN_ANN, and the watched
+// paths never did. The walk limits applied to both.
+
+// envFSOptions is for the one-shot index builds (`ken search`, `ken bench`,
+// `ken index --no-watch`, `ken perf`'s cold builds): KEN_ENRICH, KEN_ANN
+// and the walk limits.
+func envFSOptions() search.FSOptions {
+	return search.FSOptions{
+		DisableEnrichment: envcfg.EnrichDisabled(),
+		DenseRetriever:    envcfg.DenseRetriever(),
+		Walk:              envcfg.WalkLimits(),
+	}
+}
+
+// envWatchFSOptions is for the watched index (`ken index`, and `ken perf`'s
+// watch scenario): the walk limits only. These paths have never applied
+// KEN_ENRICH or KEN_ANN.
+func envWatchFSOptions() search.FSOptions {
+	return search.FSOptions{Walk: envcfg.WalkLimits()}
+}
+
+// envStatusOptions carries the variables `ken status` / `ken doctor` report
+// on: KEN_MODEL_DIR, KEN_RERANK_MODEL_DIR, KEN_USAGE_STATS_PATH, KEN_ENRICH.
+func envStatusOptions() status.BuildOptions {
+	return status.BuildOptions{
+		EmbedModelDir:  envcfg.ModelDir(),
+		RerankModelDir: envcfg.RerankModelDir(),
+		SavingsPath:    envcfg.UsageStatsPath(),
+		EnrichEnv:      envcfg.EnrichRaw(),
+	}
+}

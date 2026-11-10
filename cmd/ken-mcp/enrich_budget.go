@@ -1,9 +1,9 @@
 package main
 
 import (
-	"os"
 	"time"
 
+	"github.com/townsendmerino/ken/internal/envcfg"
 	"github.com/townsendmerino/ken/internal/structural"
 	kenmcp "github.com/townsendmerino/ken/mcp"
 )
@@ -17,22 +17,24 @@ import (
 // (e.g. bootstrap-5.blade.php) individually ~159× the median, which the 64 KiB
 // size cap won't catch. 500 ms is ~100× the p99 healthy file parse (~13 ms on
 // the ken tree), so only genuinely pathological files trip it.
-const defaultServerEnrichBudgetMS = "500"
+const defaultServerEnrichBudgetMS = 500
 
-// setupEnrichBudget applies the server-side per-file parse budget: default the
-// env knob when unset, and route budget-exhaustion skips to the leveled stderr
+// setupEnrichBudget applies the server-side per-file parse budget: read the
+// env knob (defaulting it when unset), hand it to internal/structural, and route budget-exhaustion skips to the leveled stderr
 // logger (never stdout — the JSON-RPC channel). Server-only; the library / CLI
 // layers stay at the disabled default. Must run before the first index build so
 // the lazily-created gotreesitter pools observe the budget.
 func setupEnrichBudget(logger *kenmcp.Logger) {
-	if os.Getenv("KEN_ENRICH_FILE_BUDGET_MS") == "" {
-		_ = os.Setenv("KEN_ENRICH_FILE_BUDGET_MS", defaultServerEnrichBudgetMS)
+	micros, set := envcfg.EnrichFileBudgetMicros()
+	if !set {
+		micros = defaultServerEnrichBudgetMS * 1000
 		logger.Logf(kenmcp.LogDebug,
-			"enrichment: KEN_ENRICH_FILE_BUDGET_MS unset — applying ken-mcp server default %s ms (set it to override; 0 disables)",
+			"enrichment: KEN_ENRICH_FILE_BUDGET_MS unset — applying ken-mcp server default %d ms (set it to override; 0 disables)",
 			defaultServerEnrichBudgetMS)
 	} else {
-		logger.Logf(kenmcp.LogDebug, "enrichment: honoring KEN_ENRICH_FILE_BUDGET_MS=%s from env", os.Getenv("KEN_ENRICH_FILE_BUDGET_MS"))
+		logger.Logf(kenmcp.LogDebug, "enrichment: honoring KEN_ENRICH_FILE_BUDGET_MS=%s from env", envcfg.EnrichFileBudgetRaw())
 	}
+	structural.SetParseBudget(time.Duration(micros) * time.Microsecond)
 
 	structural.SetParseBudgetLogf(func(path string, d time.Duration) {
 		logger.Logf(kenmcp.LogWarn,

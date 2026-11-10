@@ -305,7 +305,9 @@ func main() {
 	case "build-index":
 		// Deliberately NOT setupEnrichBudget() — build-index's contract is
 		// byte-identical, machine-load-independent output (ADR-040); see
-		// setupEnrichBudget's doc comment.
+		// setupEnrichBudget's doc comment. An explicitly set
+		// KEN_ENRICH_FILE_BUDGET_MS still applies.
+		applyExplicitEnrichBudget()
 		os.Exit(cmdBuildIndex(os.Args[2:]))
 	case "download-model":
 		os.Exit(cmdDownloadModel(os.Args[2:]))
@@ -348,7 +350,7 @@ func cmdDoctor(args []string) int {
 		}
 	}
 
-	st := status.Build(status.BuildOptions{})
+	st := status.Build(envStatusOptions())
 
 	// Probe the on-disk rerank cache (per-quant file). Report the warmest of the
 	// two variants — the operator may have used either f32 or int8.
@@ -439,7 +441,7 @@ func cmdStatus(args []string) int {
 			return 2
 		}
 	}
-	s := status.Build(status.BuildOptions{})
+	s := status.Build(envStatusOptions())
 	if jsonOut {
 		out, err := status.RenderJSON(s)
 		if err != nil {
@@ -601,7 +603,7 @@ func cmdIndex(args []string) int {
 		// snapshot to <path>/.ken/snapshot.{bin,manifest}, and exit — so a
 		// later ken-mcp boot on the same repo loads it instead of rebuilding.
 		// Build-once takes precedence over --watch.
-		wix, err := search.NewWatchedIndex(rest[0], mode, chunker, model, false)
+		wix, err := search.NewWatchedIndexWithOptions(rest[0], mode, chunker, model, false, envWatchFSOptions())
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 			return 1
@@ -621,7 +623,7 @@ func cmdIndex(args []string) int {
 
 	if !watch {
 		// v0.2 behavior: build once, print, exit.
-		ix, err := search.FromFS(os.DirFS(rest[0]), mode, chunker, model)
+		ix, err := search.FromFSWithOptions(os.DirFS(rest[0]), mode, chunker, model, envFSOptions())
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 			return 1
@@ -635,7 +637,7 @@ func cmdIndex(args []string) int {
 	// built (use ken search or ken-mcp for that); this mode is for
 	// "warm an index, observe it, ^C when done" workflows and as a
 	// surface to validate the watcher behavior without ken-mcp.
-	wix, err := search.NewWatchedIndex(rest[0], mode, chunker, model, true)
+	wix, err := search.NewWatchedIndexWithOptions(rest[0], mode, chunker, model, true, envWatchFSOptions())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1
@@ -972,7 +974,7 @@ func cmdSearch(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
-	ix, err := search.FromFS(os.DirFS(sa.root), mode, sa.chunker, sa.model)
+	ix, err := search.FromFSWithOptions(os.DirFS(sa.root), mode, sa.chunker, sa.model, envFSOptions())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1
@@ -1218,7 +1220,7 @@ func cmdBench(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
-	ix, err := search.FromFS(os.DirFS(rest[0]), mode, chunker, model)
+	ix, err := search.FromFSWithOptions(os.DirFS(rest[0]), mode, chunker, model, envFSOptions())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1

@@ -236,12 +236,13 @@ func PeekSnapshotChunks(path string) (int, bool) {
 }
 
 // CurrentManifest walks dir the SAME way the index build does
-// (repo.WalkFS with the default options — .ken/ is pruned, so the snapshot's
-// own files never appear) and stamps each file, pairing them with configKey.
-// Callers use it both to write a snapshot's manifest and to drift-check on
-// load; sharing one walk keeps store and check symmetric.
-func CurrentManifest(dir, configKey string) (SnapshotManifest, error) {
-	files, err := repo.WalkFS(os.DirFS(dir), repo.Options{})
+// (repo.WalkFS with the build's walk limits — .ken/ is pruned, so the
+// snapshot's own files never appear) and stamps each file, pairing them with
+// configKey. Callers use it both to write a snapshot's manifest and to
+// drift-check on load; sharing one walk keeps store and check symmetric.
+// walk must be the FSOptions.Walk the index was built with.
+func CurrentManifest(dir, configKey string, walk repo.Options) (SnapshotManifest, error) {
+	files, err := repo.WalkFS(os.DirFS(dir), walk)
 	if err != nil {
 		return SnapshotManifest{ConfigKey: configKey}, err
 	}
@@ -260,7 +261,7 @@ func WriteSnapshot(dir string, wi *WatchedIndex, configKey string) error {
 	if err != nil {
 		return fmt.Errorf("search: snapshot serialize: %w", err)
 	}
-	manifest, err := CurrentManifest(dir, configKey)
+	manifest, err := CurrentManifest(dir, configKey, wi.fsOpts.Walk)
 	if err != nil {
 		return fmt.Errorf("search: snapshot manifest walk: %w", err)
 	}

@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/townsendmerino/ken/bench/internal/benchenv"
 	"github.com/townsendmerino/ken/bench/internal/provenance"
 	"github.com/townsendmerino/ken/bench/internal/semblecorpus"
 	"github.com/townsendmerino/ken/internal/repo"
@@ -67,9 +68,7 @@ func TestTemporal_RecallUnderDrift(t *testing.T) {
 	}
 	// Bound the structural parse: an unbounded sweep spins forever on a
 	// pathological file (see bench/chunkdiff and gotreesitter#972).
-	if os.Getenv("KEN_ENRICH_FILE_BUDGET_MS") == "" {
-		t.Setenv("KEN_ENRICH_FILE_BUDGET_MS", "500")
-	}
+	benchenv.ApplyParseBudget(500)
 
 	// A small fixed repo set, per the plan. Chosen for size (a mutation
 	// experiment re-indexes each repo several times) and for spanning
@@ -163,7 +162,7 @@ func runOne(t *testing.T, r semblecorpus.Repo, srcDir string, plan plannedMutati
 	// Score before, mutate, score after — same queries, same corpus copy.
 	pre := map[string]map[string][]search.Result{}
 	for _, mode := range []search.Mode{search.ModeBM25, search.ModeHybrid} {
-		ix, ierr := search.FromPath(work, mode, "regex", modelDir)
+		ix, ierr := benchenv.FromPath(work, mode, "regex", modelDir)
 		if ierr != nil {
 			return nil, Mutation{}, fmt.Errorf("index pre: %w", ierr)
 		}
@@ -181,7 +180,7 @@ func runOne(t *testing.T, r semblecorpus.Repo, srcDir string, plan plannedMutati
 
 	var rows []scoreRow
 	for _, mode := range []search.Mode{search.ModeBM25, search.ModeHybrid} {
-		ix, ierr := search.FromPath(work, mode, "regex", modelDir)
+		ix, ierr := benchenv.FromPath(work, mode, "regex", modelDir)
 		if ierr != nil {
 			return nil, Mutation{}, fmt.Errorf("index post: %w", ierr)
 		}

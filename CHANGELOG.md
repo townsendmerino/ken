@@ -17,6 +17,12 @@ pre-built binaries.
 
 ### Changed
 
+- **`engine` no longer reads the environment (ADR-053).** `engine.Options` is its whole configuration. Through v1.13 an `engine.Open` caller implicitly picked up `KEN_MAX_FILE_BYTES`, `KEN_MAX_AVG_LINE_BYTES`, `KEN_MAX_FILES`, `KEN_SKIP_GENERATED`, `KEN_STRUCTURAL_MAX_FILE_BYTES` and `KEN_ENRICH_FILE_BUDGET_MS` through `internal/*`. A program that imports `engine` and relied on one of them now sets it explicitly:
+  - New `Options` fields `MaxFileBytes`, `MaxAvgLineBytes`, `MaxFiles` and `SkipGenerated`. In the numeric fields 0 means the default; a negative `MaxAvgLineBytes` switches the minified-file heuristic off and a negative `MaxFiles` means unlimited.
+  - `Options.StructuralMaxFileBytes` 0 now means 1 MiB; it no longer falls back to `KEN_STRUCTURAL_MAX_FILE_BYTES`.
+  - New `engine.SetEnrichFileBudget(d)` sets the per-file parse budget. It is process-wide (parser pools are shared), so call it once before the first `Open`.
+  - The `ken` and `ken-mcp` binaries, and servers built on `mcp.Run` / `mcp.NewServer`, honor every variable exactly as before: they read them at their own edge and pass the values down. Old and new builds of both binaries were compared across 65 environment settings with identical output.
+  - Library packages (`engine`, and `internal/*` apart from `internal/envcfg`) no longer call `os.Getenv`; a new test, `TestEnvReadsStayAtTheEdge`, enforces it.
 - **`engine`'s escape hatches are now documented as best-effort.** The `engine.Index`, `engine.WatchedIndex` and `engine.StructuralIndex` aliases, and the `Workspace.WatchedIndex`, `Workspace.Structural` and `Workspace.StructuralIfBuilt` accessors that return them, are outside the 1.0 stability promise. They alias `internal/search` and `internal/structural` types, so they carry about 53 of those packages' methods, which can change in any release. Their comments said "1.0-stable" before. Nothing was removed or renamed.
 - **`mcp.Logger`, `mcp.LogLevel` and `mcp.ValidateEnum` are now aliases and wrappers over `internal/mcplog`.** The names, signatures and behavior are unchanged. `internal/envcfg` no longer imports the public `mcp` package, which was the import graph's one internal-to-public edge.
 

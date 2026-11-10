@@ -37,8 +37,8 @@ func snapshotConfigKey(mode search.Mode, chunker string, model *embed.StaticMode
 // into an empty manifest — which won't match a non-empty stored one, so a
 // walk failure is conservative (forces a rebuild) rather than silently
 // trusting a stale snapshot.
-func currentManifest(root, configKey string) search.SnapshotManifest {
-	m, _ := search.CurrentManifest(root, configKey)
+func currentManifest(root, configKey string, fsOpts search.FSOptions) search.SnapshotManifest {
+	m, _ := search.CurrentManifest(root, configKey, fsOpts.Walk)
 	return m
 }
 
@@ -78,7 +78,7 @@ func (w *Workspace) tryLoadSnapshot(modeStr string) *search.WatchedIndex {
 
 	// Compute the drift set. A large fraction of the corpus changing is
 	// cheaper to rebuild from scratch than to reconcile file-by-file.
-	changed, deleted := stored.Diff(currentManifest(w.root, wantKey))
+	changed, deleted := stored.Diff(currentManifest(w.root, wantKey, w.fsOpts))
 	drift := len(changed) + len(deleted)
 	if drift > 0 && (len(stored.Files) == 0 || drift*2 > len(stored.Files)) {
 		w.logf("engine: %s drifted heavily since snapshot (%d/%d files changed); full rebuild",

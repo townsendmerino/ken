@@ -139,7 +139,7 @@ func TestRetrieverEval(t *testing.T) {
 		}
 
 		tRepo := time.Now()
-		ix, err := FromPath(benchDir, ModeHybrid, "regex", modelDir)
+		ix, err := fromPathEnv(benchDir, ModeHybrid, "regex", modelDir)
 		if err != nil {
 			t.Logf("[%s] skip — index build: %v", repo.Name, err)
 			continue

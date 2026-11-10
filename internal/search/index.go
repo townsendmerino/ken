@@ -40,7 +40,6 @@ import (
 	"path"
 	"runtime"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -146,9 +145,18 @@ type FSOptions struct {
 	// docs/internal/dense-retriever-adoption-2026-09.md for the measured
 	// recall/latency/memory tradeoffs behind each — none of them change
 	// end-to-end recall on the published benchmark, so this is an
-	// opt-in latency/memory knob, not a quality one. defaultFSOptions
-	// reads it from KEN_ANN. An unrecognized value falls back to "" (Flat).
+	// opt-in latency/memory knob, not a quality one. An unrecognized value
+	// falls back to "" (Flat). The ken CLI fills it from KEN_ANN
+	// (internal/envcfg.DenseRetriever); this package does not read the
+	// environment.
 	DenseRetriever string
+
+	// Walk carries the walker's limits (file size, minified-line
+	// threshold, file-count cap, generated-code skip) to every walk and
+	// watch-admission check this index makes. Its Root is ignored. The
+	// zero value is the walker's defaults; the binaries fill it from the
+	// KEN_MAX_* / KEN_SKIP_GENERATED variables (internal/envcfg.WalkLimits).
+	Walk repo.Options
 
 	// MmapModel selects aikit's embed.LoadMmap over embed.LoadFromFS for
 	// the embedding-model load: the safetensors tensors are memory-mapped
@@ -241,7 +249,7 @@ const (
 )
 
 // buildDenseRetriever constructs the dense arm for kind over vecs. An
-// unrecognized kind (should not happen — defaultFSOptions validates the
+// unrecognized kind (should not happen — internal/envcfg validates the
 // env var) falls back to denseFlat rather than panicking.
 func buildDenseRetriever(kind denseRetrieverKind, vecs [][]float32) denseRetriever {
 	switch kind {
@@ -304,36 +312,7 @@ type Index struct {
 // re-chunk / re-embed work — it shouldn't re-walk the tree just to
 // rebuild the index struct.
 func FromFS(fsys fs.FS, mode Mode, chunkerName, modelDir string) (*Index, error) {
-	return FromFSWithOptions(fsys, mode, chunkerName, modelDir, defaultFSOptions())
-}
-
-// defaultFSOptions returns the FSOptions the no-knob entry points
-// (FromFS, FromPath, FromFSWithModel) thread through to the walker.
-// Honors the KEN_ENRICH env shortcut: any of "0", "off", "false",
-// "no" (case-insensitive) disables Arm B enrichment; all other
-// values (including unset and the explicit "on") leave it enabled.
-// Callers that want explicit control should construct FSOptions
-// themselves and call FromFSWithOptions.
-func defaultFSOptions() FSOptions {
-	opts := FSOptions{}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("KEN_ENRICH"))) {
-	case "0", "off", "false", "no":
-		opts.DisableEnrichment = true
-	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("KEN_ANN"))) {
-	case "":
-		// unset — leave opts.DenseRetriever at its zero value (denseFlat).
-	case string(denseFlatI8):
-		opts.DenseRetriever = string(denseFlatI8)
-	case string(denseFlatBinaryI8):
-		opts.DenseRetriever = string(denseFlatBinaryI8)
-		// An unrecognized value falls back to "" (Flat) rather than
-		// erroring — matches KEN_ENRICH's tolerant-default posture. There's
-		// no logger threaded into this low-level constructor to warn
-		// through; ken-mcp's own KEN_MCP_* enum vars use envcfg.EnvEnum for
-		// the warn-and-fall-back behavior where a logger is available.
-	}
-	return opts
+	return FromFSWithOptions(fsys, mode, chunkerName, modelDir, FSOptions{})
 }
 
 // FromFSWithOptions is FromFS plus the v0.7.1 FSOptions knob — currently
@@ -517,7 +496,7 @@ func walkAndChunkFSWithModel(ctx context.Context, fsys fs.FS, mode Mode, chunker
 		return nil, nil, nil, nil, fmt.Errorf("search: mode requires an embedding model but model is nil")
 	}
 
-	files, err := repo.WalkFS(fsys, repo.Options{})
+	files, err := repo.WalkFS(fsys, opts.Walk)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -758,7 +737,14 @@ func chunkOneFile(chunkerName, rel string, data []byte, skipSQLStructural bool) 
 // embedded corpora include numbered .sql files in the same directory get
 // folded chunks automatically — no API change required.
 func FromFSWithModel(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel) (*Index, error) {
-	chunks, vecs, m, _, err := walkAndChunkFSWithModel(context.Background(), fsys, mode, chunkerName, model, FSOptions{})
+	return FromFSWithModelWalk(fsys, mode, chunkerName, model, repo.Options{})
+}
+
+// FromFSWithModelWalk is FromFSWithModel with the walker's limits supplied
+// by the caller (mcp.Run passes the KEN_MAX_* / KEN_SKIP_GENERATED values
+// it read at its edge). A zero walk is exactly FromFSWithModel.
+func FromFSWithModelWalk(fsys fs.FS, mode Mode, chunkerName string, model *embed.StaticModel, walk repo.Options) (*Index, error) {
+	chunks, vecs, m, _, err := walkAndChunkFSWithModel(context.Background(), fsys, mode, chunkerName, model, FSOptions{Walk: walk})
 	if err != nil {
 		return nil, err
 	}

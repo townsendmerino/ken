@@ -65,7 +65,7 @@ func TestBuild_ModelPresent(t *testing.T) {
 }
 
 // TestBuild_EnrichmentEnv pins the KEN_ENRICH parsing against the
-// same rules the indexer uses (defaultFSOptions in
+// same rules the indexer uses (internal/envcfg.EnrichDisabled, formerly
 // internal/search/index.go).
 func TestBuild_EnrichmentEnv(t *testing.T) {
 	for _, tc := range []struct {
@@ -85,8 +85,7 @@ func TestBuild_EnrichmentEnv(t *testing.T) {
 		{"no", false},
 	} {
 		t.Run("KEN_ENRICH="+tc.envVal, func(t *testing.T) {
-			t.Setenv("KEN_ENRICH", tc.envVal)
-			s := Build(BuildOptions{SavingsPath: filepath.Join(t.TempDir(), "x")})
+			s := Build(BuildOptions{SavingsPath: filepath.Join(t.TempDir(), "x"), EnrichEnv: tc.envVal})
 			if s.Enrichment.Enabled != tc.wantEnabled {
 				t.Errorf("Enabled = %v, want %v for KEN_ENRICH=%q", s.Enrichment.Enabled, tc.wantEnabled, tc.envVal)
 			}
