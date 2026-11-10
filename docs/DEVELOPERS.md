@@ -285,13 +285,17 @@ package:
   Hit's line range falls inside exactly one returned Section with the
   same `HeadingPath`.
 - `Section{HeadingPath, Level, StartLine, EndLine, ApproxTokens}`.
-- `Workspace.{Status, Close, Root, SetOnFlush, SetReranker, SetExtraChunks,
-  WatchedIndex, StructuralIfBuilt}` — the latter two are aliased-type
-  escape hatches (`engine.WatchedIndex`/`engine.Index`/
-  `engine.StructuralIndex` alias `search.WatchedIndex`/`search.Index`/
-  `structural.Index`) back to the lower-level surface for callers (like
-  `cmd/ken-mcp`) that need per-call telemetry, filters, or token budgeting
-  the `Hit`-based methods don't model.
+- `Workspace.{Status, Close, Root, SetOnFlush, SetReranker, SetExtraChunks}`.
+- **Best-effort, outside the 1.0 commitment:** the escape hatches
+  `Workspace.{WatchedIndex, Structural, StructuralIfBuilt}` and the types
+  they return, `engine.WatchedIndex`/`engine.Index`/`engine.StructuralIndex`
+  (aliases of `search.WatchedIndex`/`search.Index`/`structural.Index`).
+  They reach the lower-level surface for callers (like `cmd/ken-mcp`) that
+  need per-call telemetry, filters, token budgeting or their own
+  structural lookups, which the `Hit`-based methods don't model. An alias
+  carries every exported method of its target, so these expose about 53
+  methods of `internal/search` and `internal/structural`, and those change
+  without notice.
 - `Mode`, `ModeBM25`, `ModeSemantic`, `ModeHybrid`, `ModeHybridRerank`,
   `Telemetry`, `Reranker`, `RerankerOption`, `With{RerankN,
   RerankBlendBeta, AdaptiveRerankN}`, `VecCache` — aliases/wrappers over
