@@ -35,6 +35,7 @@ import (
 
 	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/envcfg"
+	"github.com/townsendmerino/ken/internal/structural"
 )
 
 func main() {
@@ -94,7 +95,7 @@ func main() {
 			fmt.Printf("[%7.1fs]   still building\n", time.Since(start).Seconds())
 		}
 		done()
-		s := ws.StructuralIfBuilt().Stats()
+		s, _ := ws.StructuralStatus()
 		fmt.Printf("  structural files=%d symbols=%d callees=%d\n", s.IndexedFiles, s.UniqueSymbols, s.UniqueCallees)
 	}
 
@@ -139,8 +140,16 @@ func main() {
 	// no-op: this is the search side alone.
 	run("Refresh, search side only (structural unbuilt)", refreshOnce)
 	buildStructural()
+	// The structural side is timed on an index this tool builds itself,
+	// with the options engine builds its own with: engine does not hand out
+	// its structural index, and Update is internal/structural's method.
+	// The build is outside the timed region.
+	sx, err := structural.BuildWithOptions(ctx, root, structural.BuildOptions{MaxFileBytes: envcfg.StructuralMaxFileBytes(), Walk: walk})
+	if err != nil {
+		fatal(err)
+	}
 	run("structural side only (Index.Update, one file)", func(int) {
-		ws.StructuralIfBuilt().Update(ws.Root(), []string{*refresh}, nil, nil)
+		sx.Update(root, []string{*refresh}, nil, nil)
 	})
 	run("Refresh, both sides", refreshOnce)
 	if *snapshot {

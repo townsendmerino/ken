@@ -400,6 +400,58 @@ one, `ken-mcp` identical in all 30.
     values: `setupReranker` logs between its reads, and splitting it would
     reorder those lines against the startup-mode lines.
 
+- **Slice 4 (close)**: `tools/k8-structural` no longer uses an escape
+  hatch. It reads the structural stats from `engine.StructuralStatus`, and
+  times the structural `Update` on an index it builds itself from
+  `internal/structural`, as a second named exception in the guard
+  (Francis's decision on #138); what it prints is unchanged.
+  `TestEscapeHatchesHaveNoNewCallers` pins the remaining users:
+  `mcp/bundle.go` and `mcp/cache.go` (public signatures) and one bench
+  harness. `prebuiltLogWriter` is removed: for a pre-built repo `ken-mcp`'s
+  log carries engine's own two structural lines.
+- **Subprocess tests** all start ken's binaries through
+  `internal/testenv` (temporary `HOME`, `KEN_NO_USAGE_STATS=1`);
+  `TestSubprocessTestsUseTestenv` fails for a test file that calls
+  `os/exec` directly for anything but `go` and `git`.
+
+## End state (2026-11-10)
+
+- `engine` is the only package outside `internal/` that imports
+  `internal/search` or `internal/structural`, except
+  `cmd/ken/internal/measure` (`ken bench` / `ken perf`),
+  `tools/k8-structural` and seven bench harness packages under `bench/`,
+  all named in the guard.
+- `cmd/ken`, `cmd/ken-mcp` and `mcp` work through `*engine.Workspace`.
+- `ken-mcp`'s `main()` is 19 lines.
+
+Final benchmark, same commands as the baseline, parse budget off:
+
+| | overall | NL | symbol |
+|---|--:|--:|--:|
+| BM25-only recall@10 | 0.840 | 0.831 | 0.892 |
+| Hybrid recall@10 | 0.974 | 0.970 | 0.995 |
+
+Hybrid NDCG@10 0.8436 (0.843619 unrounded), 0 of 63 repos differing from
+the earlier budget-off runs. Identical to the baseline.
+
+Left open:
+
+- `ken-mcp`'s late environment reads (`KEN_DB_*`, rerank telemetry, usage
+  stats, shutdown grace) are outside `server.Config`; moving them reorders
+  invalid-value warnings in the log.
+- Hybrid search with DB chunks is not repeatable across a minute
+  boundary. Traced 2026-11-10: every DB chunk's text starts with
+  `-- indexed at <UTC minute> from <host>` (`internal/db.freshnessHeader`),
+  and that line is tokenized and embedded with the rest. With only the
+  minute varied over 180 consecutive minutes, four digit-free queries gave
+  33 distinct hybrid score sets (163 minute-to-minute changes), and one
+  score set in BM25 and in semantic mode. In live sessions a new output
+  appeared at exactly 21:27:00 and 21:28:00. The race detector reported
+  nothing in 200 sessions, so it is not a data race or an order-dependent
+  sum. It applies to `ken-mcp` with `KEN_DB_DSN` as much as to `mcp.Run`.
+  Not changed: keeping the line out of the indexed text is a ranking
+  change.
+
 ## Inferred, not verified
 
 - That `Open` with `Watch: false` matches `FromFSWithOptions` for every

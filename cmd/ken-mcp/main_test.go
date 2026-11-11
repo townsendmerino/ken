@@ -15,6 +15,8 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
+
+	"github.com/townsendmerino/ken/internal/testenv"
 )
 
 // kenMCPBin is the ken-mcp test-binary filename. On Windows an executable
@@ -138,17 +140,14 @@ func TestBinary_StdoutIsCleanJSONRPC(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath)
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"), // go-git reads ~/.gitconfig for some setups
-		"KEN_NO_USAGE_STATS=1",      // keep test searches out of the real ~/.ken/savings.jsonl
+	cmd := testenv.CommandContext(t, ctx, binPath)
+	cmd.Env = append(cmd.Env,
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=error",
 		"KEN_MCP_SNAPSHOT=0", // don't pollute committed testdata/repo/.ken (M1)
-		"KEN_MCP_DEFAULT_REPO=" + fixture,
-	}
+		"KEN_MCP_DEFAULT_REPO="+fixture,
+	)
 	var stderr safeBuf
 	cmd.Stderr = &stderr
 
@@ -286,26 +285,23 @@ func TestBinary_StdoutIsCleanJSONRPC_WithRerank(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath)
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
-		"KEN_NO_USAGE_STATS=1", // keep test searches out of the real ~/.ken/savings.jsonl
+	cmd := testenv.CommandContext(t, ctx, binPath)
+	cmd.Env = append(cmd.Env,
 		"KEN_MCP_MODE=hybrid-rerank",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info", // so we can verify rerank=on lands on stderr
 		"KEN_MCP_SNAPSHOT=0",     // don't pollute committed testdata/repo/.ken (M1)
-		"KEN_MCP_DEFAULT_REPO=" + fixture,
-		"KEN_MCP_MODEL_DIR=" + hybridModel,
+		"KEN_MCP_DEFAULT_REPO="+fixture,
+		"KEN_MCP_MODEL_DIR="+hybridModel,
 		"KEN_MCP_RERANK=on",
-		"KEN_MCP_RERANK_MODEL_DIR=" + rerankModel,
+		"KEN_MCP_RERANK_MODEL_DIR="+rerankModel,
 		"KEN_MCP_RERANK_TOP_N=10", // small head keeps the test fast
 		"KEN_MCP_RERANK_BETA=0.25",
 		// Without this the server saves its rerank cache to the real
 		// ~/.ken/rerank-cache-int8.bin on shutdown, replacing the
 		// developer's warm cache with this test's few entries.
-		"KEN_MCP_RERANK_CACHE=" + filepath.Join(t.TempDir(), "rerank-cache.bin"),
-	}
+		"KEN_MCP_RERANK_CACHE="+filepath.Join(t.TempDir(), "rerank-cache.bin"),
+	)
 	var stderr safeBuf
 	cmd.Stderr = &stderr
 
@@ -376,20 +372,17 @@ func TestBinary_StdoutIsCleanJSONRPC_WithDB(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath)
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
-		"KEN_NO_USAGE_STATS=1", // keep test searches out of the real ~/.ken/savings.jsonl
+	cmd := testenv.CommandContext(t, ctx, binPath)
+	cmd.Env = append(cmd.Env,
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info", // verbose to catch any accidental stdout writes
 		"KEN_MCP_SNAPSHOT=0",     // don't pollute committed testdata/repo/.ken (M1)
-		"KEN_MCP_DEFAULT_REPO=" + fixture,
-		"KEN_DB_DSN=" + dsn,
+		"KEN_MCP_DEFAULT_REPO="+fixture,
+		"KEN_DB_DSN="+dsn,
 		"KEN_DB_SAMPLE_ROWS=3",
 		"KEN_DB_REINDEX_INTERVAL=30s",
-	}
+	)
 	var stderr safeBuf
 	cmd.Stderr = &stderr
 
@@ -443,7 +436,7 @@ func TestBinary_PrintListenScript_StdoutIsScript(t *testing.T) {
 	binPath := buildKenMCPOnce(t)
 
 	var stdout, stderr bytes.Buffer
-	cmd := exec.Command(binPath, "print-listen-script")
+	cmd := testenv.Command(t, binPath, "print-listen-script")
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -499,19 +492,16 @@ func TestBinary_StdoutIsCleanJSONRPC_WithListen(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath)
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
-		"KEN_NO_USAGE_STATS=1", // keep test searches out of the real ~/.ken/savings.jsonl
+	cmd := testenv.CommandContext(t, ctx, binPath)
+	cmd.Env = append(cmd.Env,
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info",
 		"KEN_MCP_SNAPSHOT=0", // don't pollute committed testdata/repo/.ken (M1)
-		"KEN_MCP_DEFAULT_REPO=" + fixture,
-		"KEN_DB_DSN=" + dsn,
+		"KEN_MCP_DEFAULT_REPO="+fixture,
+		"KEN_DB_DSN="+dsn,
 		"KEN_DB_LISTEN=1",
-	}
+	)
 	var stderr safeBuf
 	cmd.Stderr = &stderr
 
@@ -594,18 +584,15 @@ func TestBinary_StdoutIsCleanJSONRPC_WithReindexDB(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath)
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
-		"KEN_NO_USAGE_STATS=1", // keep test searches out of the real ~/.ken/savings.jsonl
+	cmd := testenv.CommandContext(t, ctx, binPath)
+	cmd.Env = append(cmd.Env,
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info",
 		"KEN_MCP_SNAPSHOT=0", // don't pollute committed testdata/repo/.ken (M1)
-		"KEN_MCP_DEFAULT_REPO=" + fixture,
-		"KEN_DB_DSN=" + dsn,
-	}
+		"KEN_MCP_DEFAULT_REPO="+fixture,
+		"KEN_DB_DSN="+dsn,
+	)
 	var stderr safeBuf
 	cmd.Stderr = &stderr
 
@@ -676,22 +663,19 @@ func TestBinary_StdoutIsCleanJSONRPC_WithMySQL(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath)
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
-		"KEN_NO_USAGE_STATS=1", // keep test searches out of the real ~/.ken/savings.jsonl
+	cmd := testenv.CommandContext(t, ctx, binPath)
+	cmd.Env = append(cmd.Env,
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info",
 		"KEN_MCP_SNAPSHOT=0", // don't pollute committed testdata/repo/.ken (M1)
-		"KEN_MCP_DEFAULT_REPO=" + fixture,
-		"KEN_DB_DSN=" + dsn,
+		"KEN_MCP_DEFAULT_REPO="+fixture,
+		"KEN_DB_DSN="+dsn,
 		"KEN_DB_SAMPLE_ROWS=2",
 		// Exercise schema filtering too — confirms both env vars feed
 		// through wireDBTier2 without disturbing the stdout contract.
 		"KEN_DB_SCHEMAS=ken_test",
-	}
+	)
 	var stderr safeBuf
 	cmd.Stderr = &stderr
 
@@ -755,20 +739,17 @@ func TestBinary_StdoutIsCleanJSONRPC_WithMariaDB(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath)
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
-		"KEN_NO_USAGE_STATS=1", // keep test searches out of the real ~/.ken/savings.jsonl
+	cmd := testenv.CommandContext(t, ctx, binPath)
+	cmd.Env = append(cmd.Env,
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info",
 		"KEN_MCP_SNAPSHOT=0", // don't pollute committed testdata/repo/.ken (M1)
-		"KEN_MCP_DEFAULT_REPO=" + fixture,
-		"KEN_DB_DSN=" + dsn,
+		"KEN_MCP_DEFAULT_REPO="+fixture,
+		"KEN_DB_DSN="+dsn,
 		"KEN_DB_SAMPLE_ROWS=2",
 		"KEN_DB_SCHEMAS=ken_test",
-	}
+	)
 	var stderr safeBuf
 	cmd.Stderr = &stderr
 
@@ -838,19 +819,16 @@ func TestBinary_StdoutIsCleanJSONRPC_WithSQLite(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath)
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
-		"KEN_NO_USAGE_STATS=1", // keep test searches out of the real ~/.ken/savings.jsonl
+	cmd := testenv.CommandContext(t, ctx, binPath)
+	cmd.Env = append(cmd.Env,
 		"KEN_MCP_MODE=bm25",
 		"KEN_MCP_CHUNKER=regex",
 		"KEN_MCP_LOG_LEVEL=info",
 		"KEN_MCP_SNAPSHOT=0", // don't pollute committed testdata/repo/.ken (M1)
-		"KEN_MCP_DEFAULT_REPO=" + fixture,
-		"KEN_DB_DSN=" + sqliteFileDSN(dbPath),
+		"KEN_MCP_DEFAULT_REPO="+fixture,
+		"KEN_DB_DSN="+sqliteFileDSN(dbPath),
 		"KEN_DB_SAMPLE_ROWS=2",
-	}
+	)
 	var stderr safeBuf
 	cmd.Stderr = &stderr
 

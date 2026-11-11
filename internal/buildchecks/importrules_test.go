@@ -67,7 +67,7 @@ var importRules = map[string][]string{
 	"tools/build-subset":            {"internal/devtools"},
 	"tools/compare-binaries/runbin": {"mcp", "mcp/db"},
 	"tools/gen-licenses":            {"internal/devtools"},
-	"tools/k8-structural":           {"engine", "internal/envcfg"},
+	"tools/k8-structural":           {"engine", "internal/envcfg", "internal/structural"},
 	"tools/peakrss":                 {},
 	"tools/perf-startup-m2":         {"internal/devtools"},
 	"tools/rss-bench":               {},
@@ -94,6 +94,7 @@ var importRules = map[string][]string{
 	"internal/sql":         {},
 	"internal/status":      {"internal/usage"},
 	"internal/structural":  {"internal/repo"},
+	"internal/testenv":     {},
 	"internal/usage":       {},
 }
 
@@ -107,6 +108,7 @@ var searchImporters = map[string]string{
 	"engine": "the composition root",
 
 	"cmd/ken/internal/measure": "named exception: the ken bench / ken perf harnesses",
+	"tools/k8-structural":      "named exception: a measurement tool that times the structural index's own Update",
 
 	// Benchmark harnesses (//go:build bench), never linked into a release.
 	"bench/chunkdiff":           "bench harness",

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -13,6 +12,8 @@ import (
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/townsendmerino/ken/internal/testenv"
 )
 
 // runKenMCPExpectExit runs the real binary with env and asserts it exits with
@@ -23,10 +24,8 @@ func runKenMCPExpectExit(t *testing.T, wantCode int, env ...string) string {
 	binPath := buildKenMCPOnce(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binPath)
-	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"),
-		"KEN_NO_USAGE_STATS=1"}, // keep test searches out of the real ~/.ken/savings.jsonl
-		env...)
+	cmd := testenv.CommandContext(t, ctx, binPath)
+	cmd.Env = append(cmd.Env, env...)
 	var stderr safeBuf
 	cmd.Stderr = &stderr
 	err := cmd.Run()
@@ -132,14 +131,12 @@ func TestHTTP_Binary_ServesAuthedSession(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binPath)
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"),
-		"KEN_MCP_TRANSPORT=http", "KEN_MCP_ADDR=" + addr, "KEN_MCP_AUTH_TOKEN=" + token,
+	cmd := testenv.CommandContext(t, ctx, binPath)
+	cmd.Env = append(cmd.Env,
+		"KEN_MCP_TRANSPORT=http", "KEN_MCP_ADDR="+addr, "KEN_MCP_AUTH_TOKEN="+token,
 		"KEN_MCP_MODE=bm25", "KEN_MCP_CHUNKER=regex", "KEN_MCP_LOG_LEVEL=error",
-		"KEN_NO_USAGE_STATS=1", // keep test searches out of the real ~/.ken/savings.jsonl
-		"KEN_MCP_SNAPSHOT=0", "KEN_MCP_DEFAULT_REPO=" + fixture,
-	}
+		"KEN_MCP_SNAPSHOT=0", "KEN_MCP_DEFAULT_REPO="+fixture,
+	)
 	var stderr safeBuf
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {

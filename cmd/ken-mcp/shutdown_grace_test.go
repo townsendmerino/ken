@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/townsendmerino/ken/internal/testenv"
 )
 
 // TestBinary_ShutdownGraceOnSignal exercises Fix 1's signal path end to end:
@@ -34,9 +36,8 @@ func TestBinary_ShutdownGraceOnSignal(t *testing.T) {
 		t.Fatalf("go build ken-mcp: %v\n%s", err, out)
 	}
 
-	cmd := exec.Command(binPath)
-	cmd.Env = append(os.Environ(),
-		"KEN_NO_USAGE_STATS=1",      // keep the test out of the real ~/.ken/savings.jsonl
+	cmd := testenv.Command(t, binPath)
+	cmd.Env = append(cmd.Env,
 		"KEN_MCP_MODE=bm25",         // no model needed → fast startup
 		"KEN_MCP_AUTO_FETCH=0",      // no network
 		"KEN_MCP_SHUTDOWN_GRACE=2s", // small grace so the test stays fast

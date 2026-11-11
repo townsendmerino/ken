@@ -88,6 +88,10 @@ type StructuralStatus struct {
 	// FilesByExtension counts indexed files per extension, leading dot
 	// kept (".go", ".py").
 	FilesByExtension map[string]int
+	// IndexedFiles is how many files the index holds; UniqueSymbols how
+	// many distinct names have a definition; UniqueCallees how many
+	// distinct names are called somewhere.
+	IndexedFiles, UniqueSymbols, UniqueCallees int
 }
 
 // StructuralStatus summarizes the structural index if one is already
@@ -98,6 +102,8 @@ func (w *Workspace) StructuralStatus() (st StructuralStatus, ok bool) {
 	if sx == nil {
 		return st, false
 	}
+	s := sx.Stats()
+	st.IndexedFiles, st.UniqueSymbols, st.UniqueCallees = s.IndexedFiles, s.UniqueSymbols, s.UniqueCallees
 	st.FilesByExtension = map[string]int{}
 	for path, fs := range sx.Files() {
 		st.FilesByExtension[filepath.Ext(path)]++

@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/townsendmerino/ken/internal/search"
+
+	"github.com/townsendmerino/ken/internal/testenv"
 )
 
 // buildKenBinary compiles the `ken` binary into binDir and returns
@@ -69,7 +71,7 @@ func TestBuildIndex_HappyPath(t *testing.T) {
 	writeTinyCorpus(t, corpusDir)
 	outPath := filepath.Join(corpusDir, ".ken", "index.bin")
 
-	cmd := exec.Command(binPath, "build-index", corpusDir,
+	cmd := testenv.Command(t, binPath, "build-index", corpusDir,
 		"-o", outPath, "--mode", "bm25", "--chunker", "regex")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -128,7 +130,7 @@ func TestBuildIndex_AutoCreatesParentDir(t *testing.T) {
 	writeTinyCorpus(t, corpusDir)
 	outPath := filepath.Join(corpusDir, ".ken", "index.bin") // .ken/ doesn't exist
 
-	cmd := exec.Command(binPath, "build-index", corpusDir, "-o", outPath, "--mode", "bm25")
+	cmd := testenv.Command(t, binPath, "build-index", corpusDir, "-o", outPath, "--mode", "bm25")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -141,7 +143,7 @@ func TestBuildIndex_AutoCreatesParentDir(t *testing.T) {
 	// build-from-corpus run (Commit 1's prune). We check this by
 	// running build-index AGAIN over the same corpus (where .ken/
 	// now exists) and verifying the new index still loads.
-	cmd2 := exec.Command(binPath, "build-index", corpusDir, "-o", outPath, "--mode", "bm25")
+	cmd2 := testenv.Command(t, binPath, "build-index", corpusDir, "-o", outPath, "--mode", "bm25")
 	cmd2.Stderr = &stderr
 	if err := cmd2.Run(); err != nil {
 		t.Fatalf("second ken build-index: %v\n--stderr--\n%s", err, stderr.String())
@@ -155,7 +157,7 @@ func TestBuildIndex_MissingCorpus(t *testing.T) {
 		t.Skip("skipping subprocess test in -short mode")
 	}
 	binPath := buildKenBinary(t, t.TempDir())
-	cmd := exec.Command(binPath, "build-index", "/nonexistent/corpus/dir",
+	cmd := testenv.Command(t, binPath, "build-index", "/nonexistent/corpus/dir",
 		"-o", filepath.Join(t.TempDir(), "out.bin"), "--mode", "bm25")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -177,7 +179,7 @@ func TestBuildIndex_InvalidMode(t *testing.T) {
 	binPath := buildKenBinary(t, t.TempDir())
 	corpusDir := t.TempDir()
 	writeTinyCorpus(t, corpusDir)
-	cmd := exec.Command(binPath, "build-index", corpusDir,
+	cmd := testenv.Command(t, binPath, "build-index", corpusDir,
 		"-o", filepath.Join(t.TempDir(), "out.bin"), "--mode", "hybrydddd")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -198,7 +200,7 @@ func TestBuildIndex_MissingOutputFlag(t *testing.T) {
 	binPath := buildKenBinary(t, t.TempDir())
 	corpusDir := t.TempDir()
 	writeTinyCorpus(t, corpusDir)
-	cmd := exec.Command(binPath, "build-index", corpusDir, "--mode", "bm25")
+	cmd := testenv.Command(t, binPath, "build-index", corpusDir, "--mode", "bm25")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	err := cmd.Run()

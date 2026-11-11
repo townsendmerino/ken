@@ -21,7 +21,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -185,7 +184,6 @@ func openWorkspace(ctx context.Context, dir string, opts engine.Options, logger 
 	if data, err := os.ReadFile(prebuiltIndexPath(dir)); err == nil {
 		popts := opts
 		popts.Prebuilt = data
-		popts.LogWriter = prebuiltLogWriter{logger: logger, dir: dir, passthrough: opts.LogWriter}
 		ws, pErr := engine.Open(ctx, dir, popts)
 		var pe *engine.PrebuiltError
 		switch {
@@ -212,49 +210,6 @@ func openWorkspace(ctx context.Context, dir string, opts engine.Options, logger 
 	}
 	logger.Logf(kenmcp.LogInfo, "indexed %s (%d chunks, watching)", dir, ws.ChunkCount())
 	return ws, nil
-}
-
-// prebuiltLogWriter is the LogWriter of a pre-built repo's Workspace. The
-// frozen bundle used to build its structural index through ken-mcp's own
-// builder, which reported the outcome through the leveled logger. engine
-// builds it now and reports in its own words; this turns those two lines
-// back into the messages, and levels, operators have always seen for a
-// pre-built repo. Anything else engine writes passes through.
-type prebuiltLogWriter struct {
-	logger      *kenmcp.Logger
-	dir         string
-	passthrough io.Writer
-}
-
-// structuralBuiltLine matches engine's "structural index built" line. It is
-// anchored on the counts at the end, so a root path with spaces or colons
-// in it still matches.
-var structuralBuiltLine = regexp.MustCompile(`^engine: structural index built for .*: (\d+) files, (\d+) symbols, (\d+) callees in \S+$`)
-
-func (w prebuiltLogWriter) Write(p []byte) (int, error) {
-	line := strings.TrimRight(string(p), "\n")
-	if m := structuralBuiltLine.FindStringSubmatch(line); m != nil {
-		w.logger.Logf(kenmcp.LogInfo,
-			"structural index built (lazy, first use) for %s: %s files, %s symbols, %s unique callees",
-			w.dir, m[1], m[2], m[3])
-		return len(p), nil
-	}
-	const failPrefix = "engine: structural index build for "
-	if rest, ok := strings.CutPrefix(line, failPrefix); ok {
-		if i := strings.Index(rest, " failed ("); i >= 0 {
-			cause := rest[i+len(" failed ("):]
-			if j := strings.LastIndex(cause, ");"); j >= 0 {
-				cause = cause[:j]
-			}
-			w.logger.Logf(kenmcp.LogWarn, "structural index build failed for %s: %s "+
-				"(track 2 tools will report no structure available; will retry on next call)", w.dir, cause)
-			return len(p), nil
-		}
-	}
-	if w.passthrough != nil {
-		return w.passthrough.Write(p)
-	}
-	return len(p), nil
 }
 
 // RunSubcommand dispatches one-shot CLI subcommands that exit before
