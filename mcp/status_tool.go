@@ -81,6 +81,11 @@ func withStatusEnv(opts status.BuildOptions) status.BuildOptions {
 	opts.RerankModelDir = envcfg.RerankModelDir()
 	opts.SavingsPath = envcfg.UsageStatsPath()
 	opts.EnrichEnv = envcfg.EnrichRaw()
+	// Process-wide counts: every index this server has built so far.
+	opts.ParseBudget = &status.ParseBudgetInfo{
+		Skipped: structural.ParseBudgetSkips(),
+		Reached: structural.ParseBudgetReached(),
+	}
 	return opts
 }
 

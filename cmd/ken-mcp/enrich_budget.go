@@ -41,4 +41,9 @@ func setupEnrichBudget(logger *kenmcp.Logger) {
 			"enrichment parse budget exceeded for %s (%v) — skipping enrichment for this file (pathological/template-like input; results are unaffected, just unenriched)",
 			path, d)
 	})
+	structural.SetParseBudgetReachedLogf(func(path string, d time.Duration) {
+		logger.Logf(kenmcp.LogWarn,
+			"enrichment parse budget reached for %s (%v) — the file is enriched from a parse that was cut short, so its label can differ between runs (raise KEN_ENRICH_FILE_BUDGET_MS, or 0 to disable the budget)",
+			path, d)
+	})
 }

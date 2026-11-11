@@ -131,6 +131,14 @@ func extractGuardedCap(gram, rel string, data []byte, maxBytes int64) *FileStruc
 		}
 		return nil
 	}
+	// An accepted parse that ran up to the budget is not the full parse:
+	// gotreesitter uses the timeout as a deadline across its error-recovery
+	// passes and returns its best tree so far as accepted. Count and log it
+	// ("budget reached"), then use the tree exactly as before, so the label
+	// is unchanged; the point is that the file is no longer silent.
+	if elapsed := time.Since(start); budgetReached(effectiveParseBudgetMicros(), elapsed) || parseBudgetForceReached.Load() {
+		recordParseBudgetReached(rel, elapsed)
+	}
 	root := tree.RootNode()
 	if root == nil {
 		return nil
