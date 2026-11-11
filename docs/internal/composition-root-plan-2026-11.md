@@ -346,6 +346,23 @@ one, `ken-mcp` identical in all 30.
     `internal/search` (seven packages). The brief's end state did not mention
     them; the guard lists them as harnesses.
 
+- **Harness** (PR #132): scratch-HOME guard, and `runbin`, an `mcp.Run`
+  test server over a code corpus.
+- **Slice 2a**: mcp's `NewServer` / `Cache` path on `engine.Workspace`
+  (ADR-057). mcp no longer imports `internal/structural`; it imports
+  `internal/search` only in `run.go`, for `mcp.Run`.
+  - Comparison against main: `ken` 29 identical plus the timing case;
+    `ken-mcp` 30 identical; `runbin` differs in 25 settings, only in its
+    live and DB variants, because importing `engine` registers the markdown
+    chunker (decision 2, accepted). Pre-built sections are identical in
+    every setting, and main's `runbin` with the chunker linked in is
+    identical to the new build.
+  - **Found on the way:** hybrid search with DB chunks under `mcp.Run`
+    is not perfectly repeatable. About once in 500 sessions a few
+    consecutive queries return scores that differ in the fifth digit, on
+    main compared with itself. Not traced. The harness retries a differing
+    setting once and reports "flaky" if the retry agrees.
+
 ## Inferred, not verified
 
 - That `Open` with `Watch: false` matches `FromFSWithOptions` for every

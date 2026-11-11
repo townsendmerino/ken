@@ -21,7 +21,7 @@ func TestSearchResponse_WarmingField(t *testing.T) {
 	args := SearchArgs{Query: "user", Output: "json"}
 
 	semantic := func(warming bool) string {
-		res, _, err := runSearchWithTelemetry(ix, args, nil, false, nil, "", warming)
+		res, _, err := runSearchWithTelemetry(indexView{ix}, args, nil, false, nil, "", warming)
 		if err != nil {
 			t.Fatalf("runSearchWithTelemetry: %v", err)
 		}

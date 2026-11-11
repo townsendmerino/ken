@@ -64,6 +64,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-054](#adr-054-ken_enrich-and-ken_ann-apply-on-every-index-path) | `KEN_ENRICH` and `KEN_ANN` apply on every index path | Accepted |
 | [ADR-055](#adr-055-minified-files-are-skipped-by-default-retroactive) | Minified files are skipped by default (retroactive) | Accepted |
 | [ADR-056](#adr-056-markdown-files-use-the-markdown-chunker-by-default-retroactive) | Markdown files use the markdown chunker by default (retroactive) | Accepted |
+| [ADR-057](#adr-057-mcp-works-through-engine-superseding-adr-048s-rejection) | `mcp` works through `engine` (superseding ADR-048's rejection) | Accepted |
 
 ---
 
@@ -3084,3 +3085,27 @@ Unchanged since the commit: files `chunk.Language` identifies as markdown go to 
 - Together with ADR-055 this accounts for the whole BM25-only drift between docs/BENCH.md's June table (0.841 overall) and v1.13.0 (0.842): −0.001, then +0.002.
 - The top-of-list cost (recall@1 down 0.006 BM25-only) was not in the commit message and is recorded here for the first time.
 - A default chunking change belongs in its own commit with its own record, not inside a performance commit.
+
+## ADR-057: mcp works through engine (superseding ADR-048's rejection)
+
+**Status:** Accepted
+**Date:** 2026-11-10
+**Decided by:** Francis (2026-11-10), on the composition-root plan (`docs/internal/composition-root-plan-2026-11.md`), decisions 1 to 3.
+**Supersedes:** the alternative ADR-048 rejected, "`mcp` importing `engine` and holding a `*engine.Workspace`". The rest of ADR-048 stands.
+
+### Context
+ADR-048 kept `mcp` from importing `engine` because the import "changes the dependency graph `mcp.Run` users link". That left four packages assembling the search pipeline from `internal/search` on their own (engine, mcp, cmd/ken, cmd/ken-mcp), and two bugs came from those paths drifting apart: `KEN_ENRICH` and `KEN_ANN` reaching only some of them (ADR-054), and the DB-refresh path rebuilding with the wrong dense store. tack depends on there being one engine with several faces.
+
+### Decision
+1. **`mcp` imports `engine` and its tools query an `*engine.Workspace`.** A bundle either carries one (the new `RepoBundle.Workspace` field, which is how cmd/ken-mcp builds bundles) or, for a Builder that assembles an index itself, is given a view over its index by `engine.WrapIndex`. The handlers see a Workspace either way.
+2. **`mcp`'s public API does not change.** Its signatures are written in internal types (`RepoBundle.Index`, `StructuralBuilder`, `StructuralSource`, `Cache.Get`, and the `Mode` / `Result` / `Telemetry` aliases). They now name those types through engine's aliases, which are the same types. This is the one remaining use of the escape-hatch alias types inside ken, and three small methods on `RepoBundle` are the only places ken calls the raw-index accessors, to keep `Cache.Get`, `RepoBundle.StructuralIndex` and `StructuralIfBuilt` returning what they always have.
+3. **The dependency-graph effect is accepted.** Importing `engine` links the markdown chunker into every binary built on `mcp`, because that chunker registers itself at package init and `engine` imports it (ADR-047). Since ADR-056 a registered markdown chunker handles `.md` files.
+
+### Why the earlier objection no longer applies
+The objection was to the size and shape of what `mcp.Run` users link. `engine` adds no database driver and no tokenizer (`mcp`'s two binary contracts still pass), and its own code is a thin layer over packages `mcp` already linked. What it does add is the markdown chunker, a behavior change rather than a size one, and Francis accepted it rather than split `engine` or change aikit.
+
+### Consequences
+- **Third-party `mcp` binaries that did not link the markdown chunker now chunk `.md` files by heading on a live build.** Their results for those files change: line windows become heading sections, and other chunks' BM25 scores shift with the corpus statistics. Measured with the `mcp.Run` test server in `tools/compare-binaries`: 25 of 30 settings differ, all in live builds; the same server with the chunker linked in is identical to the new build.
+- **Unaffected:** `ken-mcp` and `cmd/ken-mcp-docs`, which already linked the chunker (identical in all 30 settings), and any pre-built index, which was chunked when it was built (identical in every setting).
+- New best-effort engine API serves the handlers: `Result`, `ModeNames`, `SearchResults`, `FindRelatedResults`, `CurrentMode`, `Warming`, `IndexStatus`, `StructuralStatus`, `StructuralPending`, `OutlineOfFile`, `StructuralFilesUnder`, `EnrichFileBudgetCounts`, `NormalizePath`, `StripLabel`, `StructuralSource`, `WrapIndex`, `ErrWrappedIndex`.
+- `mcp.Run` itself still builds its own index until the next slice moves it onto a Workspace.

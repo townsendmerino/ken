@@ -73,7 +73,7 @@ func (w *Workspace) Structural(ctx context.Context) (*StructuralIndex, error) {
 // again rather than holding the result. Best-effort, outside engine's
 // stability promise, like the StructuralIndex type it returns.
 func (w *Workspace) StructuralIfBuilt() *StructuralIndex {
-	return w.structural.cur.Load()
+	return w.structural.ifBuilt()
 }
 
 // VecCache is a persistent content-hash→vector cache consulted on every

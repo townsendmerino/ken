@@ -57,7 +57,7 @@ func handleRecentlyChanged(ctx context.Context, cfg *Config, args RecentlyChange
 			return errorResult(args.Output, fmt.Sprintf(
 				"recently_changed: failed to prepare %s: %v", source, berr)), nil, nil
 		}
-		gitDir = bundle.Index.Root()
+		gitDir = bundle.workspace().Root()
 		shallowNote = "_Note: URL repos are indexed from a shallow (depth-1) clone, so git history here is limited to the most recent commit(s). Clone the repo locally and pass its path for full history._"
 	}
 	if st, err := os.Stat(gitDir); err != nil || !st.IsDir() {

@@ -16,8 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/townsendmerino/ken/internal/search"
-	"github.com/townsendmerino/ken/internal/structural"
+	"github.com/townsendmerino/ken/engine"
 )
 
 // RepoBundle is the per-repo data the cache holds: the retrieval-side
@@ -40,7 +39,16 @@ import (
 // on eviction to stop the watcher goroutine; the structural index needs
 // no teardown (it's plain maps that GC).
 type RepoBundle struct {
-	Index *search.WatchedIndex
+	// Workspace is the engine.Workspace that serves this repo. When set it
+	// is the bundle: the tools query it, its structural index is the
+	// bundle's, and reaping the bundle closes it. Index, StructuralBuilder
+	// and Structural may then be left nil. This is how cmd/ken-mcp builds
+	// bundles; the three fields below remain for Builders that assemble an
+	// index themselves. Best-effort (added after 1.0).
+	Workspace *engine.Workspace
+
+	// Index is the watched index, for a bundle with no Workspace.
+	Index *engine.WatchedIndex
 
 	// StructuralBuilder constructs the structural symbol index over the
 	// repo's corpus. nil ⇒ the bundle has no structural support (it stays
@@ -48,7 +56,7 @@ type RepoBundle struct {
 	// StructuralIndex() call; on error it is retried on the next call
 	// (audit db/mcp §8) — only a successful build is cached. The context
 	// lets a client cancellation / timeout abort the whole-corpus parse.
-	StructuralBuilder func(context.Context) (*structural.Index, error)
+	StructuralBuilder func(context.Context) (*engine.StructuralIndex, error)
 
 	// Structural, when set, supplies the structural index in place of
 	// StructuralBuilder and this bundle's own build state machine: the
@@ -62,11 +70,14 @@ type RepoBundle struct {
 
 	structuralMu       sync.Mutex  // guards the build-state fields below
 	structuralBuilt    atomic.Bool // set once a build succeeds
-	structuralIdx      *structural.Index
+	structuralIdx      *engine.StructuralIndex
 	structuralBuilding bool               // a background build is in flight
 	structuralDone     chan struct{}      // closed when the in-flight build finishes
 	structuralCancel   context.CancelFunc // cancels the in-flight build (audit N7)
 	structuralFailedAt time.Time          // last failure; gates the retry cooldown
+
+	wrapOnce sync.Once // guards wrapped
+	wrapped  *engine.Workspace
 }
 
 // StructuralSource supplies a RepoBundle's structural index (see
@@ -74,9 +85,9 @@ type RepoBundle struct {
 // the same names mean; Close stops any in-flight build and releases the
 // source (for an engine.Workspace, its watcher too).
 type StructuralSource interface {
-	StructuralIndex(ctx context.Context) *structural.Index
+	StructuralIndex(ctx context.Context) *engine.StructuralIndex
 	StructuralPending() bool
-	StructuralIfBuilt() *structural.Index
+	StructuralIfBuilt() *engine.StructuralIndex
 	Close() error
 }
 
@@ -116,7 +127,11 @@ var structuralFailCooldown = 60 * time.Second
 // Returns nil (never panics) when no builder is wired, the build is still
 // running, it failed, or it found no supported files — handlers defend
 // against nil and can call StructuralPending to distinguish "building".
-func (b *RepoBundle) StructuralIndex(ctx context.Context) *structural.Index {
+func (b *RepoBundle) StructuralIndex(ctx context.Context) *engine.StructuralIndex {
+	if b.Workspace != nil {
+		idx, _ := b.Workspace.Structural(ctx) // nil while building or unavailable
+		return idx
+	}
 	if b.Structural != nil {
 		return b.Structural.StructuralIndex(ctx)
 	}
@@ -240,7 +255,10 @@ func (b *RepoBundle) StructuralPending() bool {
 // StructuralIndex() call already built it; it never triggers a build. The
 // status tool uses this so a `status` query doesn't force the lazy (and, on
 // large corpora, expensive) structural parse just to report on it.
-func (b *RepoBundle) StructuralIfBuilt() *structural.Index {
+func (b *RepoBundle) StructuralIfBuilt() *engine.StructuralIndex {
+	if b.Workspace != nil {
+		return b.Workspace.StructuralIfBuilt()
+	}
 	if b.Structural != nil {
 		return b.Structural.StructuralIfBuilt()
 	}
@@ -248,4 +266,36 @@ func (b *RepoBundle) StructuralIfBuilt() *structural.Index {
 		return b.structuralIdx
 	}
 	return nil
+}
+
+// workspace returns the engine.Workspace the tool handlers query: the
+// bundle's own, or, for a bundle a Builder assembled from an index and a
+// structural builder, a view over those (engine.WrapIndex) that is created
+// once and owns nothing.
+func (b *RepoBundle) workspace() *engine.Workspace {
+	if b.Workspace != nil {
+		return b.Workspace
+	}
+	b.wrapOnce.Do(func() { b.wrapped = engine.WrapIndex(b.Index, b) })
+	return b.wrapped
+}
+
+// watchedIndex is the bundle's index as Cache.Get has always returned it.
+// mcp's public API names this type, so for a Workspace bundle this is one
+// of the few places ken itself calls the Workspace's raw-index accessor.
+func (b *RepoBundle) watchedIndex() *engine.WatchedIndex {
+	if b.Index != nil || b.Workspace == nil {
+		return b.Index
+	}
+	return b.Workspace.WatchedIndex()
+}
+
+// closeIndex stops the bundle's watcher when the cache reaps it.
+func (b *RepoBundle) closeIndex() {
+	switch {
+	case b.Workspace != nil:
+		_ = b.Workspace.Close()
+	case b.Index != nil:
+		_ = b.Index.Close()
+	}
 }

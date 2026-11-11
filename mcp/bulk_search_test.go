@@ -34,7 +34,7 @@ func bulkFixtureIndex(t *testing.T) *search.Index {
 func TestBulkSearch_JSONGroupsPerQuery(t *testing.T) {
 	ix := bulkFixtureIndex(t)
 	args := SearchArgs{Queries: []string{"validateToken", "saveRecord"}, TopK: 5, Output: "json"}
-	res, _, err := runSearch(ix, args)
+	res, _, err := runSearch(indexView{ix}, args)
 	if err != nil {
 		t.Fatalf("runSearch: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestBulkSearch_JSONGroupsPerQuery(t *testing.T) {
 
 func TestBulkSearch_MarkdownSections(t *testing.T) {
 	ix := bulkFixtureIndex(t)
-	res, _, err := runSearch(ix, SearchArgs{Queries: []string{"validateToken", "saveRecord"}, TopK: 3})
+	res, _, err := runSearch(indexView{ix}, SearchArgs{Queries: []string{"validateToken", "saveRecord"}, TopK: 3})
 	if err != nil {
 		t.Fatalf("runSearch: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestBulkSearch_CapEnforced(t *testing.T) {
 	for i := range queries {
 		queries[i] = "validateToken"
 	}
-	res, _, err := runSearch(ix, SearchArgs{Queries: queries, TopK: 1, Output: "json"})
+	res, _, err := runSearch(indexView{ix}, SearchArgs{Queries: queries, TopK: 1, Output: "json"})
 	if err != nil {
 		t.Fatalf("runSearch: %v", err)
 	}

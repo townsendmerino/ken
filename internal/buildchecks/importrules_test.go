@@ -29,7 +29,7 @@ import (
 // puts the layering change in front of the reviewer. The intended layers,
 // for judging such a change: aikit (external) → internal/* → the public
 // library packages (engine, mcp, mcp/db) → programs (cmd/*, tools/*,
-// demos/*, bench/*). mcp doesn't import engine (ADR-048), and the mcp
+// demos/*, bench/*). mcp imports engine (ADR-057, superseding ADR-048's rejection), and the mcp
 // package must stay DB-free (mcp/binary_contract_test.go). An internal/*
 // package importing a public one points the wrong way.
 //
@@ -74,7 +74,7 @@ var importRules = map[string][]string{
 
 	// Public library packages.
 	"engine": {"internal/repo", "internal/search", "internal/structural"},
-	"mcp":    {"internal/envcfg", "internal/mcplog", "internal/search", "internal/status", "internal/structural"},
+	"mcp":    {"engine", "internal/envcfg", "internal/mcplog", "internal/search", "internal/status"},
 	"mcp/db": {"internal/db", "mcp"},
 
 	// Internal packages.
@@ -117,7 +117,7 @@ var searchImporters = map[string]string{
 	"bench/tokens":              "bench harness",
 
 	// Not yet moved onto engine.Workspace.
-	"mcp":         "pending: the mcp slices",
+	"mcp":         "pending: mcp.Run (run.go) still builds its own index; slice 2b",
 	"cmd/ken-mcp": "pending: the cmd/ken-mcp slices",
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/townsendmerino/aikit/chunk"
 	"github.com/townsendmerino/aikit/embed"
+	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/envcfg"
 	"github.com/townsendmerino/ken/internal/search"
 )
@@ -402,7 +403,7 @@ func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db D
 		if args.Repo != "" {
 			logger.Logf(LogDebug, "search: repo=%q ignored (embedded-corpus mode)", args.Repo)
 		}
-		return runSearch(ixPtr.Load(), args)
+		return runSearch(indexView{ixPtr.Load()}, args)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -420,7 +421,7 @@ func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db D
 			// markdown it can't parse.
 			return errorResult(args.Output, "file_path is required and line must be ≥ 1."), nil, nil
 		}
-		return runFindRelated(ixPtr.Load(), args)
+		return runFindRelated(indexView{ixPtr.Load()}, args)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -430,7 +431,7 @@ func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db D
 			"embedded-corpus index (chunk count, mode, chunker). Pass `output: 'json'` " +
 			"for a machine-parsable response.",
 	}, func(_ context.Context, _ *sdk.CallToolRequest, args StatusArgs) (*sdk.CallToolResult, any, error) {
-		return runStatus(ixPtr.Load(), args)
+		return runStatus(indexView{ixPtr.Load()}, args)
 	})
 
 	// v0.8.0 Part 2 + Part 3 (ADR-020): reindex_db tool. Same
@@ -451,4 +452,43 @@ func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db D
 	}
 
 	return srv
+}
+
+// indexView adapts mcp.Run's immutable *search.Index to what the tool
+// handlers ask of an index (queryIndex, IndexStatus). The handlers are
+// written against an engine.Workspace; mcp.Run still holds a bare index
+// until it moves onto a Workspace too (composition-root plan, slice 2b),
+// and this adapter goes away with that.
+type indexView struct{ ix *search.Index }
+
+func (v indexView) CurrentMode() engine.Mode { return v.ix.Mode() }
+
+func (v indexView) SearchResults(_ context.Context, query string, k int, mode engine.Mode, opts engine.SearchOptions) ([]engine.Result, engine.Mode, error) {
+	if opts.Telemetry != nil {
+		res, eff, tel := v.ix.SearchModeWithTelemetry(query, k, mode)
+		*opts.Telemetry = tel
+		return res, eff, nil
+	}
+	res, eff := v.ix.SearchMode(query, k, mode)
+	return res, eff, nil
+}
+
+func (v indexView) FindRelatedResults(_ context.Context, filePath string, line, k int) ([]engine.Result, error) {
+	return v.ix.FindRelated(filePath, line, k)
+}
+
+func (v indexView) IndexStatus() engine.IndexStatus {
+	seen := map[string]struct{}{}
+	for _, c := range v.ix.Chunks() {
+		if !c.Tombstoned {
+			seen[c.File] = struct{}{}
+		}
+	}
+	return engine.IndexStatus{
+		Mode:           v.ix.Mode(),
+		FileCount:      len(seen),
+		ChunkCount:     v.ix.Len(),
+		EnrichedChunks: v.ix.EnrichedChunks(),
+		DenseRetriever: v.ix.DenseRetriever(),
+	}
 }

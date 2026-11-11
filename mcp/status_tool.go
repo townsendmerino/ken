@@ -2,14 +2,12 @@ package mcp
 
 import (
 	"context"
-	"path/filepath"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/envcfg"
-	"github.com/townsendmerino/ken/internal/search"
 	"github.com/townsendmerino/ken/internal/status"
-	"github.com/townsendmerino/ken/internal/structural"
 )
 
 // handleStatus implements the `status` MCP tool for the cmd/ken-mcp
@@ -39,17 +37,20 @@ func handleStatus(ctx context.Context, cfg *Config, args StatusArgs) (*sdk.CallT
 		source, err := resolveRepo(cfg, args.Repo)
 		if err == nil {
 			if bundle, err := cfg.Cache.GetBundle(ctx, source); err == nil {
-				if bundle.Index != nil {
-					if ix := bundle.Index.Load(); ix != nil {
-						opts.LiveIndex = liveIndexInfo(source, ix)
-					}
+				ws := bundle.workspace()
+				if bundle.watchedIndex() != nil {
+					opts.LiveIndex = liveIndexInfo(source, ws.IndexStatus())
 				}
 				// Peek only — never trigger the lazy structural build just
 				// to report status (cold-start M0). If no structural tool
 				// has been called yet, the index isn't built and status
 				// omits it, same as a repo with no structural support.
-				if s := bundle.StructuralIfBuilt(); s != nil {
-					opts.LiveStructural = buildStructuralInfo(s)
+				if st, ok := ws.StructuralStatus(); ok {
+					opts.LiveStructural = &status.StructuralInfo{
+						TopLevelSymbols:  st.TopLevelSymbols,
+						Methods:          st.Methods,
+						PerLanguageFiles: st.FilesByExtension,
+					}
 				}
 			}
 		}
@@ -63,10 +64,10 @@ func handleStatus(ctx context.Context, cfg *Config, args StatusArgs) (*sdk.CallT
 // a single live Index via the atomic pointer. Surface that as the
 // IndexInfo so users still see "what's loaded right now" without
 // having to pass a repo argument.
-func runStatus(ix *search.Index, args StatusArgs) (*sdk.CallToolResult, any, error) {
+func runStatus(ix interface{ IndexStatus() engine.IndexStatus }, args StatusArgs) (*sdk.CallToolResult, any, error) {
 	opts := status.BuildOptions{}
 	if ix != nil {
-		opts.LiveIndex = liveIndexInfo("(embedded corpus)", ix)
+		opts.LiveIndex = liveIndexInfo("(embedded corpus)", ix.IndexStatus())
 	}
 	return renderStatusResult(status.Build(withStatusEnv(opts)), args)
 }
@@ -82,10 +83,8 @@ func withStatusEnv(opts status.BuildOptions) status.BuildOptions {
 	opts.SavingsPath = envcfg.UsageStatsPath()
 	opts.EnrichEnv = envcfg.EnrichRaw()
 	// Process-wide counts: every index this server has built so far.
-	opts.ParseBudget = &status.ParseBudgetInfo{
-		Skipped: structural.ParseBudgetSkips(),
-		Reached: structural.ParseBudgetReached(),
-	}
+	skipped, reached := engine.EnrichFileBudgetCounts()
+	opts.ParseBudget = &status.ParseBudgetInfo{Skipped: skipped, Reached: reached}
 	return opts
 }
 
@@ -100,64 +99,24 @@ func renderStatusResult(s status.Status, args StatusArgs) (*sdk.CallToolResult, 
 	return textResult(status.RenderMarkdown(s, args.Verbose)), nil, nil
 }
 
-func liveIndexInfo(repo string, ix *search.Index) *status.IndexInfo {
+// liveIndexInfo is the status report's view of one loaded index, read
+// from the index itself (engine.IndexStatus) rather than from KEN_ENRICH /
+// KEN_ANN.
+func liveIndexInfo(repo string, st engine.IndexStatus) *status.IndexInfo {
+	dense := st.DenseRetriever
+	switch {
+	case st.Mode == engine.ModeBM25:
+		dense = "none"
+	case dense == "":
+		dense = "flat"
+	}
 	return &status.IndexInfo{
-		Repo:       repo,
-		ChunkCount: ix.Len(),
-		Mode:       search.ModeNames()[int(ix.Mode())],
-		FileCount:  countUniqueFiles(ix),
-		// What this index actually holds, read from the index itself
-		// rather than from KEN_ENRICH / KEN_ANN.
-		EnrichedChunks: ix.EnrichedChunks(),
-		DenseRetriever: denseRetrieverLabel(ix),
+		Repo:           repo,
+		ChunkCount:     st.ChunkCount,
+		Mode:           engine.ModeNames()[int(st.Mode)],
+		FileCount:      st.FileCount,
 		WatchActive:    true, // ken-mcp v0.3+ always watches; embedded-corpus pointer is reloaded on rebuild
+		EnrichedChunks: st.EnrichedChunks,
+		DenseRetriever: dense,
 	}
-}
-
-// countUniqueFiles walks the index's chunks once and counts distinct
-// file paths. The index doesn't expose this directly; for the status
-// surface we accept the O(N) cost.
-func countUniqueFiles(ix *search.Index) int {
-	seen := make(map[string]struct{})
-	for _, c := range ix.Chunks() {
-		if c.Tombstoned {
-			continue
-		}
-		seen[c.File] = struct{}{}
-	}
-	return len(seen)
-}
-
-// buildStructuralInfo summarizes the structural index into the
-// status.StructuralInfo shape. Per-language file count is bucketed by
-// extension (lowercase; leading dot kept so the table matches what
-// `ken status --verbose` prints).
-func buildStructuralInfo(sx *structural.Index) *status.StructuralInfo {
-	info := &status.StructuralInfo{PerLanguageFiles: map[string]int{}}
-	for path, fs := range sx.Files() {
-		ext := filepath.Ext(path)
-		info.PerLanguageFiles[ext]++
-		for _, fn := range fs.Functions {
-			if fn.IsMethod {
-				info.Methods++
-			} else {
-				info.TopLevelSymbols++
-			}
-		}
-		info.TopLevelSymbols += len(fs.Classes)
-	}
-	return info
-}
-
-// denseRetrieverLabel names the dense arm the index is serving, for status:
-// "none" for a BM25 index, "flat" for exact cosine, else "flat-i8" or
-// "flat-binary-i8".
-func denseRetrieverLabel(ix *search.Index) string {
-	if ix.Mode() == search.ModeBM25 {
-		return "none"
-	}
-	if k := ix.DenseRetriever(); k != "" {
-		return k
-	}
-	return "flat"
 }

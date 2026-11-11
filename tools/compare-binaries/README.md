@@ -52,7 +52,12 @@ binary. Comparing a build against itself should print 29 identical plus that
 one for `ken` and for `runbin`, and 30 identical for `ken-mcp`, in about three
 minutes.
 
+A setting that differs is run once more; if the builds agree on the retry it
+is reported as `flaky` rather than `DIFF`. Hybrid search with DB chunks has
+shown a fifth-digit score difference about once in 500 sessions, on a build
+compared with itself.
+
 `ken perf` is not compared: its output is timings. In the DB variant the
-harness calls `reindex_db` before its first search, because `mcp.Run` applies
-DB chunks asynchronously at startup and a query could otherwise land on either
-side of the first swap.
+harness waits until the DB chunks are being served before its first compared
+query, because `mcp.Run` applies them asynchronously at startup, and both
+sides read one shared SQLite file, because the DB chunks' text names it.

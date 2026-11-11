@@ -177,6 +177,10 @@ type Options struct {
 // (Definition, References, Callers, Outline, Symbols). Methods are safe for
 // concurrent use. Call Close when done.
 type Workspace struct {
+	// wrapped marks a view over an index someone else owns (WrapIndex):
+	// Close leaves the index alone, Refresh and WriteSnapshot refuse.
+	wrapped bool
+
 	root     string
 	mode     search.Mode
 	chunker  string
@@ -392,6 +396,9 @@ func (w *Workspace) SetOnFlush(f func(msg string)) {
 // structural build, and — if Snapshot was requested and a Refresh left
 // the on-disk snapshot behind the index — writes it. Idempotent.
 func (w *Workspace) Close() error {
+	if w.wrapped {
+		return nil
+	}
 	w.structural.stop()
 	err := w.index.Close()
 	if w.snapshotEnabled && w.snapshotDirty.CompareAndSwap(true, false) {

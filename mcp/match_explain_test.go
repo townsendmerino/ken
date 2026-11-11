@@ -63,7 +63,7 @@ func TestSearchExplain(t *testing.T) {
 
 	// JSON, explain on.
 	args := SearchArgs{Query: "validateToken", TopK: 5, Explain: true, Output: "json"}
-	res, _, err := runSearchWithTelemetry(ix, args, nil, false, nil, "", false)
+	res, _, err := runSearchWithTelemetry(indexView{ix}, args, nil, false, nil, "", false)
 	if err != nil {
 		t.Fatalf("runSearchWithTelemetry: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestSearchExplain(t *testing.T) {
 
 	// markdown, explain on → per-result "match:" annotation.
 	mdArgs := SearchArgs{Query: "validateToken", TopK: 5, Explain: true}
-	mdRes, _, _ := runSearchWithTelemetry(ix, mdArgs, nil, false, nil, "", false)
+	mdRes, _, _ := runSearchWithTelemetry(indexView{ix}, mdArgs, nil, false, nil, "", false)
 	md := mdRes.Content[0].(*sdk.TextContent).Text
 	if !strings.Contains(md, "match: terms") {
 		t.Errorf("markdown should carry a 'match: terms' annotation; got:\n%s", md)
@@ -90,7 +90,7 @@ func TestSearchExplain(t *testing.T) {
 
 	// Default (no explain) → Match nil, no annotation.
 	offArgs := SearchArgs{Query: "validateToken", TopK: 5, Output: "json"}
-	offRes, _, _ := runSearchWithTelemetry(ix, offArgs, nil, false, nil, "", false)
+	offRes, _, _ := runSearchWithTelemetry(indexView{ix}, offArgs, nil, false, nil, "", false)
 	var offResp SearchResponse
 	_ = json.Unmarshal([]byte(offRes.Content[0].(*sdk.TextContent).Text), &offResp)
 	for _, r := range offResp.Results {

@@ -1,6 +1,6 @@
 package mcp
 
-import "github.com/townsendmerino/ken/internal/search"
+import "github.com/townsendmerino/ken/engine"
 
 // This file resolves the v0.9.x public-API audit finding (see
 // docs/internal/road-to-1.0.md → "Versioning / public API discipline" row,
@@ -19,41 +19,41 @@ import "github.com/townsendmerino/ken/internal/search"
 
 // Mode is the search-pipeline mode. 1.0-stable alias for
 // `search.Mode`; the underlying enum values are re-exported below.
-type Mode = search.Mode
+type Mode = engine.Mode
 
 // Mode constants. Use these to construct a [Config.Mode] value
 // without needing to import internal/search.
 const (
 	// ModeBM25 runs only the lexical retriever. No semantic
 	// vectors are needed; smallest binary footprint.
-	ModeBM25 = search.ModeBM25
+	ModeBM25 = engine.ModeBM25
 
 	// ModeSemantic runs only the dense retriever (Model2Vec cosine
 	// over an [ann.Flat]). Requires a model dir / model.fs.
-	ModeSemantic = search.ModeSemantic
+	ModeSemantic = engine.ModeSemantic
 
 	// ModeHybrid runs both lexical and dense, fuses via RRF, then
 	// applies the standard boost / penalty pipeline. The default
 	// mode for cmd/ken-mcp and [Run].
-	ModeHybrid = search.ModeHybrid
+	ModeHybrid = engine.ModeHybrid
 
 	// ModeHybridRerank is [ModeHybrid] plus a second-stage neural
 	// reranker over the top-N candidates. Requires the rerank model
 	// (`KEN_MCP_RERANK=on` in cmd/ken-mcp, or the equivalent SDK
 	// wiring). Falls back to [ModeHybrid] when the reranker is
 	// absent.
-	ModeHybridRerank = search.ModeHybridRerank
+	ModeHybridRerank = engine.ModeHybridRerank
 )
 
 // Telemetry is the per-query timing breakdown surfaced by the
 // [Config.TelemetryLog] callback. 1.0-stable alias for
 // `search.Telemetry`; struct field names and JSON tags are part of
 // the stable surface.
-type Telemetry = search.Telemetry
+type Telemetry = engine.Telemetry
 
 // Result is a single search hit returned by ken's hybrid pipeline.
 // 1.0-stable alias for `search.Result`. The fields exposed
 // (chunk-relative file path, span, score, etc.) are stable; new
 // additive fields may land between minors. [FormatResults] consumes
 // a slice of these.
-type Result = search.Result
+type Result = engine.Result

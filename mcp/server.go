@@ -11,8 +11,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/townsendmerino/aikit/chunk"
-	"github.com/townsendmerino/ken/internal/search"
-	"github.com/townsendmerino/ken/internal/structural"
+	"github.com/townsendmerino/ken/engine"
 )
 
 // DBIntegration is the seam between mcp.Run / mcp.NewServer and a
@@ -455,18 +454,19 @@ func handleSearch(ctx context.Context, cfg *Config, args SearchArgs) (*sdk.CallT
 	if err != nil {
 		return errorResult(args.Output, err.Error()), nil, nil
 	}
-	wi, err := cfg.Cache.Get(ctx, source)
+	bundle, err := cfg.Cache.GetBundle(ctx, source)
 	if err != nil {
 		return errorResult(args.Output, fmt.Sprintf("Failed to index %q: %s", source, err.Error())), nil, nil
 	}
+	ws := bundle.workspace()
 	// sourceRoot for usage stats: only meaningful for local-path
 	// sources where the chunk's relative path can be stat()ed for
 	// file size. http(s) clones land in a temp dir under TMPDIR;
 	// passing that root is fine — the stats are best-effort.
 	if len(args.Queries) > 0 {
-		return runSearchBulk(wi.Load(), args, cfg.UsageRecorder, source, wi.Warming())
+		return runSearchBulk(ws, args, cfg.UsageRecorder, source, ws.Warming())
 	}
-	return runSearchWithTelemetry(wi.Load(), args, cfg.TelemetryLog, cfg.TelemetryInResponse, cfg.UsageRecorder, source, wi.Warming())
+	return runSearchWithTelemetry(ws, args, cfg.TelemetryLog, cfg.TelemetryInResponse, cfg.UsageRecorder, source, ws.Warming())
 }
 
 func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
@@ -477,11 +477,12 @@ func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (
 	if err != nil {
 		return errorResult(args.Output, err.Error()), nil, nil
 	}
-	wi, err := cfg.Cache.Get(ctx, source)
+	bundle, err := cfg.Cache.GetBundle(ctx, source)
 	if err != nil {
 		return errorResult(args.Output, fmt.Sprintf("Failed to index %q: %s", source, err.Error())), nil, nil
 	}
-	return runFindRelatedWithUsage(wi.Load(), args, cfg.UsageRecorder, source, wi.Warming())
+	ws := bundle.workspace()
+	return runFindRelatedWithUsage(ws, args, cfg.UsageRecorder, source, ws.Warming())
 }
 
 // runSearch executes a search against a resolved Index — independent of
@@ -496,7 +497,7 @@ func handleFindRelated(ctx context.Context, cfg *Config, args FindRelatedArgs) (
 // is the EFFECTIVE mode actually used — so an agent that asks for
 // hybrid against a BM25-only index sees "mode=bm25" in the header
 // (capability downgrade is visible, not silent).
-func runSearch(ix *search.Index, args SearchArgs) (*sdk.CallToolResult, any, error) {
+func runSearch(ix queryIndex, args SearchArgs) (*sdk.CallToolResult, any, error) {
 	if len(args.Queries) > 0 {
 		return runSearchBulk(ix, args, nil, "", false)
 	}
@@ -510,7 +511,7 @@ func runSearch(ix *search.Index, args SearchArgs) (*sdk.CallToolResult, any, err
 // (a top-level script, a raise-only module) gets a "# calls: …" / "# raises:
 // …" label, which the old hardcoded "# func:" prefix missed and leaked.
 func stripEnrichmentLabel(text string) string {
-	return structural.StripLabel(text)
+	return engine.StripLabel(text)
 }
 
 // runSearchWithTelemetry is the runSearch variant that optionally
@@ -522,7 +523,7 @@ func stripEnrichmentLabel(text string) string {
 // recorder: when non-nil, one Record call is appended on each
 // successful search (len(results) > 0). sourceRoot scopes file_chars
 // computation — file paths in results are joined to it before stat.
-func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query string, t search.Telemetry), includeInResponse bool, recorder UsageRecorder, sourceRoot string, warming bool) (*sdk.CallToolResult, any, error) {
+func runSearchWithTelemetry(ix queryIndex, args SearchArgs, log func(query string, t engine.Telemetry), includeInResponse bool, recorder UsageRecorder, sourceRoot string, warming bool) (*sdk.CallToolResult, any, error) {
 	requestedMode, perr := parseRequestedMode(ix, args.Mode)
 	if perr != nil {
 		return errorResult(args.Output, perr.Error()), nil, nil
@@ -537,13 +538,23 @@ func runSearchWithTelemetry(ix *search.Index, args SearchArgs, log func(query st
 	return dispatchOutput(args.Output, resp, body)
 }
 
+// queryIndex is what the search and find_related handlers need from an
+// index. *engine.Workspace is the implementation: a repo opened by the
+// server's Builder, or a view over a third-party bundle's index
+// (RepoBundle.workspace).
+type queryIndex interface {
+	CurrentMode() engine.Mode
+	SearchResults(ctx context.Context, query string, k int, mode engine.Mode, opts engine.SearchOptions) ([]engine.Result, engine.Mode, error)
+	FindRelatedResults(ctx context.Context, filePath string, line, k int) ([]engine.Result, error)
+}
+
 // parseRequestedMode resolves the per-call mode override: empty ⇒ the index's
 // configured mode; otherwise the parsed override (error on an invalid string).
-func parseRequestedMode(ix *search.Index, modeStr string) (search.Mode, error) {
+func parseRequestedMode(ix queryIndex, modeStr string) (engine.Mode, error) {
 	if modeStr == "" {
-		return ix.Mode(), nil
+		return ix.CurrentMode(), nil
 	}
-	return search.ParseMode(modeStr)
+	return engine.ParseMode(modeStr)
 }
 
 // MaxBulkQueries bounds a single bulk `search` call so an agent passing a huge
@@ -554,7 +565,7 @@ const MaxBulkQueries = 20
 // runSearchBulk runs each of args.Queries through searchCore against the same
 // index/mode/filters and returns ONE combined response (a BulkSearchResponse in
 // JSON; per-query sections in markdown), saving an agent N round-trips.
-func runSearchBulk(ix *search.Index, args SearchArgs, recorder UsageRecorder, sourceRoot string, warming bool) (*sdk.CallToolResult, any, error) {
+func runSearchBulk(ix queryIndex, args SearchArgs, recorder UsageRecorder, sourceRoot string, warming bool) (*sdk.CallToolResult, any, error) {
 	requestedMode, perr := parseRequestedMode(ix, args.Mode)
 	if perr != nil {
 		return errorResult(args.Output, perr.Error()), nil, nil
@@ -588,7 +599,7 @@ func runSearchBulk(ix *search.Index, args SearchArgs, recorder UsageRecorder, so
 // single-query (runSearchWithTelemetry) and bulk (runSearchBulk) paths share it.
 // requestedMode is pre-parsed; collectTel toggles the telemetry-instrumented
 // retrieval (single path when a caller wants telemetry; bulk always false).
-func searchCore(ix *search.Index, args SearchArgs, requestedMode search.Mode, collectTel bool, recorder UsageRecorder, sourceRoot string, warming bool) (SearchResponse, search.Telemetry, string) {
+func searchCore(ix queryIndex, args SearchArgs, requestedMode engine.Mode, collectTel bool, recorder UsageRecorder, sourceRoot string, warming bool) (SearchResponse, engine.Telemetry, string) {
 	topK := args.TopK
 	if topK <= 0 {
 		topK = DefaultTopK
@@ -609,15 +620,16 @@ func searchCore(ix *search.Index, args SearchArgs, requestedMode search.Mode, co
 		fetchK = min(topK*10, 200)
 	}
 	var (
-		results       []search.Result
-		effectiveMode search.Mode
-		tel           search.Telemetry
+		results       []engine.Result
+		effectiveMode engine.Mode
+		tel           engine.Telemetry
 	)
+	var opts engine.SearchOptions
 	if collectTel {
-		results, effectiveMode, tel = ix.SearchModeWithTelemetry(args.Query, fetchK, requestedMode)
-	} else {
-		results, effectiveMode = ix.SearchMode(args.Query, fetchK, requestedMode)
+		opts.Telemetry = &tel
 	}
+	// The error is a cancelled context only; the handlers pass none.
+	results, effectiveMode, _ = ix.SearchResults(context.Background(), args.Query, fetchK, requestedMode, opts)
 	// Apply filters and truncate. recall@filter is reported in the
 	// header (`X of Y results matched filters`) so callers can see
 	// when the filter was the limiting factor.
@@ -638,7 +650,7 @@ func searchCore(ix *search.Index, args SearchArgs, requestedMode search.Mode, co
 	}
 	resp := SearchResponse{
 		Query: args.Query,
-		Mode:  search.ModeNames()[int(effectiveMode)],
+		Mode:  engine.ModeNames()[int(effectiveMode)],
 	}
 	if warming {
 		resp.Semantic = "warming"
@@ -685,7 +697,7 @@ func searchCore(ix *search.Index, args SearchArgs, requestedMode search.Mode, co
 		resp.Results = append(resp.Results, row)
 	}
 	header := fmt.Sprintf("Search results for: %q (mode=%s)",
-		args.Query, search.ModeNames()[int(effectiveMode)])
+		args.Query, engine.ModeNames()[int(effectiveMode)])
 	if warming {
 		header += " — semantic index still warming (BM25 results now; hybrid arriving shortly)"
 	}
@@ -711,7 +723,7 @@ func searchCore(ix *search.Index, args SearchArgs, requestedMode search.Mode, co
 // constraint to survive. Languages normalize a leading dot (so
 // both "py" and ".py" work); path filters are case-sensitive
 // substring matches.
-func applySearchFilters(results []search.Result, args SearchArgs) []search.Result {
+func applySearchFilters(results []engine.Result, args SearchArgs) []engine.Result {
 	// Build a quick-lookup extension set; tolerate either "py" or
 	// ".py" inputs.
 	var allowExt map[string]bool
@@ -753,7 +765,7 @@ func applySearchFilters(results []search.Result, args SearchArgs) []search.Resul
 // if recorder is nil. Stat failures are silent — the count missing a
 // file is a smaller wrong than failing the whole tool call over a
 // race with the file watcher.
-func recordSearchUsage(rec UsageRecorder, callType string, results []search.Result, sourceRoot string) {
+func recordSearchUsage(rec UsageRecorder, callType string, results []engine.Result, sourceRoot string) {
 	if rec == nil || len(results) == 0 {
 		return
 	}
@@ -782,7 +794,7 @@ func recordSearchUsage(rec UsageRecorder, callType string, results []search.Resu
 // line appended to MCP search responses when TelemetryInResponse is on.
 // Matches the format ken search --verbose emits so an operator can grep
 // across both surfaces with the same pattern.
-func formatTelemetryLine(t search.Telemetry) string {
+func formatTelemetryLine(t engine.Telemetry) string {
 	return fmt.Sprintf("[telemetry] total=%s stage1=%s rerank=%s blend=%s n=%d cache=%d/%d q_enc=%s cand_enc=%s",
 		t.TotalWall, t.Stage1Wall, t.RerankWall, t.BlendWall,
 		t.RerankerN, t.RerankerCacheHits, t.RerankerCacheMisses,
@@ -791,14 +803,14 @@ func formatTelemetryLine(t search.Telemetry) string {
 
 // runFindRelated executes a find_related against a resolved Index. The
 // caller has already validated args.FilePath and args.Line.
-func runFindRelated(ix *search.Index, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
+func runFindRelated(ix queryIndex, args FindRelatedArgs) (*sdk.CallToolResult, any, error) {
 	return runFindRelatedWithUsage(ix, args, nil, "", false)
 }
 
 // runFindRelatedWithUsage is runFindRelated + optional usage recording.
 // recorder=nil disables tracking; otherwise one Record call is appended
 // per successful response. sourceRoot scopes file_chars computation.
-func runFindRelatedWithUsage(ix *search.Index, args FindRelatedArgs, recorder UsageRecorder, sourceRoot string, warming bool) (*sdk.CallToolResult, any, error) {
+func runFindRelatedWithUsage(ix queryIndex, args FindRelatedArgs, recorder UsageRecorder, sourceRoot string, warming bool) (*sdk.CallToolResult, any, error) {
 	topK := args.TopK
 	if topK <= 0 {
 		topK = DefaultTopK
@@ -814,7 +826,7 @@ func runFindRelatedWithUsage(ix *search.Index, args FindRelatedArgs, recorder Us
 		// yet. Flag it so the agent knows to retry shortly.
 		resp.Semantic = "warming"
 	}
-	results, err := ix.FindRelated(args.FilePath, args.Line, topK)
+	results, err := ix.FindRelatedResults(context.Background(), args.FilePath, args.Line, topK)
 	if err != nil {
 		// e.g. BM25-only index: semantic similarity is unavailable. Surface
 		// as text so the agent can adapt rather than fail.

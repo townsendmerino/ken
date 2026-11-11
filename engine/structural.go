@@ -113,6 +113,12 @@ var structuralFailCooldown = 60 * time.Second
 // K13); a failed one is not kept, but is rate-limited by the cooldown
 // above.
 type structuralState struct {
+	// external, when set, replaces this state machine: the Workspace wraps
+	// an index someone else built (WrapIndex) and asks its owner for the
+	// structural index on every call, so it follows whatever that owner
+	// publishes.
+	external StructuralSource
+
 	builder func(context.Context) (*structural.Index, error)
 	// update brings an index up to date for the given repo-relative
 	// paths, returning the new index and whether anything changed
@@ -143,13 +149,25 @@ type structuralState struct {
 }
 
 // built reports whether a structural index has been published.
-func (s *structuralState) built() bool { return s.cur.Load() != nil }
+func (s *structuralState) built() bool { return s.ifBuilt() != nil }
+
+// ifBuilt returns the structural index if one is already built, without
+// starting a build.
+func (s *structuralState) ifBuilt() *structural.Index {
+	if s.external != nil {
+		return s.external.StructuralIfBuilt()
+	}
+	return s.cur.Load()
+}
 
 // get returns the structural index, or nil if it isn't ready yet (building,
 // or in a failure cooldown). ctx bounds how long the caller blocks for an
 // in-flight build; the build itself runs under an independent budget and
 // keeps going after ctx is done.
 func (s *structuralState) get(ctx context.Context) *structural.Index {
+	if s.external != nil {
+		return s.external.StructuralIndex(ctx)
+	}
 	if idx := s.cur.Load(); idx != nil {
 		return idx
 	}
@@ -284,6 +302,9 @@ func (s *structuralState) apply(paths []string, resync bool) {
 // fresh call right now would start one (no cached result, no active
 // cooldown).
 func (s *structuralState) pending() bool {
+	if s.external != nil {
+		return s.external.StructuralPending()
+	}
 	if s.built() {
 		return false
 	}
