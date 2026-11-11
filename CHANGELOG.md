@@ -15,6 +15,10 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Security
+
+- **Built with Go 1.27.4**, which fixes GO-2026-6859 in the standard library's `net/http` (ken reaches it through the model download, shallow clones and ken-mcp's HTTP transport). The `go` directive is the single toolchain pin. Output is unchanged: builds with 1.27.3 and 1.27.4 are identical across 30 environment settings.
+
 ### Changed
 
 - **`mcp` now imports `engine`, and its tools work through `engine.Workspace` (ADR-057, superseding ADR-048's rejection).** `mcp`'s public API is unchanged: its signatures name the same types through engine's aliases, and `RepoBundle` gains a `Workspace` field. One behavior change follows from the import. **Third-party `mcp` binaries that did not link the markdown chunker now chunk `.md` files by heading on a live build**, because importing `engine` registers that chunker; their results for markdown files change, and other chunks' BM25 scores shift with the corpus statistics. `ken-mcp`, `ken-mcp-docs` and pre-built indexes are unaffected: `ken-mcp` returns identical output across 30 environment settings, and a pre-built index was chunked when it was built.
