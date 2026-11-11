@@ -118,6 +118,7 @@ def normalize(text, corpus):
     text = text.replace(corpus, "<CORPUS>").replace(os.path.realpath(corpus), "<CORPUS>")
     text = re.sub(r'v\d+\.\d+\.\d+-0\.\d{14}-[0-9a-f]{12}(\+dirty)?', '<VER>', text)
     text = re.sub(r'\b[0-9a-f]{40}\b', '<REV>', text)
+    text = re.sub(r'\bgo1\.\d+(\.\d+)?\b', '<GO>', text)  # the toolchain is a build stamp too
     text = re.sub(r'\b[0-9a-f]{12}\b( \(dirty\))?', '<REV12>', text)
     text = re.sub(r'\\?"(VcsDirty|vcs_dirty)\\?":\s*(true|false)', '"VcsDirty":0', text)
     text = re.sub(r'\d{4}-\d\d-\d\dT[0-9:.]+(Z|[+-]\d\d:\d\d)', '<TS>', text)
