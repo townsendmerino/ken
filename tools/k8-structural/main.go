@@ -1,7 +1,8 @@
 // Command k8-structural takes the structural half of tack's K8 measurements
 // (ADR-048): the cold structural build behind engine.Open plus one
-// Definition, and the cost of Refresh for one changed file, with its search
-// and structural sides apart.
+// Definition, and the cost of Refresh for one changed file: with the search
+// side alone, with both sides, and the difference, which is the structural
+// side.
 //
 // Run it on a quiet machine, against a COPY of the repo — the refresh
 // measurement edits a file (and restores it), and -snapshot writes .ken/
@@ -94,7 +95,7 @@ func main() {
 			fmt.Printf("[%7.1fs]   still building\n", time.Since(start).Seconds())
 		}
 		done()
-		s := ws.StructuralIfBuilt().Stats()
+		s, _ := ws.StructuralStatus()
 		fmt.Printf("  structural files=%d symbols=%d callees=%d\n", s.IndexedFiles, s.UniqueSymbols, s.UniqueCallees)
 	}
 
@@ -117,7 +118,7 @@ func main() {
 			fatal(err)
 		}
 	}
-	run := func(name string, f func(i int)) {
+	run := func(name string, f func(i int)) time.Duration {
 		var ds []time.Duration
 		for i := range *reps {
 			edit(i)
@@ -128,6 +129,7 @@ func main() {
 		slices.Sort(ds)
 		fmt.Printf("%s: median %v (min %v, max %v, n=%d)\n", name,
 			ds[len(ds)/2].Round(time.Microsecond), ds[0].Round(time.Microsecond), ds[len(ds)-1].Round(time.Microsecond), len(ds))
+		return ds[len(ds)/2]
 	}
 	refreshOnce := func(int) {
 		if err := ws.Refresh(ctx, []string{*refresh}, nil); err != nil {
@@ -137,12 +139,13 @@ func main() {
 
 	// The structural index isn't built yet, so Refresh's batch hook is a
 	// no-op: this is the search side alone.
-	run("Refresh, search side only (structural unbuilt)", refreshOnce)
+	searchOnly := run("Refresh, search side only (structural unbuilt)", refreshOnce)
 	buildStructural()
-	run("structural side only (Index.Update, one file)", func(int) {
-		ws.StructuralIfBuilt().Update(ws.Root(), []string{*refresh}, nil, nil)
-	})
-	run("Refresh, both sides", refreshOnce)
+	both := run("Refresh, both sides", refreshOnce)
+	// The structural side is not timed directly: that would mean calling
+	// the structural index's own Update, which is internal to engine. It is
+	// what building the structural index added to a Refresh.
+	fmt.Printf("structural side (both sides minus search side, medians): %v\n", (both - searchOnly).Round(time.Microsecond))
 	if *snapshot {
 		done := phase("Close (writes the snapshot Refresh deferred)")
 		_ = ws.Close()

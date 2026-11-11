@@ -265,6 +265,8 @@ package:
   `NewNeuralRerankerSized` and `DefaultRerankCacheSize`; `LazyReranker`
   (`NewLazyReranker`, `Loaded`, `Inner`), which loads its model on the
   first query that reranks; `ModelFingerprint`.
+- `StructuralStatus` also reports `IndexedFiles`, `UniqueSymbols` and
+  `UniqueCallees` (best-effort).
 - `SetEnrichFileBudget(d time.Duration)` — the per-file parse budget
   behind enrichment and the structural index (what
   `KEN_ENRICH_FILE_BUDGET_MS` sets in the binaries). Process-wide, because

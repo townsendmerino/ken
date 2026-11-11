@@ -400,6 +400,45 @@ one, `ken-mcp` identical in all 30.
     values: `setupReranker` logs between its reads, and splitting it would
     reorder those lines against the startup-mode lines.
 
+- **Slice 4 (close)**: `tools/k8-structural` no longer uses an escape
+  hatch. It read the structural index's stats (now on
+  `engine.StructuralStatus`) and timed the structural index's own `Update`;
+  it now reports the structural side of a Refresh as "both sides minus the
+  search side". `TestEscapeHatchesHaveNoNewCallers` pins the remaining
+  users: `mcp/bundle.go` and `mcp/cache.go` (public signatures) and one
+  bench harness.
+
+## End state (2026-11-10)
+
+- `engine` is the only package outside `internal/` that imports
+  `internal/search` or `internal/structural`, except
+  `cmd/ken/internal/measure` (`ken bench` / `ken perf`) and seven bench
+  harness packages under `bench/`, all named in the guard.
+- `cmd/ken`, `cmd/ken-mcp` and `mcp` work through `*engine.Workspace`.
+- `ken-mcp`'s `main()` is 19 lines.
+
+Final benchmark, same commands as the baseline, parse budget off:
+
+| | overall | NL | symbol |
+|---|--:|--:|--:|
+| BM25-only recall@10 | 0.840 | 0.831 | 0.892 |
+| Hybrid recall@10 | 0.974 | 0.970 | 0.995 |
+
+Hybrid NDCG@10 0.8436 (0.843619 unrounded), 0 of 63 repos differing from
+the earlier budget-off runs. Identical to the baseline.
+
+Left open:
+
+- `ken-mcp`'s late environment reads (`KEN_DB_*`, rerank telemetry, usage
+  stats, shutdown grace) are outside `server.Config`; moving them reorders
+  invalid-value warnings in the log.
+- `prebuiltLogWriter` rewrites two engine log lines for pre-built repos.
+- Hybrid search with DB chunks under `mcp.Run` showed a fifth-digit score
+  difference about once in 500 sessions, on a build compared with itself.
+  Not traced.
+- Tests in `mcp/db` and `cmd/ken` still run subprocesses with the real
+  `HOME`; only `cmd/ken-mcp`'s were checked and fixed.
+
 ## Inferred, not verified
 
 - That `Open` with `Watch: false` matches `FromFSWithOptions` for every
