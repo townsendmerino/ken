@@ -225,6 +225,20 @@ func (w *WatchedIndex) publish(ix *Index) {
 	w.ix.Store(ix)
 }
 
+// PublishStatic replaces the snapshot of a static index (WrapStatic): the
+// one way such an index changes, since it has no corpus to rebuild from.
+// engine uses it for an fs.FS-backed Workspace, whose DB chunks are applied
+// by rebuilding from the immutable base index (Index.WithExtraChunks). It
+// reports false, and does nothing, on a watched (non-static) index, which
+// publishes through its own corpus path.
+func (w *WatchedIndex) PublishStatic(ix *Index) bool {
+	if !w.static || ix == nil {
+		return false
+	}
+	w.publish(ix)
+	return true
+}
+
 // Generation returns the number of snapshots published so far (1 after the
 // first build, incremented on every subsequent republish). Pairs with Load:
 // reading both without a lock between them can observe a slightly newer

@@ -74,7 +74,7 @@ var importRules = map[string][]string{
 
 	// Public library packages.
 	"engine": {"internal/repo", "internal/search", "internal/structural"},
-	"mcp":    {"engine", "internal/envcfg", "internal/mcplog", "internal/search", "internal/status"},
+	"mcp":    {"engine", "internal/envcfg", "internal/mcplog", "internal/status"},
 	"mcp/db": {"internal/db", "mcp"},
 
 	// Internal packages.
@@ -117,7 +117,6 @@ var searchImporters = map[string]string{
 	"bench/tokens":              "bench harness",
 
 	// Not yet moved onto engine.Workspace.
-	"mcp":         "pending: mcp.Run (run.go) still builds its own index; slice 2b",
 	"cmd/ken-mcp": "pending: the cmd/ken-mcp slices",
 }
 

@@ -181,6 +181,10 @@ type Workspace struct {
 	// Close leaves the index alone, Refresh and WriteSnapshot refuse.
 	wrapped bool
 
+	// staticBase is set on an OpenFS Workspace: the corpus's index as
+	// first built, which ReplaceExtraChunks rebuilds from.
+	staticBase *search.Index
+
 	root     string
 	mode     search.Mode
 	chunker  string

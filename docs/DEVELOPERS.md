@@ -251,6 +251,12 @@ package:
   `StripLabel`, and `WrapIndex(index, StructuralSource)`, which returns a
   Workspace view over an index someone else built and owns
   (`ErrWrappedIndex` from `Refresh` / `WriteSnapshot` on such a view).
+- **Best-effort additions for `mcp.Run` (composition-root slice 2b):**
+  `OpenFS(ctx, fsys, StaticOptions)` returns a Workspace over a fixed
+  corpus (never watched, no root, no structural index), optionally from a
+  pre-built index (`StaticOptions.Prebuilt`; `*PrebuiltError` when it
+  cannot be used); `Workspace.ReplaceExtraChunks` (extra chunks that
+  replace one another, with an error return); `Workspace.ChunkCount`.
 - `SetEnrichFileBudget(d time.Duration)` — the per-file parse budget
   behind enrichment and the structural index (what
   `KEN_ENRICH_FILE_BUDGET_MS` sets in the binaries). Process-wide, because
