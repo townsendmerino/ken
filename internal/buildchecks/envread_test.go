@@ -26,7 +26,8 @@ import (
 // The edges:
 //
 //   - every `package main` (cmd/*, tools/*, demos/*, scripts, the harness
-//     binaries): a program is its own edge;
+//     binaries) and everything under cmd/, where a program's private
+//     packages live: a program is its own edge;
 //   - internal/envcfg, the shared readers and their parsing;
 //   - mcp, the server library. A third-party mcp.Run or mcp.NewServer
 //     binary honors the documented variables without wiring each one, so
@@ -44,6 +45,9 @@ var envEdgeDirs = []string{
 // envEdgeTrees are edges that include every package beneath them.
 var envEdgeTrees = []string{
 	"bench",
+	// A program's private packages (cmd/<name>/internal/...) are part of
+	// that program: nothing outside it can import them.
+	"cmd",
 }
 
 var envReadFuncs = map[string]bool{"Getenv": true, "LookupEnv": true, "ExpandEnv": true}

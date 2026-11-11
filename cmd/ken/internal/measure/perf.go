@@ -13,7 +13,8 @@
 // "two lines" an earlier note claimed) were duplicated verbatim across the
 // perf subcommands, so they're factored into startCPUProfile / writeHeapProfile
 // below — a fix now lands in one place, not two.
-package main
+
+package measure
 
 import (
 	"encoding/json"
@@ -29,8 +30,9 @@ import (
 	"time"
 
 	"github.com/townsendmerino/aikit/chunk"
-	_ "github.com/townsendmerino/aikit/chunk/markdown"
 	"github.com/townsendmerino/aikit/chunk/treesitter"
+
+	"github.com/townsendmerino/ken/cmd/ken/internal/cli"
 	"github.com/townsendmerino/ken/internal/perf"
 	"github.com/townsendmerino/ken/internal/search"
 )
@@ -113,7 +115,7 @@ func writeHeapProfile(path string) bool {
 	return true
 }
 
-func cmdPerf(args []string) int {
+func Perf(args []string) int {
 	if len(args) == 0 {
 		perfUsage()
 		return 2
@@ -165,18 +167,18 @@ type perfIndexRecord struct {
 }
 
 func cmdPerfIndex(args []string) int {
-	rest, chunker, modeStr, model, err := commonFlags(args)
+	rest, chunker, modeStr, model, err := cli.CommonFlags(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		perfUsage()
 		return 2
 	}
-	rest, cpuProfile, err := extractFlag(rest, "cpuprofile", "")
+	rest, cpuProfile, err := cli.ExtractFlag(rest, "cpuprofile", "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
-	rest, memProfile, err := extractFlag(rest, "memprofile", "")
+	rest, memProfile, err := cli.ExtractFlag(rest, "memprofile", "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
@@ -280,33 +282,33 @@ type perfSearchRecord struct {
 }
 
 func cmdPerfSearch(args []string) int {
-	rest, chunker, modeStr, model, err := commonFlags(args)
+	rest, chunker, modeStr, model, err := cli.CommonFlags(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		perfUsage()
 		return 2
 	}
-	rest, queriesFile, err := extractFlag(rest, "queries", "")
+	rest, queriesFile, err := cli.ExtractFlag(rest, "queries", "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
-	rest, nStr, err := extractFlag(rest, "n", "1000")
+	rest, nStr, err := cli.ExtractFlag(rest, "n", "1000")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
-	rest, kStr, err := extractFlag(rest, "k", "10")
+	rest, kStr, err := cli.ExtractFlag(rest, "k", "10")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
-	rest, cpuProfile, err := extractFlag(rest, "cpuprofile", "")
+	rest, cpuProfile, err := cli.ExtractFlag(rest, "cpuprofile", "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
-	rest, memProfile, err := extractFlag(rest, "memprofile", "")
+	rest, memProfile, err := cli.ExtractFlag(rest, "memprofile", "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
@@ -433,13 +435,13 @@ type perfWatchRecord struct {
 }
 
 func cmdPerfWatch(args []string) int {
-	rest, chunker, modeStr, model, err := commonFlags(args)
+	rest, chunker, modeStr, model, err := cli.CommonFlags(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		perfUsage()
 		return 2
 	}
-	rest, editsStr, err := extractFlag(rest, "edits", "10")
+	rest, editsStr, err := cli.ExtractFlag(rest, "edits", "10")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2

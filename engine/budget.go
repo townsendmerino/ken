@@ -19,3 +19,15 @@ import (
 // the ken and ken-mcp binaries do with KEN_ENRICH_FILE_BUDGET_MS (2000 and
 // 500 ms by default); engine itself does not read that variable.
 func SetEnrichFileBudget(d time.Duration) { structural.SetParseBudget(d) }
+
+// SetEnrichFileBudgetLog installs the callbacks that report what the parse
+// budget did to a file: skipped when its parse timed out (the file is
+// indexed without an enrichment label), reached when its parse was
+// accepted but ran up to the budget (the label comes from a parse that was
+// cut short). Either may be nil. Process-wide, like the budget; set once
+// at startup. Callbacks MUST NOT write to stdout in a program that speaks
+// a protocol there. Best-effort, outside the stability promise.
+func SetEnrichFileBudgetLog(skipped, reached func(path string, d time.Duration)) {
+	structural.SetParseBudgetLogf(skipped)
+	structural.SetParseBudgetReachedLogf(reached)
+}

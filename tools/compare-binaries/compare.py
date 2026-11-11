@@ -10,8 +10,8 @@ per setting, whether everything they print is identical.
 
 What is compared, per environment setting, in bm25 and hybrid mode:
 
-  ken      search (text and --json, several queries), index --no-watch,
-           bench, build-index (hash of the file), index --write-snapshot
+  ken      search (text and --json, several queries, plus error cases and
+           other chunkers), index --no-watch, bench, build-index (hash of the file), index --write-snapshot
            (hash of snapshot.bin), status, status --json, doctor
   ken-mcp  over JSON-RPC on stdio: search (markdown and JSON), find_related,
            definition / callers / references / outline / symbols, status
@@ -36,6 +36,25 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 QUERIES = ["store client", "widget", "walk gitignore", "GeneratedStoreClient", "minifiedWidget", "reciprocal rank fusion"]
 SYMBOLS = ["WalkFS", "GeneratedStoreClient", "Service"]
 TIMING = {"KEN_ENRICH_FILE_BUDGET_MS": "1"}
+
+ERROR_CASES = [
+    ["search", "/nonexistent/ken-compare", "foo", "--mode", "bm25"],
+    ["search", "{c}/store.go", "foo", "--mode", "bm25"],
+    ["index", "/nonexistent/ken-compare", "--no-watch", "--mode", "bm25"],
+    ["index", "{c}/store.go", "--no-watch", "--mode", "bm25"],
+    ["index", "/nonexistent/ken-compare", "--write-snapshot", "--mode", "bm25"],
+    ["search", "{c}", "foo", "--mode", "nope"],
+    ["search", "{c}", "foo", "--mode", "bm25", "--chunker", "nope"],
+    ["index", "{c}", "--no-watch", "--mode", "bm25", "--chunker", "nope"],
+    ["search", "{c}", "foo", "--mode", "hybrid", "--model", "/nonexistent/model"],
+    ["index", "{c}", "--no-watch", "--mode", "hybrid", "--model", "/nonexistent/model"],
+    ["search", "{c}", "foo", "--mode", "hybrid-rerank", "--rerank-model", "/nonexistent/rerank"],
+    ["search", "{c}", "store", "client", "--mode", "bm25", "--verbose", "--no-stats"],
+    ["search", "{c}", "store", "--mode", "bm25", "-k", "3", "--chunker", "line", "--no-stats"],
+    ["search", "{c}", "store", "--mode", "bm25", "-k", "3", "--chunker", "treesitter", "--no-stats"],
+    ["build-index", "/nonexistent/ken-compare", "-o", "/dev/null"],
+    ["search", "{c}"],
+]
 
 SETTINGS = [
     {},
@@ -92,6 +111,17 @@ def strip_keys(v, keys):
     return v
 
 
+def snapshot_key(corpus):
+    """The config key a snapshot manifest was written under (a readable
+    string inside a binary file whose other contents are file mtimes)."""
+    try:
+        with open(os.path.join(corpus, ".ken", "snapshot.manifest"), "rb") as f:
+            m = re.search(rb"v\d+.mode=\d+[ -~]*", f.read())
+            return m.group(0).decode() if m else "no key found"
+    except OSError:
+        return "absent"
+
+
 def sha(path):
     try:
         with open(path, "rb") as f:
@@ -138,7 +168,13 @@ class Runner:
             out.append("## build-index %s\n%s\nsha=%s" % (mode, self.run([self.ken, "build-index", c, "-o", b, "--mode", mode], extra), sha(b)))
             out.append("## index --write-snapshot %s\n%s\nsnapshot.bin sha=%s" % (
                 mode, self.run([self.ken, "index", c, "--no-watch", "--write-snapshot", "--mode", mode], extra),
-                sha(os.path.join(c, ".ken", "snapshot.bin"))))
+                sha(os.path.join(c, ".ken", "snapshot.bin"))) + "\nsnapshot key=" + snapshot_key(c))
+            if mode == "bm25":
+                # Error paths: the words ken prints for a bad root, mode,
+                # chunker or model are output too.
+                for args in ERROR_CASES:
+                    argv = [x.replace("{c}", c) for x in args]
+                    out.append("## error case: ken %s\n%s" % (" ".join(args), self.run([self.ken] + argv, extra)))
             out = [normalize(x, c) for x in out]
         js = self.run([self.ken, "status", "--json"], extra)
         m = re.search(r"--stdout--\n(.*)--stderr--", js, re.S)
@@ -210,7 +246,7 @@ class Runner:
                 p.wait(timeout=60)
             except subprocess.TimeoutExpired:
                 p.kill()
-            out.append("## %s snapshot.bin sha=%s" % (mode, sha(os.path.join(c, ".ken", "snapshot.bin"))))
+            out.append("## %s snapshot.bin sha=%s key=%s" % (mode, sha(os.path.join(c, ".ken", "snapshot.bin")), snapshot_key(c)))
             out = [normalize(x, c) for x in out]
         return "\n".join(out)
 

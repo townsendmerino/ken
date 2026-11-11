@@ -15,6 +15,15 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Changed
+
+- **The `ken` CLI builds and queries through `engine.Workspace`** (composition-root plan, slice 1). `ken search`, `ken index`, `ken build-index`, `ken status` and `ken doctor` no longer assemble the pipeline from `internal/search` themselves. `ken bench` and `ken perf`, which measure the pipeline's internals, moved unchanged into a private package, `cmd/ken/internal/measure`, the one named exception that still imports `internal/search`. Output is unchanged: old and new builds are identical across 30 environment settings in both modes, including error messages, except the fix below.
+- **`engine` gains best-effort API for the CLI:** `SearchOptions.Telemetry` and `NoArmRanks`, `Hit.Label`, `ParseMode`, `BuildError`, `NeuralReranker` (with its cache load/save), `BuildIndexBytes`, `Workspace.WriteSnapshot`, `InspectSnapshot`, `InspectRerankCache`, `SetEnrichFileBudgetLog`. All are outside the stability promise.
+
+### Fixed
+
+- **`ken index --write-snapshot` records the settings the snapshot was built with.** It hard-coded "enrichment on" and omitted the dense store in the snapshot's key. Since 1.14.0 made `KEN_ENRICH` and `KEN_ANN` apply to this command, a snapshot written under `KEN_ENRICH=off` was labelled as enriched, and a `ken-mcp` running with enrichment on would have loaded it as its own. The key is now the one `ken-mcp` computes for the same settings. **Who is affected:** a snapshot written by an earlier `ken index --write-snapshot` with `KEN_ENRICH` or `KEN_ANN` set no longer matches and is rebuilt once, on the next `ken-mcp` start or the next `--write-snapshot`. With both variables unset nothing changes: the key and the snapshot bytes are identical.
+
 ### Documentation
 
 - **Two retroactive ADRs record default changes that moved the benchmark figures.** ADR-055: the default-on minified-file skip (`9c3a512`, 2026-07-19) cost 0.001 BM25-only recall@10 on semble (0.841 to 0.840). ADR-056: routing markdown files to the markdown chunker by default (`6756a74`, 2026-09-17) raised it by 0.002 (0.840 to 0.842) and lowered recall@1 by 0.006. Both were found by bisecting on 2026-11-10; neither default changes. docs/BENCH.md records as an open item that the hybrid column's moves since June are not traced.

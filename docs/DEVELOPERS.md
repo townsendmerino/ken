@@ -230,6 +230,16 @@ package:
   whole configuration; the `KEN_*` variables in the README are read by the
   `ken` and `ken-mcp` binaries and by servers built on the `mcp` package,
   not by `engine`. A program that imports `engine` sets the fields above.
+- **Best-effort additions for the ken CLI (composition-root slice 1,
+  outside the 1.0 commitment):** `SearchOptions.Telemetry` and
+  `SearchOptions.NoArmRanks`; `Hit.Label` (the enrichment line `Hit.Text`
+  omits, so `Label+Text` is the stored chunk); `ParseMode`; `Telemetry`
+  (alias of `search.Telemetry`); `BuildError` (what `Open` returns when the
+  build fails, with the cause in `Err`); `NeuralReranker` with
+  `NewNeuralReranker`, `LoadCache`, `SaveCache`, `CacheStats` and the four
+  `ErrRerankCache*` errors; `BuildIndexBytes` / `BuildIndexOptions` (the
+  pre-built index format); `Workspace.WriteSnapshot`; `InspectSnapshot`,
+  `InspectRerankCache`; `SetEnrichFileBudgetLog`.
 - `SetEnrichFileBudget(d time.Duration)` — the per-file parse budget
   behind enrichment and the structural index (what
   `KEN_ENRICH_FILE_BUDGET_MS` sets in the binaries). Process-wide, because

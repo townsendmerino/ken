@@ -50,7 +50,12 @@ var importRules = map[string][]string{
 	"bench/tokens":                {"internal/envcfg", "internal/repo", "internal/search", "mcp"},
 
 	// Programs.
-	"cmd/ken":                   {"internal/envcfg", "internal/modelfetch", "internal/perf", "internal/search", "internal/status", "internal/structural", "internal/usage"},
+	"cmd/ken":              {"cmd/ken/internal/cli", "cmd/ken/internal/measure", "engine", "internal/envcfg", "internal/modelfetch", "internal/status", "internal/usage"},
+	"cmd/ken/internal/cli": {"engine"},
+	// The named exception: `ken bench` and `ken perf` measure the pipeline's
+	// internals, so this one package under cmd/ imports internal/search
+	// (composition-root plan, decision 6/7). See searchImporters below.
+	"cmd/ken/internal/measure":  {"cmd/ken/internal/cli", "internal/envcfg", "internal/perf", "internal/search"},
 	"cmd/ken-mcp":               {"engine", "internal/bytesize", "internal/embedcache", "internal/envcfg", "internal/modelfetch", "internal/search", "internal/structural", "internal/usage", "mcp", "mcp/db"},
 	"cmd/ken-mcp-docs":          {"mcp"},
 	"demos/go-stdlib":           {"mcp"},
@@ -88,6 +93,31 @@ var importRules = map[string][]string{
 	"internal/status":      {"internal/usage"},
 	"internal/structural":  {"internal/repo"},
 	"internal/usage":       {},
+}
+
+// searchImporters is every package outside internal/ that may import
+// internal/search or internal/structural. The goal (docs/internal/
+// composition-root-plan-2026-11.md) is that engine is the only product
+// package that does: everything else works through *engine.Workspace.
+// TestOnlyNamedPackagesImportSearch fails if the set grows, and each slice
+// of that plan deletes its package from the "not yet moved" block.
+var searchImporters = map[string]string{
+	"engine": "the composition root",
+
+	"cmd/ken/internal/measure": "named exception: the ken bench / ken perf harnesses",
+
+	// Benchmark harnesses (//go:build bench), never linked into a release.
+	"bench/chunkdiff":           "bench harness",
+	"bench/contextbench":        "bench harness",
+	"bench/contextbench/cmd/cb": "bench harness",
+	"bench/internal/benchenv":   "bench harness",
+	"bench/internal/provenance": "bench harness",
+	"bench/ndcg":                "bench harness",
+	"bench/tokens":              "bench harness",
+
+	// Not yet moved onto engine.Workspace.
+	"mcp":         "pending: the mcp slices",
+	"cmd/ken-mcp": "pending: the cmd/ken-mcp slices",
 }
 
 const modulePath = "github.com/townsendmerino/ken"
@@ -237,6 +267,35 @@ func TestImportRules(t *testing.T) {
 	for pkg := range importRules {
 		if _, ok := graph[pkg]; !ok {
 			t.Errorf("importRules has a row for %s, which is not a package in the module; delete it", pkg)
+		}
+	}
+}
+
+// TestOnlyNamedPackagesImportSearch is the composition-root guard: outside
+// internal/, only the packages named in searchImporters may import
+// internal/search or internal/structural, and every name there must still
+// do so (delete the entry when a package stops).
+func TestOnlyNamedPackagesImportSearch(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go tool not on PATH; can't list the import graph")
+	}
+	graph := moduleImportGraph(t)
+	for pkg, deps := range graph {
+		if strings.HasPrefix(pkg, "internal/") {
+			continue
+		}
+		uses := deps["internal/search"] || deps["internal/structural"]
+		_, named := searchImporters[pkg]
+		switch {
+		case uses && !named:
+			t.Errorf("%s imports internal/search or internal/structural; outside internal/ only engine and the packages named in searchImporters may. Work through *engine.Workspace instead", pkg)
+		case !uses && named:
+			t.Errorf("searchImporters names %s, which no longer imports internal/search or internal/structural; delete the entry", pkg)
+		}
+	}
+	for pkg := range searchImporters {
+		if _, ok := graph[pkg]; !ok {
+			t.Errorf("searchImporters names %s, which is not a package in the module; delete the entry", pkg)
 		}
 	}
 }

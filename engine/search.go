@@ -57,6 +57,12 @@ type Hit struct {
 	EndLine   int
 	Text      string
 
+	// Label is the Arm B enrichment line Text omits ("" when the chunk has
+	// none), including its trailing newline, so Label+Text is the chunk
+	// exactly as the index stores and ranks it. Best-effort, outside the
+	// stability promise: the ken CLI prints the stored chunk and needs it.
+	Label string
+
 	// Hash is sha256(Text), hex-encoded — a content fingerprint stable
 	// across reindexes as long as the hit's own lines don't change, useful
 	// for a caller's own dedup/cache keys. Because Text carries no
@@ -135,6 +141,12 @@ func hitText(r search.Result) (text, hash string) {
 	return text, hashText(text)
 }
 
+// hitLabel is the enrichment line hitText stripped: StripLabel removes a
+// prefix, so what it removed is the head of the stored text.
+func hitLabel(r search.Result, text string) string {
+	return r.Chunk.Text[:len(r.Chunk.Text)-len(text)]
+}
+
 // armOverfetch sizes the auxiliary single-arm queries toHits runs to
 // recover per-arm ranks for a hybrid result set — generous enough that a
 // chunk ranked respectably in its arm is actually found, cheap enough that
@@ -151,8 +163,11 @@ func armOverfetch(k int) int {
 // DenseRank with best-effort per-arm ranks for the hybrid modes. ix is the
 // exact snapshot results was computed against (the caller's single Load()
 // for the whole call), so the auxiliary queries see the same data.
-func (w *Workspace) toHits(ix *search.Index, results []search.Result, effMode search.Mode, gen uint64, query string, k int) []Hit {
+func (w *Workspace) toHits(ix *search.Index, results []search.Result, effMode search.Mode, gen uint64, query string, k int, noArmRanks bool) []Hit {
 	var bm25Rank, denseRank map[chunkKey]int
+	if noArmRanks {
+		effMode = -1 // matches no case: leave both rank maps nil
+	}
 	switch effMode {
 	case search.ModeBM25:
 		bm25Rank = rankMap(results)
@@ -180,6 +195,7 @@ func (w *Workspace) toHits(ix *search.Index, results []search.Result, effMode se
 			StartLine:   r.Chunk.StartLine,
 			EndLine:     r.Chunk.EndLine,
 			Text:        text,
+			Label:       hitLabel(r, text),
 			Hash:        hash,
 			Score:       r.Score,
 			Rank:        i + 1,
@@ -224,7 +240,27 @@ type SearchOptions struct {
 	// rerank). Leave it off for ranked search, where spreading results
 	// across files is the point.
 	BudgetPacking bool
+
+	// Telemetry, when non-nil, receives this call's per-stage timings.
+	// Not filled when BudgetPacking is set. Best-effort, outside the
+	// stability promise.
+	Telemetry *Telemetry
+
+	// NoArmRanks skips the auxiliary single-arm queries that fill
+	// Hit.BM25Rank and Hit.DenseRank in the hybrid modes, leaving both 0.
+	// The ranking, scores and every other Hit field are unchanged; the
+	// call is cheaper. Best-effort, outside the stability promise.
+	NoArmRanks bool
 }
+
+// Telemetry is one query's per-stage timing breakdown (see
+// SearchOptions.Telemetry). Alias for search.Telemetry; best-effort, outside
+// the stability promise: its fields follow the pipeline's stages.
+type Telemetry = search.Telemetry
+
+// ParseMode parses a mode name ("bm25", "semantic", "hybrid",
+// "hybrid-rerank"), the strings Options.Mode accepts.
+func ParseMode(s string) (Mode, error) { return search.ParseMode(s) }
 
 // budgetPackingSaturationDecay is the file-saturation decay BudgetPacking
 // uses (shipped ranking: 0.5). ADR-052, superseding ADR-051's threshold 2.
@@ -240,12 +276,15 @@ func (w *Workspace) SearchWith(ctx context.Context, query string, k int, mode Mo
 	gen := w.index.Generation()
 	var results []search.Result
 	var eff Mode
-	if opts.BudgetPacking {
+	switch {
+	case opts.BudgetPacking:
 		results, eff = ix.SearchModeAblated(query, k, mode, search.AdaptiveAlphas, search.RankAblation{SaturationDecay: budgetPackingSaturationDecay})
-	} else {
+	case opts.Telemetry != nil:
+		results, eff, *opts.Telemetry = ix.SearchModeWithTelemetry(query, k, mode)
+	default:
 		results, eff = ix.SearchMode(query, k, mode)
 	}
-	return w.toHits(ix, results, eff, gen, query, k), eff, nil
+	return w.toHits(ix, results, eff, gen, query, k, opts.NoArmRanks), eff, nil
 }
 
 // FindRelated returns chunks semantically similar to the chunk containing
@@ -271,6 +310,7 @@ func (w *Workspace) FindRelated(ctx context.Context, filePath string, line, k in
 			StartLine:   r.Chunk.StartLine,
 			EndLine:     r.Chunk.EndLine,
 			Text:        text,
+			Label:       hitLabel(r, text),
 			Hash:        hash,
 			Score:       r.Score,
 			Rank:        i + 1,
@@ -326,6 +366,7 @@ func (w *Workspace) SearchFiles(ctx context.Context, query string, k int, mode M
 			StartLine:   r.Chunk.StartLine,
 			EndLine:     r.Chunk.EndLine,
 			Text:        text,
+			Label:       hitLabel(r, text),
 			Hash:        hash,
 			Score:       r.Score,
 			Rank:        i + 1,

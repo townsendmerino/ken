@@ -5,8 +5,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/envcfg"
-	"github.com/townsendmerino/ken/internal/structural"
 )
 
 // defaultCLIEnrichBudgetMS is the per-file structural-enrichment parse
@@ -31,7 +31,7 @@ import (
 const defaultCLIEnrichBudgetMS = 2000
 
 // setupEnrichBudget reads KEN_ENRICH_FILE_BUDGET_MS (defaulting it when
-// unset), hands the budget to internal/structural, and routes
+// unset), hands the budget to engine, and routes
 // budget-exhaustion skips to stderr, so a pathological file degrades to "one
 // file's structural enrichment silently skipped" instead of looking like a
 // hang (the exact user-facing symptom the C# grammar fix, v1.5.1, was
@@ -44,11 +44,10 @@ func setupEnrichBudget() {
 	if !set {
 		micros = defaultCLIEnrichBudgetMS * 1000
 	}
-	structural.SetParseBudget(time.Duration(micros) * time.Microsecond)
-	structural.SetParseBudgetLogf(func(path string, d time.Duration) {
+	engine.SetEnrichFileBudget(time.Duration(micros) * time.Microsecond)
+	engine.SetEnrichFileBudgetLog(func(path string, d time.Duration) {
 		fmt.Fprintf(os.Stderr, "ken: enrichment parse budget exceeded for %s (%v) — skipping structural enrichment for this file (results are unaffected, just unenriched); set KEN_ENRICH_FILE_BUDGET_MS to change, or KEN_ENRICH=off to disable enrichment entirely\n", path, d)
-	})
-	structural.SetParseBudgetReachedLogf(func(path string, d time.Duration) {
+	}, func(path string, d time.Duration) {
 		fmt.Fprintf(os.Stderr, "ken: enrichment parse budget reached for %s (%v) — the file is enriched from a parse that was cut short, so its label can differ between runs; raise KEN_ENRICH_FILE_BUDGET_MS (0 disables the budget) for a repeatable index\n", path, d)
 	})
 }
@@ -60,6 +59,6 @@ func setupEnrichBudget() {
 // applied to build-index too; it just isn't defaulted there.
 func applyExplicitEnrichBudget() {
 	if micros, set := envcfg.EnrichFileBudgetMicros(); set {
-		structural.SetParseBudget(time.Duration(micros) * time.Microsecond)
+		engine.SetEnrichFileBudget(time.Duration(micros) * time.Microsecond)
 	}
 }
