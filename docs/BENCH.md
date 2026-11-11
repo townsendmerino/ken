@@ -86,10 +86,31 @@ outcomes, chosen by how busy the machine is. vapor's
    logs it. Under CPU load, or at a 1000 ms budget, this is what happened.
 
 Each outcome changes that file's chunks, and through BM25 statistics the
-scores of a few queries. For a repeatable benchmark run, set
-`KEN_ENRICH_FILE_BUDGET_MS=0` (the recall harnesses in `internal/search`
-already run without a budget). That measures a slightly different index from
-the CLI default on a repo with a slow file, so say which one a figure is.
+scores of a few queries.
+
+**What is done about it.**
+
+- `run_ken.py` now sets `KEN_ENRICH_FILE_BUDGET_MS=0` unless you set the
+  variable yourself, so its runs repeat exactly; the recall harnesses in
+  `internal/search` already ran without a budget. The repeatable hybrid
+  headline at ken `b6d8ae5` is **0.8436** NDCG@10 (the 0.8439 above was a
+  budgeted run that happened to get outcome 2 for vapor). A budget-off run
+  measures a slightly different index from the CLI default on a repo with a
+  slow file, so say which one a figure is.
+- Outcome 2 is no longer silent. ken times each parse, and an accepted parse
+  that ran up to the budget is counted and logged as "budget reached", beside
+  the budget skips: a stderr line from `ken`, a warning from `ken-mcp`, and a
+  "Parse budget" block (`skipped` / `reached`) in the `status` tool. The tree
+  is used exactly as before, so no ranking changes.
+- Upstream: gotreesitter is asked to report when its retry passes hit the
+  deadline ([gotreesitter#1600](https://github.com/odvcencio/gotreesitter/issues/1600)), so ken could treat that case like a
+  timeout instead of inferring it from the clock.
+
+**Open item (deferred).** The budget is still wall-clock, so outcomes 2 and 3
+still depend on machine load for any user who keeps the default. Removing
+that needs a work-based budget (parse steps or nodes rather than
+milliseconds), which changes which files get labelled and therefore ranking
+output; it has not been designed or measured.
 
 ## Acceptance thresholds
 

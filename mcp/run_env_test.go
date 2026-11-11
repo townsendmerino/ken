@@ -71,3 +71,22 @@ func TestStatus_ReportsLoadedIndexNotEnv(t *testing.T) {
 		t.Errorf("status must report the loaded index as enriched; got:\n%s", text)
 	}
 }
+
+// TestStatus_ShowsParseBudgetCounts: the MCP status report carries this
+// process's parse-budget counts (skipped and reached), even when both are 0.
+func TestStatus_ShowsParseBudgetCounts(t *testing.T) {
+	st := status.Build(withStatusEnv(status.BuildOptions{}))
+	if st.ParseBudget == nil {
+		t.Fatal("MCP status has no ParseBudget block")
+	}
+	text := status.RenderText(st, false)
+	for _, want := range []string{"Parse budget", "skipped:", "reached:"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("status text lacks %q:\n%s", want, text)
+		}
+	}
+	// The CLI surface passes no counts and shows no block.
+	if cli := status.RenderText(status.Build(status.BuildOptions{}), false); strings.Contains(cli, "Parse budget") {
+		t.Errorf("CLI status shows a Parse budget block:\n%s", cli)
+	}
+}

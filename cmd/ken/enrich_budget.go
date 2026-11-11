@@ -48,6 +48,9 @@ func setupEnrichBudget() {
 	structural.SetParseBudgetLogf(func(path string, d time.Duration) {
 		fmt.Fprintf(os.Stderr, "ken: enrichment parse budget exceeded for %s (%v) — skipping structural enrichment for this file (results are unaffected, just unenriched); set KEN_ENRICH_FILE_BUDGET_MS to change, or KEN_ENRICH=off to disable enrichment entirely\n", path, d)
 	})
+	structural.SetParseBudgetReachedLogf(func(path string, d time.Duration) {
+		fmt.Fprintf(os.Stderr, "ken: enrichment parse budget reached for %s (%v) — the file is enriched from a parse that was cut short, so its label can differ between runs; raise KEN_ENRICH_FILE_BUDGET_MS (0 disables the budget) for a repeatable index\n", path, d)
+	})
 }
 
 // applyExplicitEnrichBudget is build-index's half of setupEnrichBudget: it

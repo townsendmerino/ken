@@ -523,6 +523,43 @@ var parseBudgetLogf func(path string, d time.Duration)
 // safe to call concurrently with an in-flight build; wire it once at startup.
 func SetParseBudgetLogf(f func(path string, d time.Duration)) { parseBudgetLogf = f }
 
+// budgetReached reports whether a parse that took elapsed ran up to a budget
+// of budgetMicros (0 = no budget, never reached).
+func budgetReached(budgetMicros uint64, elapsed time.Duration) bool {
+	return budgetMicros > 0 && elapsed >= time.Duration(budgetMicros)*time.Microsecond
+}
+
+// parseBudgetReached counts files whose parse was accepted but ran up to
+// the budget: the recovery passes were cut short, and the tree (so the
+// enrichment label) may differ from an unbudgeted parse's.
+var parseBudgetReached atomic.Uint64
+
+// ParseBudgetReached returns how many accepted parses ran up to the parse
+// budget since process start. Unlike ParseBudgetSkips these files are still
+// labelled and indexed; the count says their label depended on the budget,
+// which is wall-clock, so it can differ from run to run.
+func ParseBudgetReached() uint64 { return parseBudgetReached.Load() }
+
+// parseBudgetReachedLogf, if set, is invoked once per budget-reached file.
+// MUST NOT write to stdout (the JSON-RPC channel).
+var parseBudgetReachedLogf func(path string, d time.Duration)
+
+// SetParseBudgetReachedLogf installs the per-file "budget reached" logger.
+// Pass nil to silence. Wire it once at startup, with SetParseBudgetLogf.
+func SetParseBudgetReachedLogf(f func(path string, d time.Duration)) { parseBudgetReachedLogf = f }
+
+// parseBudgetForceReached, when true, makes extractGuarded take the
+// budget-reached path for every accepted parse. Test-only: a real one needs
+// a parse that outlasts a wall-clock budget.
+var parseBudgetForceReached atomic.Bool
+
+func recordParseBudgetReached(path string, d time.Duration) {
+	parseBudgetReached.Add(1)
+	if parseBudgetReachedLogf != nil {
+		parseBudgetReachedLogf(path, d)
+	}
+}
+
 // recordParseBudgetSkip is called by extractGuarded when a parse times out.
 func recordParseBudgetSkip(path string, d time.Duration) {
 	parseBudgetSkips.Add(1)

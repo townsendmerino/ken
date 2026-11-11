@@ -75,6 +75,10 @@ type Status struct {
 	Structural StructuralInfo
 	Cache      CacheInfo
 
+	// ParseBudget is non-nil only on the MCP surface (omitted from CLI
+	// JSON): what the per-file parse budget did to this server's builds.
+	ParseBudget *ParseBudgetInfo `json:",omitempty"`
+
 	// Process / runtime. Populated by Build; useful for "is this
 	// the binary I think it is" sanity checks.
 	Process ProcessInfo
@@ -180,6 +184,18 @@ type StructuralInfo struct {
 	PerLanguageFiles map[string]int
 }
 
+// ParseBudgetInfo counts what the per-file parse budget
+// (KEN_ENRICH_FILE_BUDGET_MS) did to this process's index builds (MCP-only).
+type ParseBudgetInfo struct {
+	// Skipped is the files whose parse timed out: indexed without an
+	// enrichment label.
+	Skipped uint64
+	// Reached is the files whose parse was accepted but ran up to the
+	// budget: labelled from a parse that was cut short, so the label can
+	// differ between runs.
+	Reached uint64
+}
+
 // CacheInfo describes the ken-mcp repo cache state (MCP-only).
 type CacheInfo struct {
 	Capacity   int      // LRU bound
@@ -227,6 +243,11 @@ type BuildOptions struct {
 	LiveStructural *StructuralInfo
 	LiveCache      *CacheInfo
 
+	// ParseBudget, when non-nil, is reported as Status.ParseBudget. The
+	// MCP status handler passes this process's counts; the CLI leaves it
+	// nil (a `ken status` process has built nothing).
+	ParseBudget *ParseBudgetInfo
+
 	// Now overrides the clock for tests. Zero = time.Now().
 	Now time.Time
 }
@@ -264,6 +285,7 @@ func Build(opts BuildOptions) Status {
 	if opts.LiveCache != nil {
 		st.Cache = *opts.LiveCache
 	}
+	st.ParseBudget = opts.ParseBudget
 	return st
 }
 

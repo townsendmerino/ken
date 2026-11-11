@@ -1,6 +1,7 @@
 package structural
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
@@ -84,5 +85,64 @@ func TestSetParseBudget(t *testing.T) {
 		if got := effectiveParseBudgetMicros(); got != want {
 			t.Errorf("SetParseBudget(%v): budget = %d µs, want %d", d, got, want)
 		}
+	}
+}
+
+func TestBudgetReached(t *testing.T) {
+	for _, tc := range []struct {
+		budgetMicros uint64
+		elapsed      time.Duration
+		want         bool
+	}{
+		{0, time.Hour, false}, // no budget: never reached
+		{2_000_000, 13 * time.Millisecond, false},
+		{2_000_000, 1999 * time.Millisecond, false},
+		{2_000_000, 2 * time.Second, true},
+		{2_000_000, 2001 * time.Millisecond, true}, // what a cut-short parse measures
+	} {
+		if got := budgetReached(tc.budgetMicros, tc.elapsed); got != tc.want {
+			t.Errorf("budgetReached(%dµs, %v) = %v, want %v", tc.budgetMicros, tc.elapsed, got, tc.want)
+		}
+	}
+}
+
+// TestParseBudget_ReachedIsCountedLoggedAndStillExtracted covers an accepted
+// parse that ran up to the budget: it is counted and logged as "budget
+// reached", it is NOT a skip, and the extraction is exactly what it would
+// have been without the bookkeeping (the tree is used as before).
+func TestParseBudget_ReachedIsCountedLoggedAndStillExtracted(t *testing.T) {
+	parseBudgetMicros.Store(0)
+	parseBudgetOverrideMicros.Store(0)
+	clearParserPools()
+	t.Cleanup(clearParserPools)
+	src := []byte("<?php\nfunction hello() { return world(); }\n")
+	plain := ExtractFile("ok.php", src)
+	if plain == nil {
+		t.Fatal("baseline extraction failed")
+	}
+
+	var logged []string
+	SetParseBudgetReachedLogf(func(path string, d time.Duration) { logged = append(logged, path) })
+	parseBudgetForceReached.Store(true)
+	t.Cleanup(func() {
+		parseBudgetForceReached.Store(false)
+		SetParseBudgetReachedLogf(nil)
+	})
+	reached0, skips0 := ParseBudgetReached(), ParseBudgetSkips()
+	got := ExtractFile("ok.php", src)
+	if got == nil {
+		t.Fatal("a budget-reached parse must still be extracted, got nil")
+	}
+	if !reflect.DeepEqual(got, plain) {
+		t.Errorf("budget-reached extraction differs from the plain one:\n got  %+v\n want %+v", got, plain)
+	}
+	if d := ParseBudgetReached() - reached0; d != 1 {
+		t.Errorf("ParseBudgetReached delta = %d, want 1", d)
+	}
+	if d := ParseBudgetSkips() - skips0; d != 0 {
+		t.Errorf("ParseBudgetSkips delta = %d, want 0 (reached is not a skip)", d)
+	}
+	if len(logged) != 1 || logged[0] != "ok.php" {
+		t.Errorf("reached logger saw %v, want [ok.php]", logged)
 	}
 }

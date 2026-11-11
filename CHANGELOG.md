@@ -15,6 +15,10 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Added
+
+- **Files whose parse was cut short at the parse budget are now reported ("budget reached").** With `KEN_ENRICH_FILE_BUDGET_MS` set (2000 ms by default in `ken`, 500 ms in `ken-mcp`), tree-sitter can return a parse as accepted after its recovery passes ran out of time. The file was enriched from that shorter parse with nothing logged, and because the budget is wall-clock its label could differ from run to run. ken now times each parse and, when an accepted parse ran up to the budget, counts and logs the file beside the existing budget skips: a stderr line from `ken`, a warning from `ken-mcp`, and a new "Parse budget" block (`skipped` / `reached`) in the `status` tool (`ParseBudget` in its JSON). The tree is used exactly as before, so no result changes; old and new builds return identical output. Upstream request for a real signal: [gotreesitter#1600](https://github.com/odvcencio/gotreesitter/issues/1600).
+
 ### Fixed
 
 - **`KEN_ENRICH` and `KEN_ANN` now do what the documentation says on every path (behavior fix, ADR-054).** Both were applied only by the one-shot builds (`ken search`, `ken bench`, `ken index --no-watch`, `ken perf`). `ken-mcp`, `ken index` in watch mode, `ken build-index` and `mcp.Run` ignored them, although README and docs/USERS.md said otherwise.
@@ -27,7 +31,7 @@ pre-built binaries.
 - **The `status` tool reports what the loaded index actually has.** The live-index section gains `enrichment` (how many chunks carry a structural label, counted from the index) and `dense store` (the store being served); the JSON form gains `Index.EnrichedChunks` and `Index.DenseRetriever`. Before, `status` showed only the `KEN_ENRICH` setting, and reported enrichment as off over an enriched index.
 
 - **Recall figures in the docs are re-measured (documentation correction).** docs/BENCH.md's recall@10 table carried figures measured in June with `KEN_ENRICH=off`. Re-measured at `b6d8ae5` with the shipped defaults: hybrid 0.974 overall / 0.970 NL / 0.995 symbol (was quoted as 0.971 / 0.967 / 0.995), BM25-only 0.840 / 0.831 / 0.892 (was 0.841 / 0.832 / 0.892). Enrichment shifts BM25-only recall@10 by 0.002, not the "<0.001" the doc stated. README and docs/USERS.md quote the new NL figure. No code changed.
-- **docs/BENCH.md documents why two identical hybrid benchmark runs can differ.** The CLI's default 2000 ms per-file parse budget is wall-clock, so a file whose parse takes about that long is labelled fully, labelled from a less-recovered tree, or skipped, depending on machine load. Set `KEN_ENRICH_FILE_BUDGET_MS=0` for a repeatable run.
+- **The semble benchmark harness is repeatable.** Two identical hybrid `bench/semble/run_ken.py` runs could differ, because the CLI's default 2000 ms per-file parse budget is wall-clock: a file whose parse takes about that long is labelled fully, labelled from a parse cut short, or skipped, depending on machine load. `run_ken.py` now runs with `KEN_ENRICH_FILE_BUDGET_MS=0` unless you set the variable. The repeatable hybrid headline at `b6d8ae5` is 0.8436 NDCG@10. docs/BENCH.md explains the cause and records the remaining open item: the shipped budget is still wall-clock.
 
 ### Changed
 

@@ -125,6 +125,14 @@ func RenderText(s Status, verbose bool) string {
 		fmt.Fprintln(&b)
 	}
 
+	// ---------- Parse budget (MCP only) ----------
+	if s.ParseBudget != nil {
+		fmt.Fprintln(&b, "Parse budget (this server's index builds)")
+		fmt.Fprintf(&b, "  skipped:  %d file(s) timed out and are indexed without an enrichment label\n", s.ParseBudget.Skipped)
+		fmt.Fprintf(&b, "  reached:  %d file(s) were labelled from a parse cut short at the budget\n", s.ParseBudget.Reached)
+		fmt.Fprintln(&b)
+	}
+
 	// ---------- Live cache (MCP only) ----------
 	if s.Cache.Capacity > 0 || s.Cache.InUse > 0 {
 		fmt.Fprintln(&b, "Repo cache (MCP)")

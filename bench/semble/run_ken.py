@@ -1083,6 +1083,14 @@ def collect_provenance(
 
 
 def main() -> int:
+    # Repeatability: `ken bench` applies a wall-clock per-file parse budget
+    # (2000 ms by default), and a file whose parse takes about that long is
+    # labelled fully, labelled from a parse cut short, or skipped, depending
+    # on how busy the machine is. That made two identical hybrid runs differ
+    # (docs/BENCH.md, "Repeatability"). Run with the budget off unless the
+    # caller set one; every `ken` subprocess inherits it, and the provenance
+    # block records it with the other KEN_* variables.
+    os.environ.setdefault("KEN_ENRICH_FILE_BUDGET_MS", "0")
     p = argparse.ArgumentParser(
         description="Run ken against the semble NDCG@10 benchmark (drop-in for the verbatim-port check)."
     )
