@@ -88,7 +88,7 @@ func (w *WatchedIndex) warmCorpusInBackground(ctx context.Context) {
 				newChunks[i].Text = label + stripEnrichLabel(newChunks[i].Text)
 			}
 			if needEmbed {
-				newVecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, newChunks[i].Text)
+				newVecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, indexText(newChunks[i]))
 			}
 		}
 	}
@@ -350,7 +350,7 @@ func (w *WatchedIndex) refoldMigrationDir(dir string) int {
 	if w.model != nil && !w.stagedPending {
 		batchVecs = make([][]float32, len(folded))
 		for i, c := range folded {
-			batchVecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, c.Text)
+			batchVecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, indexText(c))
 		}
 	}
 	w.chunks = append(w.chunks, folded...)
@@ -504,7 +504,7 @@ func (w *WatchedIndex) SetExtraChunks(chunks []chunk.Chunk) {
 	if w.model != nil && len(chunks) > 0 {
 		vecs := make([][]float32, len(chunks))
 		for i, c := range chunks {
-			vecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, c.Text)
+			vecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, indexText(c))
 		}
 		w.extraVecs = vecs
 	} else {
@@ -647,7 +647,7 @@ func (w *WatchedIndex) appendFile(rel string) int {
 	if w.model != nil && !w.stagedPending {
 		batchVecs = make([][]float32, len(cs))
 		for i, c := range cs {
-			batchVecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, c.Text)
+			batchVecs[i] = encodeCached(w.fsOpts.EmbedCache, w.model, indexText(c))
 		}
 	}
 	w.chunks = append(w.chunks, cs...)
