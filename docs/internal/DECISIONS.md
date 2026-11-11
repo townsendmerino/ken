@@ -62,6 +62,8 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-052](#adr-052-budgetpacking-uses-a-gentler-decay-08-instead-of-threshold-2) | `BudgetPacking` uses a gentler decay (0.8) instead of threshold 2 | Accepted |
 | [ADR-053](#adr-053-environment-variables-are-read-at-the-edge) | Environment variables are read at the edge | Accepted |
 | [ADR-054](#adr-054-ken_enrich-and-ken_ann-apply-on-every-index-path) | `KEN_ENRICH` and `KEN_ANN` apply on every index path | Accepted |
+| [ADR-055](#adr-055-minified-files-are-skipped-by-default-retroactive) | Minified files are skipped by default (retroactive) | Accepted |
+| [ADR-056](#adr-056-markdown-files-use-the-markdown-chunker-by-default-retroactive) | Markdown files use the markdown chunker by default (retroactive) | Accepted |
 
 ---
 
@@ -3029,3 +3031,56 @@ That includes one behavior the documentation gets wrong, kept as it was: `KEN_EN
 - A ken-mcp snapshot built under the old behavior is rebuilt once when either variable is set: the snapshot's config key already included both settings.
 - The memory saving is the watched index's (`ken-mcp`, `ken index`, `engine`): it holds only the quantized store. A pre-built or embedded-corpus index keeps its full-precision vectors beside a quantized retriever, so there `KEN_ANN` changes query speed, not memory.
 - The bench harnesses that open repos through `engine.Open` (`bench/contextbench`) are unchanged: `engine` does not read the environment, and they did not apply these variables before either.
+
+## ADR-055: Minified files are skipped by default (retroactive)
+
+**Status:** Accepted
+**Date:** 2026-11-10, written retroactively. The change shipped on 2026-07-19 in commit `9c3a512` ("feat(repo): env-tunable size cap + minified-file skip (memory campaign M3)") with no ADR and no benchmark figure.
+**Decided by:** Francis asked for this record on 2026-11-10, after a bisect traced a recall move to the commit.
+
+### Context
+The memory campaign added a default-on filter to the walker: a file whose sampled head averages more than 1,000 bytes per line (built JS/CSS bundles, single-line JSON) is not indexed. Its purpose was build memory and index size on artifact-heavy repos. It changed which files every index contains, and its effect on retrieval was not measured at the time.
+
+### What it did, as measured
+Bisected on 2026-11-10 with `KEN_ENRICH=off go test -tags=bench ./internal/search/ -run TestRecallDecomp_BM25Baseline` (semble set, 63 repos, 1,251 queries; no parse budget, so exactly repeatable). BM25-only recall, the commit's parent against the commit:
+
+| | @10 overall | @10 NL | @20 overall |
+|---|--:|--:|--:|
+| parent (`eeb9df5`) | 0.841 | 0.832 | 0.927 |
+| `9c3a512` | 0.840 | 0.831 | 0.926 |
+
+Recall at 1, 3, 5, 50 and 100 did not move. About one query in 1,251 lost a target from its top 10. The hybrid columns were not bisected.
+
+### The default now
+Unchanged since the commit: the skip is on, at 1,000 bytes per line. `KEN_MAX_AVG_LINE_BYTES` sets the threshold for the binaries (0 switches it off); `engine.Options.MaxAvgLineBytes` does for a program that imports `engine` (negative switches it off). README documents the variable.
+
+### Consequences
+- The cost is recorded: 0.001 BM25-only recall@10 on semble, in exchange for keeping built bundles out of the index.
+- A change to which files are indexed by default moves benchmark figures even when no ranking code changes. It should carry a before/after figure and an ADR; this one had neither, which is why docs/BENCH.md's June recall table stopped reproducing without anyone noticing.
+
+## ADR-056: Markdown files use the markdown chunker by default (retroactive)
+
+**Status:** Accepted
+**Date:** 2026-11-10, written retroactively. The change shipped on 2026-09-17 in commit `6756a74` ("perf: reduce allocations on the hybrid rerank hot path; wire up markdown chunking", #84) with no ADR.
+**Decided by:** Francis asked for this record on 2026-11-10, after a bisect traced a recall move to the commit.
+
+### Context
+The heading-aware markdown chunker was linked into `cmd/ken` and `cmd/ken-mcp` but never selected: under the default `--chunker=regex`, a `.md` file fell through to the line chunker. The commit made the index route markdown files to the markdown chunker whenever one is registered. That changes how every markdown file is chunked by default. It rode in a commit titled as a performance change, though its message did state the measured effect, and the v1.8.0 release notes repeated it.
+
+### What it did, as measured
+Same harness and date as ADR-055. BM25-only recall, the commit's parent against the commit:
+
+| | @1 | @3 | @5 | @10 overall | @10 NL |
+|---|--:|--:|--:|--:|--:|
+| parent (`078e809`) | 0.426 | 0.641 | 0.746 | 0.840 | 0.831 |
+| `6756a74` | 0.420 | 0.640 | 0.742 | 0.842 | 0.833 |
+
+Recall@10 rose by 0.002 and recall at 1 to 5 fell by 0.001 to 0.006: heading-bounded sections bring more targets into the top 10 and rank some of them lower inside it. The commit's own figures agree on @10 (0.840 to 0.842) and report hybrid recall@10 unchanged at 0.973 / 0.969 / 0.995; that hybrid claim was not re-measured here.
+
+### The default now
+Unchanged since the commit: files `chunk.Language` identifies as markdown go to the markdown chunker when it is registered, which it is in `cmd/ken`, `cmd/ken-mcp` and, since ADR-047, any program importing `engine`. `--chunker=line` (or `Options.Chunker: "line"`) is the opt-out. A binary that does not link the markdown chunker keeps the old line fallback.
+
+### Consequences
+- Together with ADR-055 this accounts for the whole BM25-only drift between docs/BENCH.md's June table (0.841 overall) and v1.13.0 (0.842): −0.001, then +0.002.
+- The top-of-list cost (recall@1 down 0.006 BM25-only) was not in the commit message and is recorded here for the first time.
+- A default chunking change belongs in its own commit with its own record, not inside a performance commit.

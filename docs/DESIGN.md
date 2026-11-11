@@ -527,6 +527,8 @@ Training-dataset licenses (CornStack `nomic-ai/cornstack-*`) don't encumber the 
 
 ## 7. Hybrid retrieval & rerank
 
+> **Scope of this section's divergence record.** §7 lists ranking constants and marks each one that differs from semble. Two default changes moved the benchmark figures without touching any constant here, so they are recorded as ADRs rather than in this list: the default-on minified-file skip (ADR-055, a change to which files are indexed) and markdown files using the markdown chunker (ADR-056, a chunking change; see §2).
+
 Ported verbatim from semble's live source (`search.py`, `ranking/{boosting,penalties,weighting}.py`, `tokens.py`), which diverged materially from the scoping reconstruction. Since [ADR-050](internal/DECISIONS.md#adr-050-ranking-may-diverge-from-the-verbatim-semble-port) (2026-10-30, Francis's call) these constants may diverge from semble under a measured gate. The default pipeline has not diverged. The opt-in `engine.SearchOptions{BudgetPacking}` uses a file-saturation decay of 0.8 instead of semble's 0.5 ([ADR-052](internal/DECISIONS.md#adr-052-budgetpacking-uses-a-gentler-decay-08-instead-of-threshold-2), superseding ADR-051's threshold 2).
 
 ### Arm B chunk-level enrichment (Stage 8 close, ADR-035)

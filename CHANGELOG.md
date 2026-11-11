@@ -15,6 +15,10 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Documentation
+
+- **Two retroactive ADRs record default changes that moved the benchmark figures.** ADR-055: the default-on minified-file skip (`9c3a512`, 2026-07-19) cost 0.001 BM25-only recall@10 on semble (0.841 to 0.840). ADR-056: routing markdown files to the markdown chunker by default (`6756a74`, 2026-09-17) raised it by 0.002 (0.840 to 0.842) and lowered recall@1 by 0.006. Both were found by bisecting on 2026-11-10; neither default changes. docs/BENCH.md records as an open item that the hybrid column's moves since June are not traced.
+
 ## [1.14.0] — 2026-11-10 — `KEN_ENRICH` / `KEN_ANN` work on every path, and `engine` takes its configuration from `Options` only
 
 `KEN_ENRICH` and `KEN_ANN` now take effect in `ken-mcp`, `ken index`, `ken build-index` and `mcp.Run`, as the documentation said they did, and the `status` tool reports what the loaded index holds. `engine` no longer reads the environment: a program that imports it sets `engine.Options`. With neither variable set, the `ken` and `ken-mcp` binaries return the same output as 1.13.0.

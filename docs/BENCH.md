@@ -477,6 +477,19 @@ measured with enrichment on, as shipped. Enrichment shifts BM25-only
 recall@10 by 0.002 on this corpus (0.840 on, 0.842 off) and hybrid by 0.003
 the other way (0.974 on, 0.971 off).
 
+**What moved the BM25-only column since June** (bisected 2026-11-10 with
+enrichment off): the default-on minified-file skip took overall recall@10
+from 0.841 to 0.840 (`9c3a512`, 2026-07-19, ADR-055), and routing markdown
+files to the markdown chunker took it from 0.840 to 0.842 (`6756a74`,
+2026-09-17, ADR-056).
+
+**Open item: the hybrid column's moves since June are not traced.** With
+enrichment off, hybrid recall@10 went from the recorded 0.971 / 0.967 /
+0.995 (overall / NL / symbol) to 0.971 / 0.968 / 0.990, so symbol recall
+fell by 0.005 between June and `b6d8ae5`. The June hybrid figures were not
+re-run at the June commit either, so they have not been confirmed to
+reproduce there. Nothing has been bisected.
+
 ### Reproduce
 
 ```bash
