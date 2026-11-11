@@ -436,10 +436,11 @@ the earlier budget-off runs. Identical to the baseline.
 
 Left open:
 
-- `ken-mcp`'s late environment reads (`KEN_DB_*`, rerank telemetry, usage
-  stats, shutdown grace) are outside `server.Config`; moving them reorders
-  invalid-value warnings in the log.
-- Hybrid search with DB chunks is not repeatable across a minute
+- (Closed 2026-11-10.) `ken-mcp`'s late environment reads (`KEN_DB_*`, rerank telemetry, usage
+  stats, shutdown grace, and the per-build index settings) are in
+  `server.Config`; `TestOnlyConfigLoadersReadTheEnvironment` keeps `Run` from
+  reading any.
+- (Closed.) Hybrid search with DB chunks was not repeatable across a minute
   boundary. Traced 2026-11-10: every DB chunk's text starts with
   `-- indexed at <UTC minute> from <host>` (`internal/db.freshnessHeader`),
   and that line is tokenized and embedded with the rest. With only the
@@ -449,8 +450,7 @@ Left open:
   appeared at exactly 21:27:00 and 21:28:00. The race detector reported
   nothing in 200 sessions, so it is not a data race or an order-dependent
   sum. It applies to `ken-mcp` with `KEN_DB_DSN` as much as to `mcp.Run`.
-  Not changed: keeping the line out of the indexed text is a ranking
-  change.
+  Fixed after 1.15.0 by ADR-058: the header is shown, not indexed.
 
 ## Inferred, not verified
 
