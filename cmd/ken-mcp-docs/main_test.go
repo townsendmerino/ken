@@ -28,6 +28,8 @@ import (
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/townsendmerino/ken/internal/testenv"
 )
 
 // TestEmbeddedCorpus_SmokeTest builds the demo binary via the canonical
@@ -74,8 +76,8 @@ func TestEmbeddedCorpus_SmokeTest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath)
-	cmd.Env = append(os.Environ(), "KEN_MCP_LOG_LEVEL=error")
+	cmd := testenv.CommandContext(t, ctx, binPath)
+	cmd.Env = append(cmd.Env, "KEN_MCP_LOG_LEVEL=error")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 

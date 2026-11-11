@@ -32,6 +32,8 @@ import (
 //   - mcp, the server library. A third-party mcp.Run or mcp.NewServer
 //     binary honors the documented variables without wiring each one, so
 //     the package reads them itself (mcp/env.go lists which);
+//   - internal/testenv, test support: it copies PATH and the temporary-
+//     directory variables into the environment of a binary under test;
 //   - bench/, the benchmark harnesses (//go:build bench, never linked into
 //     a released binary), whose runs are configured by environment.
 //
@@ -39,6 +41,7 @@ import (
 // process is not reading configuration from it.
 var envEdgeDirs = []string{
 	"internal/envcfg",
+	"internal/testenv",
 	"mcp",
 }
 

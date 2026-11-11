@@ -13,11 +13,12 @@ package mcpdb_test
 import (
 	"bytes"
 	"context"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/townsendmerino/ken/internal/testenv"
 )
 
 // buildEmbeddedWithDBBinary compiles testdata/embedded-with-db into
@@ -46,12 +47,10 @@ func buildEmbeddedWithDBBinary(t *testing.T) string {
 // the "no DB" branch.
 func newBinaryCommand(t *testing.T, ctx context.Context, binPath, dsn string) *exec.Cmd {
 	t.Helper()
-	cmd := exec.CommandContext(ctx, binPath)
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
-		"MY_DB_DSN=" + dsn, // mini-binary reads this; matches the README example
-	}
+	cmd := testenv.CommandContext(t, ctx, binPath)
+	cmd.Env = append(cmd.Env,
+		"MY_DB_DSN="+dsn, // mini-binary reads this; matches the README example
+	)
 	return cmd
 }
 

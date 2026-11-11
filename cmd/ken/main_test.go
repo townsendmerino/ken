@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/townsendmerino/ken/internal/testenv"
 )
 
 func TestParseSearchArgs(t *testing.T) {
@@ -150,7 +152,7 @@ func TestBench_StdinDrivenJSON(t *testing.T) {
 	// stdin: three real queries + one blank line + one '#' comment to
 	// exercise the skip rules. Expect exactly three JSON records out.
 	stdin := strings.NewReader("validate_user\n\n# comment line\ncircle area\nmakeWidget\n")
-	cmd := exec.Command(binPath, "bench", fixture, "--mode", "bm25", "--chunker", "regex", "-k", "3")
+	cmd := testenv.Command(t, binPath, "bench", fixture, "--mode", "bm25", "--chunker", "regex", "-k", "3")
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

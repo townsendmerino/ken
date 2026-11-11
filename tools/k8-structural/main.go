@@ -1,8 +1,7 @@
 // Command k8-structural takes the structural half of tack's K8 measurements
 // (ADR-048): the cold structural build behind engine.Open plus one
-// Definition, and the cost of Refresh for one changed file: with the search
-// side alone, with both sides, and the difference, which is the structural
-// side.
+// Definition, and the cost of Refresh for one changed file, with its search
+// and structural sides apart.
 //
 // Run it on a quiet machine, against a COPY of the repo — the refresh
 // measurement edits a file (and restores it), and -snapshot writes .ken/
@@ -36,6 +35,7 @@ import (
 
 	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/envcfg"
+	"github.com/townsendmerino/ken/internal/structural"
 )
 
 func main() {
@@ -118,7 +118,7 @@ func main() {
 			fatal(err)
 		}
 	}
-	run := func(name string, f func(i int)) time.Duration {
+	run := func(name string, f func(i int)) {
 		var ds []time.Duration
 		for i := range *reps {
 			edit(i)
@@ -129,7 +129,6 @@ func main() {
 		slices.Sort(ds)
 		fmt.Printf("%s: median %v (min %v, max %v, n=%d)\n", name,
 			ds[len(ds)/2].Round(time.Microsecond), ds[0].Round(time.Microsecond), ds[len(ds)-1].Round(time.Microsecond), len(ds))
-		return ds[len(ds)/2]
 	}
 	refreshOnce := func(int) {
 		if err := ws.Refresh(ctx, []string{*refresh}, nil); err != nil {
@@ -139,13 +138,20 @@ func main() {
 
 	// The structural index isn't built yet, so Refresh's batch hook is a
 	// no-op: this is the search side alone.
-	searchOnly := run("Refresh, search side only (structural unbuilt)", refreshOnce)
+	run("Refresh, search side only (structural unbuilt)", refreshOnce)
 	buildStructural()
-	both := run("Refresh, both sides", refreshOnce)
-	// The structural side is not timed directly: that would mean calling
-	// the structural index's own Update, which is internal to engine. It is
-	// what building the structural index added to a Refresh.
-	fmt.Printf("structural side (both sides minus search side, medians): %v\n", (both - searchOnly).Round(time.Microsecond))
+	// The structural side is timed on an index this tool builds itself,
+	// with the options engine builds its own with: engine does not hand out
+	// its structural index, and Update is internal/structural's method.
+	// The build is outside the timed region.
+	sx, err := structural.BuildWithOptions(ctx, root, structural.BuildOptions{MaxFileBytes: envcfg.StructuralMaxFileBytes(), Walk: walk})
+	if err != nil {
+		fatal(err)
+	}
+	run("structural side only (Index.Update, one file)", func(int) {
+		sx.Update(root, []string{*refresh}, nil, nil)
+	})
+	run("Refresh, both sides", refreshOnce)
 	if *snapshot {
 		done := phase("Close (writes the snapshot Refresh deferred)")
 		_ = ws.Close()

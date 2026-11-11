@@ -401,19 +401,26 @@ one, `ken-mcp` identical in all 30.
     reorder those lines against the startup-mode lines.
 
 - **Slice 4 (close)**: `tools/k8-structural` no longer uses an escape
-  hatch. It read the structural index's stats (now on
-  `engine.StructuralStatus`) and timed the structural index's own `Update`;
-  it now reports the structural side of a Refresh as "both sides minus the
-  search side". `TestEscapeHatchesHaveNoNewCallers` pins the remaining
-  users: `mcp/bundle.go` and `mcp/cache.go` (public signatures) and one
-  bench harness.
+  hatch. It reads the structural stats from `engine.StructuralStatus`, and
+  times the structural `Update` on an index it builds itself from
+  `internal/structural`, as a second named exception in the guard
+  (Francis's decision on #138); what it prints is unchanged.
+  `TestEscapeHatchesHaveNoNewCallers` pins the remaining users:
+  `mcp/bundle.go` and `mcp/cache.go` (public signatures) and one bench
+  harness. `prebuiltLogWriter` is removed: for a pre-built repo `ken-mcp`'s
+  log carries engine's own two structural lines.
+- **Subprocess tests** all start ken's binaries through
+  `internal/testenv` (temporary `HOME`, `KEN_NO_USAGE_STATS=1`);
+  `TestSubprocessTestsUseTestenv` fails for a test file that calls
+  `os/exec` directly for anything but `go` and `git`.
 
 ## End state (2026-11-10)
 
 - `engine` is the only package outside `internal/` that imports
   `internal/search` or `internal/structural`, except
-  `cmd/ken/internal/measure` (`ken bench` / `ken perf`) and seven bench
-  harness packages under `bench/`, all named in the guard.
+  `cmd/ken/internal/measure` (`ken bench` / `ken perf`),
+  `tools/k8-structural` and seven bench harness packages under `bench/`,
+  all named in the guard.
 - `cmd/ken`, `cmd/ken-mcp` and `mcp` work through `*engine.Workspace`.
 - `ken-mcp`'s `main()` is 19 lines.
 
@@ -432,12 +439,9 @@ Left open:
 - `ken-mcp`'s late environment reads (`KEN_DB_*`, rerank telemetry, usage
   stats, shutdown grace) are outside `server.Config`; moving them reorders
   invalid-value warnings in the log.
-- `prebuiltLogWriter` rewrites two engine log lines for pre-built repos.
 - Hybrid search with DB chunks under `mcp.Run` showed a fifth-digit score
   difference about once in 500 sessions, on a build compared with itself.
   Not traced.
-- Tests in `mcp/db` and `cmd/ken` still run subprocesses with the real
-  `HOME`; only `cmd/ken-mcp`'s were checked and fixed.
 
 ## Inferred, not verified
 
