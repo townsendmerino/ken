@@ -253,10 +253,8 @@ func NewLogger() *kenmcp.Logger {
 // Config is what ken-mcp resolved from its environment before it starts
 // serving. LoadConfig fills it; Run assembles the server from it.
 //
-// Four groups of variables are not here, because they are read where they
-// are used and moving the read would move their invalid-value warning in
-// the log: the KEN_DB_* family (wireDBTier2), KEN_MCP_RERANK_TELEMETRY,
-// KEN_NO_USAGE_STATS / KEN_USAGE_STATS_PATH, and KEN_MCP_SHUTDOWN_GRACE.
+// Run and what it calls read no configuration from the environment
+// themselves.
 type Config struct {
 	Transport string            // KEN_MCP_TRANSPORT: stdio or http
 	HTTP      kenmcp.HTTPConfig // the http transport's address, token and rate limit
@@ -272,6 +270,29 @@ type Config struct {
 	EmbedCacheEnabled bool // KEN_MCP_EMBED_CACHE
 	EmbedCacheMax     int  // KEN_MCP_EMBED_CACHE_MAX
 	MmapModel         bool // KEN_MCP_MMAP_MODEL
+
+	// Index holds the index settings every repo is built with, and only
+	// those: the walk limits (KEN_MAX_FILE_BYTES, KEN_MAX_AVG_LINE_BYTES,
+	// KEN_MAX_FILES, KEN_SKIP_GENERATED), KEN_ENRICH, KEN_ANN and
+	// KEN_STRUCTURAL_MAX_FILE_BYTES. Its other fields are unset.
+	Index engine.Options
+
+	// DB is the live-database integration the KEN_DB_* variables configure.
+	// DB.DSN is empty when it is off.
+	DB DBConfig
+
+	// RerankTelemetryInResponse is KEN_MCP_RERANK_TELEMETRY: append the
+	// per-query rerank telemetry line to the search tool's result text.
+	RerankTelemetryInResponse bool
+
+	// UsageStatsDisabled is KEN_NO_USAGE_STATS. UsageStatsPath is
+	// KEN_USAGE_STATS_PATH, trimmed; empty means the default path.
+	UsageStatsDisabled bool
+	UsageStatsPath     string
+
+	// ShutdownGrace is KEN_MCP_SHUTDOWN_GRACE: how long a shutdown signal
+	// waits for in-flight tool calls before the process exits.
+	ShutdownGrace time.Duration
 
 	// Startup is the serving mode and model KEN_MCP_MODE, KEN_MCP_MODEL_DIR
 	// and KEN_MCP_AUTO_FETCH resolve to, given whether the model is on disk.
@@ -404,10 +425,18 @@ func LoadConfig(logger *kenmcp.Logger) Config {
 		EmbedCacheMax:     embedCacheMax,
 		MmapModel:         mmapModel,
 		Startup:           sm,
-		lazyReranker:      lazyReranker,
-		rerankerLoader:    rl,
-		rerankerOptions:   rerankerOptions,
-		rerankEnabled:     rerankEnabled,
+
+		Index:                     loadIndexOptions(),
+		DB:                        loadDBConfig(logger),
+		RerankTelemetryInResponse: envcfg.EnvBool("KEN_MCP_RERANK_TELEMETRY", false, logger),
+		UsageStatsDisabled:        envcfg.EnvBool("KEN_NO_USAGE_STATS", false, logger),
+		UsageStatsPath:            strings.TrimSpace(os.Getenv("KEN_USAGE_STATS_PATH")),
+		ShutdownGrace:             envcfg.EnvDuration("KEN_MCP_SHUTDOWN_GRACE", defaultShutdownGrace, logger),
+
+		lazyReranker:    lazyReranker,
+		rerankerLoader:  rl,
+		rerankerOptions: rerankerOptions,
+		rerankEnabled:   rerankEnabled,
 	}
 }
 
@@ -484,6 +513,7 @@ func Run(cfg Config, logger *kenmcp.Logger) {
 		mmapModel:         mmapModel,
 		lazyReranker:      lazyReranker,
 		rerankerOptions:   rerankerOptions,
+		index:             cfg.Index,
 		dbDefaultKey:      dbDefaultKey,
 		dbExtras:          dbExtrasHolder,
 	}).Build
@@ -523,7 +553,7 @@ func Run(cfg Config, logger *kenmcp.Logger) {
 	// Returns (nil refresher, nil cleanup) when Tier 2 isn't configured
 	// or initial connection fails (the latter logs warn and continues
 	// with FS-only rather than crashing startup).
-	refresher, dbCleanup := wireDBTier2(ctx, logger, cache, defaultRepo, dbExtrasHolder)
+	refresher, dbCleanup := wireDBTier2(ctx, logger, cache, defaultRepo, dbExtrasHolder, cfg.DB)
 
 	// Background model auto-fetch (KEN_MCP_AUTO_FETCH, default on). When the
 	// model was missing at startup we serve bm25 now; this pulls the model,
@@ -546,7 +576,7 @@ func Run(cfg Config, logger *kenmcp.Logger) {
 	//     change.
 	// Either gate enables collection in the search code path; both off
 	// means the zero-config path (no time.Now bookkeeping).
-	telemetryInResponse := envcfg.EnvBool("KEN_MCP_RERANK_TELEMETRY", false, logger)
+	telemetryInResponse := cfg.RerankTelemetryInResponse
 	var telemetryLog func(query string, t engine.Telemetry)
 	if lazyReranker != nil && logger.Level <= kenmcp.LogInfo {
 		telemetryLog = func(query string, t engine.Telemetry) {
@@ -565,10 +595,10 @@ func Run(cfg Config, logger *kenmcp.Logger) {
 	// Privacy: internal/usage NEVER records query text or file paths.
 	// Only ts + call type + result count + char counts are persisted.
 	var usageRecorder *usage.Recorder
-	if envcfg.EnvBool("KEN_NO_USAGE_STATS", false, logger) {
+	if cfg.UsageStatsDisabled {
 		logger.Logf(kenmcp.LogInfo, "usage stats: tracking disabled via KEN_NO_USAGE_STATS=1")
 	} else {
-		usagePath := strings.TrimSpace(os.Getenv("KEN_USAGE_STATS_PATH"))
+		usagePath := cfg.UsageStatsPath
 		if usagePath == "" {
 			usagePath = usage.DefaultPath()
 		}
@@ -704,7 +734,7 @@ func Run(cfg Config, logger *kenmcp.Logger) {
 		// exit so shutdown can't hang, and register a fresh signal channel so
 		// a SECOND signal always force-quits (NotifyContext no longer delivers
 		// after the first — the first signal already used its channel).
-		grace := envcfg.EnvDuration("KEN_MCP_SHUTDOWN_GRACE", defaultShutdownGrace, logger)
+		grace := cfg.ShutdownGrace
 		logger.Logf(kenmcp.LogInfo, "shutdown signal received; draining in-flight requests (grace %s)…", grace)
 
 		// Stdio's srv.Run watches ctx and drains on its own; the http.Server does
@@ -763,8 +793,9 @@ type repoBuilder struct {
 	mmapModel         bool
 	lazyReranker      *engine.LazyReranker
 	rerankerOptions   []engine.RerankerOption
-	dbDefaultKey      string    // normalized cache key the DB extras attach to ("" ⇒ none)
-	dbExtras          *dbExtras // shared holder the Refresher publishes DB chunks into
+	index             engine.Options // the env-derived index settings (Config.Index)
+	dbDefaultKey      string         // normalized cache key the DB extras attach to ("" ⇒ none)
+	dbExtras          *dbExtras      // shared holder the Refresher publishes DB chunks into
 }
 
 // Build is the kenmcp.Builder: clone http(s) URLs to a temp dir; index local
@@ -822,7 +853,6 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 		}
 	}
 
-	walk := envcfg.WalkLimits()
 	persistSnapshot := rb.snapshotEnabled && isLocal
 	wsOpts := engine.Options{
 		Mode:                  bModeStr,
@@ -837,15 +867,15 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 		MmapModel:             rb.mmapModel,
 		// KEN_ENRICH and KEN_ANN, the same options the ken CLI's one-shot
 		// builds use (ADR-054; before it ken-mcp ignored both).
-		DisableEnrichment: envcfg.EnrichDisabled(),
-		DenseRetriever:    envcfg.DenseRetriever(),
+		DisableEnrichment: rb.index.DisableEnrichment,
+		DenseRetriever:    rb.index.DenseRetriever,
 		// engine does not read the environment; the walk limits and the
-		// structural cap are the KEN_* values read at this binary's edge.
-		MaxFileBytes:           walk.MaxFileBytes,
-		MaxAvgLineBytes:        walk.MaxAvgLineBytes,
-		MaxFiles:               walk.MaxFiles,
-		SkipGenerated:          walk.SkipGenerated,
-		StructuralMaxFileBytes: envcfg.StructuralMaxFileBytes(),
+		// structural cap are the KEN_* values LoadConfig read.
+		MaxFileBytes:           rb.index.MaxFileBytes,
+		MaxAvgLineBytes:        rb.index.MaxAvgLineBytes,
+		MaxFiles:               rb.index.MaxFiles,
+		SkipGenerated:          rb.index.SkipGenerated,
+		StructuralMaxFileBytes: rb.index.StructuralMaxFileBytes,
 	}
 	// Assign the interface only when non-nil so a nil *Cache doesn't become
 	// a non-nil VecCache holding a nil pointer.
@@ -1129,42 +1159,41 @@ func setupReranker(logger *kenmcp.Logger) (*engine.LazyReranker, *rerankerLoader
 	return lazy, loader, opts, true
 }
 
-// wireDBTier2 wires the v0.7.0 Tier-2 database introspection path. No-op
-// when KEN_DB_DSN is unset. Otherwise:
-//
-//  1. Validates DSN + reads KEN_DB_SAMPLE_ROWS + KEN_DB_REINDEX_INTERVAL.
-//  2. Pre-builds the defaultRepo WatchedIndex via the cache (so we
-//     have a concrete swap target before Refresher needs one).
-//  3. Runs db.IndexSchema once at startup; pushes the chunks via
-//     wix.SetExtraChunks.
-//  4. If KEN_DB_REINDEX_INTERVAL > 0, spawns refresher.Run(ctx) in a
-//     goroutine for periodic refresh.
-//  5. Installs SIGHUP handler (unix-only via watchSIGHUP) that calls
-//     refresher.Refresh on each signal.
-//
-// Returns the *db.Refresher (or nil if Tier 2 wasn't enabled / initial
-// setup failed) plus a cleanup func. The Refresher is forwarded to
-// NewServer's Config.Reindex so the v0.8.0 reindex_db MCP tool
-// (ADR-020 Part 2) can call TryRefresh. Cleanup is currently a no-op
-// (the Refresher exits when ctx cancels naturally) but reserved as a
-// future seam.
-//
-// Failure modes — all non-fatal (FS-only mode continues, server keeps
-// running):
-//   - DSN unset: silent no-op.
-//   - DSN invalid (envDSN returns ""): warning already logged.
-//   - DefaultRepo unset: warning, Tier 2 stays off ("DB chunks must
-//     attach to a known repo").
-//   - DefaultRepo is an http(s) URL: warning, Tier 2 stays off (eager
-//     pre-build would shell out to git, which is too heavy for startup).
-//   - Initial cache.Get fails: warning, Tier 2 stays off.
-//   - Initial db.IndexSchema fails: warning, Tier 2 stays off (no
-//     refresher started — agents shouldn't get stale empty chunks if
-//     the DB was never reachable).
-func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache, defaultRepo string, extras *dbExtras) (*mcpdb.Refresher, func()) {
+// loadIndexOptions reads the index settings that apply to every repo.
+// engine does not read the environment, so this binary's edge does.
+func loadIndexOptions() engine.Options {
+	walk := envcfg.WalkLimits()
+	return engine.Options{
+		// KEN_ENRICH and KEN_ANN, the same options the ken CLI's one-shot
+		// builds use (ADR-054; before it ken-mcp ignored both).
+		DisableEnrichment:      envcfg.EnrichDisabled(),
+		DenseRetriever:         envcfg.DenseRetriever(),
+		MaxFileBytes:           walk.MaxFileBytes,
+		MaxAvgLineBytes:        walk.MaxAvgLineBytes,
+		MaxFiles:               walk.MaxFiles,
+		SkipGenerated:          walk.SkipGenerated,
+		StructuralMaxFileBytes: envcfg.StructuralMaxFileBytes(),
+	}
+}
+
+// DBConfig is the KEN_DB_* family as read at startup.
+type DBConfig struct {
+	DSN             string        // KEN_DB_DSN; empty means no database
+	SampleRows      int           // KEN_DB_SAMPLE_ROWS
+	ReindexInterval time.Duration // KEN_DB_REINDEX_INTERVAL
+	StartupTimeout  time.Duration // KEN_DB_STARTUP_TIMEOUT
+	IncludeSchemas  []string      // KEN_DB_SCHEMAS
+	ExcludeSchemas  []string      // KEN_DB_EXCLUDE_SCHEMAS (dropped when IncludeSchemas is set)
+	EnableListen    bool          // KEN_DB_LISTEN
+}
+
+// loadDBConfig reads the KEN_DB_* family, warning about each invalid value.
+// With KEN_DB_DSN unset or invalid the other variables are not read, so
+// they are not validated either.
+func loadDBConfig(logger *kenmcp.Logger) DBConfig {
 	dsn := envcfg.EnvDSN("KEN_DB_DSN", logger)
 	if dsn == "" {
-		return nil, nil
+		return DBConfig{}
 	}
 	sampleRows := envcfg.EnvInt("KEN_DB_SAMPLE_ROWS", 0, logger)
 	if sampleRows < 0 {
@@ -1199,6 +1228,57 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 			"KEN_DB_SCHEMAS / KEN_DB_EXCLUDE_SCHEMAS set but DSN is SQLite — schema filtering not supported for SQLite (single-schema engine), env vars ignored")
 	}
 
+	return DBConfig{
+		DSN:             dsn,
+		SampleRows:      sampleRows,
+		ReindexInterval: reindex,
+		StartupTimeout:  startupTimeout,
+		IncludeSchemas:  includeSchemas,
+		ExcludeSchemas:  excludeSchemas,
+		EnableListen:    envcfg.EnvBool("KEN_DB_LISTEN", false, logger),
+	}
+}
+
+// wireDBTier2 wires the v0.7.0 Tier-2 database introspection path. No-op
+// when KEN_DB_DSN is unset. Otherwise:
+//
+//  1. Takes the KEN_DB_* settings LoadConfig read (loadDBConfig).
+//  2. Pre-builds the defaultRepo WatchedIndex via the cache (so we
+//     have a concrete swap target before Refresher needs one).
+//  3. Runs db.IndexSchema once at startup; pushes the chunks via
+//     wix.SetExtraChunks.
+//  4. If KEN_DB_REINDEX_INTERVAL > 0, spawns refresher.Run(ctx) in a
+//     goroutine for periodic refresh.
+//  5. Installs SIGHUP handler (unix-only via watchSIGHUP) that calls
+//     refresher.Refresh on each signal.
+//
+// Returns the *db.Refresher (or nil if Tier 2 wasn't enabled / initial
+// setup failed) plus a cleanup func. The Refresher is forwarded to
+// NewServer's Config.Reindex so the v0.8.0 reindex_db MCP tool
+// (ADR-020 Part 2) can call TryRefresh. Cleanup is currently a no-op
+// (the Refresher exits when ctx cancels naturally) but reserved as a
+// future seam.
+//
+// Failure modes — all non-fatal (FS-only mode continues, server keeps
+// running):
+//   - DSN unset: silent no-op.
+//   - DSN invalid (envDSN returns ""): warning already logged.
+//   - DefaultRepo unset: warning, Tier 2 stays off ("DB chunks must
+//     attach to a known repo").
+//   - DefaultRepo is an http(s) URL: warning, Tier 2 stays off (eager
+//     pre-build would shell out to git, which is too heavy for startup).
+//   - Initial cache.Get fails: warning, Tier 2 stays off.
+//   - Initial db.IndexSchema fails: warning, Tier 2 stays off (no
+//     refresher started — agents shouldn't get stale empty chunks if
+//     the DB was never reachable).
+func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache, defaultRepo string, extras *dbExtras, dbc DBConfig) (*mcpdb.Refresher, func()) {
+	dsn := dbc.DSN
+	if dsn == "" {
+		return nil, nil
+	}
+	sampleRows, reindex, startupTimeout := dbc.SampleRows, dbc.ReindexInterval, dbc.StartupTimeout
+	includeSchemas, excludeSchemas := dbc.IncludeSchemas, dbc.ExcludeSchemas
+
 	if defaultRepo == "" {
 		logger.Logf(kenmcp.LogWarn,
 			"KEN_DB_DSN set but KEN_MCP_DEFAULT_REPO is empty — Tier 2 (DB indexing) needs "+
@@ -1222,7 +1302,7 @@ func wireDBTier2(ctx context.Context, logger *kenmcp.Logger, cache *kenmcp.Cache
 		return nil, nil
 	}
 
-	enableListen := envcfg.EnvBool("KEN_DB_LISTEN", false, logger)
+	enableListen := dbc.EnableListen
 	if enableListen {
 		logger.Logf(kenmcp.LogInfo, "Tier 2: KEN_DB_LISTEN=1 (Postgres LISTEN/NOTIFY)")
 	}
