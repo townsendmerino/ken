@@ -15,6 +15,12 @@ pre-built binaries.
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-11-10 — `KEN_ENRICH` / `KEN_ANN` work on every path, and `engine` takes its configuration from `Options` only
+
+`KEN_ENRICH` and `KEN_ANN` now take effect in `ken-mcp`, `ken index`, `ken build-index` and `mcp.Run`, as the documentation said they did, and the `status` tool reports what the loaded index holds. `engine` no longer reads the environment: a program that imports it sets `engine.Options`. With neither variable set, the `ken` and `ken-mcp` binaries return the same output as 1.13.0.
+
+Two things to check before upgrading. If a server runs with `KEN_ENRICH=off` or `KEN_ANN` set, its results change, because the variable now takes effect. If a program imports `engine` and relied on `KEN_MAX_FILE_BYTES`, `KEN_MAX_AVG_LINE_BYTES`, `KEN_MAX_FILES`, `KEN_SKIP_GENERATED`, `KEN_STRUCTURAL_MAX_FILE_BYTES` or `KEN_ENRICH_FILE_BUDGET_MS` being picked up from its environment, it must now set the matching `Options` field or call `engine.SetEnrichFileBudget`.
+
 ### Added
 
 - **Files whose parse was cut short at the parse budget are now reported ("budget reached").** With `KEN_ENRICH_FILE_BUDGET_MS` set (2000 ms by default in `ken`, 500 ms in `ken-mcp`), tree-sitter can return a parse as accepted after its recovery passes ran out of time. The file was enriched from that shorter parse with nothing logged, and because the budget is wall-clock its label could differ from run to run. ken now times each parse and, when an accepted parse ran up to the budget, counts and logs the file beside the existing budget skips: a stderr line from `ken`, a warning from `ken-mcp`, and a new "Parse budget" block (`skipped` / `reached`) in the `status` tool (`ParseBudget` in its JSON). The tree is used exactly as before, so no result changes; old and new builds return identical output. Upstream request for a real signal: [gotreesitter#1600](https://github.com/odvcencio/gotreesitter/issues/1600).
@@ -30,8 +36,6 @@ pre-built binaries.
   - `Index.WithExtraChunks` (the `mcp.Run` DB-refresh path) keeps the index's dense store. It used to rebuild with the exact store.
 - **The `status` tool reports what the loaded index actually has.** The live-index section gains `enrichment` (how many chunks carry a structural label, counted from the index) and `dense store` (the store being served); the JSON form gains `Index.EnrichedChunks` and `Index.DenseRetriever`. Before, `status` showed only the `KEN_ENRICH` setting, and reported enrichment as off over an enriched index.
 
-- **Recall figures in the docs are re-measured (documentation correction).** docs/BENCH.md's recall@10 table carried figures measured in June with `KEN_ENRICH=off`. Re-measured at `b6d8ae5` with the shipped defaults: hybrid 0.974 overall / 0.970 NL / 0.995 symbol (was quoted as 0.971 / 0.967 / 0.995), BM25-only 0.840 / 0.831 / 0.892 (was 0.841 / 0.832 / 0.892). Enrichment shifts BM25-only recall@10 by 0.002, not the "<0.001" the doc stated. README and docs/USERS.md quote the new NL figure. No code changed.
-- **The semble benchmark harness is repeatable.** Two identical hybrid `bench/semble/run_ken.py` runs could differ, because the CLI's default 2000 ms per-file parse budget is wall-clock: a file whose parse takes about that long is labelled fully, labelled from a parse cut short, or skipped, depending on machine load. `run_ken.py` now runs with `KEN_ENRICH_FILE_BUDGET_MS=0` unless you set the variable. The repeatable hybrid headline at `b6d8ae5` is 0.8436 NDCG@10. docs/BENCH.md explains the cause and records the remaining open item: the shipped budget is still wall-clock.
 
 ### Changed
 
@@ -43,6 +47,15 @@ pre-built binaries.
   - Library packages (`engine`, and `internal/*` apart from `internal/envcfg`) no longer call `os.Getenv`; a new test, `TestEnvReadsStayAtTheEdge`, enforces it.
 - **`engine`'s escape hatches are now documented as best-effort.** The `engine.Index`, `engine.WatchedIndex` and `engine.StructuralIndex` aliases, and the `Workspace.WatchedIndex`, `Workspace.Structural` and `Workspace.StructuralIfBuilt` accessors that return them, are outside the 1.0 stability promise. They alias `internal/search` and `internal/structural` types, so they carry about 53 of those packages' methods, which can change in any release. Their comments said "1.0-stable" before. Nothing was removed or renamed.
 - **`mcp.Logger`, `mcp.LogLevel` and `mcp.ValidateEnum` are now aliases and wrappers over `internal/mcplog`.** The names, signatures and behavior are unchanged. `internal/envcfg` no longer imports the public `mcp` package, which was the import graph's one internal-to-public edge.
+
+### Documentation and benchmark harness
+
+- **Recall figures in the docs are re-measured (documentation correction).** docs/BENCH.md's recall@10 table carried figures measured in June with `KEN_ENRICH=off`. Re-measured at `b6d8ae5` with the shipped defaults: hybrid 0.974 overall / 0.970 NL / 0.995 symbol (was quoted as 0.971 / 0.967 / 0.995), BM25-only 0.840 / 0.831 / 0.892 (was 0.841 / 0.832 / 0.892). Enrichment shifts BM25-only recall@10 by 0.002, not the "<0.001" the doc stated. README and docs/USERS.md quote the new NL figure. No code changed.
+- **The semble benchmark harness is repeatable.** Two identical hybrid `bench/semble/run_ken.py` runs could differ, because the CLI's default 2000 ms per-file parse budget is wall-clock: a file whose parse takes about that long is labelled fully, labelled from a parse cut short, or skipped, depending on machine load. `run_ken.py` now runs with `KEN_ENRICH_FILE_BUDGET_MS=0` unless you set the variable. The repeatable hybrid headline at `b6d8ae5` is 0.8436 NDCG@10. docs/BENCH.md explains the cause and records the remaining open item: the shipped budget is still wall-clock.
+
+### Internal
+
+- **Two layering guards in `internal/buildchecks`.** `TestImportRules` holds a table of every package's allowed ken imports and fails when the real import graph (from `go list`, across darwin/linux/windows and the `bench`, `embed_corpus` and `kendemo` tags) differs from it, so adding or removing an edge needs a reviewed table change. `TestEnvReadsStayAtTheEdge` fails on `os.Getenv`, `os.LookupEnv` or `os.ExpandEnv` outside the programs, `internal/envcfg`, `mcp` and `bench/`. ARCHITECTURE.md's package map is redrawn from the same graph, with `engine` as the in-process library face.
 
 ## [1.13.0] — 2026-11-08 — exact `SearchFiles` at any index size, and opt-in `BudgetPacking` search
 
