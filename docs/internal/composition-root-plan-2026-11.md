@@ -325,6 +325,27 @@ The before/after comparison is `tools/compare-binaries/compare.py`. `main`
 against itself: `ken` identical in 29 of 30 settings plus the timing-dependent
 one, `ken-mcp` identical in all 30.
 
+## Progress
+
+- **Slice 0** (PR #130): harness and baseline.
+- **Slices 1a and 1b** (one PR; they share `cmd/ken/main.go`): cmd/ken's
+  commands on `engine.Workspace`; bench and perf in
+  `cmd/ken/internal/measure`; shared flag and reranker helpers in
+  `cmd/ken/internal/cli`. cmd/ken no longer imports `internal/search` or
+  `internal/structural`. A new guard, `TestOnlyNamedPackagesImportSearch`,
+  names every package outside `internal/` that still may.
+  - Comparison against `87eca6f`: `ken` identical in 23 of 30 settings plus
+    the timing one; the other 6 differ in one line, the snapshot key (below).
+    `ken-mcp` identical in all 30. Rerank output identical cold and warm.
+  - After: recall lines identical to the baseline; NDCG@10 0.8436 with 0 of
+    63 repos differing.
+  - **One output change, held for a decision:** `ken index --write-snapshot`
+    wrote a key that said "enrichment on, no dense store" whatever the
+    settings. Through the Workspace it writes the real key.
+  - **Found on the way:** the bench harnesses under `bench/` also import
+    `internal/search` (seven packages). The brief's end state did not mention
+    them; the guard lists them as harnesses.
+
 ## Inferred, not verified
 
 - That `Open` with `Watch: false` matches `FromFSWithOptions` for every

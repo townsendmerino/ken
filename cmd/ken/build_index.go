@@ -14,7 +14,7 @@
 //	                [--model DIR]
 //
 // Model resolution priority order matches `ken index` / `ken search`
-// (see resolveModelDir): --model flag → $KEN_MODEL_DIR → ~/.ken/model
+// (see cli.ResolveModelDir): --model flag → $KEN_MODEL_DIR → ~/.ken/model
 // → ./testdata/model.
 
 package main
@@ -25,22 +25,23 @@ import (
 	"path/filepath"
 
 	"github.com/townsendmerino/aikit/embed"
+	"github.com/townsendmerino/ken/cmd/ken/internal/cli"
+	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/envcfg"
-	"github.com/townsendmerino/ken/internal/search"
 )
 
 func cmdBuildIndex(args []string) int {
 	// Output path is mandatory (no sane default — overwrites are a
 	// destructive default in this category). Extract before
-	// commonFlags so positional order doesn't matter. Try -o first,
+	// cli.CommonFlags so positional order doesn't matter. Try -o first,
 	// then fall back to --output as a long alias.
-	args, output, err := extractFlag(args, "o", "")
+	args, output, err := cli.ExtractFlag(args, "o", "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
 	if output == "" {
-		args, output, err = extractFlag(args, "output", "")
+		args, output, err = cli.ExtractFlag(args, "output", "")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 			return 2
@@ -50,10 +51,10 @@ func cmdBuildIndex(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: -o <output_path> is required")
 		return 2
 	}
-	rest, chunker, modeStr, model, err := commonFlags(args)
+	rest, chunker, modeStr, model, err := cli.CommonFlags(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		usage()
+		cli.Usage()
 		return 2
 	}
 	if len(rest) != 1 {
@@ -75,18 +76,18 @@ func cmdBuildIndex(args []string) int {
 		return 1
 	}
 
-	mode, err := search.ParseMode(modeStr)
+	mode, err := engine.ParseMode(modeStr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
 
 	// Load the model only when semantic/hybrid actually need it.
-	// resolveModelDir already picked a path inside commonFlags;
+	// cli.ResolveModelDir already picked a path inside cli.CommonFlags;
 	// re-resolve here so the error message lists the exact path
 	// that was tried (the same path FromFS would have used).
 	var staticModel *embed.StaticModel
-	if mode != search.ModeBM25 {
+	if mode != engine.ModeBM25 {
 		if model == "" {
 			fmt.Fprintln(os.Stderr, "ken: mode requires --model <dir> or $KEN_MODEL_DIR (or run `ken download-model`)")
 			return 1
@@ -100,14 +101,18 @@ func cmdBuildIndex(args []string) int {
 	}
 
 	fsys := os.DirFS(corpusDir)
-	data, err := search.BuildAndSerializeIndex(fsys, search.BuildOptions{
+	walk := envcfg.WalkLimits()
+	data, err := engine.BuildIndexBytes(fsys, engine.BuildIndexOptions{
 		Mode:    mode,
 		Chunker: chunker,
 		Model:   staticModel,
-		Walk:    envcfg.WalkLimits(),
 		// KEN_ENRICH. KEN_ANN has nothing to do here: the file stores
 		// full-precision vectors and the retriever is chosen at load.
 		DisableEnrichment: envcfg.EnrichDisabled(),
+		MaxFileBytes:      walk.MaxFileBytes,
+		MaxAvgLineBytes:   walk.MaxAvgLineBytes,
+		MaxFiles:          walk.MaxFiles,
+		SkipGenerated:     walk.SkipGenerated,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())

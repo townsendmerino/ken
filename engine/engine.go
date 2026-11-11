@@ -228,6 +228,23 @@ func defaultModelDir() string {
 	return filepath.Join(home, ".ken", "model")
 }
 
+// BuildError is the error Open returns when the index build itself fails:
+// an unknown chunker, a missing or unreadable model, a walk over the file
+// limit. Err is the cause, for a caller that reports it in its own words.
+// Best-effort, outside the stability promise.
+type BuildError struct {
+	Root string
+	Err  error
+}
+
+// Error implements error.
+func (e *BuildError) Error() string {
+	return fmt.Sprintf("engine: build index for %s: %v", e.Root, e.Err)
+}
+
+// Unwrap returns the cause.
+func (e *BuildError) Unwrap() error { return e.Err }
+
 // Open builds (or loads a persisted snapshot of) a Workspace over root.
 // root must be a local directory; resolving a remote/URL repo to a local
 // clone is the caller's job (ken-mcp's mcp/clone.go does this before
@@ -319,7 +336,7 @@ func Open(ctx context.Context, root string, opts Options) (*Workspace, error) {
 	if wi == nil {
 		wi, err = search.NewWatchedIndexWithContext(ctx, absRoot, mode, chunker, modelDir, opts.Watch, w.fsOpts)
 		if err != nil {
-			return nil, fmt.Errorf("engine: build index for %s: %w", absRoot, err)
+			return nil, &BuildError{Root: absRoot, Err: err}
 		}
 		if opts.Snapshot {
 			w.persistSnapshot(wi)

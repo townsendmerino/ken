@@ -4,10 +4,8 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	// Side-effect imports: register every chunker the CLI exposes.
 	// internal/search blank-imports "regex" (the default); the optional
@@ -26,181 +23,21 @@ import (
 	"github.com/townsendmerino/aikit/chunk"
 	_ "github.com/townsendmerino/aikit/chunk/markdown"
 	"github.com/townsendmerino/aikit/chunk/treesitter"
-	"github.com/townsendmerino/aikit/encoder"
+	"github.com/townsendmerino/ken/cmd/ken/internal/cli"
+	"github.com/townsendmerino/ken/cmd/ken/internal/measure"
+	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/modelfetch"
-	"github.com/townsendmerino/ken/internal/search"
 	"github.com/townsendmerino/ken/internal/status"
 	usagepkg "github.com/townsendmerino/ken/internal/usage"
 )
-
-// defaultChunker is "regex" per docs/DESIGN.md (Option C is the v1 default);
-// unsupported languages still fall back to the line chunker inside
-// chunk.ChunkFile.
-const (
-	defaultChunker = "regex"
-	defaultMode    = "hybrid" // docs/DESIGN.md Stage 4: hybrid is the default
-)
-
-// resolveModelDir returns the directory ken will look for a Model2Vec
-// snapshot in. Priority order, first wins:
-//
-//  1. flagValue — whatever --model was set to; empty means not passed.
-//  2. $KEN_MODEL_DIR — environment override.
-//  3. $HOME/.ken/model — the canonical end-user location, if it exists.
-//  4. ./testdata/model — repo-developer fallback, if it exists.
-//
-// (1) and (2) are returned unconditionally: a user who explicitly set
-// either of those wants errors against that exact path, not a silent
-// fallback to a different one. (3) and (4) require the candidate
-// directory to actually contain model.safetensors before they're
-// chosen; otherwise we fall through to the next.
-//
-// If none of the candidates exist, we return the canonical end-user
-// path so the "not found" error from search.FromPath points users at
-// the right `ken download-model --to <path>` command.
-func resolveModelDir(flagValue string) string {
-	return resolveModelDirChain(flagValue, "KEN_MODEL_DIR", "model", "model")
-}
-
-// resolveModelDirChain is the shared four-step resolver behind resolveModelDir
-// and resolveRerankModelDir (identical logic, differing only by env var name +
-// the ~/.ken and testdata subdirectories): explicit flag → $envVar →
-// ~/.ken/<homeSub> → testdata/<repoSub>. (1)+(2) return unconditionally (an
-// explicit choice wants errors against that exact path); (3)+(4) require
-// model.safetensors to actually be present. If none resolve, returns the
-// canonical end-user path (or the repo path when $HOME is unset) so the
-// downstream "not found" error points at the right `ken download-model` command.
-func resolveModelDirChain(flagValue, envVar, homeSub, repoSub string) string {
-	if flagValue != "" {
-		return flagValue
-	}
-	if env := os.Getenv(envVar); env != "" {
-		return env
-	}
-	var homeCandidate string
-	if home, err := os.UserHomeDir(); err == nil {
-		homeCandidate = filepath.Join(home, ".ken", homeSub)
-		if fileExists(filepath.Join(homeCandidate, "model.safetensors")) {
-			return homeCandidate
-		}
-	}
-	repoCandidate := filepath.Join("testdata", repoSub)
-	if fileExists(filepath.Join(repoCandidate, "model.safetensors")) {
-		return repoCandidate
-	}
-	if homeCandidate != "" {
-		return homeCandidate
-	}
-	return repoCandidate
-}
-
-func fileExists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
-}
-
-// resolveRerankModelDir mirrors resolveModelDir for the M4/M5 neural
-// reranker checkpoint (nomic-ai/CodeRankEmbed). Priority order:
-//
-//  1. flagValue (--rerank-model), unconditional if non-empty.
-//  2. $KEN_RERANK_MODEL_DIR, unconditional if set.
-//  3. $HOME/.ken/rerank-model — the canonical end-user location, IF
-//     model.safetensors exists there.
-//  4. ./testdata/encoder-model — repo-developer fallback, IF
-//     model.safetensors exists there.
-//
-// If none resolve, returns the canonical end-user path so the
-// downstream "not found" error points at `ken download-model --rerank`.
-func resolveRerankModelDir(flagValue string) string {
-	return resolveModelDirChain(flagValue, "KEN_RERANK_MODEL_DIR", "rerank-model", "encoder-model")
-}
-
-func usage() {
-	fmt.Fprint(os.Stderr, `ken — code search
-
-usage:
-  ken index           <path>           [--watch|--no-watch] [--write-snapshot] [--chunker regex|treesitter|line] [--mode bm25|semantic|hybrid|hybrid-rerank] [--model DIR]
-  ken search          <path> <query>...  [-k N] [--json] [--verbose] [--stream] [--no-stats] [--chunker ...] [--mode ...] [--model DIR]
-                                         [--rerank-model DIR] [--rerank-top-n N] [--rerank-beta β] [--rerank-quant f32|int8] [--rerank-adaptive THRESHOLD:MINN]
-  ken bench           <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR] [--alpha-symbol F] [--alpha-nl F] [--no-file-saturation] [--saturation-threshold N] [--saturation-decay F]
-                                         [--rerank-model DIR] [--rerank-top-n N] [--rerank-beta β] [--rerank-quant f32|int8] [--rerank-adaptive THRESHOLD:MINN]
-  ken perf            <subcmd> [args]    (index|search|watch — see 'ken perf' for full usage)
-  ken build-index     <corpus>         -o <path> [--chunker ...] [--mode ...] [--model DIR]
-  ken download-model                     [--rerank] [--model ORG/NAME] [--to DIR] [--force]
-  ken savings                            [--verbose] [--path FILE]    # render token-savings summary
-  ken status                             [--json] [--verbose]         # build identity, models, enrichment, savings
-  ken doctor                             [--json] [--verbose]         # health check + recommendations (model, rerank cache, config)
-
-ken index --watch (default in v0.3+) keeps the process alive and re-indexes
-files on change; --no-watch is the v0.2 behavior (build once, print, exit).
-For one-shot queries via 'ken search' the flag is accepted but a no-op since
-the process exits after the result.
-
-ken build-index pre-builds a search index from a corpus directory and writes
-the serialized bytes to <path>. SDK authors using mcp.Run typically point
--o at <corpus>/.ken/index.bin so the file is picked up by //go:embed corpus
-at build time and auto-loaded at runtime — see docs/internal/DECISIONS.md ADR-024
-for the cold-start narrative.
-
-ken bench reads queries from stdin (one per line; lines starting with '#'
-ignored) and emits one JSON record per query to stdout against a single
-in-process index. Designed for the semble benchmark harness; see
-docs/BENCH.md.
-
---alpha-symbol / --alpha-nl pin the hybrid fusion's semantic blend weight
-for one query class (0..1; unset = the shipped adaptive 0.3 / 0.5). Bench
-only — they exist for the alpha-sensitivity sweep and are deliberately
-absent from 'ken search'; docs/BENCH.md's "don't tune ken's constants"
-rule keeps (0.3, 0.5) the verbatim-parity reference. Pinned runs report
-zero telemetry timings. --no-file-saturation turns the file-saturation
-decay off, --saturation-threshold N decays from a file's (N+1)th chunk,
-and --saturation-decay F sets the per-chunk decay (shipped 0.5; 0.8 = the
-engine's BudgetPacking search option, ADR-052); all report zero timings.
-
-ken perf is the speed/memory measurement harness (sibling to ken bench;
-they share no state). Each invocation emits one JSON record on stdout
-plus optional pprof profiles. See docs/internal/PERF.md and 'ken perf' for
-sub-command usage.
-
-ken download-model fetches the three files Model2Vec needs (model.safetensors,
-tokenizer.json, config.json) directly from HuggingFace into ~/.ken/model by
-default. With --rerank it instead fetches the M4 neural reranker
-(nomic-ai/CodeRankEmbed, ~547 MB) into ~/.ken/rerank-model. No Python tooling
-required. Public models only; gated/private models still need huggingface-cli.
-
-semantic/hybrid modes need a Model2Vec model dir; the CLI resolves one in
-priority order: --model <DIR> → $KEN_MODEL_DIR → ~/.ken/model → ./testdata/model.
-Run 'ken download-model' to populate ~/.ken/model. bm25 mode needs no model.
-
-hybrid-rerank mode also needs a CodeRankEmbed rerank-model dir; resolved as
---rerank-model <DIR> → $KEN_RERANK_MODEL_DIR → ~/.ken/rerank-model →
-./testdata/encoder-model. Run 'ken download-model --rerank' to populate it.
-Defaults: --rerank-top-n 50, --rerank-beta 0.25 (M0-validated blend).
-`)
-}
-
-// commonFlags pulls --chunker/--mode/--model out of args (any position).
-func commonFlags(args []string) (rest []string, chunker, mode, model string, err error) {
-	if rest, chunker, err = extractFlag(args, "chunker", defaultChunker); err != nil {
-		return
-	}
-	if rest, mode, err = extractFlag(rest, "mode", defaultMode); err != nil {
-		return
-	}
-	rest, model, err = extractFlag(rest, "model", "")
-	if err == nil {
-		model = resolveModelDir(model)
-	}
-	return
-}
 
 // extractWatch parses --watch / --no-watch from args. v0.3 onward
 // defaults to watching; --no-watch is the explicit opt-out (batch / CI /
 // huge-repo scenarios). Both forms present is an error — caller would
 // have one ambiguous intent.
 func extractWatch(args []string) ([]string, bool, error) {
-	args, hasWatch := stripBoolFlag(args, "watch")
-	args, hasNoWatch := stripBoolFlag(args, "no-watch")
+	args, hasWatch := cli.StripBoolFlag(args, "watch")
+	args, hasNoWatch := cli.StripBoolFlag(args, "no-watch")
 	if hasWatch && hasNoWatch {
 		return nil, false, fmt.Errorf("--watch and --no-watch are mutually exclusive")
 	}
@@ -208,66 +45,6 @@ func extractWatch(args []string) ([]string, bool, error) {
 		return args, false, nil
 	}
 	return args, true, nil
-}
-
-// extractFlag pulls `-name V`, `--name V`, `-name=V`, or `--name=V` out of
-// args from ANY position (Go's flag package stops at the first positional;
-// see TestParseSearchArgs). It returns the remaining args with the flag
-// removed, plus the value (def if the flag is absent).
-func extractFlag(args []string, name, def string) ([]string, string, error) {
-	val, found := def, false
-	rest := make([]string, 0, len(args))
-	long, short := "--"+name, "-"+name
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == long || a == short:
-			if i+1 >= len(args) {
-				return nil, "", fmt.Errorf("%s expects a value", a)
-			}
-			i++
-			val, found = args[i], true
-		case strings.HasPrefix(a, long+"=") || strings.HasPrefix(a, short+"="):
-			val, found = a[strings.IndexByte(a, '=')+1:], true
-		default:
-			rest = append(rest, a)
-			continue
-		}
-		if found && val == "" {
-			return nil, "", fmt.Errorf("--%s expects a non-empty value", name)
-		}
-	}
-	return rest, val, nil
-}
-
-// rerankFlags are the five --rerank-* CLI flags cmdSearch and cmdBench both
-// accept.
-type rerankFlags struct {
-	model, topN, beta, quant, adaptive string
-}
-
-// extractRerankFlags pulls all five --rerank-* flags out of args in one call —
-// cmdSearch and cmdBench previously repeated the identical five extractFlag
-// blocks verbatim. Returns the remaining args + the extracted values.
-func extractRerankFlags(args []string) ([]string, rerankFlags, error) {
-	var rf rerankFlags
-	specs := []struct {
-		name string
-		dst  *string
-	}{
-		{"rerank-model", &rf.model},
-		{"rerank-top-n", &rf.topN},
-		{"rerank-beta", &rf.beta},
-		{"rerank-quant", &rf.quant},
-		{"rerank-adaptive", &rf.adaptive},
-	}
-	var err error
-	for _, s := range specs {
-		if args, *s.dst, err = extractFlag(args, s.name, ""); err != nil {
-			return args, rf, err
-		}
-	}
-	return args, rf, nil
 }
 
 // init installs the CLI's treesitter chunker with the per-parse wall-clock
@@ -286,7 +63,7 @@ func init() {
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
+		cli.Usage()
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -298,10 +75,10 @@ func main() {
 		os.Exit(cmdSearch(os.Args[2:]))
 	case "bench":
 		setupEnrichBudget()
-		os.Exit(cmdBench(os.Args[2:]))
+		os.Exit(measure.Bench(os.Args[2:]))
 	case "perf":
 		setupEnrichBudget()
-		os.Exit(cmdPerf(os.Args[2:]))
+		os.Exit(measure.Perf(os.Args[2:]))
 	case "build-index":
 		// Deliberately NOT setupEnrichBudget() — build-index's contract is
 		// byte-identical, machine-load-independent output (ADR-040); see
@@ -318,7 +95,7 @@ func main() {
 	case "doctor":
 		os.Exit(cmdDoctor(os.Args[2:]))
 	default:
-		usage()
+		cli.Usage()
 		os.Exit(2)
 	}
 }
@@ -356,8 +133,8 @@ func cmdDoctor(args []string) int {
 	// two variants — the operator may have used either f32 or int8.
 	rerankEntries := -1
 	for _, q := range []string{"int8", "f32"} {
-		if p := resolveRerankCachePath(q); p != "" {
-			if c, err := search.PeekRerankCacheCount(p); err == nil && c > rerankEntries {
+		if p := cli.ResolveRerankCachePath(q); p != "" {
+			if c, err := engine.InspectRerankCache(p); err == nil && c > rerankEntries {
 				rerankEntries = c
 			}
 		}
@@ -368,7 +145,7 @@ func cmdDoctor(args []string) int {
 	// repo. Cheap header-only peek — never loads the index body; CWD-relative,
 	// since doctor is run at the repo root. Absent snapshot ⇒ 0 ⇒ no advice.
 	corpusChunks := 0
-	if n, ok := search.PeekSnapshotChunks(search.SnapshotBinPath(".")); ok {
+	if n, ok := engine.InspectSnapshot("."); ok {
 		corpusChunks = n
 	}
 
@@ -525,7 +302,7 @@ func cmdSavings(args []string) int {
 // safetensors file gets cleaned up by the atomic-rename contract in
 // internal/modelfetch.
 func cmdDownloadModel(args []string) int {
-	args, rerank := stripBoolFlag(args, "rerank")
+	args, rerank := cli.StripBoolFlag(args, "rerank")
 
 	defaultModel := modelfetch.DefaultModel
 	defaultDestFn := modelfetch.DefaultDest
@@ -534,7 +311,7 @@ func cmdDownloadModel(args []string) int {
 		defaultDestFn = modelfetch.DefaultRerankDest
 	}
 
-	args, model, err := extractFlag(args, "model", defaultModel)
+	args, model, err := cli.ExtractFlag(args, "model", defaultModel)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
@@ -545,7 +322,7 @@ func cmdDownloadModel(args []string) int {
 		// pass --to explicitly rather than picking a surprising default.
 		defaultDest = ""
 	}
-	args, dest, err := extractFlag(args, "to", defaultDest)
+	args, dest, err := cli.ExtractFlag(args, "to", defaultDest)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
@@ -554,10 +331,10 @@ func cmdDownloadModel(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: --to is required when $HOME is unset")
 		return 2
 	}
-	args, force := stripBoolFlag(args, "force")
+	args, force := cli.StripBoolFlag(args, "force")
 	if len(args) != 0 {
 		fmt.Fprintf(os.Stderr, "ken: unexpected positional arg(s): %v\n", args)
-		usage()
+		cli.Usage()
 		return 2
 	}
 
@@ -581,19 +358,18 @@ func cmdIndex(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
-	args, writeSnap := stripBoolFlag(args, "write-snapshot")
-	rest, chunker, modeStr, model, err := commonFlags(args)
+	args, writeSnap := cli.StripBoolFlag(args, "write-snapshot")
+	rest, chunker, modeStr, model, err := cli.CommonFlags(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		usage()
+		cli.Usage()
 		return 2
 	}
 	if len(rest) != 1 {
-		usage()
+		cli.Usage()
 		return 2
 	}
-	mode, err := search.ParseMode(modeStr)
-	if err != nil {
+	if _, err := engine.ParseMode(modeStr); err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
@@ -603,32 +379,33 @@ func cmdIndex(args []string) int {
 		// snapshot to <path>/.ken/snapshot.{bin,manifest}, and exit — so a
 		// later ken-mcp boot on the same repo loads it instead of rebuilding.
 		// Build-once takes precedence over --watch.
-		wix, err := search.NewWatchedIndexWithOptions(rest[0], mode, chunker, model, false, envFSOptions())
+		ws, err := openWorkspace(rest[0], modeStr, chunker, model, false)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 			return 1
 		}
-		defer func() { _ = wix.Close() }()
-		// enrich=true, lazy/staged=false: NewWatchedIndex builds with enrichment
-		// on (FSOptions{}) and no deferral, matching ken-mcp's non-lazy config
-		// key so the snapshot loads without a rebuild.
-		key := search.SnapshotConfigKey(mode, chunker, search.ModelFingerprint(wix.EmbedModel(), model), true, false, false)
-		if err := search.WriteSnapshot(rest[0], wix, key); err != nil {
+		defer func() { _ = ws.Close() }()
+		// The snapshot is keyed by the options the index was built with
+		// (mode, chunker, model, enrichment, dense store), the same key
+		// ken-mcp computes, so a server with the same settings loads it
+		// without a rebuild.
+		if err := ws.WriteSnapshot(); err != nil {
 			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 			return 1
 		}
-		fmt.Printf("wrote snapshot to %s/.ken/ (%d chunks, chunker=%s mode=%s)\n", rest[0], wix.Len(), chunker, modeStr)
+		fmt.Printf("wrote snapshot to %s/.ken/ (%d chunks, chunker=%s mode=%s)\n", rest[0], ws.Status().ChunkCount, chunker, modeStr)
 		return 0
 	}
 
 	if !watch {
 		// v0.2 behavior: build once, print, exit.
-		ix, err := search.FromFSWithOptions(os.DirFS(rest[0]), mode, chunker, model, envFSOptions())
+		ws, err := openWorkspace(rest[0], modeStr, chunker, model, false)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 			return 1
 		}
-		fmt.Printf("indexed %d chunks from %s (chunker=%s mode=%s)\n", ix.Len(), rest[0], chunker, modeStr)
+		defer func() { _ = ws.Close() }()
+		fmt.Printf("indexed %d chunks from %s (chunker=%s mode=%s)\n", ws.Status().ChunkCount, rest[0], chunker, modeStr)
 		return 0
 	}
 
@@ -637,7 +414,7 @@ func cmdIndex(args []string) int {
 	// built (use ken search or ken-mcp for that); this mode is for
 	// "warm an index, observe it, ^C when done" workflows and as a
 	// surface to validate the watcher behavior without ken-mcp.
-	wix, err := search.NewWatchedIndexWithOptions(rest[0], mode, chunker, model, true, envFSOptions())
+	wix, err := openWorkspace(rest[0], modeStr, chunker, model, true)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1
@@ -651,7 +428,7 @@ func cmdIndex(args []string) int {
 		fmt.Fprintln(os.Stderr, "ken: "+msg)
 	})
 	fmt.Fprintf(os.Stderr, "ken: indexed %d chunks from %s (chunker=%s mode=%s); watching for changes — ^C to stop\n",
-		wix.Len(), rest[0], chunker, modeStr)
+		wix.Status().ChunkCount, rest[0], chunker, modeStr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -668,7 +445,7 @@ type searchArgs struct {
 	chunker        string
 	mode           string
 	model          string
-	rerankModel    string // --rerank-model DIR; "" → resolveRerankModelDir resolves
+	rerankModel    string // --rerank-model DIR; "" → cli.ResolveRerankModelDir resolves
 	rerankTopN     string // --rerank-top-n N; "" → use default 50
 	rerankBeta     string // --rerank-beta β; "" → use default 0.25
 	rerankQuant    string // --rerank-quant f32|int8; "" → default int8 (aikit ≥v1.5.0 parity)
@@ -679,205 +456,21 @@ type searchArgs struct {
 	stream         bool   // --stream: print stage-1 results immediately, then the rerank-adjusted top-K
 }
 
-// attachRerankerIfNeeded loads the CodeRankEmbed model and attaches a
-// NeuralReranker to ix when mode == ModeHybridRerank. No-op for any
-// other mode. For non-MCP CLI use we ERROR if the model is missing
-// (interactive user with a typo should see a clear failure); ken-mcp
-// instead warns + leaves ix.reranker=nil so SearchMode transparently
-// downgrades to ModeHybrid.
-//
-// topNStr/betaStr/quant are pass-through from the flag parser
-// ("" = default). The default is int8: as of aikit v1.5.0 the q8 reranker
-// reaches f32 latency parity (the matmulBTQ8 dequant-then-SIMD fix) at
-// ~140 MB resident vs ~547 MB f32 and ~21× less runtime scratch, with
-// cosine 0.997 vs f32 — strictly better-or-equal, so it's the default.
-// Pass --rerank-quant f32 for the full-precision path.
-func attachRerankerIfNeeded(ix *search.Index, mode search.Mode, rerankModelFlag, topNStr, betaStr, quant, adaptiveStr string) (saveCache func(), err error) {
-	if mode != search.ModeHybridRerank {
-		return func() {}, nil
-	}
-	dir := resolveRerankModelDir(rerankModelFlag)
-	if !fileExists(filepath.Join(dir, "model.safetensors")) {
-		return nil, fmt.Errorf("rerank model not found at %s — run `ken download-model --rerank` (downloads ~547 MB to ~/.ken/rerank-model) or pass --rerank-model DIR", dir)
-	}
-	var enc encoder.Encoder
-	switch quant {
-	case "", "int8":
-		m, lerr := encoder.LoadQ8(dir)
-		if lerr != nil {
-			return nil, fmt.Errorf("loading rerank model (int8) from %s: %w", dir, lerr)
-		}
-		enc = m
-	case "f32":
-		m, lerr := encoder.Load(dir)
-		if lerr != nil {
-			return nil, fmt.Errorf("loading rerank model from %s: %w", dir, lerr)
-		}
-		enc = m
-	default:
-		return nil, fmt.Errorf("--rerank-quant: unknown value %q (want f32 or int8)", quant)
-	}
-	opts, perr := parseRerankerOptions(topNStr, betaStr, adaptiveStr)
-	if perr != nil {
-		return nil, perr
-	}
-	r := search.NewNeuralReranker(enc)
-	ix.SetReranker(r, opts...)
-
-	// M9 persistent doc cache. Default ~/.ken/rerank-cache-<quant>.bin.
-	// Override via KEN_RERANK_CACHE; KEN_RERANK_CACHE="" disables.
-	// Quant normalized to "f32" or "int8" so the path is stable.
-	normalizedQuant := quant
-	if normalizedQuant == "" {
-		normalizedQuant = "int8"
-	}
-	cachePath := resolveRerankCachePath(normalizedQuant)
-	if cachePath == "" {
-		return func() {}, nil
-	}
-	scope := search.CacheScopeKey(filepath.Base(dir), normalizedQuant, enc.HiddenDim())
-	if loaded, lerr := search.LoadCacheFromFile(r, cachePath, scope, enc.HiddenDim()); lerr != nil {
-		// Soft errors: don't fail the whole command. The cache is a perf
-		// optimization, not a correctness primitive. Print one diagnostic
-		// to stderr so the user knows the first query will be cold.
-		switch {
-		case errors.Is(lerr, os.ErrNotExist):
-			// First run — silent. Most expected path.
-		case errors.Is(lerr, search.ErrCacheScopeMismatch),
-			errors.Is(lerr, search.ErrCacheEmbedDimMismatch),
-			errors.Is(lerr, search.ErrCacheCorrupt),
-			errors.Is(lerr, search.ErrCacheFormatVersion):
-			fmt.Fprintf(os.Stderr, "rerank cache: %s unusable (%v); starting cold\n", cachePath, lerr)
-		default:
-			fmt.Fprintf(os.Stderr, "rerank cache: load %s failed (%v); starting cold\n", cachePath, lerr)
-		}
-	} else if loaded > 0 {
-		fmt.Fprintf(os.Stderr, "rerank cache: loaded %d entries from %s\n", loaded, cachePath)
-	}
-	saver := func() {
-		if _, _, sz := r.CacheStats(); sz == 0 {
-			return
-		}
-		if serr := search.SaveCacheToFile(r, cachePath, scope, enc.HiddenDim()); serr != nil {
-			fmt.Fprintf(os.Stderr, "rerank cache: save to %s failed: %v\n", cachePath, serr)
-		}
-	}
-	return saver, nil
-}
-
-// resolveRerankCachePath returns the path the rerank LRU should be
-// persisted at. Empty string = persistence disabled.
-//
-// Precedence: KEN_RERANK_CACHE env (explicit "" disables) →
-// ~/.ken/rerank-cache-<quant>.bin default → "" if HOME is unset.
-//
-// quant scopes the default filename so an f32 cache and an int8 cache
-// live side-by-side and a quant swap across runs doesn't trigger
-// ErrCacheScopeMismatch on every restart.
-func resolveRerankCachePath(quant string) string {
-	if raw, set := os.LookupEnv("KEN_RERANK_CACHE"); set {
-		return strings.TrimSpace(raw)
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
-	}
-	return filepath.Join(home, ".ken", fmt.Sprintf("rerank-cache-%s.bin", quant))
-}
-
-func parseRerankerOptions(topNStr, betaStr, adaptiveStr string) ([]search.RerankerOption, error) {
-	var opts []search.RerankerOption
-	if topNStr != "" {
-		n, err := strconv.Atoi(topNStr)
-		if err != nil {
-			return nil, fmt.Errorf("--rerank-top-n: expected integer, got %q", topNStr)
-		}
-		if n <= 0 {
-			return nil, fmt.Errorf("--rerank-top-n: must be > 0, got %d", n)
-		}
-		opts = append(opts, search.WithRerankN(n))
-	}
-	if betaStr != "" {
-		b, err := strconv.ParseFloat(betaStr, 64)
-		if err != nil {
-			return nil, fmt.Errorf("--rerank-beta: expected float, got %q", betaStr)
-		}
-		if b < 0 || b > 1 {
-			return nil, fmt.Errorf("--rerank-beta: must be in [0, 1], got %v", b)
-		}
-		opts = append(opts, search.WithRerankBlendBeta(b))
-	}
-	if adaptiveStr != "" {
-		threshold, minN, err := parseAdaptiveSpec(adaptiveStr)
-		if err != nil {
-			return nil, err
-		}
-		opts = append(opts, search.WithAdaptiveRerankN(threshold, minN))
-	}
-	return opts, nil
-}
-
-// parseAdaptiveSpec parses "THRESHOLD:MINN" (e.g. "0.30:10") for
-// --rerank-adaptive. Errors with a clear message on malformed inputs.
-// Both --rerank-adaptive="" and --rerank-adaptive="0:0" disable
-// adaptive (handled by WithAdaptiveRerankN's clamping; the "" check
-// above keeps the no-flag path zero-allocation).
-func parseAdaptiveSpec(spec string) (float64, int, error) {
-	parts := strings.SplitN(spec, ":", 2)
-	if len(parts) != 2 {
-		return 0, 0, fmt.Errorf("--rerank-adaptive: expected THRESHOLD:MINN (e.g. 0.30:10), got %q", spec)
-	}
-	threshold, err := strconv.ParseFloat(parts[0], 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("--rerank-adaptive threshold: expected float, got %q", parts[0])
-	}
-	minN, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, 0, fmt.Errorf("--rerank-adaptive minN: expected integer, got %q", parts[1])
-	}
-	return threshold, minN, nil
-}
-
-// jsonResult is the per-result shape emitted by `ken search --json` and by
-// the per-query records of `ken bench`. Field names match what the semble
-// benchmark adapter expects (see docs/BENCH.md and bench/semble/run_ken.py).
-type jsonResult struct {
-	FilePath  string  `json:"file_path"`
-	StartLine int     `json:"start_line"`
-	EndLine   int     `json:"end_line"`
-	Score     float64 `json:"score"`
-	Content   string  `json:"content"`
-}
-
-func toJSONResults(rs []search.Result) []jsonResult {
-	out := make([]jsonResult, len(rs))
-	for i, r := range rs {
-		out[i] = jsonResult{
-			FilePath:  r.Chunk.File,
-			StartLine: r.Chunk.StartLine,
-			EndLine:   r.Chunk.EndLine,
-			Score:     r.Score,
-			Content:   r.Chunk.Text,
+// hitsToJSON is toJSONResults for engine hits. Content is the chunk as the
+// index stores it, enrichment label included (Label+Text), which is what
+// `ken search --json` has always printed.
+func hitsToJSON(hs []engine.Hit) []cli.JSONResult {
+	out := make([]cli.JSONResult, len(hs))
+	for i, h := range hs {
+		out[i] = cli.JSONResult{
+			FilePath:  h.File,
+			StartLine: h.StartLine,
+			EndLine:   h.EndLine,
+			Score:     h.Score,
+			Content:   h.Label + h.Text,
 		}
 	}
 	return out
-}
-
-// stripBoolFlag removes any matching boolean flag (`--name`, `-name`) from
-// args, returning the filtered slice plus whether it was seen. Used for
-// flags that take no value (`--json`).
-func stripBoolFlag(args []string, name string) ([]string, bool) {
-	long, short := "--"+name, "-"+name
-	rest := make([]string, 0, len(args))
-	found := false
-	for _, a := range args {
-		if a == long || a == short {
-			found = true
-			continue
-		}
-		rest = append(rest, a)
-	}
-	return rest, found
 }
 
 // parseSearchArgs extracts the -k / -k=N option from ANY position and
@@ -895,12 +488,12 @@ func stripBoolFlag(args []string, name string) ([]string, bool) {
 // CLI's flag-acceptance surface is uniform across subcommands and
 // future test helpers can pin parsing behavior. See cmdSearch.
 func parseSearchArgs(args []string) (searchArgs, error) {
-	// model: "" means "let resolveModelDir pick" once commonFlags resolves.
-	sa := searchArgs{k: 10, chunker: defaultChunker, mode: defaultMode, model: ""}
-	args, sa.jsonOut = stripBoolFlag(args, "json")
-	args, sa.verbose = stripBoolFlag(args, "verbose")
-	args, sa.noStats = stripBoolFlag(args, "no-stats")
-	args, sa.stream = stripBoolFlag(args, "stream")
+	// model: "" means "let cli.ResolveModelDir pick" once cli.CommonFlags resolves.
+	sa := searchArgs{k: 10, chunker: cli.DefaultChunker, mode: cli.DefaultMode, model: ""}
+	args, sa.jsonOut = cli.StripBoolFlag(args, "json")
+	args, sa.verbose = cli.StripBoolFlag(args, "verbose")
+	args, sa.noStats = cli.StripBoolFlag(args, "no-stats")
+	args, sa.stream = cli.StripBoolFlag(args, "stream")
 	// Consume --watch / --no-watch defensively; we don't surface the
 	// value because ken search is one-shot, but accepting the flag
 	// avoids confusing "unknown flag" errors in scripts that pass it.
@@ -908,7 +501,7 @@ func parseSearchArgs(args []string) (searchArgs, error) {
 	if werr != nil {
 		return sa, werr
 	}
-	args, chunker, mode, model, err := commonFlags(args)
+	args, chunker, mode, model, err := cli.CommonFlags(args)
 	if err != nil {
 		return sa, err
 	}
@@ -917,11 +510,11 @@ func parseSearchArgs(args []string) (searchArgs, error) {
 	// validates/converts only when mode == hybrid-rerank, so a stray
 	// --rerank-beta on a bm25 query is silently ignored rather than
 	// failing the unrelated query.
-	var rf rerankFlags
-	if args, rf, err = extractRerankFlags(args); err != nil {
+	var rf cli.RerankFlags
+	if args, rf, err = cli.ExtractRerankFlags(args); err != nil {
 		return sa, err
 	}
-	sa.rerankModel, sa.rerankTopN, sa.rerankBeta, sa.rerankQuant, sa.rerankAdaptive = rf.model, rf.topN, rf.beta, rf.quant, rf.adaptive
+	sa.rerankModel, sa.rerankTopN, sa.rerankBeta, sa.rerankQuant, sa.rerankAdaptive = rf.Model, rf.TopN, rf.Beta, rf.Quant, rf.Adaptive
 	setK := func(v string) error {
 		n, err := strconv.Atoi(v)
 		if err != nil {
@@ -966,38 +559,46 @@ func cmdSearch(args []string) int {
 	sa, err := parseSearchArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		usage()
+		cli.Usage()
 		return 2
 	}
-	mode, err := search.ParseMode(sa.mode)
+	mode, err := engine.ParseMode(sa.mode)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 2
 	}
-	ix, err := search.FromFSWithOptions(os.DirFS(sa.root), mode, sa.chunker, sa.model, envFSOptions())
+	ws, err := openWorkspace(sa.root, sa.mode, sa.chunker, sa.model, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1
 	}
-	saveCache, err := attachRerankerIfNeeded(ix, mode, sa.rerankModel, sa.rerankTopN, sa.rerankBeta, sa.rerankQuant, sa.rerankAdaptive)
+	defer func() { _ = ws.Close() }()
+	reranker, rerankOpts, saveCache, err := cli.LoadRerankerIfNeeded(mode, sa.rerankModel, sa.rerankTopN, sa.rerankBeta, sa.rerankQuant, sa.rerankAdaptive)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 		return 1
+	}
+	if reranker != nil {
+		ws.SetReranker(reranker, rerankOpts...)
 	}
 	defer saveCache()
+	ctx := context.Background()
+	// The CLI prints rank, score and text only, so skip the per-arm rank
+	// queries a Hit would otherwise carry.
+	quick := engine.SearchOptions{NoArmRanks: true}
 	// M10: --stream prints preliminary stage-1 results to stdout BEFORE
 	// the (slower) rerank runs. Useful on rerank-cold queries where
 	// the rerank step takes seconds; the terminal user sees relevant-
 	// enough results in ~150 ms instead of waiting for the full rerank.
 	// No-op when mode != hybrid-rerank (stage-1 IS the final result).
-	if sa.stream && mode == search.ModeHybridRerank && !sa.jsonOut {
-		prelim, _ := ix.SearchMode(sa.query, sa.k, search.ModeHybrid)
+	if sa.stream && mode == engine.ModeHybridRerank && !sa.jsonOut {
+		prelim, _, _ := ws.SearchWith(ctx, sa.query, sa.k, engine.ModeHybrid, quick)
 		if len(prelim) > 0 {
 			fmt.Println("[preliminary]")
 			for _, r := range prelim {
 				fmt.Printf("%.4f  %s:%d-%d  %s\n",
-					r.Score, r.Chunk.File, r.Chunk.StartLine, r.Chunk.EndLine,
-					previewLine(r.Chunk.Text))
+					r.Score, r.File, r.StartLine, r.EndLine,
+					previewLine(r.Label+r.Text))
 			}
 			fmt.Println("[reranked]")
 		}
@@ -1006,15 +607,14 @@ func cmdSearch(args []string) int {
 	// M8d: use the telemetry-aware path when --verbose so we can
 	// print the breakdown after results. The basic Search path skips
 	// the per-stage timing bookkeeping when telemetry isn't asked for.
-	var results []search.Result
-	var tel search.Telemetry
+	var tel engine.Telemetry
 	if sa.verbose {
-		queryMode, _ := search.ParseMode(sa.mode)
-		var effMode search.Mode
-		results, effMode, tel = ix.SearchModeWithTelemetry(sa.query, sa.k, queryMode)
-		_ = effMode
-	} else {
-		results = ix.Search(sa.query, sa.k)
+		quick.Telemetry = &tel
+	}
+	results, _, err := ws.SearchWith(ctx, sa.query, sa.k, mode, quick)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
+		return 1
 	}
 	// Best-effort usage record (one Record per successful interactive
 	// search). Off when --no-stats or KEN_NO_USAGE_STATS=1. Computes
@@ -1025,7 +625,7 @@ func cmdSearch(args []string) int {
 	if sa.jsonOut {
 		// Always emit a valid JSON array, even for zero results — the
 		// benchmark adapter relies on parseable output unconditionally.
-		if err := json.NewEncoder(os.Stdout).Encode(toJSONResults(results)); err != nil {
+		if err := json.NewEncoder(os.Stdout).Encode(hitsToJSON(results)); err != nil {
 			fmt.Fprintln(os.Stderr, "ken: "+err.Error())
 			return 1
 		}
@@ -1037,8 +637,8 @@ func cmdSearch(args []string) int {
 	}
 	for _, r := range results {
 		fmt.Printf("%.4f  %s:%d-%d  %s\n",
-			r.Score, r.Chunk.File, r.Chunk.StartLine, r.Chunk.EndLine,
-			previewLine(r.Chunk.Text))
+			r.Score, r.File, r.StartLine, r.EndLine,
+			previewLine(r.Label+r.Text))
 	}
 	if sa.verbose {
 		printTelemetry(os.Stderr, &tel)
@@ -1052,7 +652,7 @@ func cmdSearch(args []string) int {
 // on result files → that file's size doesn't contribute to file_chars
 // but the line still goes out. Privacy-preserving: only counts, never
 // query text or paths.
-func recordInteractiveSearchUsage(callType string, results []search.Result, sourceRoot string) {
+func recordInteractiveSearchUsage(callType string, results []engine.Hit, sourceRoot string) {
 	path := strings.TrimSpace(os.Getenv("KEN_USAGE_STATS_PATH"))
 	if path == "" {
 		path = usagepkg.DefaultPath()
@@ -1064,9 +664,9 @@ func recordInteractiveSearchUsage(callType string, results []search.Result, sour
 	snippetChars := 0
 	uniqueFiles := make(map[string]struct{}, len(results))
 	for _, res := range results {
-		snippetChars += len(res.Chunk.Text)
-		if res.Chunk.File != "" {
-			uniqueFiles[res.Chunk.File] = struct{}{}
+		snippetChars += len(res.Label) + len(res.Text)
+		if res.File != "" {
+			uniqueFiles[res.File] = struct{}{}
 		}
 	}
 	fileChars := 0
@@ -1087,7 +687,7 @@ func recordInteractiveSearchUsage(callType string, results []search.Result, sour
 // same fields as JSON. Zero-value sub-breakdown fields (e.g. when the
 // reranker isn't NeuralReranker, or the mode isn't hybrid-rerank) are
 // omitted to keep the output tight.
-func printTelemetry(w io.Writer, t *search.Telemetry) {
+func printTelemetry(w io.Writer, t *engine.Telemetry) {
 	fmt.Fprintf(w, "\n[telemetry] total=%v", t.TotalWall)
 	if t.Stage1Wall > 0 {
 		fmt.Fprintf(w, " stage1=%v", t.Stage1Wall)
@@ -1111,312 +711,6 @@ func printTelemetry(w io.Writer, t *search.Telemetry) {
 		fmt.Fprintf(w, " cand_enc=%v", t.RerankerCandidateEncode)
 	}
 	fmt.Fprintln(w)
-}
-
-// cmdBench reads queries from stdin (one per line; lines beginning with
-// '#' are comments, blank lines skipped) and emits one JSON record per
-// query to stdout against a single in-process index. The Python adapter
-// in bench/semble/run_ken.py drives this for the semble benchmark.
-//
-// Per-query record shape:
-//
-//	{"query":"...", "results":[{"file_path":..., "start_line":..., ...}, ...]}
-//
-// This exists because subprocess-per-query would force a fresh index
-// build on every call; with 63 repos × ~20 queries × 5 latency runs the
-// indexing time alone would dominate. cmdBench builds the index once
-// per process invocation, then accepts arbitrarily many queries.
-func cmdBench(args []string) int {
-	rest, chunker, modeStr, model, err := commonFlags(args)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		usage()
-		return 2
-	}
-	rest, kStr, err := extractFlag(rest, "k", "10")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 2
-	}
-	// M5: same rerank flags as cmdSearch so `ken bench --mode=hybrid-rerank`
-	// drives the M0/M6 benchmark harness through the neural pipeline.
-	rest, rf, err := extractRerankFlags(rest)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 2
-	}
-	rerankModel, rerankTopN, rerankBeta, rerankQuant, rerankAdaptive := rf.model, rf.topN, rf.beta, rf.quant, rf.adaptive
-	// α pinning for the α-sensitivity sweep (bench/semble/run_ken.py
-	// --alpha-sweep; docs/internal/rag-thread-followups.md item 1).
-	// Bench-only: `ken search` deliberately has no such flag, because
-	// docs/BENCH.md's "don't tune ken's constants" rule makes
-	// α=(0.3, 0.5) the verbatim-parity reference. Unset ⇒ adaptive.
-	rest, alphas, err := extractAlphaFlags(rest)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 2
-	}
-	// --alpha-pairs evaluates SEVERAL α settings against ONE index
-	// build, emitting a record per (query, pair). α is a fusion input —
-	// it changes nothing about indexing — so the sweep was rebuilding an
-	// identical index once per grid point. On the 63-repo semble corpus
-	// that is ~11 minutes of rebuild to change one float; this collapses
-	// the whole experiment from 13 passes to 2.
-	rest, alphaPairs, err := extractAlphaPairs(rest, alphas)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 2
-	}
-	// --no-file-saturation turns the file-saturation decay off (the
-	// ContextBench packing gate's KP setting) for its semble NDCG report.
-	// Bench only; absent from 'ken search'.
-	noFileSaturation := false
-	{
-		kept := rest[:0:0]
-		for _, a := range rest {
-			if a == "--no-file-saturation" {
-				noFileSaturation = true
-				continue
-			}
-			kept = append(kept, a)
-		}
-		rest = kept
-	}
-	// --saturation-threshold N: file-saturation decay from a file's
-	// (N+1)th chunk instead of its second (search.RankAblation); bench only,
-	// for the ContextBench threshold gate's semble NDCG report.
-	rest, satStr, err := extractFlag(rest, "saturation-threshold", "0")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 2
-	}
-	satThresh, err := strconv.Atoi(satStr)
-	if err != nil || satThresh < 0 {
-		fmt.Fprintln(os.Stderr, "ken: --saturation-threshold expects a non-negative integer")
-		return 2
-	}
-	// --saturation-decay F: per-chunk decay past the threshold (shipped 0.5).
-	rest, satDecayStr, err := extractFlag(rest, "saturation-decay", "0")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 2
-	}
-	satDecay, err := strconv.ParseFloat(satDecayStr, 64)
-	if err != nil || satDecay < 0 || satDecay > 1 {
-		fmt.Fprintln(os.Stderr, "ken: --saturation-decay expects a number in [0, 1]")
-		return 2
-	}
-	k, err := strconv.Atoi(kStr)
-	if err != nil || k < 0 {
-		fmt.Fprintln(os.Stderr, "ken: -k expects a non-negative integer")
-		return 2
-	}
-	if len(rest) != 1 {
-		usage()
-		return 2
-	}
-	mode, err := search.ParseMode(modeStr)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 2
-	}
-	ix, err := search.FromFSWithOptions(os.DirFS(rest[0]), mode, chunker, model, envFSOptions())
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 1
-	}
-	saveCache, err := attachRerankerIfNeeded(ix, mode, rerankModel, rerankTopN, rerankBeta, rerankQuant, rerankAdaptive)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 1
-	}
-	defer saveCache()
-	fmt.Fprintf(os.Stderr, "ken bench: indexed %d chunks from %s (mode=%s chunker=%s)\n",
-		ix.Len(), rest[0], modeStr, chunker)
-	if len(alphaPairs) > 1 {
-		fmt.Fprintf(os.Stderr, "ken bench: %d alpha pairs against one index\n", len(alphaPairs))
-	} else if alphaPairs[0] != search.AdaptiveAlphas {
-		fmt.Fprintf(os.Stderr, "ken bench: alpha pinned (symbol=%s nl=%s)\n",
-			alphaLabel(alphaPairs[0].Symbol), alphaLabel(alphaPairs[0].NL))
-	}
-
-	type record struct {
-		Query   string       `json:"query"`
-		Results []jsonResult `json:"results"`
-		// QueryMS is the wall-clock cost of just ix.Search — the index is
-		// already built. Lets the Python adapter compute per-query median
-		// latency over N runs (semble methodology) without paying
-		// subprocess/IO overhead between runs.
-		QueryMS float64 `json:"query_ms"`
-		// M8d: per-query telemetry breakdown — same fields as
-		// search.Telemetry. Populated for hybrid-rerank queries; mostly
-		// zeros for non-rerank modes (just total_wall_us is meaningful).
-		Telemetry search.Telemetry `json:"telemetry"`
-		// SymbolQuery is semble's is_symbol_query verdict — the
-		// classifier that decides WHICH adaptive α applies. Emitted so
-		// the α-sensitivity sweep buckets queries by the same rule the
-		// fusion used instead of re-deriving the regex in Python.
-		// Additive; the semble adapter is the only consumer.
-		SymbolQuery bool `json:"symbol_query"`
-		// AlphaSymbol / AlphaNL label which α pair produced this
-		// record, present only under --alpha-pairs (see the loop
-		// below). "adaptive" means the shipped per-class constants.
-		AlphaSymbol string `json:"alpha_symbol,omitempty"`
-		AlphaNL     string `json:"alpha_nl,omitempty"`
-	}
-
-	enc := json.NewEncoder(os.Stdout)
-	sc := bufio.NewScanner(os.Stdin)
-	sc.Buffer(make([]byte, 64*1024), 1<<20) // tolerate fat queries
-	for sc.Scan() {
-		q := strings.TrimSpace(sc.Text())
-		if q == "" || strings.HasPrefix(q, "#") {
-			continue
-		}
-		symbolQuery := search.IsSymbolQuery(q)
-		for _, a := range alphaPairs {
-			started := time.Now()
-			var (
-				results []search.Result
-				tel     search.Telemetry
-			)
-			if noFileSaturation || satThresh > 0 || satDecay > 0 {
-				// No telemetry variant of the ablated path; timings report zero.
-				results, _ = ix.SearchModeAblated(q, k, mode, a, search.RankAblation{NoFileSaturation: noFileSaturation, SaturationThreshold: satThresh, SaturationDecay: satDecay})
-			} else if a == search.AdaptiveAlphas {
-				results, _, tel = ix.SearchModeWithTelemetry(q, k, mode)
-			} else {
-				// The telemetry path has no α-pinning variant (rerank
-				// stage-1 always runs adaptive), and the sweep doesn't
-				// read telemetry — so pinned runs report zero timings
-				// rather than pretend the adaptive numbers apply.
-				results, _ = ix.SearchModeAlphas(q, k, mode, a)
-			}
-			ms := float64(time.Since(started).Microseconds()) / 1000.0
-			rec := record{
-				Query:       q,
-				Results:     toJSONResults(results),
-				QueryMS:     ms,
-				Telemetry:   tel,
-				SymbolQuery: symbolQuery,
-			}
-			// Only stamped in multi-pair mode: a single-pair run keeps
-			// the exact record shape the semble adapter has always
-			// consumed, so nothing downstream has to learn a new field.
-			if len(alphaPairs) > 1 {
-				rec.AlphaSymbol = alphaLabel(a.Symbol)
-				rec.AlphaNL = alphaLabel(a.NL)
-			}
-			if err := enc.Encode(rec); err != nil {
-				fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-				return 1
-			}
-		}
-	}
-	if err := sc.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "ken: "+err.Error())
-		return 1
-	}
-	return 0
-}
-
-// extractAlphaFlags pulls --alpha-symbol / --alpha-nl off args and
-// returns the resulting [search.AlphaPair]. An absent flag leaves that
-// class adaptive (negative sentinel), so `--alpha-symbol=0.4` alone
-// sweeps the symbol class while NL keeps its shipped 0.5. Values must
-// be in [0, 1] — α is a blend weight, and a value outside that range
-// is a typo, not a configuration.
-func extractAlphaFlags(args []string) ([]string, search.AlphaPair, error) {
-	out := search.AdaptiveAlphas
-	rest, symStr, err := extractFlag(args, "alpha-symbol", "")
-	if err != nil {
-		return nil, out, err
-	}
-	rest, nlStr, err := extractFlag(rest, "alpha-nl", "")
-	if err != nil {
-		return nil, out, err
-	}
-	for _, f := range []struct {
-		name, val string
-		dst       *float64
-	}{
-		{"--alpha-symbol", symStr, &out.Symbol},
-		{"--alpha-nl", nlStr, &out.NL},
-	} {
-		if f.val == "" {
-			continue
-		}
-		v, perr := strconv.ParseFloat(f.val, 64)
-		if perr != nil || v < 0 || v > 1 {
-			return nil, out, fmt.Errorf("%s expects a number in [0,1], got %q", f.name, f.val)
-		}
-		*f.dst = v
-	}
-	return rest, out, nil
-}
-
-// extractAlphaPairs parses --alpha-pairs into the list of α settings to
-// evaluate per query. Each comma-separated entry is either "adaptive"
-// (the shipped per-class constants) or "SYMBOL:NL". Absent, the result
-// is the single pair the --alpha-symbol/--alpha-nl flags produced, so
-// the default path is exactly one evaluation per query.
-//
-// Example — the whole tune sweep plus the holdout baseline in one pass:
-//
-//	--alpha-pairs adaptive,0.0:0.0,0.1:0.1,...,1.0:1.0
-func extractAlphaPairs(args []string, single search.AlphaPair) ([]string, []search.AlphaPair, error) {
-	rest, spec, err := extractFlag(args, "alpha-pairs", "")
-	if err != nil {
-		return nil, nil, err
-	}
-	if spec == "" {
-		return rest, []search.AlphaPair{single}, nil
-	}
-	if single != search.AdaptiveAlphas {
-		return nil, nil, fmt.Errorf("--alpha-pairs conflicts with --alpha-symbol/--alpha-nl; use one or the other")
-	}
-	var out []search.AlphaPair
-	seen := map[search.AlphaPair]bool{}
-	for entry := range strings.SplitSeq(spec, ",") {
-		entry = strings.TrimSpace(entry)
-		pair := search.AdaptiveAlphas
-		if entry != "adaptive" {
-			sym, nl, ok := strings.Cut(entry, ":")
-			if !ok {
-				return nil, nil, fmt.Errorf("--alpha-pairs entry %q: want \"adaptive\" or \"SYMBOL:NL\"", entry)
-			}
-			for _, f := range []struct {
-				raw string
-				dst *float64
-			}{{sym, &pair.Symbol}, {nl, &pair.NL}} {
-				v, perr := strconv.ParseFloat(strings.TrimSpace(f.raw), 64)
-				if perr != nil || v < 0 || v > 1 {
-					return nil, nil, fmt.Errorf("--alpha-pairs entry %q: %q is not a number in [0,1]", entry, f.raw)
-				}
-				*f.dst = v
-			}
-		}
-		// Duplicates would silently double a curve point's weight in
-		// whatever aggregates the records downstream.
-		if seen[pair] {
-			return nil, nil, fmt.Errorf("--alpha-pairs lists %q more than once", entry)
-		}
-		seen[pair] = true
-		out = append(out, pair)
-	}
-	if len(out) == 0 {
-		return nil, nil, fmt.Errorf("--alpha-pairs is empty")
-	}
-	return rest, out, nil
-}
-
-// alphaLabel renders one AlphaPair component for the startup log:
-// "adaptive" for the negative sentinel, the number otherwise.
-func alphaLabel(v float64) string {
-	if v < 0 {
-		return "adaptive"
-	}
-	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
 // previewLine returns the first non-blank line, trimmed, for a one-line preview.
