@@ -15,6 +15,12 @@ pre-built binaries.
 
 ## [Unreleased]
 
+## [1.16.0] — 2026-11-11 — repeatable hybrid search over database chunks
+
+Hybrid search over a corpus with live-database chunks (`KEN_DB_DSN`, `mcp/db`) now returns the same scores whenever the schema was read. Each DB chunk's first line, which carries the time it was indexed, is still shown in results but is no longer part of the indexed text. `ken-mcp` reads all of its settings at startup.
+
+One thing to check before upgrading: if you use database chunks, their ranking changes slightly, and a query for the engine or host name no longer matches them through that first line. Corpora without database chunks return the same results as 1.15.0.
+
 ### Changed
 
 - **`ken-mcp` reads every setting at startup, so warnings about invalid values may appear in a different order.** The `KEN_DB_*` family, `KEN_MCP_RERANK_TELEMETRY`, `KEN_NO_USAGE_STATS`, `KEN_USAGE_STATS_PATH` and `KEN_MCP_SHUTDOWN_GRACE` were read where they were used: after the `starting (…)` line, after the default repo was indexed, or, for the shutdown grace, only when a shutdown signal arrived. They are now read with the rest, before `starting (…)`. Their warnings have the same text; an invalid `KEN_MCP_SHUTDOWN_GRACE` is now reported at startup, not at shutdown. Nothing else changes: with valid settings the log and all tool output are identical. With `KEN_DB_DSN` unset the other `KEN_DB_*` variables are still not read or validated.
