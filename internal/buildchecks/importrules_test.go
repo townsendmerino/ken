@@ -56,7 +56,7 @@ var importRules = map[string][]string{
 	// internals, so this one package under cmd/ imports internal/search
 	// (composition-root plan, decision 6/7). See searchImporters below.
 	"cmd/ken/internal/measure":      {"cmd/ken/internal/cli", "internal/envcfg", "internal/perf", "internal/search"},
-	"cmd/ken-mcp":                   {"engine", "internal/bytesize", "internal/embedcache", "internal/envcfg", "internal/modelfetch", "internal/search", "internal/structural", "internal/usage", "mcp", "mcp/db"},
+	"cmd/ken-mcp":                   {"engine", "internal/bytesize", "internal/embedcache", "internal/envcfg", "internal/modelfetch", "internal/usage", "mcp", "mcp/db"},
 	"cmd/ken-mcp-docs":              {"mcp"},
 	"demos/go-stdlib":               {"mcp"},
 	"demos/kubernetes":              {"mcp"},
@@ -115,9 +115,6 @@ var searchImporters = map[string]string{
 	"bench/internal/provenance": "bench harness",
 	"bench/ndcg":                "bench harness",
 	"bench/tokens":              "bench harness",
-
-	// Not yet moved onto engine.Workspace.
-	"cmd/ken-mcp": "pending: the cmd/ken-mcp slices",
 }
 
 const modulePath = "github.com/townsendmerino/ken"

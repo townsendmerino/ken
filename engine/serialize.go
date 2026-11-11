@@ -72,3 +72,8 @@ func (w *Workspace) WriteSnapshot() error {
 func InspectSnapshot(root string) (chunks int, ok bool) {
 	return search.PeekSnapshotChunks(search.SnapshotBinPath(root))
 }
+
+// ModelFingerprint identifies the embedding model in dir by its size and
+// shape, without loading it: the string a cache keyed on "which model made
+// these vectors" (an embed cache, a snapshot) compares.
+func ModelFingerprint(dir string) string { return search.ModelFingerprintFromDir(dir) }

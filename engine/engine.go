@@ -165,6 +165,17 @@ type Options struct {
 	// no cache — every embed encodes fresh.
 	EmbedCache VecCache
 
+	// Prebuilt, when non-nil, is a serialized index (BuildIndexBytes, `ken
+	// build-index`, conventionally <root>/.ken/index.bin) to serve as it
+	// is instead of building one (ADR-024). The Workspace is then frozen:
+	// Watch and Snapshot are ignored and the index never changes, though
+	// the structural index is still built lazily from the files under
+	// root. The bytes must have been built with this Mode and Chunker. If
+	// they cannot be used, Open returns a *PrebuiltError and builds
+	// nothing; the caller decides whether to call again without them.
+	// Best-effort, outside the stability promise.
+	Prebuilt []byte
+
 	// LogWriter receives best-effort diagnostic lines (snapshot load/write
 	// outcomes, fold-migration warnings). nil discards. MUST NOT be stdout
 	// for any caller that also speaks a stdio protocol on stdout (ken-mcp's
@@ -338,7 +349,14 @@ func Open(ctx context.Context, root string, opts Options) (*Workspace, error) {
 	}
 
 	var wi *search.WatchedIndex
-	if opts.Snapshot {
+	if opts.Prebuilt != nil {
+		wi, err = loadPrebuilt(opts.Prebuilt, absRoot, mode, modeStr, chunker, modelDir, opts)
+		if err != nil {
+			return nil, err
+		}
+		w.watch, w.snapshotEnabled, opts.Snapshot = false, false, false
+	}
+	if wi == nil && opts.Snapshot {
 		wi = w.tryLoadSnapshot(modeStr)
 	}
 	if wi == nil {

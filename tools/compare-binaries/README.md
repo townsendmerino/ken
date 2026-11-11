@@ -32,8 +32,12 @@ environment settings, in bm25 and hybrid mode, and prints one line per setting:
   `status --json`, `doctor`.
 - **`ken-mcp`**, over JSON-RPC on stdio: `tools/list`, search (markdown, JSON,
   batch with `explain`, `max_tokens`), `find_related`, `definition`, `callers`,
-  `references`, `outline`, `symbols`, `status`, and the hash of the snapshot it
-  writes.
+  `references`, `outline`, `symbols`, `status`, the hash of the snapshot it
+  writes, and its stderr log at info level (lines sorted, timestamps removed).
+  Each over a live build and over a pre-built `.ken/index.bin` written by
+  `ken build-index`. With `--rerank-model DIR`, two more sessions under the
+  default settings run with `KEN_MCP_RERANK=1`: one with no cache file, one
+  with the file the first saved, whose hash is compared too.
 
 - **`runbin`**, when both directories hold one: a test server built on
   `mcp.Run` over the same corpus (`tools/compare-binaries/runbin`; ken ships no
@@ -49,8 +53,7 @@ Version stamps, timestamps, durations and scratch paths are normalized away.
 One setting, `KEN_ENRICH_FILE_BUDGET_MS=1`, is reported as `timing`: a 1 ms
 wall-clock parse budget gives different results between two runs of the same
 binary. Comparing a build against itself should print 29 identical plus that
-one for `ken` and for `runbin`, and 30 identical for `ken-mcp`, in about three
-minutes.
+one for each of `ken`, `ken-mcp` and `runbin`, in about five minutes.
 
 A setting that differs is run once more; if the builds agree on the retry it
 is reported as `flaky` rather than `DIFF`. Hybrid search with DB chunks has

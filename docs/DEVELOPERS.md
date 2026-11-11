@@ -257,6 +257,14 @@ package:
   pre-built index (`StaticOptions.Prebuilt`; `*PrebuiltError` when it
   cannot be used); `Workspace.ReplaceExtraChunks` (extra chunks that
   replace one another, with an error return); `Workspace.ChunkCount`.
+- **Best-effort additions for `ken-mcp` (composition-root slice 3a):**
+  `Options.Prebuilt` (the bytes of a pre-built index: `Open` serves it
+  frozen, with no watcher and no snapshot, and returns `*PrebuiltError`
+  when it cannot be used; `ErrPrebuiltModeMismatch` and
+  `ErrPrebuiltChunkerMismatch` name the two fingerprint failures);
+  `NewNeuralRerankerSized` and `DefaultRerankCacheSize`; `LazyReranker`
+  (`NewLazyReranker`, `Loaded`, `Inner`), which loads its model on the
+  first query that reranks; `ModelFingerprint`.
 - `SetEnrichFileBudget(d time.Duration)` — the per-file parse budget
   behind enrichment and the structural index (what
   `KEN_ENRICH_FILE_BUDGET_MS` sets in the binaries). Process-wide, because

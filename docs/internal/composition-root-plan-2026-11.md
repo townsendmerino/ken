@@ -373,6 +373,19 @@ one, `ken-mcp` identical in all 30.
     `ken-mcp` 30, `runbin` 29 plus the timing case (live build, pre-built
     index, DB chunks with `reindex_db`).
 
+- **Slice 3a**: `cmd/ken-mcp` stops reaching past the Workspace. Its
+  pre-built path goes through `engine.Options.Prebuilt`; the reranker, its
+  cache and the parse budget through engine's wrappers. `cmd/ken-mcp` no
+  longer imports `internal/search` or `internal/structural`, so the
+  "not yet moved" block of the guard is empty.
+  - The harness gained two `ken-mcp` variants over a pre-built index and
+    compares the server's stderr log at info level (sorted, timestamps
+    removed), because this slice changes which package writes those lines.
+  - **A shim, to remove in a later cleanup:** for a pre-built repo engine
+    logs "structural index built/failed" in its own words; `ken-mcp`
+    rewrites those two lines to the wording it always used
+    (`prebuiltLogWriter`), so the log is unchanged.
+
 ## Inferred, not verified
 
 - That `Open` with `Watch: false` matches `FromFSWithOptions` for every

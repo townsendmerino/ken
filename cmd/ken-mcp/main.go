@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -43,7 +44,6 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/townsendmerino/aikit/chunk"
-	"github.com/townsendmerino/aikit/embed"
 	// Side-effect imports: register every chunker the stock binary
 	// offers. internal/search blank-imports "regex" (the default), so
 	// we only need the optional chunkers here. The treesitter import
@@ -59,8 +59,6 @@ import (
 	"github.com/townsendmerino/ken/internal/embedcache"
 	"github.com/townsendmerino/ken/internal/envcfg"
 	"github.com/townsendmerino/ken/internal/modelfetch"
-	"github.com/townsendmerino/ken/internal/search"
-	"github.com/townsendmerino/ken/internal/structural"
 	"github.com/townsendmerino/ken/internal/usage"
 	kenmcp "github.com/townsendmerino/ken/mcp"
 	mcpdb "github.com/townsendmerino/ken/mcp/db"
@@ -100,18 +98,18 @@ func modelAvailable(dir string) bool {
 // once the embedding model lands. Read once per build under RLock.
 type buildState struct {
 	mu       sync.RWMutex
-	mode     search.Mode
+	mode     engine.Mode
 	modeStr  string
 	modelDir string
 }
 
-func (b *buildState) snapshot() (search.Mode, string, string) {
+func (b *buildState) snapshot() (engine.Mode, string, string) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.mode, b.modeStr, b.modelDir
 }
 
-func (b *buildState) set(mode search.Mode, modeStr, modelDir string) {
+func (b *buildState) set(mode engine.Mode, modeStr, modelDir string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.mode, b.modeStr, b.modelDir = mode, modeStr, modelDir
@@ -165,7 +163,7 @@ func autoFetchRealFetch(ctx context.Context, dest string) (int, error) {
 // attached it logs a restart prompt instead — the DB Refresher holds the
 // default repo's index instance, so a live purge would orphan its chunks.
 // On fetch failure it stays bm25.
-func autoFetchModel(ctx context.Context, bs *buildState, wantMode search.Mode, wantStr, dest string, hasDB bool, cache *kenmcp.Cache, defaultRepo string, fetch autoFetchFunc, logger *kenmcp.Logger) {
+func autoFetchModel(ctx context.Context, bs *buildState, wantMode engine.Mode, wantStr, dest string, hasDB bool, cache *kenmcp.Cache, defaultRepo string, fetch autoFetchFunc, logger *kenmcp.Logger) {
 	if _, err := fetch(ctx, dest); err != nil {
 		logger.Logf(kenmcp.LogWarn,
 			"auto-fetch: model download failed (%v) — staying in bm25 mode; "+
@@ -208,122 +206,91 @@ func localPathHasPrebuilt(dir string) bool {
 	return err == nil
 }
 
-// loadOrBuildWatched returns a WatchedIndex for dir, preferring a
-// pre-built <dir>/.ken/index.bin (ADR-024) over a live walk+chunk+embed
-// build. The pre-built path loads in ~1-2s and serves a frozen,
-// non-watching snapshot — the demo-appropriate shape (the OSS-demo
-// playbook mandates "never run watch-mode in the demo"), and the fix
-// for the cold-start blocker where a 44s treesitter build exceeded the
-// MCP client's tool-call timeout.
+// openWorkspace opens dir as an engine.Workspace for the repo cache. When
+// the operator has placed a pre-built index at <dir>/.ken/index.bin
+// (ADR-024, `ken build-index`) it is served frozen, with no watcher and no
+// snapshot; otherwise engine loads a snapshot or builds live and watches
+// (ADR-039, ADR-046).
 //
-// Precedence + failure handling:
-//   - No pre-built file → live-index with the file watcher (unchanged
-//     v0.3+ behavior). Repos without a baked index keep working exactly
-//     as before.
-//   - Pre-built present, mode/chunker MISMATCH → hard error. The
-//     operator built the index with different `ken build-index` flags
-//     than the server's KEN_MCP_MODE/KEN_MCP_CHUNKER; serving it would
-//     silently return wrong-config results. The default-repo path turns
-//     this into a startup exit (see main); ad-hoc repo args surface it
-//     as a failed tool call.
-//   - Pre-built present, corrupt / incompatible format / missing model →
-//     warn and fall back to a live build. The file is unusable but the
-//     corpus is still indexable; a slower-but-correct result beats an
-//     outage. (Distinct from mismatch, which is a config error the
-//     operator must fix.)
-func loadOrBuildWatched(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, persistSnapshot bool, logger *kenmcp.Logger) (*search.WatchedIndex, func(func(string)), *engine.Workspace, error) {
+// A pre-built index built for another mode or chunker is a configuration
+// error and fails the open. Any other problem with it (corrupt, another
+// format version, its model missing) is logged and the repo is indexed
+// live instead.
+func openWorkspace(ctx context.Context, dir string, opts engine.Options, logger *kenmcp.Logger) (*engine.Workspace, error) {
 	if data, err := os.ReadFile(prebuiltIndexPath(dir)); err == nil {
-		var model *embed.StaticModel
-		if mode != search.ModeBM25 {
-			m, mErr := search.LoadModelDir(modelDir, fsOpts.MmapModel)
-			if mErr != nil {
-				logger.Logf(kenmcp.LogWarn, "pre-built index %s needs a model but loading %q failed (%v); live-indexing instead",
-					prebuiltIndexPath(dir), modelDir, mErr)
-				return buildOrLoadSnapshot(ctx, dir, mode, modeStr, chunker, modelDir, fsOpts, persistSnapshot, logger)
-			}
-			model = m
-		}
-		ix, lErr := search.LoadSerializedIndex(data, search.LoadOptions{
-			ExpectedMode:    modeStr,
-			ExpectedChunker: chunker,
-			Model:           model,
-			// KEN_ANN picks the retriever built over the file's vectors.
-			// KEN_ENRICH can't apply: a pre-built index is enriched or
-			// not as `ken build-index` made it (status reports which).
-			DenseRetriever: fsOpts.DenseRetriever,
-		})
+		popts := opts
+		popts.Prebuilt = data
+		popts.LogWriter = prebuiltLogWriter{logger: logger, dir: dir, passthrough: opts.LogWriter}
+		ws, pErr := engine.Open(ctx, dir, popts)
+		var pe *engine.PrebuiltError
 		switch {
-		case lErr == nil:
-			logger.Logf(kenmcp.LogInfo, "loaded pre-built index %s (%d chunks, no watch)", prebuiltIndexPath(dir), ix.Len())
-			wi := search.WrapStatic(ix, dir, mode, chunker)
-			return wi, wi.SetOnFlush, nil, nil
-		case errors.Is(lErr, search.ErrModeMismatch) || errors.Is(lErr, search.ErrChunkerMismatch):
+		case pErr == nil:
+			logger.Logf(kenmcp.LogInfo, "loaded pre-built index %s (%d chunks, no watch)", prebuiltIndexPath(dir), ws.ChunkCount())
+			return ws, nil
+		case !errors.As(pErr, &pe):
+			return nil, pErr
+		case pe.ModelLoad:
+			logger.Logf(kenmcp.LogWarn, "pre-built index %s needs a model but loading %q failed (%v); live-indexing instead",
+				prebuiltIndexPath(dir), opts.ModelDir, pe.Err)
+		case errors.Is(pe.Err, engine.ErrPrebuiltModeMismatch) || errors.Is(pe.Err, engine.ErrPrebuiltChunkerMismatch):
 			// Config error — fail loud rather than serve wrong results.
-			return nil, nil, nil, fmt.Errorf("pre-built index %s: %w (server is mode=%s chunker=%s; rebuild with matching `ken build-index` flags or fix KEN_MCP_MODE/KEN_MCP_CHUNKER)",
-				prebuiltIndexPath(dir), lErr, modeStr, chunker)
+			return nil, fmt.Errorf("pre-built index %s: %w (server is mode=%s chunker=%s; rebuild with matching `ken build-index` flags or fix KEN_MCP_MODE/KEN_MCP_CHUNKER)",
+				prebuiltIndexPath(dir), pe.Err, opts.Mode, opts.Chunker)
 		default:
 			// Corrupt / format-version / model-required — fall back.
-			logger.Logf(kenmcp.LogWarn, "pre-built index %s unusable (%v); live-indexing instead", prebuiltIndexPath(dir), lErr)
+			logger.Logf(kenmcp.LogWarn, "pre-built index %s unusable (%v); live-indexing instead", prebuiltIndexPath(dir), pe.Err)
 		}
 	}
-	return buildOrLoadSnapshot(ctx, dir, mode, modeStr, chunker, modelDir, fsOpts, persistSnapshot, logger)
-}
-
-// buildOrLoadSnapshot is the cold-start M1 (ADR-039) fall-through, taken when
-// there is no ADR-024 operator prebuilt to serve frozen. engine.Open owns the
-// actual load-snapshot-or-live-build-and-persist decision (ADR-046) — ken-mcp
-// no longer carries its own copy of that logic, so it can't drift from
-// ken/engine's. The returned setOnFlush is ws.SetOnFlush (composes with
-// engine's own snapshot-persist-on-flush hook) rather than the raw
-// WatchedIndex's SetOnFlush, which would replace it outright.
-func buildOrLoadSnapshot(ctx context.Context, dir string, mode search.Mode, modeStr, chunker, modelDir string, fsOpts search.FSOptions, persistSnapshot bool, logger *kenmcp.Logger) (*search.WatchedIndex, func(func(string)), *engine.Workspace, error) {
-	ws, err := engine.Open(ctx, dir, engine.Options{
-		Mode:                  modeStr,
-		Chunker:               chunker,
-		ModelDir:              modelDir,
-		Watch:                 true,
-		Snapshot:              persistSnapshot,
-		DisableFoldMigrations: fsOpts.DisableFoldMigrations,
-		LogWriter:             fsOpts.LogWriter,
-		DisableEnrichment:     fsOpts.DisableEnrichment,
-		LazyEnrichment:        fsOpts.LazyEnrichment,
-		StagedEmbedding:       fsOpts.StagedEmbedding,
-		MmapModel:             fsOpts.MmapModel,
-		DenseRetriever:        fsOpts.DenseRetriever,
-		EmbedCache:            fsOpts.EmbedCache,
-		// engine does not read the environment; these four walk limits and
-		// the structural cap are the KEN_* values read at this binary's edge.
-		MaxFileBytes:           fsOpts.Walk.MaxFileBytes,
-		MaxAvgLineBytes:        fsOpts.Walk.MaxAvgLineBytes,
-		MaxFiles:               fsOpts.Walk.MaxFiles,
-		SkipGenerated:          fsOpts.Walk.SkipGenerated,
-		StructuralMaxFileBytes: envcfg.StructuralMaxFileBytes(),
-	})
+	ws, err := engine.Open(ctx, dir, opts)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	logger.Logf(kenmcp.LogInfo, "indexed %s (%d chunks, watching)", dir, ws.WatchedIndex().Len())
-	return ws.WatchedIndex(), ws.SetOnFlush, ws, nil
+	logger.Logf(kenmcp.LogInfo, "indexed %s (%d chunks, watching)", dir, ws.ChunkCount())
+	return ws, nil
 }
 
-// workspaceStructural adapts an engine.Workspace to mcp.StructuralSource,
-// so a RepoBundle's structural tools use engine's lazy structural build —
-// and its updates on every watcher flush (ADR-048) — instead of the
-// bundle's own build-once state machine.
-type workspaceStructural struct{ ws *engine.Workspace }
-
-func (s workspaceStructural) StructuralIndex(ctx context.Context) *structural.Index {
-	idx, _ := s.ws.Structural(ctx)
-	return idx
+// prebuiltLogWriter is the LogWriter of a pre-built repo's Workspace. The
+// frozen bundle used to build its structural index through ken-mcp's own
+// builder, which reported the outcome through the leveled logger. engine
+// builds it now and reports in its own words; this turns those two lines
+// back into the messages, and levels, operators have always seen for a
+// pre-built repo. Anything else engine writes passes through.
+type prebuiltLogWriter struct {
+	logger      *kenmcp.Logger
+	dir         string
+	passthrough io.Writer
 }
 
-// StructuralPending reads Status, which counts the index's files; it is
-// only consulted after StructuralIndex came back nil.
-func (s workspaceStructural) StructuralPending() bool { return s.ws.Status().StructuralPending }
+// structuralBuiltLine matches engine's "structural index built" line. It is
+// anchored on the counts at the end, so a root path with spaces or colons
+// in it still matches.
+var structuralBuiltLine = regexp.MustCompile(`^engine: structural index built for .*: (\d+) files, (\d+) symbols, (\d+) callees in \S+$`)
 
-func (s workspaceStructural) StructuralIfBuilt() *structural.Index { return s.ws.StructuralIfBuilt() }
-
-func (s workspaceStructural) Close() error { return s.ws.Close() }
+func (w prebuiltLogWriter) Write(p []byte) (int, error) {
+	line := strings.TrimRight(string(p), "\n")
+	if m := structuralBuiltLine.FindStringSubmatch(line); m != nil {
+		w.logger.Logf(kenmcp.LogInfo,
+			"structural index built (lazy, first use) for %s: %s files, %s symbols, %s unique callees",
+			w.dir, m[1], m[2], m[3])
+		return len(p), nil
+	}
+	const failPrefix = "engine: structural index build for "
+	if rest, ok := strings.CutPrefix(line, failPrefix); ok {
+		if i := strings.Index(rest, " failed ("); i >= 0 {
+			cause := rest[i+len(" failed ("):]
+			if j := strings.LastIndex(cause, ");"); j >= 0 {
+				cause = cause[:j]
+			}
+			w.logger.Logf(kenmcp.LogWarn, "structural index build failed for %s: %s "+
+				"(track 2 tools will report no structure available; will retry on next call)", w.dir, cause)
+			return len(p), nil
+		}
+	}
+	if w.passthrough != nil {
+		return w.passthrough.Write(p)
+	}
+	return len(p), nil
+}
 
 // runSubcommand dispatches one-shot CLI subcommands that exit before
 // the MCP server starts. v0.8.0 introduces `print-listen-script`, the
@@ -392,7 +359,7 @@ func main() {
 	}
 
 	chunker := envcfg.EnvEnum("KEN_MCP_CHUNKER", chunk.Names(), "regex", logger)
-	modeStr := envcfg.EnvEnum("KEN_MCP_MODE", search.ModeNames(), "hybrid", logger)
+	modeStr := envcfg.EnvEnum("KEN_MCP_MODE", engine.ModeNames(), "hybrid", logger)
 	modelDir := envcfg.EnvPath("KEN_MCP_MODEL_DIR", logger)
 	// Onboarding: when KEN_MCP_MODEL_DIR is unset, fall back to the
 	// canonical end-user location ~/.ken/model (where `ken download-model`
@@ -593,9 +560,9 @@ func main() {
 	// Either gate enables collection in the search code path; both off
 	// means the zero-config path (no time.Now bookkeeping).
 	telemetryInResponse := envcfg.EnvBool("KEN_MCP_RERANK_TELEMETRY", false, logger)
-	var telemetryLog func(query string, t search.Telemetry)
+	var telemetryLog func(query string, t engine.Telemetry)
 	if lazyReranker != nil && logger.Level <= kenmcp.LogInfo {
-		telemetryLog = func(query string, t search.Telemetry) {
+		telemetryLog = func(query string, t engine.Telemetry) {
 			logger.Logf(kenmcp.LogInfo,
 				"search %q total=%s stage1=%s rerank=%s blend=%s n=%d cache=%d/%d q_enc=%s cand_enc=%s",
 				query, t.TotalWall, t.Stage1Wall, t.RerankWall, t.BlendWall,
@@ -670,9 +637,9 @@ func main() {
 		// M9 persistent cache save — only when the lazy reranker actually
 		// loaded (otherwise there's nothing in its LRU to save).
 		if lazyReranker != nil && lazyReranker.Loaded() && rl != nil && rl.cachePath != "" {
-			if nr, ok := lazyReranker.Inner().(*search.NeuralReranker); ok && nr != nil {
+			if nr := lazyReranker.Inner(); nr != nil {
 				if _, _, sz := nr.CacheStats(); sz > 0 {
-					if serr := search.SaveCacheToFile(nr, rl.cachePath, rl.cacheScope, rl.cacheDim); serr != nil {
+					if serr := nr.SaveCache(rl.cachePath, filepath.Base(rl.modelDir), rl.quant); serr != nil {
 						logger.Logf(kenmcp.LogWarn, "rerank cache: save to %s failed: %v", rl.cachePath, serr)
 					} else {
 						logger.Logf(kenmcp.LogInfo, "rerank cache: saved %d entries to %s", sz, rl.cachePath)
@@ -807,8 +774,8 @@ type repoBuilder struct {
 	lazyEnrich        bool
 	staged            bool
 	mmapModel         bool
-	lazyReranker      *search.LazyReranker
-	rerankerOptions   []search.RerankerOption
+	lazyReranker      *engine.LazyReranker
+	rerankerOptions   []engine.RerankerOption
 	dbDefaultKey      string    // normalized cache key the DB extras attach to ("" ⇒ none)
 	dbExtras          *dbExtras // shared holder the Refresher publishes DB chunks into
 }
@@ -845,9 +812,9 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 	// M3 embed cache (opt-in): only useful when embedding is used
 	// (semantic/hybrid) on a local repo.
 	var embedCache *embedcache.Cache
-	if rb.embedCacheEnabled && isLocal && bMode != search.ModeBM25 {
+	if rb.embedCacheEnabled && isLocal && bMode != engine.ModeBM25 {
 		_ = os.MkdirAll(filepath.Join(dir, ".ken"), 0o755)
-		fp := search.ModelFingerprintFromDir(bModelDir)
+		fp := engine.ModelFingerprint(bModelDir)
 		if c, cErr := embedcache.Open(filepath.Join(dir, ".ken", "embed.db"), fp, 0, rb.embedCacheMax); cErr != nil {
 			rb.logger.Logf(kenmcp.LogWarn, "embed cache disabled for %s (%v)", dir, cErr)
 		} else {
@@ -868,7 +835,14 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 		}
 	}
 
-	fsOpts := search.FSOptions{
+	walk := envcfg.WalkLimits()
+	persistSnapshot := rb.snapshotEnabled && isLocal
+	wsOpts := engine.Options{
+		Mode:                  bModeStr,
+		Chunker:               rb.chunker,
+		ModelDir:              bModelDir,
+		Watch:                 true,
+		Snapshot:              persistSnapshot,
 		DisableFoldMigrations: rb.noAutoMigrations,
 		LogWriter:             os.Stderr,
 		LazyEnrichment:        rb.lazyEnrich,
@@ -878,17 +852,20 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 		// builds use (ADR-054; before it ken-mcp ignored both).
 		DisableEnrichment: envcfg.EnrichDisabled(),
 		DenseRetriever:    envcfg.DenseRetriever(),
-		// KEN_MAX_FILE_BYTES, KEN_MAX_AVG_LINE_BYTES, KEN_MAX_FILES and
-		// KEN_SKIP_GENERATED.
-		Walk: envcfg.WalkLimits(),
+		// engine does not read the environment; the walk limits and the
+		// structural cap are the KEN_* values read at this binary's edge.
+		MaxFileBytes:           walk.MaxFileBytes,
+		MaxAvgLineBytes:        walk.MaxAvgLineBytes,
+		MaxFiles:               walk.MaxFiles,
+		SkipGenerated:          walk.SkipGenerated,
+		StructuralMaxFileBytes: envcfg.StructuralMaxFileBytes(),
 	}
 	// Assign the interface only when non-nil so a nil *Cache doesn't become
 	// a non-nil VecCache holding a nil pointer.
 	if embedCache != nil {
-		fsOpts.EmbedCache = embedCache
+		wsOpts.EmbedCache = embedCache
 	}
-	persistSnapshot := rb.snapshotEnabled && isLocal
-	ix, setOnFlush, ws, err := loadOrBuildWatched(ctx, dir, bMode, bModeStr, rb.chunker, bModelDir, fsOpts, persistSnapshot, rb.logger)
+	ws, err := openWorkspace(ctx, dir, wsOpts, rb.logger)
 	if err != nil {
 		if cleanup != nil {
 			cleanup()
@@ -901,7 +878,7 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 	// so the content-hash LRU stays warm regardless of file churn or
 	// switching between repos.
 	if rb.lazyReranker != nil {
-		ix.SetReranker(rb.lazyReranker, rb.rerankerOptions...)
+		ws.SetReranker(rb.lazyReranker, rb.rerankerOptions...)
 	}
 	// Tier-2 self-heal (audit db/mcp §1): if this is the pinned default
 	// repo and the Refresher has published DB chunks, re-apply them so a
@@ -910,7 +887,7 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 	// for every non-default repo.
 	if rb.dbDefaultKey != "" && source == rb.dbDefaultKey {
 		if extras := rb.dbExtras.load(); len(extras) > 0 {
-			ix.SetExtraChunks(extras)
+			ws.SetExtraChunks(extras)
 			rb.logger.Logf(kenmcp.LogInfo, "Tier 2: re-applied %d DB chunks to rebuilt default repo %q", len(extras), dir)
 		}
 	}
@@ -922,7 +899,7 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 	// snapshot-persist-on-flush hook) or the raw WatchedIndex's
 	// SetOnFlush for the ADR-024 static pre-built case (never fires —
 	// a frozen index has no watcher — so persistence is moot there).
-	setOnFlush(func(msg string) {
+	ws.SetOnFlush(func(msg string) {
 		rb.logger.Logf(kenmcp.LogInfo, "%s: %s", dir, msg)
 		// M2: a flush rebuilds the index snapshot, leaving the old
 		// corpus/postings/vectors as garbage. Hand the freed pages
@@ -931,48 +908,11 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 		debug.FreeOSMemory()
 	})
 
-	// Stage 8: LAZY structural-index build (cold-start M0). The
-	// structural symbol index tree-sitter-parses every file — the
-	// same per-file parse the enrichment pass already paid for, so
-	// building it eagerly here doubled the cold-start parse cost
-	// (measured ~50% of index time on PHP corpora, M0 findings) for
-	// a symbol index most sessions never query. Wire a builder
-	// instead and let RepoBundle.StructuralIndex() build it on the
-	// first definition/references/callers/outline/symbols call. On
-	// failure (unsupported language, parse errors) it returns nil
-	// and the Track 2 tools degrade to a clear "no structural index
-	// available" message.
-	structuralBuilder := func(ctx context.Context) (*structural.Index, error) {
-		six, sErr := structural.BuildWithOptions(ctx, dir, structural.BuildOptions{
-			MaxFileBytes: envcfg.StructuralMaxFileBytes(),
-			Walk:         fsOpts.Walk,
-		})
-		if sErr != nil {
-			rb.logger.Logf(kenmcp.LogWarn, "structural index build failed for %s: %v "+
-				"(track 2 tools will report no structure available; will retry on next call)", dir, sErr)
-			return nil, sErr
-		}
-		stats := six.Stats()
-		rb.logger.Logf(kenmcp.LogInfo,
-			"structural index built (lazy, first use) for %s: %d files, %d symbols, %d unique callees",
-			dir, stats.IndexedFiles, stats.UniqueSymbols, stats.UniqueCallees)
-		return six, nil
-	}
-
-	// M2: the initial chunk+embed build is the biggest transient-memory
-	// spike in the process lifetime. Return the freed pages to the OS
-	// now that the snapshot is published, so idle RSS settles near the
-	// live index size instead of the build high-water.
+	// The Workspace is the bundle: the tools query it, its structural index
+	// is built lazily on first use (cold-start M0) and follows edits
+	// (ADR-048), and reaping the bundle closes it.
 	debug.FreeOSMemory()
-	if ws != nil {
-		// A live, watched build: the structural tools use the Workspace's
-		// structural state, which every watcher flush brings up to date
-		// (ADR-048). Its build logs go to the engine LogWriter (stderr).
-		return &kenmcp.RepoBundle{Index: ix, Structural: workspaceStructural{ws}}, cleanup, nil
-	}
-	// The ADR-024 pre-built index is frozen (no watcher), so a structural
-	// index built once from the files on disk stays as current as it is.
-	return &kenmcp.RepoBundle{Index: ix, StructuralBuilder: structuralBuilder}, cleanup, nil
+	return &kenmcp.RepoBundle{Workspace: ws}, cleanup, nil
 }
 
 // startupMode is the effective serving configuration resolved by
@@ -981,11 +921,11 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 // mode (so the background auto-fetch knows what to upgrade to), and the
 // dir to fetch the model into (empty ⇒ no auto-fetch).
 type startupMode struct {
-	mode     search.Mode
+	mode     engine.Mode
 	modeStr  string
 	modelDir string
 
-	wantMode search.Mode
+	wantMode engine.Mode
 	wantStr  string
 
 	autoFetchDest string
@@ -998,17 +938,17 @@ type startupMode struct {
 // later upgrade. modelPresent is passed in (not stat'd here) so the
 // decision logic is unit-testable without a filesystem.
 func resolveStartupMode(modeStr, modelDir string, modelPresent, autoFetch bool, logger *kenmcp.Logger) startupMode {
-	mode, err := search.ParseMode(modeStr)
+	mode, err := engine.ParseMode(modeStr)
 	if err != nil {
 		// modeStr already passed envcfg.EnvEnum(ModeNames()), so this is
 		// unreachable today; kept so a future ModeNames/ParseMode skew is
 		// caught rather than silently mis-served.
 		logger.Logf(kenmcp.LogError, "internal: KEN_MCP_MODE=%q passed envEnum but failed ParseMode: %v — defaulting to bm25",
 			modeStr, err)
-		mode = search.ModeBM25
+		mode = engine.ModeBM25
 	}
 	sm := startupMode{mode: mode, modeStr: modeStr, modelDir: modelDir, wantMode: mode, wantStr: modeStr}
-	if mode == search.ModeBM25 || modelPresent {
+	if mode == engine.ModeBM25 || modelPresent {
 		return sm
 	}
 	if autoFetch && modelDir != "" {
@@ -1024,7 +964,7 @@ func resolveStartupMode(modeStr, modelDir string, modelPresent, autoFetch bool, 
 				"(run `ken download-model`, or set KEN_MCP_AUTO_FETCH=1 to fetch it automatically)",
 			modelDir)
 	}
-	sm.mode = search.ModeBM25
+	sm.mode = engine.ModeBM25
 	sm.modeStr = "bm25"
 	sm.modelDir = ""
 	return sm
@@ -1046,15 +986,12 @@ type rerankerLoader struct {
 	adaptiveThreshold float64
 	adaptiveMinN      int
 	logger            *kenmcp.Logger
-
-	cacheScope string // set by Load() on success
-	cacheDim   int    // set by Load() on success
 }
 
 // Load is the search.NewLazyReranker loader. On model-load failure it
 // returns the error (LazyReranker passes through → query downgrades to
 // hybrid).
-func (l *rerankerLoader) Load() (search.Reranker, error) {
+func (l *rerankerLoader) Load() (*engine.NeuralReranker, error) {
 	var (
 		enc     encoder.Encoder
 		loadErr error
@@ -1071,19 +1008,17 @@ func (l *rerankerLoader) Load() (search.Reranker, error) {
 				"hybrid-rerank queries will downgrade to hybrid", l.modelDir, l.quant, loadErr)
 		return nil, loadErr
 	}
-	nr := search.NewNeuralReranker(enc, search.WithCacheSize(l.cacheSize))
-	l.cacheDim = enc.HiddenDim()
-	l.cacheScope = search.CacheScopeKey(filepath.Base(l.modelDir), l.quant, l.cacheDim)
+	nr := engine.NewNeuralRerankerSized(enc, l.cacheSize)
 	if l.cachePath != "" {
-		loaded, lerr := search.LoadCacheFromFile(nr, l.cachePath, l.cacheScope, l.cacheDim)
+		loaded, lerr := nr.LoadCache(l.cachePath, filepath.Base(l.modelDir), l.quant)
 		switch {
 		case lerr == nil:
 			l.logger.Logf(kenmcp.LogInfo, "rerank cache: loaded %d entries from %s", loaded, l.cachePath)
 		case errors.Is(lerr, os.ErrNotExist):
 			l.logger.Logf(kenmcp.LogInfo, "rerank cache: %s not present yet (first run); starting cold", l.cachePath)
-		case errors.Is(lerr, search.ErrCacheScopeMismatch), errors.Is(lerr, search.ErrCacheEmbedDimMismatch):
+		case errors.Is(lerr, engine.ErrRerankCacheScopeMismatch), errors.Is(lerr, engine.ErrRerankCacheDimMismatch):
 			l.logger.Logf(kenmcp.LogWarn, "rerank cache: %s scope/dim mismatch (%v); starting cold, next save will overwrite", l.cachePath, lerr)
-		case errors.Is(lerr, search.ErrCacheCorrupt), errors.Is(lerr, search.ErrCacheFormatVersion):
+		case errors.Is(lerr, engine.ErrRerankCacheCorrupt), errors.Is(lerr, engine.ErrRerankCacheFormatVersion):
 			l.logger.Logf(kenmcp.LogWarn, "rerank cache: %s unusable (%v); starting cold, next save will overwrite", l.cachePath, lerr)
 		default:
 			l.logger.Logf(kenmcp.LogWarn, "rerank cache: load failed (%v); starting cold", lerr)
@@ -1142,16 +1077,16 @@ func resolveRerankCachePath(quant string) string {
 // The loader is returned so main's shutdown path can persist the rerank
 // LRU under the scope/dim Load() recorded. Mirrors wireDBTier2's shape:
 // reads env, logs, returns the wired components.
-func setupReranker(logger *kenmcp.Logger) (*search.LazyReranker, *rerankerLoader, []search.RerankerOption, bool) {
+func setupReranker(logger *kenmcp.Logger) (*engine.LazyReranker, *rerankerLoader, []engine.RerankerOption, bool) {
 	if !envcfg.EnvBool("KEN_MCP_RERANK", false, logger) {
 		return nil, nil, nil, false
 	}
 	modelDir := envcfg.EnvPath("KEN_MCP_RERANK_MODEL_DIR", logger)
 	topN := envcfg.EnvInt("KEN_MCP_RERANK_TOP_N", 50, logger)
-	cacheSize := envcfg.EnvInt("KEN_MCP_RERANK_CACHE_SIZE", search.DefaultRerankerCacheSize, logger)
+	cacheSize := envcfg.EnvInt("KEN_MCP_RERANK_CACHE_SIZE", engine.DefaultRerankCacheSize, logger)
 	beta := envcfg.EnvFloat("KEN_MCP_RERANK_BETA", 0.25, logger)
 	// Validate before wiring (audit §22): cmd/ken validates these but the
-	// MCP side passed them straight to search.WithRerankN / WithRerankBlendBeta,
+	// MCP side passed them straight to engine.WithRerankN / WithRerankBlendBeta,
 	// so KEN_MCP_RERANK_TOP_N=-5 or a beta outside [0,1] reached the reranker
 	// unchecked. Clamp to the documented defaults with a warning.
 	if topN <= 0 {
@@ -1182,12 +1117,12 @@ func setupReranker(logger *kenmcp.Logger) (*search.LazyReranker, *rerankerLoader
 		return nil, nil, nil, true
 	}
 
-	opts := []search.RerankerOption{
-		search.WithRerankN(topN),
-		search.WithRerankBlendBeta(beta),
+	opts := []engine.RerankerOption{
+		engine.WithRerankN(topN),
+		engine.WithRerankBlendBeta(beta),
 	}
 	if adaptiveThreshold > 0 && adaptiveMinN > 0 {
-		opts = append(opts, search.WithAdaptiveRerankN(adaptiveThreshold, adaptiveMinN))
+		opts = append(opts, engine.WithAdaptiveRerankN(adaptiveThreshold, adaptiveMinN))
 	}
 	loader := &rerankerLoader{
 		modelDir:          modelDir,
@@ -1200,7 +1135,7 @@ func setupReranker(logger *kenmcp.Logger) (*search.LazyReranker, *rerankerLoader
 		adaptiveMinN:      adaptiveMinN,
 		logger:            logger,
 	}
-	lazy := search.NewLazyReranker(loader.Load)
+	lazy := engine.NewLazyReranker(loader.Load)
 	logger.Logf(kenmcp.LogInfo,
 		"rerank: lazy-load configured (quant=%s top_n=%d beta=%v adaptive=%v:%d); model will load on first hybrid+rerank query",
 		quant, topN, beta, adaptiveThreshold, adaptiveMinN)
