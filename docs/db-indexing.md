@@ -63,7 +63,7 @@ TABLE users
 The defaults are conservative:
 - **Schema-only is the default.** `KEN_DB_SAMPLE_ROWS=0` (unset) means no row data is read.
 - **The opt-in is unambiguous.** `KEN_DB_SAMPLE_ROWS=N` reads as "rows you're choosing to expose."
-- **Every chunk carries provenance.** The freshness header surfaces `postgres@dev-pg.local` in agent output, so reviewers see where the data came from.
+- **Every chunk carries provenance.** The freshness header surfaces `postgres@dev-pg.local` in agent output, so reviewers see where the data came from. The header is shown, not indexed: it is left out of the text ken tokenizes and embeds, so a chunk ranks the same whenever its schema was read (ADR-058), and a search for the host or engine name does not match through it.
 
 ### Row sampling (opt-in)
 

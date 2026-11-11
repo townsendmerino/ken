@@ -119,6 +119,12 @@ def make_corpus(dst):
 def normalize(text, corpus):
     text = text.replace(corpus, "<CORPUS>").replace(os.path.realpath(corpus), "<CORPUS>")
     text = re.sub(r'v\d+\.\d+\.\d+-0\.\d{14}-[0-9a-f]{12}(\+dirty)?', '<VER>', text)
+    # ken's own version where status prints it: a build from a release tag
+    # says "v1.15.0" and a build from a working tree "v1.15.0+dirty". Other
+    # versions (aikit, gotreesitter) are left alone, so a dependency bump shows.
+    text = re.sub(r'(\\?"Version\\?":\s*\\?")v\d+\.\d+\.\d+[^"\\]*', r'\1<VER>', text)
+    text = re.sub(r'(?m)^(\s*version:\s+)v\d+\.\d+\.\d+\S*', r'\1<VER>', text)
+    text = re.sub(r'(\\n\s*version:\s+)v\d+\.\d+\.\d+[^\\\s]*', r'\1<VER>', text)
     text = re.sub(r'\b[0-9a-f]{40}\b', '<REV>', text)
     text = re.sub(r'\bgo1\.\d+(\.\d+)?\b', '<GO>', text)  # the toolchain is a build stamp too
     text = re.sub(r'\b[0-9a-f]{12}\b( \(dirty\))?', '<REV12>', text)

@@ -143,13 +143,14 @@ func (r *NeuralReranker) RerankWithTelemetry(query string, cands []chunk.Chunk, 
 	var missTexts []string
 	var missIdx []int
 	for i, c := range cands {
-		h := fnvHash(c.Text)
+		text := indexText(c)
+		h := fnvHash(text)
 		hashes[i] = h
 		if v, ok := r.cache.get(h); ok {
 			cached[i] = v
 			continue
 		}
-		missTexts = append(missTexts, c.Text)
+		missTexts = append(missTexts, text)
 		missIdx = append(missIdx, i)
 	}
 	if t != nil {
