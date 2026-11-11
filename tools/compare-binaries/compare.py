@@ -6,7 +6,14 @@ a `ken-mcp` binary (an "old" build and a "new" one) and it runs both over a
 small fixture corpus under a matrix of environment settings, then reports,
 per setting, whether everything they print is identical.
 
-    python3 tools/compare-binaries/compare.py --old /tmp/old --new /tmp/new
+    HOME=$(mktemp -d) python3 tools/compare-binaries/compare.py \
+        --old /tmp/old --new /tmp/new --model /Users/me/.ken/model
+
+HOME must be a scratch directory. The binaries read and write under ~/.ken
+(the rerank cache, usage stats, downloaded models), so a run against a real
+home can overwrite real files; the script refuses to start unless HOME is
+under a temporary directory and is not the invoking user's own home. Pass the
+embedding model with --model, as an absolute path (it is only read).
 
 What is compared, per environment setting, in bm25 and hybrid mode:
 
@@ -16,6 +23,10 @@ What is compared, per environment setting, in bm25 and hybrid mode:
   ken-mcp  over JSON-RPC on stdio: search (markdown and JSON), find_related,
            definition / callers / references / outline / symbols, status
            (markdown and JSON), and the hash of the snapshot it writes
+  runbin   the mcp.Run test server (tools/compare-binaries/runbin), when both
+           directories hold one: search, find_related and status over a live
+           build, over a pre-built index, and with DB chunks from a SQLite
+           file (reindex_db, then search again)
 
 Normalized before comparing, because they differ between any two builds or
 runs: the binaries' own version stamps, timestamps, durations, the corpus
@@ -26,10 +37,10 @@ KEN_ENRICH_FILE_BUDGET_MS=1, a 1 ms wall-clock parse budget. It is kept in the
 matrix to show the variable is honored and reported as "timing" rather than
 as a difference.
 
-Hybrid mode needs the embedding model at ~/.ken/model. Exit status is 1 if
-any setting other than the timing one differs.
+Hybrid mode needs the embedding model (--model). Exit status is 1 if any
+setting other than the timing one differs, 2 if HOME is not a scratch directory.
 """
-import argparse, difflib, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time
+import argparse, difflib, hashlib, json, os, pwd, re, shutil, sqlite3, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -134,6 +145,7 @@ class Runner:
     def __init__(self, bindir, work, model_home, ignore_keys):
         self.ken = os.path.join(bindir, "ken")
         self.kenmcp = os.path.join(bindir, "ken-mcp")
+        self.runbin = os.path.join(bindir, "runbin")
         self.work, self.home, self.ignore = work, model_home, ignore_keys
 
     def env(self, extra):
@@ -251,6 +263,126 @@ class Runner:
         return "\n".join(out)
 
 
+def rpc_session(argv, env):
+    """Start an MCP stdio server; return (call, close)."""
+    p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True)
+    n = [0]
+
+    def call(method, params, notify=False):
+        msg = {"jsonrpc": "2.0", "method": method, "params": params}
+        if not notify:
+            n[0] += 1
+            msg["id"] = n[0]
+        try:
+            p.stdin.write(json.dumps(msg) + "\n")
+            p.stdin.flush()
+        except BrokenPipeError:
+            return {"error": "server exited: " + p.stderr.read()[-1500:]}
+        if notify:
+            return None
+        while True:
+            line = p.stdout.readline()
+            if not line:
+                return {"error": "EOF: " + p.stderr.read()[-1500:]}
+            r = json.loads(line)
+            if r.get("id") == n[0]:
+                return r
+
+    def close():
+        try:
+            p.stdin.close()
+            p.wait(timeout=60)
+        except (subprocess.TimeoutExpired, BrokenPipeError):
+            p.kill()
+
+    call("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "compare", "version": "0"}})
+    call("notifications/initialized", {}, notify=True)
+    return call, close
+
+
+def make_sqlite(path):
+    """A two-table schema for the mcp.Run DB-chunk path."""
+    if os.path.exists(path):
+        os.remove(path)
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE customers (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, created_at TEXT);
+        CREATE TABLE invoices (id INTEGER PRIMARY KEY, customer_id INTEGER NOT NULL REFERENCES customers(id), total_cents INTEGER NOT NULL);
+        CREATE INDEX invoices_by_customer ON invoices(customer_id);
+    """)
+    db.commit()
+    db.close()
+
+
+def runbin_all(self, extra):
+    """mcp.Run over a code corpus: live build, pre-built index, DB chunks."""
+    out = []
+    model = os.path.join(self.home, ".ken", "model")
+    for mode in ["bm25", "hybrid"]:
+        for variant in ["live", "prebuilt", "db"]:
+            c = self.fresh()
+            env = self.env({"KEN_RUNBIN_CORPUS": c, "KEN_RUNBIN_MODE": mode, "KEN_RUNBIN_MODEL": model})
+            env.update(extra)
+            tag = "%s %s" % (mode, variant)
+            if variant == "prebuilt":
+                os.makedirs(os.path.join(c, ".ken"))
+                out.append("## %s build-index\n%s" % (tag, self.run(
+                    [self.ken, "build-index", c, "-o", os.path.join(c, ".ken", "index.bin"), "--mode", mode, "--model", model], extra)))
+            if variant == "db":
+                dbfile = os.path.join(self.work, "schema.db")
+                make_sqlite(dbfile)
+                env["KEN_RUNBIN_DSN"] = "sqlite://" + dbfile
+            call, close = rpc_session([self.runbin], env)
+
+            def tool(name, args):
+                r = call("tools/call", {"name": name, "arguments": args})
+                res = strip_keys(r.get("result", r), self.ignore)
+                out.append("## %s %s %s\n%s" % (tag, name, json.dumps(args, sort_keys=True), json.dumps(res, sort_keys=True, indent=1)))
+
+            tl = call("tools/list", {})
+            out.append("## %s tools/list\n%s" % (tag, json.dumps(tl.get("result", tl), sort_keys=True, indent=1)))
+            if variant == "db":
+                # mcp.Run applies DB chunks asynchronously at startup, so a
+                # query can land before or after the first swap. reindex_db
+                # is synchronous: call it first and every later query sees
+                # the same index.
+                tool("reindex_db", {})
+            queries = QUERIES + (["customers email", "invoices total"] if variant == "db" else [])
+            for q in queries:
+                tool("search", {"query": q, "top_k": 8})
+                tool("search", {"query": q, "top_k": 8, "output": "json"})
+            tool("find_related", {"file_path": "store.go", "line": 5, "output": "json"})
+            tool("status", {"output": "json"})
+            tool("status", {})
+            if variant == "db":
+                tool("reindex_db", {})
+                for q in ["customers email", "store client"]:
+                    tool("search", {"query": q, "top_k": 8, "output": "json"})
+                tool("status", {"output": "json"})
+            close()
+            out = [normalize(x, c) for x in out]
+    return "\n".join(out).replace(os.path.realpath(self.work), "<WORK>").replace(self.work, "<WORK>")
+
+
+Runner.runbin_all = runbin_all
+
+
+def scratch_home():
+    """Refuse to run against a real home directory (see the module doc)."""
+    home = os.environ.get("HOME", "")
+    real = os.path.realpath(home) if home else ""
+    own = os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir)
+    roots = {os.path.realpath(p) for p in [tempfile.gettempdir(), "/tmp", "/var/tmp", os.environ.get("TMPDIR", "/tmp")] if p}
+    under_tmp = any(real == r or real.startswith(r + os.sep) for r in roots)
+    if not real or real == own or own.startswith(real + os.sep) or not under_tmp or not os.path.isdir(real):
+        sys.exit("compare.py: refusing to start: HOME=%r is not a scratch directory.\n"
+                 "The binaries read and write under ~/.ken, so HOME must be an existing directory under a temporary\n"
+                 "directory (one of %s) and not your own home (%s).\n"
+                 "Run it as:  HOME=$(mktemp -d) python3 %s --old DIR --new DIR --model /abs/path/to/model"
+                 % (home, ", ".join(sorted(roots)), own, os.path.relpath(__file__)))
+    return real
+
+
 def label(s):
     return " ".join("%s=%s" % kv for kv in s.items()) or "(no KEN_* variables)"
 
@@ -260,19 +392,21 @@ def main():
     ap.add_argument("--old", required=True, help="directory holding the old ken and ken-mcp binaries")
     ap.add_argument("--new", required=True, help="directory holding the new ken and ken-mcp binaries")
     ap.add_argument("--ignore-status-key", action="append", default=[], help="JSON key to drop from status output (repeatable)")
-    ap.add_argument("--only", choices=["ken", "ken-mcp"], help="compare just one binary")
+    ap.add_argument("--only", choices=["ken", "ken-mcp", "runbin"], help="compare just one binary")
+    ap.add_argument("--model", help="absolute path of the embedding model directory (hybrid cases need it)")
     ap.add_argument("--show", type=int, default=6, help="diff lines to print per differing setting")
     ap.add_argument("--keep", help="write each setting's full old/new output under this directory")
     args = ap.parse_args()
 
-    model = os.path.expanduser("~/.ken/model")
+    home = scratch_home()
     work = tempfile.mkdtemp(prefix="ken-compare-")
-    home = os.path.join(work, "home")
-    os.makedirs(os.path.join(home, ".ken"))
-    if os.path.isdir(model):
-        os.symlink(model, os.path.join(home, ".ken", "model"))
+    os.makedirs(os.path.join(home, ".ken"), exist_ok=True)
+    link = os.path.join(home, ".ken", "model")
+    if args.model and os.path.isabs(args.model) and os.path.isdir(args.model):
+        if not os.path.lexists(link):
+            os.symlink(args.model, link)
     else:
-        print("warning: no model at ~/.ken/model; hybrid cases will compare error output only", file=sys.stderr)
+        print("warning: no --model (an absolute directory path); hybrid cases will compare error output only", file=sys.stderr)
 
     keys = tuple(args.ignore_status_key)
     runners = {t: Runner(getattr(args, t), os.path.join(work, t), home, keys) for t in ["old", "new"]}
@@ -280,8 +414,12 @@ def main():
         os.makedirs(r.work)
     t0 = time.time()
     totals = {}
-    for binary, fn in [("ken", "ken_all"), ("ken-mcp", "mcp_all")]:
+    have_runbin = all(os.path.exists(r.runbin) for r in runners.values())
+    for binary, fn in [("ken", "ken_all"), ("ken-mcp", "mcp_all"), ("runbin", "runbin_all")]:
         if args.only and args.only != binary:
+            continue
+        if binary == "runbin" and not have_runbin:
+            print("skipped runbin: build tools/compare-binaries/runbin into both directories to compare mcp.Run")
             continue
         same = diff = timing = 0
         for i, s in enumerate(SETTINGS):
