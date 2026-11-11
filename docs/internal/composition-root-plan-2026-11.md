@@ -363,6 +363,16 @@ one, `ken-mcp` identical in all 30.
     main compared with itself. Not traced. The harness retries a differing
     setting once and reports "flaky" if the retry agrees.
 
+- **Slice 2b**: `mcp.Run` on `engine.OpenFS`. The static shape keeps its
+  own rebuild path: `ReplaceExtraChunks` calls `Index.WithExtraChunks` on
+  the corpus's original index, exactly as `mcp.Run` did, and publishes the
+  result into a static `WatchedIndex` (`PublishStatic`). So section 3.3's
+  worry (a different union path) did not arise. `mcp` no longer imports
+  `internal/search` or `internal/structural`.
+  - Comparison against main: `ken` 29 identical plus the timing case,
+    `ken-mcp` 30, `runbin` 29 plus the timing case (live build, pre-built
+    index, DB chunks with `reindex_db`).
+
 ## Inferred, not verified
 
 - That `Open` with `Watch: false` matches `FromFSWithOptions` for every

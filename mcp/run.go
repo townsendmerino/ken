@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"sync/atomic"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -15,7 +14,6 @@ import (
 	"github.com/townsendmerino/aikit/embed"
 	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/envcfg"
-	"github.com/townsendmerino/ken/internal/search"
 )
 
 // Options configures Run. The zero value is meaningful: it serves a
@@ -71,7 +69,7 @@ type Options struct {
 	// posture — verified by mcp/binary_contract_test.go.
 	//
 	// Lifecycle:
-	//   1. mcp.Run builds the embedded *search.Index from fsys.
+	//   1. mcp.Run opens an engine.Workspace over fsys (engine.OpenFS).
 	//   2. Calls opts.DB.Start(ctx, onExtras) — onExtras is an
 	//      mcp.Run-internal closure that calls
 	//      baseIx.WithExtraChunks(extras) and atomic-stores the
@@ -160,8 +158,8 @@ func Run(ctx context.Context, fsys fs.FS, opts Options) error {
 // v0.8.0 Part 3 addendum (ADR-020): orchestrates the chunk-integration
 // loop when opts.DB is non-nil. Build sequence:
 //
-//  1. Build the embedded *search.Index from fsys (via buildEmbeddedIndex).
-//  2. Wrap in an atomic.Pointer[search.Index] — handlers read via .Load().
+//  1. Open an engine.Workspace over fsys (via buildEmbeddedIndex).
+//  2. Handlers query the Workspace, which publishes snapshots atomically.
 //  3. If opts.DB != nil, define onExtras = func(extras) {
 //     ixPtr.Store(baseIx.WithExtraChunks(extras))
 //     } and call opts.DB.Start(ctx, onExtras). Defer the returned
@@ -175,33 +173,26 @@ func Run(ctx context.Context, fsys fs.FS, opts Options) error {
 // contract.
 func runOnTransport(ctx context.Context, fsys fs.FS, opts Options, transport sdk.Transport) error {
 	applyParseBudgetEnv()
-	ix, logger, err := buildEmbeddedIndex(fsys, opts)
+	ws, logger, err := buildEmbeddedIndex(fsys, opts)
 	if err != nil {
 		return err
 	}
-
-	// Atomic-pointer indirection so refreshes can publish new snapshots
-	// without the handlers needing a mutex. Initialized with the
-	// baseline (no extras yet) Index.
-	var ixPtr atomic.Pointer[search.Index]
-	ixPtr.Store(ix)
 
 	// Tier-2 chunk integration (v0.8.0 Part 3 addendum). When opts.DB
 	// is wired, start the integration BEFORE the server runs so the
 	// initial introspection's swap fires before any agent search.
 	cleanup := func() {}
 	if opts.DB != nil {
-		baseIx := ix // capture the no-extras snapshot for rebuilds
 		onExtras := func(extras []chunk.Chunk) {
-			newIx, err := baseIx.WithExtraChunks(extras)
-			if err != nil {
+			// The Workspace rebuilds from the corpus as first indexed plus
+			// extras, so refreshes replace one another and never accumulate.
+			if err := ws.ReplaceExtraChunks(extras); err != nil {
 				// Non-fatal (audit §23): keep serving the prior snapshot
 				// rather than crash the server on an index-invariant
 				// violation.
 				logger.Logf(LogWarn, "mcp.Run: could not integrate %d DB chunks: %v", len(extras), err)
 				return
 			}
-			ixPtr.Store(newIx)
 			logger.Logf(LogInfo, "mcp.Run: integrated %d DB chunks into the embedded index", len(extras))
 		}
 		c, derr := opts.DB.Start(ctx, onExtras)
@@ -214,7 +205,7 @@ func runOnTransport(ctx context.Context, fsys fs.FS, opts Options, transport sdk
 	}
 	defer cleanup()
 
-	srv := newServerForIndex(&ixPtr, logger, opts.DB)
+	srv := newServerForIndex(ws, logger, opts.DB)
 	if err := srv.Run(ctx, transport); err != nil {
 		// Client-closed-stdin is the canonical clean-shutdown path; surface
 		// it as nil error so callers don't have to special-case it.
@@ -226,13 +217,13 @@ func runOnTransport(ctx context.Context, fsys fs.FS, opts Options, transport sdk
 	return nil
 }
 
-// buildEmbeddedIndex materializes the corpus *search.Index + the
+// buildEmbeddedIndex opens the corpus's engine.Workspace + the
 // scoped *Logger. Validates opts, loads the model (downgrades to bm25
 // with a warning if unavailable), and either loads a pre-built index
 // (v0.8.3 cold-start optimization, ADR-024) or runs the
 // walk+chunk+embed pass. The caller (runOnTransport) wraps the Index
 // in an atomic.Pointer and wires DB chunk integration on top.
-func buildEmbeddedIndex(fsys fs.FS, opts Options) (*search.Index, *Logger, error) {
+func buildEmbeddedIndex(fsys fs.FS, opts Options) (*engine.Workspace, *Logger, error) {
 	// Bootstrap logger at warn so we can warn about an invalid LogLevel
 	// before applying it (same chicken-and-egg dance as cmd/ken-mcp).
 	logger := NewLogger(opts.LogWriter, LogWarn)
@@ -240,19 +231,19 @@ func buildEmbeddedIndex(fsys fs.FS, opts Options) (*search.Index, *Logger, error
 	logger.Level = ParseLogLevel(logLevelStr)
 
 	chunkerName := ValidateEnum("Options.ChunkerName", opts.ChunkerName, chunk.Names(), "regex", logger)
-	modeStr := ValidateEnum("Options.Mode", opts.Mode, search.ModeNames(), "hybrid", logger)
-	mode, err := search.ParseMode(modeStr)
+	modeStr := ValidateEnum("Options.Mode", opts.Mode, engine.ModeNames(), "hybrid", logger)
+	mode, err := engine.ParseMode(modeStr)
 	if err != nil {
 		// ValidateEnum guaranteed modeStr ∈ ModeNames(); only a future
 		// drift between ParseMode and ModeNames can land here.
 		logger.Logf(LogError, "internal: validated mode %q failed ParseMode: %v — defaulting to bm25", modeStr, err)
-		mode = search.ModeBM25
+		mode = engine.ModeBM25
 	}
 
 	// Resolve the model. ModelFS wins over ModelDir. Failure here is
 	// non-fatal: downgrade to bm25 with a warning (cmd/ken-mcp parity).
 	var model *embed.StaticModel
-	if mode != search.ModeBM25 {
+	if mode != engine.ModeBM25 {
 		m, src, lerr := loadModel(opts)
 		switch {
 		case lerr != nil:
@@ -260,7 +251,7 @@ func buildEmbeddedIndex(fsys fs.FS, opts Options) (*search.Index, *Logger, error
 				"could not load model (%s): %v — downgrading to bm25 "+
 					"(set Options.ModelFS or Options.ModelDir to enable semantic/hybrid)",
 				src, lerr)
-			mode = search.ModeBM25
+			mode = engine.ModeBM25
 		default:
 			model = m
 			logger.Logf(LogInfo, "loaded model from %s (dim=%d vocab=%d)", src, model.Dim(), model.VocabSize())
@@ -273,23 +264,31 @@ func buildEmbeddedIndex(fsys fs.FS, opts Options) (*search.Index, *Logger, error
 	//   2. fsys/.ken/index.bin (convention-over-configuration)
 	// Either source's failure is non-fatal: the lazy fallback ensures
 	// the binary always works even if the pre-built bytes go bad.
-	if ix, src := tryLoadPrebuilt(fsys, opts, mode, chunkerName, model, logger); ix != nil {
-		logger.Logf(LogInfo, "loaded pre-built index from %s (%d chunks, mode=%s chunker=%s)",
-			src, ix.Len(), search.ModeNames()[int(mode)], chunkerName)
-		return ix, logger, nil
-	}
-
-	ix, err := search.FromFSWithModelOptions(fsys, mode, chunkerName, model, search.FSOptions{
+	walk := envcfg.WalkLimits()
+	sopts := engine.StaticOptions{
+		Mode:              mode,
+		Chunker:           chunkerName,
+		Model:             model,
 		DisableEnrichment: envcfg.EnrichDisabled(), // KEN_ENRICH
 		DenseRetriever:    envcfg.DenseRetriever(), // KEN_ANN
-		Walk:              envcfg.WalkLimits(),
-	})
+		MaxFileBytes:      walk.MaxFileBytes,
+		MaxAvgLineBytes:   walk.MaxAvgLineBytes,
+		MaxFiles:          walk.MaxFiles,
+		SkipGenerated:     walk.SkipGenerated,
+	}
+	if ws, src := tryLoadPrebuilt(fsys, opts, sopts, logger); ws != nil {
+		logger.Logf(LogInfo, "loaded pre-built index from %s (%d chunks, mode=%s chunker=%s)",
+			src, ws.ChunkCount(), engine.ModeNames()[int(mode)], chunkerName)
+		return ws, logger, nil
+	}
+
+	ws, err := engine.OpenFS(context.Background(), fsys, sopts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build index from fsys: %w", err)
 	}
-	logger.Logf(LogInfo, "indexed %d chunks (mode=%s chunker=%s)", ix.Len(), search.ModeNames()[int(mode)], chunkerName)
+	logger.Logf(LogInfo, "indexed %d chunks (mode=%s chunker=%s)", ws.ChunkCount(), engine.ModeNames()[int(mode)], chunkerName)
 
-	return ix, logger, nil
+	return ws, logger, nil
 }
 
 // tryLoadPrebuilt attempts the v0.8.3 pre-built-index path. Returns
@@ -309,7 +308,7 @@ func buildEmbeddedIndex(fsys fs.FS, opts Options) (*search.Index, *Logger, error
 // Explicit Options.PrebuiltIndex wins over the .ken/index.bin
 // convention; if both are present and explicit is set, the
 // convention file is never consulted.
-func tryLoadPrebuilt(fsys fs.FS, opts Options, mode search.Mode, chunkerName string, model *embed.StaticModel, logger *Logger) (*search.Index, string) {
+func tryLoadPrebuilt(fsys fs.FS, opts Options, sopts engine.StaticOptions, logger *Logger) (*engine.Workspace, string) {
 	var (
 		data []byte
 		src  string
@@ -332,22 +331,22 @@ func tryLoadPrebuilt(fsys fs.FS, opts Options, mode search.Mode, chunkerName str
 		src = fmt.Sprintf("%s (auto-discovered)", prebuiltIndexPath)
 	}
 
-	loadOpts := search.LoadOptions{
-		ExpectedMode:    search.ModeNames()[int(mode)],
-		ExpectedChunker: chunkerName,
-		Model:           model,
-		// KEN_ANN picks the retriever built over the file's vectors;
-		// KEN_ENRICH can't change a pre-built index.
-		DenseRetriever: envcfg.DenseRetriever(),
-	}
-	ix, err := search.LoadSerializedIndex(data, loadOpts)
+	// KEN_ANN (sopts.DenseRetriever) picks the retriever built over the
+	// file's vectors; KEN_ENRICH can't change a pre-built index.
+	sopts.Prebuilt = data
+	ws, err := engine.OpenFS(context.Background(), fsys, sopts)
 	if err != nil {
+		// Report the load failure in the index's own words, as before.
+		var pe *engine.PrebuiltError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
 		logger.Logf(LogWarn,
 			"failed to load pre-built index from %s (%v); falling back to build-from-corpus. "+
 				"Re-run `ken build-index` to refresh.", src, err)
 		return nil, ""
 	}
-	return ix, src
+	return ws, src
 }
 
 // loadModel returns the Model2Vec snapshot to use, preferring ModelFS
@@ -384,7 +383,7 @@ func loadModel(opts Options) (*embed.StaticModel, string, error) {
 // publish a new snapshot are visible to the very next agent
 // search/find_related call. When db is non-nil, the reindex_db tool
 // is registered too, calling db.TryRefresh.
-func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db DBIntegration) *sdk.Server {
+func newServerForIndex(ws *engine.Workspace, logger *Logger, db DBIntegration) *sdk.Server {
 	srv := sdk.NewServer(&sdk.Implementation{
 		Name:    "ken",
 		Version: "0",
@@ -403,7 +402,7 @@ func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db D
 		if args.Repo != "" {
 			logger.Logf(LogDebug, "search: repo=%q ignored (embedded-corpus mode)", args.Repo)
 		}
-		return runSearch(indexView{ixPtr.Load()}, args)
+		return runSearch(ws, args)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -421,7 +420,7 @@ func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db D
 			// markdown it can't parse.
 			return errorResult(args.Output, "file_path is required and line must be ≥ 1."), nil, nil
 		}
-		return runFindRelated(indexView{ixPtr.Load()}, args)
+		return runFindRelated(ws, args)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -431,7 +430,7 @@ func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db D
 			"embedded-corpus index (chunk count, mode, chunker). Pass `output: 'json'` " +
 			"for a machine-parsable response.",
 	}, func(_ context.Context, _ *sdk.CallToolRequest, args StatusArgs) (*sdk.CallToolResult, any, error) {
-		return runStatus(indexView{ixPtr.Load()}, args)
+		return runStatus(ws, args)
 	})
 
 	// v0.8.0 Part 2 + Part 3 (ADR-020): reindex_db tool. Same
@@ -452,43 +451,4 @@ func newServerForIndex(ixPtr *atomic.Pointer[search.Index], logger *Logger, db D
 	}
 
 	return srv
-}
-
-// indexView adapts mcp.Run's immutable *search.Index to what the tool
-// handlers ask of an index (queryIndex, IndexStatus). The handlers are
-// written against an engine.Workspace; mcp.Run still holds a bare index
-// until it moves onto a Workspace too (composition-root plan, slice 2b),
-// and this adapter goes away with that.
-type indexView struct{ ix *search.Index }
-
-func (v indexView) CurrentMode() engine.Mode { return v.ix.Mode() }
-
-func (v indexView) SearchResults(_ context.Context, query string, k int, mode engine.Mode, opts engine.SearchOptions) ([]engine.Result, engine.Mode, error) {
-	if opts.Telemetry != nil {
-		res, eff, tel := v.ix.SearchModeWithTelemetry(query, k, mode)
-		*opts.Telemetry = tel
-		return res, eff, nil
-	}
-	res, eff := v.ix.SearchMode(query, k, mode)
-	return res, eff, nil
-}
-
-func (v indexView) FindRelatedResults(_ context.Context, filePath string, line, k int) ([]engine.Result, error) {
-	return v.ix.FindRelated(filePath, line, k)
-}
-
-func (v indexView) IndexStatus() engine.IndexStatus {
-	seen := map[string]struct{}{}
-	for _, c := range v.ix.Chunks() {
-		if !c.Tombstoned {
-			seen[c.File] = struct{}{}
-		}
-	}
-	return engine.IndexStatus{
-		Mode:           v.ix.Mode(),
-		FileCount:      len(seen),
-		ChunkCount:     v.ix.Len(),
-		EnrichedChunks: v.ix.EnrichedChunks(),
-		DenseRetriever: v.ix.DenseRetriever(),
-	}
 }

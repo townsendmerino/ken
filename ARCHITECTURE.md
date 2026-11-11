@@ -47,7 +47,6 @@ graph LR
     embedded --> mcppkg
     engine --> search & structural & repo
     mcppkg --> engine & status & mcplog & envcfg
-    mcppkg -. "mcp.Run only" .-> search
     mcpdb --> mcppkg & dbpkg
     envcfg --> mcplog & repo
     search --> structural & repo & sqlpkg

@@ -7,12 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
-
-	"github.com/townsendmerino/ken/internal/search"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -70,9 +67,7 @@ func runRunOnInMemoryTransport(t *testing.T, opts Options) (context.Context, *sd
 	if err != nil {
 		t.Fatalf("buildEmbeddedIndex: %v", err)
 	}
-	var ixPtr atomic.Pointer[search.Index]
-	ixPtr.Store(ix)
-	srv := newServerForIndex(&ixPtr, logger, nil /* no DB integration in these tests */)
+	srv := newServerForIndex(ix, logger, nil /* no DB integration in these tests */)
 
 	clientT, serverT := sdk.NewInMemoryTransports()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -61,7 +61,7 @@ func TestRun_NoPrebuiltIndex_FallbackBuildsFromCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildEmbeddedIndex: %v\n--log--\n%s", err, logBuf.String())
 	}
-	if ix == nil || ix.Len() == 0 {
+	if ix == nil || ix.ChunkCount() == 0 {
 		t.Fatalf("index is nil or empty — fallback didn't run?")
 	}
 
@@ -80,7 +80,7 @@ func TestRun_NoPrebuiltIndex_FallbackBuildsFromCorpus(t *testing.T) {
 	}
 
 	// And the index must actually answer queries.
-	if results := ix.Search("ValidateUser", 3); len(results) == 0 {
+	if results := searchResultsOf(ix, "ValidateUser", 3); len(results) == 0 {
 		t.Errorf("fallback index returned no results for ValidateUser")
 	}
 }
@@ -103,7 +103,7 @@ func TestRun_ValidPrebuiltIndex_AutoLoaded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildEmbeddedIndex: %v\n--log--\n%s", err, logBuf.String())
 	}
-	if ix == nil || ix.Len() == 0 {
+	if ix == nil || ix.ChunkCount() == 0 {
 		t.Fatalf("index is nil or empty")
 	}
 	log := logBuf.String()
@@ -117,7 +117,7 @@ func TestRun_ValidPrebuiltIndex_AutoLoaded(t *testing.T) {
 		t.Errorf("explicit-override tag should NOT appear (no Options.PrebuiltIndex was set), got:\n%s", log)
 	}
 	// Sanity-check the loaded index is functional.
-	results := ix.Search("ValidateUser", 3)
+	results := searchResultsOf(ix, "ValidateUser", 3)
 	if len(results) == 0 || !strings.Contains(results[0].Chunk.File, "main.go") {
 		t.Errorf("loaded index returned unexpected results: %v", results)
 	}
@@ -159,7 +159,7 @@ func TestRun_ValidExplicitPrebuiltIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildEmbeddedIndex: %v\n--log--\n%s", err, logBuf.String())
 	}
-	if ix == nil || ix.Len() == 0 {
+	if ix == nil || ix.ChunkCount() == 0 {
 		t.Fatalf("index is nil or empty")
 	}
 	log := logBuf.String()
@@ -194,7 +194,7 @@ func TestRun_CorruptPrebuiltIndex_FallsBackWithWarning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildEmbeddedIndex: %v\n--log--\n%s", err, logBuf.String())
 	}
-	if ix == nil || ix.Len() == 0 {
+	if ix == nil || ix.ChunkCount() == 0 {
 		t.Fatalf("index is nil or empty — fallback didn't run?")
 	}
 	low := strings.ToLower(logBuf.String())
@@ -204,7 +204,7 @@ func TestRun_CorruptPrebuiltIndex_FallsBackWithWarning(t *testing.T) {
 		}
 	}
 	// Confirm the index actually works post-fallback.
-	results := ix.Search("ValidateUser", 3)
+	results := searchResultsOf(ix, "ValidateUser", 3)
 	if len(results) == 0 {
 		t.Errorf("fallback index has no results for ValidateUser")
 	}
@@ -290,7 +290,7 @@ func TestRun_ChunkerMismatch_FallsBackWithWarning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildEmbeddedIndex: %v\n--log--\n%s", err, logBuf.String())
 	}
-	if ix == nil || ix.Len() == 0 {
+	if ix == nil || ix.ChunkCount() == 0 {
 		t.Fatalf("index is nil or empty — fallback didn't run?")
 	}
 	if !strings.Contains(logBuf.String(), "failed to load pre-built") {
