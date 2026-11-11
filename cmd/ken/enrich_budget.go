@@ -13,7 +13,7 @@ import (
 // budget `ken index` / `ken search` / `ken bench` / `ken perf` apply when
 // the operator hasn't set KEN_ENRICH_FILE_BUDGET_MS. 4x ken-mcp's 500ms
 // live-server default (defaultServerEnrichBudgetMS in
-// cmd/ken-mcp/enrich_budget.go) — these commands tolerate more per-file
+// cmd/ken-mcp/internal/server/enrich_budget.go) — these commands tolerate more per-file
 // latency than an interactive server, but still shouldn't be unbounded.
 //
 // Motivated by a real-corpus survey (see
@@ -36,7 +36,7 @@ const defaultCLIEnrichBudgetMS = 2000
 // file's structural enrichment silently skipped" instead of looking like a
 // hang (the exact user-facing symptom the C# grammar fix, v1.5.1, was
 // titled after). Idempotent; safe to call once per process before the first
-// index build. Mirrors cmd/ken-mcp/enrich_budget.go's setupEnrichBudget —
+// index build. Mirrors cmd/ken-mcp/internal/server/enrich_budget.go's SetupEnrichBudget —
 // same mechanism, CLI-appropriate default and a plain stderr line instead of
 // a leveled logger (this binary has none).
 func setupEnrichBudget() {

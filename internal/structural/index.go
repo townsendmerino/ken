@@ -460,7 +460,7 @@ var (
 // healthy ~67 ms file balloons toward the budget. So the deterministic build
 // path (BuildAndSerializeIndex / golden / parity) leaves it off; ken-mcp — the
 // live server, which needs cliff-resilience, not cross-run byte-identity —
-// defaults it to 500 ms (cmd/ken-mcp/main.go). This history is exactly why the
+// defaults it to 500 ms (cmd/ken-mcp/internal/server/enrich_budget.go). This history is exactly why the
 // earlier fixed 1 s budget was removed; the difference now is (a) the
 // ParseStopReason guard turns a timeout into a clean skip, not a corrupt
 // partial-tree label, and (b) off-by-default keeps the deterministic path
