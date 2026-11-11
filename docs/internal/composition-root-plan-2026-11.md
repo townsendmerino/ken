@@ -308,6 +308,23 @@ which is option (a). The routes that do preserve every binary's output:
 
 This needs a decision before slice 2a, not before the cmd/ken slices.
 
+## Baseline (slice 0)
+
+Recorded on `main` at `87eca6f`, 2026-11-10, before any slice. Semble set, 63
+repos, 1,251 queries, shipped defaults, parse budget off.
+
+| | overall | NL | symbol |
+|---|--:|--:|--:|
+| BM25-only recall@10 (`TestRecallDecomp_BM25Baseline`) | 0.840 | 0.831 | 0.892 |
+| Hybrid recall@10 (`TestRecallDecomp`) | 0.974 | 0.970 | 0.995 |
+
+Hybrid NDCG@10 (`bench/semble/run_ken.py --mode hybrid`): **0.8436**
+(0.843619 unrounded).
+
+The before/after comparison is `tools/compare-binaries/compare.py`. `main`
+against itself: `ken` identical in 29 of 30 settings plus the timing-dependent
+one, `ken-mcp` identical in all 30.
+
 ## Inferred, not verified
 
 - That `Open` with `Watch: false` matches `FromFSWithOptions` for every
