@@ -37,15 +37,15 @@ func TestRepoBuilder_Build_LocalBM25(t *testing.T) {
 		t.Errorf("local-path build should have nil cleanup (no temp clone to reap)")
 		cleanup()
 	}
-	if bundle == nil || bundle.Index == nil {
+	if bundle == nil || bundle.Workspace == nil {
 		t.Fatal("Build returned a nil bundle/index")
 	}
-	defer func() { _ = bundle.Index.Close() }()
-	if bundle.Index.Len() == 0 {
+	defer func() { _ = bundle.Workspace.Close() }()
+	if bundle.Workspace.ChunkCount() == 0 {
 		t.Errorf("built index is empty")
 	}
-	if bundle.Structural == nil {
-		t.Errorf("a live build's bundle should take its structural index from the engine Workspace")
+	if bundle.Index != nil || bundle.Structural != nil || bundle.StructuralBuilder != nil {
+		t.Errorf("a ken-mcp bundle is its Workspace; the legacy fields should be unset")
 	}
 }
 
@@ -71,7 +71,7 @@ func TestRepoBuilder_Build_StructuralFollowsEdits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	defer func() { _ = bundle.Structural.Close() }()
+	defer func() { _ = bundle.Workspace.Close() }()
 
 	line := func() int {
 		sidx := bundle.StructuralIndex(ctx)
@@ -124,8 +124,8 @@ func TestRepoBuilder_Build_ReappliesDBExtrasForDefaultRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build(default): %v", err)
 	}
-	defer func() { _ = bundle.Index.Close() }()
-	withExtras := bundle.Index.Len()
+	defer func() { _ = bundle.Workspace.Close() }()
+	withExtras := bundle.Workspace.ChunkCount()
 
 	// A different source ⇒ extras NOT applied, so a strictly smaller corpus.
 	other := writeCorpus(t)
@@ -140,8 +140,8 @@ func TestRepoBuilder_Build_ReappliesDBExtrasForDefaultRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build(other): %v", err)
 	}
-	defer func() { _ = bundle2.Index.Close() }()
-	withoutExtras := bundle2.Index.Len()
+	defer func() { _ = bundle2.Workspace.Close() }()
+	withoutExtras := bundle2.Workspace.ChunkCount()
 
 	if withExtras <= withoutExtras {
 		t.Errorf("default-repo build (%d chunks) should exceed non-default build (%d) by the DB extras",

@@ -49,10 +49,47 @@ type StaticOptions struct {
 	SkipGenerated   bool
 }
 
-// PrebuiltError is OpenFS's error when StaticOptions.Prebuilt cannot be
-// used: corrupt, another format version, or built with a different mode or
-// chunker. Err says which.
-type PrebuiltError struct{ Err error }
+// PrebuiltError is the error Open and OpenFS return when a pre-built index
+// cannot be used: corrupt, another format version, built with a different
+// mode or chunker (Err is then ErrPrebuiltModeMismatch or
+// ErrPrebuiltChunkerMismatch, a configuration error rather than a damaged
+// file), or, from Open, the embedding model it needs could not be loaded
+// (ModelLoad is true). Err says which.
+type PrebuiltError struct {
+	Err       error
+	ModelLoad bool
+}
+
+// Errors a PrebuiltError wraps when the index was built for a different
+// configuration; test with errors.Is.
+var (
+	ErrPrebuiltModeMismatch    = search.ErrModeMismatch
+	ErrPrebuiltChunkerMismatch = search.ErrChunkerMismatch
+)
+
+// loadPrebuilt is Open's pre-built path: load the model the index needs,
+// deserialize, and wrap the result as a frozen watched index rooted at
+// root.
+func loadPrebuilt(data []byte, root string, mode Mode, modeStr, chunker, modelDir string, opts Options) (*search.WatchedIndex, error) {
+	var model *embed.StaticModel
+	if mode != ModeBM25 {
+		m, err := search.LoadModelDir(modelDir, opts.MmapModel)
+		if err != nil {
+			return nil, &PrebuiltError{Err: err, ModelLoad: true}
+		}
+		model = m
+	}
+	ix, err := search.LoadSerializedIndex(data, search.LoadOptions{
+		ExpectedMode:    modeStr,
+		ExpectedChunker: chunker,
+		Model:           model,
+		DenseRetriever:  opts.DenseRetriever,
+	})
+	if err != nil {
+		return nil, &PrebuiltError{Err: err}
+	}
+	return search.WrapStatic(ix, root, mode, chunker), nil
+}
 
 // Error implements error.
 func (e *PrebuiltError) Error() string { return "engine: pre-built index: " + e.Err.Error() }

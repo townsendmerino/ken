@@ -24,7 +24,9 @@ func runKenMCPExpectExit(t *testing.T, wantCode int, env ...string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binPath)
-	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}, env...)
+	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"),
+		"KEN_NO_USAGE_STATS=1"}, // keep test searches out of the real ~/.ken/savings.jsonl
+		env...)
 	var stderr safeBuf
 	cmd.Stderr = &stderr
 	err := cmd.Run()
@@ -135,6 +137,7 @@ func TestHTTP_Binary_ServesAuthedSession(t *testing.T) {
 		"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"),
 		"KEN_MCP_TRANSPORT=http", "KEN_MCP_ADDR=" + addr, "KEN_MCP_AUTH_TOKEN=" + token,
 		"KEN_MCP_MODE=bm25", "KEN_MCP_CHUNKER=regex", "KEN_MCP_LOG_LEVEL=error",
+		"KEN_NO_USAGE_STATS=1", // keep test searches out of the real ~/.ken/savings.jsonl
 		"KEN_MCP_SNAPSHOT=0", "KEN_MCP_DEFAULT_REPO=" + fixture,
 	}
 	var stderr safeBuf

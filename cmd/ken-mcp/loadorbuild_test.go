@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/search"
 
 	_ "github.com/townsendmerino/aikit/chunk/regex"
@@ -47,12 +48,12 @@ func bakePrebuilt(t *testing.T, dir, chunker string) {
 // No pre-built index → live build with the watcher (original behavior).
 func TestLoadOrBuild_NoPrebuilt_LiveBuilds(t *testing.T) {
 	dir := writeCorpus(t)
-	wi, _, _, err := loadOrBuildWatched(context.Background(), dir, search.ModeBM25, "bm25", "regex", "", search.FSOptions{}, false, quietLogger())
+	wi, err := openWorkspace(context.Background(), dir, engine.Options{Mode: "bm25", Chunker: "regex", Watch: true}, quietLogger())
 	if err != nil {
-		t.Fatalf("loadOrBuildWatched: %v", err)
+		t.Fatalf("openWorkspace: %v", err)
 	}
 	defer func() { _ = wi.Close() }()
-	if wi.Len() == 0 {
+	if wi.ChunkCount() == 0 {
 		t.Errorf("live build produced an empty index")
 	}
 }
@@ -61,12 +62,12 @@ func TestLoadOrBuild_NoPrebuilt_LiveBuilds(t *testing.T) {
 func TestLoadOrBuild_Prebuilt_Matching_Loads(t *testing.T) {
 	dir := writeCorpus(t)
 	bakePrebuilt(t, dir, "regex")
-	wi, _, _, err := loadOrBuildWatched(context.Background(), dir, search.ModeBM25, "bm25", "regex", "", search.FSOptions{}, false, quietLogger())
+	wi, err := openWorkspace(context.Background(), dir, engine.Options{Mode: "bm25", Chunker: "regex", Watch: true}, quietLogger())
 	if err != nil {
-		t.Fatalf("loadOrBuildWatched: %v", err)
+		t.Fatalf("openWorkspace: %v", err)
 	}
 	defer func() { _ = wi.Close() }()
-	if wi.Len() == 0 {
+	if wi.ChunkCount() == 0 {
 		t.Errorf("loaded pre-built index is empty")
 	}
 }
@@ -78,7 +79,7 @@ func TestLoadOrBuild_Prebuilt_ChunkerMismatch_Errors(t *testing.T) {
 	dir := writeCorpus(t)
 	bakePrebuilt(t, dir, "regex") // index built with regex...
 	// ...server configured for treesitter.
-	_, _, _, err := loadOrBuildWatched(context.Background(), dir, search.ModeBM25, "bm25", "treesitter", "", search.FSOptions{}, false, quietLogger())
+	_, err := openWorkspace(context.Background(), dir, engine.Options{Mode: "bm25", Chunker: "treesitter", Watch: true}, quietLogger())
 	if err == nil {
 		t.Fatal("expected a hard error on chunker mismatch, got nil")
 	}

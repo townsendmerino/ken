@@ -43,7 +43,7 @@ graph LR
     end
     ken --> engine & status & envcfg
     ken -. "bench / perf only<br/>(cmd/ken/internal/measure)" .-> search
-    kenmcp --> engine & mcppkg & mcpdb & search & structural & envcfg
+    kenmcp --> engine & mcppkg & mcpdb & envcfg
     embedded --> mcppkg
     engine --> search & structural & repo
     mcppkg --> engine & status & mcplog & envcfg

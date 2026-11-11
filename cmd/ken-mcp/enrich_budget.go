@@ -3,8 +3,8 @@ package main
 import (
 	"time"
 
+	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/envcfg"
-	"github.com/townsendmerino/ken/internal/structural"
 	kenmcp "github.com/townsendmerino/ken/mcp"
 )
 
@@ -20,7 +20,7 @@ import (
 const defaultServerEnrichBudgetMS = 500
 
 // setupEnrichBudget applies the server-side per-file parse budget: read the
-// env knob (defaulting it when unset), hand it to internal/structural, and route budget-exhaustion skips to the leveled stderr
+// env knob (defaulting it when unset), hand it to engine, and route budget-exhaustion skips to the leveled stderr
 // logger (never stdout — the JSON-RPC channel). Server-only; the library / CLI
 // layers stay at the disabled default. Must run before the first index build so
 // the lazily-created gotreesitter pools observe the budget.
@@ -34,14 +34,13 @@ func setupEnrichBudget(logger *kenmcp.Logger) {
 	} else {
 		logger.Logf(kenmcp.LogDebug, "enrichment: honoring KEN_ENRICH_FILE_BUDGET_MS=%s from env", envcfg.EnrichFileBudgetRaw())
 	}
-	structural.SetParseBudget(time.Duration(micros) * time.Microsecond)
+	engine.SetEnrichFileBudget(time.Duration(micros) * time.Microsecond)
 
-	structural.SetParseBudgetLogf(func(path string, d time.Duration) {
+	engine.SetEnrichFileBudgetLog(func(path string, d time.Duration) {
 		logger.Logf(kenmcp.LogWarn,
 			"enrichment parse budget exceeded for %s (%v) — skipping enrichment for this file (pathological/template-like input; results are unaffected, just unenriched)",
 			path, d)
-	})
-	structural.SetParseBudgetReachedLogf(func(path string, d time.Duration) {
+	}, func(path string, d time.Duration) {
 		logger.Logf(kenmcp.LogWarn,
 			"enrichment parse budget reached for %s (%v) — the file is enriched from a parse that was cut short, so its label can differ between runs (raise KEN_ENRICH_FILE_BUDGET_MS, or 0 to disable the budget)",
 			path, d)

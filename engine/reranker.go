@@ -21,10 +21,61 @@ type NeuralReranker struct {
 	dim int
 }
 
+// DefaultRerankCacheSize is how many document vectors a NeuralReranker's
+// cache holds unless NewNeuralRerankerSized says otherwise.
+const DefaultRerankCacheSize = search.DefaultRerankerCacheSize
+
 // NewNeuralReranker wraps an encoder model the caller loaded (aikit's
-// encoder.Load or encoder.LoadQ8).
+// encoder.Load or encoder.LoadQ8), with the default cache size.
 func NewNeuralReranker(model encoder.Encoder) *NeuralReranker {
 	return &NeuralReranker{r: search.NewNeuralReranker(model), dim: model.HiddenDim()}
+}
+
+// NewNeuralRerankerSized is NewNeuralReranker with an explicit
+// document-vector cache size; 0 disables the cache.
+func NewNeuralRerankerSized(model encoder.Encoder, cacheSize int) *NeuralReranker {
+	return &NeuralReranker{r: search.NewNeuralReranker(model, search.WithCacheSize(cacheSize)), dim: model.HiddenDim()}
+}
+
+// LazyReranker defers loading a NeuralReranker until the first query that
+// needs it, so a server that rarely reranks does not pay the model load at
+// startup. If the load fails, every rerank call passes the stage-1 ranking
+// through unchanged (the query is served as plain hybrid). Attach it with
+// Workspace.SetReranker, like a NeuralReranker.
+type LazyReranker struct {
+	lr *search.LazyReranker
+}
+
+// NewLazyReranker returns a LazyReranker that calls load once, on first
+// use. load must be safe to call from any goroutine.
+func NewLazyReranker(load func() (*NeuralReranker, error)) *LazyReranker {
+	return &LazyReranker{lr: search.NewLazyReranker(func() (search.Reranker, error) {
+		r, err := load()
+		if err != nil || r == nil {
+			return nil, err // an untyped nil, so the pipeline sees "no reranker"
+		}
+		return r, nil
+	})}
+}
+
+// Rerank implements Reranker.
+func (l *LazyReranker) Rerank(query string, cands []chunk.Chunk) []float64 {
+	return l.lr.Rerank(query, cands)
+}
+
+// RerankWithTelemetry is Rerank that also fills t's reranker timings.
+func (l *LazyReranker) RerankWithTelemetry(query string, cands []chunk.Chunk, t *Telemetry) []float64 {
+	return l.lr.RerankWithTelemetry(query, cands, t)
+}
+
+// Loaded reports whether the load has been attempted.
+func (l *LazyReranker) Loaded() bool { return l.lr.Loaded() }
+
+// Inner returns the loaded reranker, or nil if it has not loaded or the
+// load failed.
+func (l *LazyReranker) Inner() *NeuralReranker {
+	nr, _ := l.lr.Inner().(*NeuralReranker)
+	return nr
 }
 
 // Rerank implements Reranker.

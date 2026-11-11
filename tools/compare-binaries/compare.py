@@ -20,9 +20,11 @@ What is compared, per environment setting, in bm25 and hybrid mode:
   ken      search (text and --json, several queries, plus error cases and
            other chunkers), index --no-watch, bench, build-index (hash of the file), index --write-snapshot
            (hash of snapshot.bin), status, status --json, doctor
-  ken-mcp  over JSON-RPC on stdio: search (markdown and JSON), find_related,
-           definition / callers / references / outline / symbols, status
-           (markdown and JSON), and the hash of the snapshot it writes
+  ken-mcp  over JSON-RPC on stdio, building live and serving a pre-built
+           index: search (markdown and JSON), find_related, definition /
+           callers / references / outline / symbols, status (markdown and
+           JSON), the hash of the snapshot it writes, and its stderr log at
+           info level (sorted, timestamps removed)
   runbin   the mcp.Run test server (tools/compare-binaries/runbin), when both
            directories hold one: search, find_related and status over a live
            build, over a pre-built index, and with DB chunks from a SQLite
@@ -219,13 +221,33 @@ class Runner:
 
     def mcp_all(self, extra):
         out = []
-        for mode in ["bm25", "hybrid"]:
+        variants = [("bm25", "live"), ("hybrid", "live"), ("bm25", "prebuilt"), ("hybrid", "prebuilt")]
+        rerank_cache = os.path.join(self.work, "rerank-cache.bin")
+        if self.rerank and not extra:
+            # The neural reranker, once with no cache file and once with the
+            # file the first session saved. Only under the default settings:
+            # the reranker reads none of the KEN_* variables varied here.
+            variants += [("hybrid-rerank", "rerank-cold"), ("hybrid-rerank", "rerank-warm")]
+            if os.path.exists(rerank_cache):
+                os.remove(rerank_cache)
+        for mode, variant in variants:
             c = self.fresh()
+            model = os.path.join(self.home, ".ken", "model")
             env = self.env({"KEN_MCP_DEFAULT_REPO": c, "KEN_MCP_MODE": mode, "KEN_MCP_SNAPSHOT": "1",
-                            "KEN_MCP_AUTO_FETCH": "0", "KEN_MCP_LOG_LEVEL": "error",
-                            "KEN_MCP_MODEL_DIR": os.path.join(self.home, ".ken", "model")})
+                            "KEN_MCP_AUTO_FETCH": "0", "KEN_MCP_LOG_LEVEL": "info",
+                            "KEN_MCP_MODEL_DIR": model})
             env.update(extra)
-            p = subprocess.Popen([self.kenmcp], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True)
+            if variant.startswith("rerank"):
+                env.update({"KEN_MCP_RERANK": "1", "KEN_MCP_RERANK_MODEL_DIR": self.rerank, "KEN_MCP_RERANK_CACHE": rerank_cache})
+            if variant == "prebuilt":
+                # An operator-supplied frozen index (ADR-024), which ken-mcp
+                # serves instead of building and watching.
+                os.makedirs(os.path.join(c, ".ken"))
+                out.append("## %s prebuilt build-index\n%s" % (mode, self.run(
+                    [self.ken, "build-index", c, "-o", os.path.join(c, ".ken", "index.bin"), "--mode", mode, "--model", model], extra)))
+            mode = "%s %s" % (mode, variant)
+            errlog = open(os.path.join(self.work, "mcp-stderr.txt"), "w+")
+            p = subprocess.Popen([self.kenmcp], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errlog, env=env, text=True)
             n = [0]
 
             def call(method, params, notify=False):
@@ -240,7 +262,7 @@ class Runner:
                 while True:
                     line = p.stdout.readline()
                     if not line:
-                        return {"error": "EOF: " + p.stderr.read()[-1500:]}
+                        return {"error": "EOF (see the stderr section)"}
                     r = json.loads(line)
                     if r.get("id") == n[0]:
                         return r
@@ -277,8 +299,18 @@ class Runner:
             except subprocess.TimeoutExpired:
                 p.kill()
             out.append("## %s snapshot.bin sha=%s key=%s" % (mode, sha(os.path.join(c, ".ken", "snapshot.bin")), snapshot_key(c)))
+            if variant.startswith("rerank"):
+                out.append("## %s rerank cache sha=%s" % (mode, sha(rerank_cache)))
+            # The server's log, at info level: which lines it writes is the
+            # effect of KEN_MCP_LOG_LEVEL and of every startup decision. Lines
+            # are sorted, because goroutines interleave them differently from
+            # run to run; each line's own timestamp is removed.
+            errlog.seek(0)
+            lines = [re.sub(r"^ken-mcp \d{4}/\d\d/\d\d \d\d:\d\d:\d\d\.\d+ ", "ken-mcp ", l.rstrip("\n")) for l in errlog]
+            errlog.close()
+            out.append("## %s stderr (sorted)\n%s" % (mode, "\n".join(sorted(lines))))
             out = [normalize(x, c) for x in out]
-        return "\n".join(out)
+        return "\n".join(out).replace(os.path.realpath(self.work), "<WORK>").replace(self.work, "<WORK>")
 
 
 def rpc_session(argv, env):
@@ -423,6 +455,8 @@ def main():
     ap.add_argument("--ignore-status-key", action="append", default=[], help="JSON key to drop from status output (repeatable)")
     ap.add_argument("--only", choices=["ken", "ken-mcp", "runbin"], help="compare just one binary")
     ap.add_argument("--model", help="absolute path of the embedding model directory (hybrid cases need it)")
+    ap.add_argument("--rerank-model", help="absolute path of the neural reranker model directory; adds two ken-mcp sessions "
+                    "with KEN_MCP_RERANK=1 (cold cache, then warm) under the default settings")
     ap.add_argument("--show", type=int, default=6, help="diff lines to print per differing setting")
     ap.add_argument("--keep", help="write each setting's full old/new output under this directory")
     args = ap.parse_args()
@@ -441,6 +475,7 @@ def main():
     runners = {t: Runner(getattr(args, t), os.path.join(work, t), home, keys) for t in ["old", "new"]}
     for r in runners.values():
         os.makedirs(r.work)
+        r.rerank = args.rerank_model if args.rerank_model and os.path.isdir(args.rerank_model) else None
     t0 = time.time()
     totals = {}
     have_runbin = all(os.path.exists(r.runbin) for r in runners.values())
