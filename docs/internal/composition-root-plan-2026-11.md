@@ -439,9 +439,18 @@ Left open:
 - `ken-mcp`'s late environment reads (`KEN_DB_*`, rerank telemetry, usage
   stats, shutdown grace) are outside `server.Config`; moving them reorders
   invalid-value warnings in the log.
-- Hybrid search with DB chunks under `mcp.Run` showed a fifth-digit score
-  difference about once in 500 sessions, on a build compared with itself.
-  Not traced.
+- Hybrid search with DB chunks is not repeatable across a minute
+  boundary. Traced 2026-11-10: every DB chunk's text starts with
+  `-- indexed at <UTC minute> from <host>` (`internal/db.freshnessHeader`),
+  and that line is tokenized and embedded with the rest. With only the
+  minute varied over 180 consecutive minutes, four digit-free queries gave
+  33 distinct hybrid score sets (163 minute-to-minute changes), and one
+  score set in BM25 and in semantic mode. In live sessions a new output
+  appeared at exactly 21:27:00 and 21:28:00. The race detector reported
+  nothing in 200 sessions, so it is not a data race or an order-dependent
+  sum. It applies to `ken-mcp` with `KEN_DB_DSN` as much as to `mcp.Run`.
+  Not changed: keeping the line out of the indexed text is a ranking
+  change.
 
 ## Inferred, not verified
 

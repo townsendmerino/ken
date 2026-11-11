@@ -56,9 +56,13 @@ binary. Comparing a build against itself should print 29 identical plus that
 one for each of `ken`, `ken-mcp` and `runbin`, in about five minutes.
 
 A setting that differs is run once more; if the builds agree on the retry it
-is reported as `flaky` rather than `DIFF`. Hybrid search with DB chunks has
-shown a fifth-digit score difference about once in 500 sessions, on a build
-compared with itself.
+is reported as `flaky` rather than `DIFF`. The known source is hybrid search
+with DB chunks: every DB chunk's text starts with `-- indexed at <UTC time,
+to the minute> from <host>`, that line is indexed and embedded with the rest,
+and so hybrid scores shift slightly when the minute changes. If the old and
+new builds run their DB session on either side of a minute boundary they
+differ in the fifth digit of some scores, while this script, which replaces
+timestamps with `<TS>`, shows identical text. BM25 scores do not move.
 
 `ken perf` is not compared: its output is timings. In the DB variant the
 harness waits until the DB chunks are being served before its first compared
