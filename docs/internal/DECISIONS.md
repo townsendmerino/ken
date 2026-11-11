@@ -65,6 +65,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-055](#adr-055-minified-files-are-skipped-by-default-retroactive) | Minified files are skipped by default (retroactive) | Accepted |
 | [ADR-056](#adr-056-markdown-files-use-the-markdown-chunker-by-default-retroactive) | Markdown files use the markdown chunker by default (retroactive) | Accepted |
 | [ADR-057](#adr-057-mcp-works-through-engine-superseding-adr-048s-rejection) | `mcp` works through `engine` (superseding ADR-048's rejection) | Accepted |
+| [ADR-058](#adr-058-a-db-chunks-freshness-header-is-shown-not-indexed) | A DB chunk's freshness header is shown, not indexed | Accepted |
 
 ---
 
@@ -3109,3 +3110,40 @@ The objection was to the size and shape of what `mcp.Run` users link. `engine` a
 - **Unaffected:** `ken-mcp` and `cmd/ken-mcp-docs`, which already linked the chunker (identical in all 30 settings), and any pre-built index, which was chunked when it was built (identical in every setting).
 - New best-effort engine API serves the handlers: `Result`, `ModeNames`, `SearchResults`, `FindRelatedResults`, `CurrentMode`, `Warming`, `IndexStatus`, `StructuralStatus`, `StructuralPending`, `OutlineOfFile`, `StructuralFilesUnder`, `EnrichFileBudgetCounts`, `NormalizePath`, `StripLabel`, `StructuralSource`, `WrapIndex`, `ErrWrappedIndex`.
 - `mcp.Run` itself still builds its own index until the next slice moves it onto a Workspace.
+
+---
+
+## ADR-058: A DB chunk's freshness header is shown, not indexed
+
+**Status:** Accepted (Francis, 2026-11-10). A ranking change for corpora with live-database chunks.
+**Date:** 2026-11-10
+
+### Context
+Every chunk from live database introspection (`KEN_DB_DSN`, `mcp/db`) starts with a freshness header: `-- indexed at 2026-08-15T14:23Z from postgres@dev-pg.local` (`internal/db.freshnessHeader`, ADR-017). It tells the reader when the schema was read and from where.
+
+The header was part of `Chunk.Text`, so it was tokenized for BM25 and embedded with the rest. Its time is to the minute, so a DB chunk's embedding changed every minute, and its BM25 tokens every hour (the tokenizer keeps `t21` and `21` from `T21:27Z`). In hybrid mode that moved scores across the whole corpus: the same query over the same schema returned different scores from one minute to the next.
+
+It was found as a before/after comparison that differed "about once in 500 sessions" in the fifth digit of some hybrid scores. The comparison script replaces timestamps, so the text looked identical. Measured on the comparison fixture (36 code and markdown chunks plus two table chunks), with only the header's minute varied over 180 consecutive minutes and four queries with no digits in them:
+
+| mode | distinct score sets before | after |
+|---|--:|--:|
+| BM25 | 1 | 1 |
+| semantic | 1 | 1 |
+| hybrid | 33 (163 minute-to-minute changes) | 1 |
+
+In live sessions a new output appeared at exactly 21:27:00 and 21:28:00. The race detector reported nothing in 200 sessions: it was never a data race or an order-dependent sum.
+
+### Decision
+The freshness header stays in `Chunk.Text`, so every result still shows it, and is left out of the text that is tokenized and embedded. `internal/search.indexText` returns a chunk's text without a leading freshness header when the chunk's file starts with `db://`; every tokenize and encode call (BM25, the dense arm, `find_related`'s source vector, the neural reranker and its cache key) uses it. A file on disk that happens to start with the same line keeps it.
+
+### Consequences
+- **Hybrid results over a database-backed corpus are repeatable**, and the reranker's cache now hits for DB chunks across minutes (its key was the text, header included).
+- **Scores change for corpora with DB chunks.** On the fixture, at one fixed time:
+  - BM25: every score shifts in the third decimal, because the DB chunks are shorter and the average length moves; order unchanged. A DB chunk scores higher for its own content (`customers email`: 9.58 to 9.98).
+  - Semantic: a DB chunk scores higher for its own content (`customers email`: cosine 0.436 to 0.517; `invoices total`: 0.405 to 0.461). Its vector is a different one, so it also moves in the tail of unrelated queries: up to rank 7 for `widget` (0.152), down from ranks 6 and 7 to rank 8 for `rollback procedure notes`.
+  - Hybrid: ranks 1 to 4 are unchanged for every content query. One tail swap: for `widget`, the customers table and `Service.java` exchange ranks 5 and 6.
+- Across the before/after comparison's DB sessions (30 environment settings, BM25 and hybrid, 673 result lists): 629 keep their order and 669 keep their top three. The four top-three changes are the same tail swap on corpora cut down to a few chunks by a walk limit, where the customers table and `Service.java` exchange ranks 2 and 3 for `widget` behind the one real hit (three settings), and one in the wall-clock parse-budget setting, which differs between runs anyway. `find_related` from `store.go` no longer lists the customers table at rank 5 (cosine 0.169 with the header).
+- **The header's words no longer match.** A query for `indexed`, for the hour token, or for the engine and host named in the header (`sqlite`, `postgres`, `dev-pg`) no longer finds DB chunks through that line. The file path `db://<engine>@<host>/<object>` still names them and is shown, but paths are not indexed text. This is the intended effect, and the one a user could notice.
+- Corpora without DB chunks are untouched: the semble benchmark is identical, and every non-DB output in the before/after comparison is identical.
+- `internal/db`'s `TestIndexTextDropsWhatDBEmits` fails if the header's format and the pattern `indexText` removes drift apart.
+

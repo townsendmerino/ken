@@ -15,6 +15,10 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Changed
+
+- **A database chunk's freshness header is shown but no longer indexed (ADR-058). This changes ranking for corpora with live-database chunks (`KEN_DB_DSN`, `mcp/db`).** Every such chunk starts with `-- indexed at <UTC time, to the minute> from <engine>@<host>`. That line was tokenized and embedded with the rest, so a DB chunk's embedding changed every minute and hybrid scores across the whole corpus moved with it: the same query over the same schema gave 33 different score sets in 180 minutes on a small corpus. The line is still in every result; it is left out of BM25, the dense arm and the reranker. Results are now repeatable. DB chunks score a little higher for their own content, other chunks' scores shift slightly, and a query for the header's own words (the engine or host name, `indexed`) no longer matches DB chunks through that line. Corpora without DB chunks are unaffected.
+
 ## [1.15.0] — 2026-11-10 — one composition root: the CLI, `ken-mcp` and `mcp` work through `engine.Workspace`
 
 `engine` is now the one place that assembles the search pipeline. `ken`, `ken-mcp` and the `mcp` package build, load and query through `engine.Workspace`, and tests keep it that way. The `ken` and `ken-mcp` binaries return the same tool output as 1.14.0: old and new builds were compared across 30 environment settings in both modes, and the semble benchmark figures are identical.

@@ -586,7 +586,7 @@ func walkAndChunkFSWithModel(ctx context.Context, fsys fs.FS, mode Mode, chunker
 				if model != nil && !opts.StagedEmbedding {
 					localVecs = make([][]float32, len(cs))
 					for i, c := range cs {
-						localVecs[i] = encodeCached(opts.EmbedCache, model, c.Text)
+						localVecs[i] = encodeCached(opts.EmbedCache, model, indexText(c))
 					}
 				}
 				results[j.idx] = fileResult{chunks: cs, vecs: localVecs}
@@ -667,7 +667,7 @@ feedLoop:
 				// Also route through encodeCached so folded chunks aren't
 				// silently excluded from the embed cache.
 				if model != nil && !opts.StagedEmbedding {
-					vecs = append(vecs, encodeCached(opts.EmbedCache, model, c.Text))
+					vecs = append(vecs, encodeCached(opts.EmbedCache, model, indexText(c)))
 				}
 			}
 		}
@@ -869,7 +869,7 @@ func tokenizeDocs(chunks []chunk.Chunk, cache *tokenCache) [][]string {
 		if chunks[i].Tombstoned {
 			continue
 		}
-		hashes[i] = hashText64(chunks[i].Text)
+		hashes[i] = hashText64(indexText(chunks[i]))
 		if toks, ok := cache.byHash[hashes[i]]; ok {
 			docs[i] = toks
 			next[hashes[i]] = toks
@@ -897,7 +897,7 @@ func parallelTokenize(chunks []chunk.Chunk, docs [][]string, idxs []int) {
 	workers := min(runtime.NumCPU(), n)
 	if workers <= 1 || n < 64 {
 		for _, i := range idxs {
-			docs[i] = bm25.Tokenize(chunks[i].Text)
+			docs[i] = bm25.Tokenize(indexText(chunks[i]))
 		}
 		return
 	}
@@ -913,7 +913,7 @@ func parallelTokenize(chunks []chunk.Chunk, docs [][]string, idxs []int) {
 					return
 				}
 				i := idxs[k]
-				docs[i] = bm25.Tokenize(chunks[i].Text)
+				docs[i] = bm25.Tokenize(indexText(chunks[i]))
 			}
 		}()
 	}
@@ -981,7 +981,7 @@ func (ix *Index) WithExtraChunks(extras []chunk.Chunk) (*Index, error) {
 		}
 		extraVecs := make([][]float32, len(extras))
 		for i, c := range extras {
-			extraVecs[i] = encodeChunkText(ix.model, c.Text)
+			extraVecs[i] = encodeChunkText(ix.model, indexText(c))
 		}
 		mergedVecs = make([][]float32, 0, len(baseVecs)+len(extras))
 		mergedVecs = append(mergedVecs, baseVecs...)
@@ -1094,7 +1094,7 @@ func recomputeVecsFromChunks(chunks []chunk.Chunk, model *embed.StaticModel) [][
 	}
 	vecs := make([][]float32, len(chunks))
 	for i, c := range chunks {
-		vecs[i] = encodeChunkText(model, c.Text)
+		vecs[i] = encodeChunkText(model, indexText(c))
 	}
 	return vecs
 }
@@ -1150,7 +1150,7 @@ func (ix *Index) FindRelated(filePath string, line, k int) ([]Result, error) {
 	// still hits k. Cheap: tombstone count is len(slice)-aligned and
 	// flat.Query's cost is linear in vecs anyway.
 	overFetch := k + 1 + ix.tombstoneCount()
-	hits := ix.flat.Query(ix.model.Encode(src.Text), overFetch)
+	hits := ix.flat.Query(ix.model.Encode(indexText(*src)), overFetch)
 	out := make([]Result, 0, k)
 	for _, h := range hits {
 		c := ix.chunks[h.Index]
