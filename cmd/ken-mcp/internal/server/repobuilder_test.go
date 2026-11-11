@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 
 // repoBuilder.Build was extracted from a ~15-variable closure inside main
 // specifically so it could get isolated tests like its neighbors
-// (loadOrBuildWatched, resolveStartupMode, setupReranker). These exercise the
+// (openWorkspace, resolveStartupMode, setupReranker). These exercise the
 // local-path bm25 path — no model, no network — end to end.
 
 // A local bm25 build returns a usable bundle: non-empty retrieval index, nil

@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"os"
@@ -23,13 +23,13 @@ import (
 // more frequent GC, lower steady-state heap/RSS. A deliberate server trade.
 const defaultServerGOGC = 50
 
-// setupGCHygiene applies ken-mcp's server-tuned GC policy. Both settings
+// SetupGCHygiene applies ken-mcp's server-tuned GC policy. Both settings
 // defer to explicit operator config: an existing GOGC env var is honored
 // (SetGCPercent is only called when GOGC is unset), and KEN_MEMLIMIT is a
 // convenience alias for debug.SetMemoryLimit (a soft heap limit) that, when
 // set, takes precedence over GOMEMLIMIT. GOMEMLIMIT alone is honored
 // natively by the runtime — nothing to do here.
-func setupGCHygiene(l *kenmcp.Logger) {
+func SetupGCHygiene(l *kenmcp.Logger) {
 	if os.Getenv("GOGC") == "" {
 		debug.SetGCPercent(defaultServerGOGC)
 		l.Logf(kenmcp.LogDebug, "GC: GOGC unset — applying ken-mcp server default GOGC=%d (set GOGC to override)", defaultServerGOGC)

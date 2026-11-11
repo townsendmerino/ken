@@ -386,6 +386,20 @@ one, `ken-mcp` identical in all 30.
     rewrites those two lines to the wording it always used
     (`prebuiltLogWriter`), so the log is unchanged.
 
+- **Slice 3b**: `ken-mcp`'s assembly moved to the private package
+  `cmd/ken-mcp/internal/server`. `main()` went from 439 lines to 19: it
+  registers the chunkers the binary links, then calls `RunSubcommand`,
+  `NewLogger`, `SetupGCHygiene`, `SetupEnrichBudget`, `LoadConfig` and
+  `Run`. Code moved, none rewritten.
+  - **Not in `Config`:** the `KEN_DB_*` family, `KEN_MCP_RERANK_TELEMETRY`,
+    `KEN_NO_USAGE_STATS` / `KEN_USAGE_STATS_PATH` and
+    `KEN_MCP_SHUTDOWN_GRACE` are still read where they are used, inside
+    `Run`. Reading them in `LoadConfig` would move their invalid-value
+    warning earlier in the log, which is an output change.
+  - **`Config` carries the lazy reranker**, already wired, not plain
+    values: `setupReranker` logs between its reads, and splitting it would
+    reorder those lines against the startup-mode lines.
+
 ## Inferred, not verified
 
 - That `Open` with `Watch: false` matches `FromFSWithOptions` for every

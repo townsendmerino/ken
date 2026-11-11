@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"time"
@@ -19,12 +19,12 @@ import (
 // the ken tree), so only genuinely pathological files trip it.
 const defaultServerEnrichBudgetMS = 500
 
-// setupEnrichBudget applies the server-side per-file parse budget: read the
+// SetupEnrichBudget applies the server-side per-file parse budget: read the
 // env knob (defaulting it when unset), hand it to engine, and route budget-exhaustion skips to the leveled stderr
 // logger (never stdout — the JSON-RPC channel). Server-only; the library / CLI
 // layers stay at the disabled default. Must run before the first index build so
 // the lazily-created gotreesitter pools observe the budget.
-func setupEnrichBudget(logger *kenmcp.Logger) {
+func SetupEnrichBudget(logger *kenmcp.Logger) {
 	micros, set := envcfg.EnrichFileBudgetMicros()
 	if !set {
 		micros = defaultServerEnrichBudgetMS * 1000

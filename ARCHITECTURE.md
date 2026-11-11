@@ -22,7 +22,7 @@ graph LR
     gts["gotreesitter (parser + grammars)"]
     subgraph programs ["programs"]
         ken["cmd/ken"]
-        kenmcp["cmd/ken-mcp"]
+        kenmcp["cmd/ken-mcp<br/>(assembly in internal/server)"]
         embedded["cmd/ken-mcp-docs · demos/*"]
     end
     subgraph public ["public library packages"]
@@ -94,11 +94,11 @@ flowchart TD
 
 \* `reindex_db` registers only when a DB is wired, so `tools/list` stays honest.
 
-Long-lived goroutines and who owns them: the SDK stdio loop (process lifetime); one fsnotify + one debouncer goroutine per `WatchedIndex` (owned by the Cache, shut down on eviction/close — goleak-tested); the one-shot model auto-fetch ([`cmd/ken-mcp/main.go`](cmd/ken-mcp/main.go)); the DB refresher ([`mcp/db`](mcp/db/)). The same snapshot-swap pattern recurs at the `mcp.Run` layer for DB extras: `baseIx.WithExtraChunks(extras)` rebuilds against the *original* snapshot (extras replace, never accumulate — [`mcp/run.go`](mcp/run.go)).
+Long-lived goroutines and who owns them: the SDK stdio loop (process lifetime); one fsnotify + one debouncer goroutine per `WatchedIndex` (owned by the Cache, shut down on eviction/close — goleak-tested); the one-shot model auto-fetch ([`cmd/ken-mcp/internal/server/server.go`](cmd/ken-mcp/internal/server/server.go)); the DB refresher ([`mcp/db`](mcp/db/)). The same snapshot-swap pattern recurs at the `mcp.Run` layer for DB extras: `baseIx.WithExtraChunks(extras)` rebuilds against the *original* snapshot (extras replace, never accumulate — [`mcp/run.go`](mcp/run.go)).
 
 The startup model-resolution ladder (env validation in [`internal/envcfg/`](internal/envcfg/)): explicit dir → `~/.ken/model` → auto-fetch in background, serving bm25 meanwhile. Search reads `ix.Mode()` per query, so the bm25→hybrid upgrade is invisible to clients.
 
-**Cold start (ADR-039, the v1.3 campaign — [`engine/snapshot.go`](engine/snapshot.go)).** ken-mcp no longer rebuilds from scratch every launch. It persists the built index to `<repo>/.ken/snapshot.{bin,manifest}` and, on restart, loads + drift-scans (config-key ⊕ per-file mtime/size) instead of rebuilding when the repo is unchanged, reconciling only changed files otherwise (`KEN_MCP_SNAPSHOT`, default on; distinct from the ADR-024 operator prebuilt `.ken/index.bin`, which still wins). Three opt-in serve-before-warm modes move first-query latency off a true-cold build: `KEN_MCP_STAGED` (serve BM25 instantly, embed in the background, upgrade to hybrid — responses carry `"semantic":"warming"`), `KEN_MCP_LAZY_ENRICH` (defer the Arm B tree-sitter parse), and `KEN_MCP_EMBED_CACHE` (persistent `sha256(chunk)→vector` cache so a rebuild re-embeds only new text). A per-file parse budget guards pathological files ([`cmd/ken-mcp/enrich_budget.go`](cmd/ken-mcp/enrich_budget.go)); the long-lived server also applies GC hygiene — `GOGC`/`GOMEMLIMIT` tuning + `FreeOSMemory` after builds/flushes ([`cmd/ken-mcp/gc.go`](cmd/ken-mcp/gc.go)), all binary-layer only so `internal/search` and aikit stay allocation-policy-free.
+**Cold start (ADR-039, the v1.3 campaign — [`engine/snapshot.go`](engine/snapshot.go)).** ken-mcp no longer rebuilds from scratch every launch. It persists the built index to `<repo>/.ken/snapshot.{bin,manifest}` and, on restart, loads + drift-scans (config-key ⊕ per-file mtime/size) instead of rebuilding when the repo is unchanged, reconciling only changed files otherwise (`KEN_MCP_SNAPSHOT`, default on; distinct from the ADR-024 operator prebuilt `.ken/index.bin`, which still wins). Three opt-in serve-before-warm modes move first-query latency off a true-cold build: `KEN_MCP_STAGED` (serve BM25 instantly, embed in the background, upgrade to hybrid — responses carry `"semantic":"warming"`), `KEN_MCP_LAZY_ENRICH` (defer the Arm B tree-sitter parse), and `KEN_MCP_EMBED_CACHE` (persistent `sha256(chunk)→vector` cache so a rebuild re-embeds only new text). A per-file parse budget guards pathological files ([`cmd/ken-mcp/internal/server/enrich_budget.go`](cmd/ken-mcp/internal/server/enrich_budget.go)); the long-lived server also applies GC hygiene — `GOGC`/`GOMEMLIMIT` tuning + `FreeOSMemory` after builds/flushes ([`cmd/ken-mcp/internal/server/gc.go`](cmd/ken-mcp/internal/server/gc.go)), all binary-layer only so `internal/search` and aikit stay allocation-policy-free.
 
 ## Data flow
 
@@ -149,12 +149,12 @@ Every constant and the pipeline order are pinned to semble's Python — see DESI
 | Retrieval pipeline + rerank | [`internal/search/`](internal/search/) (`hybrid.go`, `rerank.go`, `penalties.go`, `adaptive.go`) |
 | Index build, serialization, extras | [`internal/search/index.go`](internal/search/index.go), [`index_serialize.go`](internal/search/index_serialize.go) |
 | Watch mode | [`internal/search/watch.go`](internal/search/watch.go) (ADR-012) |
-| Cold start: snapshots, serve-before-warm, parse budget, GC | [`engine/snapshot.go`](engine/snapshot.go) (ADR-039); [`cmd/ken-mcp/`](cmd/ken-mcp/) (`enrich_budget.go`, `gc.go`); env: `KEN_MCP_SNAPSHOT` / `KEN_MCP_STAGED` / `KEN_MCP_LAZY_ENRICH` / `KEN_MCP_EMBED_CACHE` |
+| Cold start: snapshots, serve-before-warm, parse budget, GC | [`engine/snapshot.go`](engine/snapshot.go) (ADR-039); [`cmd/ken-mcp/internal/server/`](cmd/ken-mcp/internal/server/) (`enrich_budget.go`, `gc.go`); env: `KEN_MCP_SNAPSHOT` / `KEN_MCP_STAGED` / `KEN_MCP_LAZY_ENRICH` / `KEN_MCP_EMBED_CACHE` |
 | Walker / gitignore | [`internal/repo/`](internal/repo/) |
 | Structural extraction + enrichment + structural MCP tools | [`internal/structural/`](internal/structural/), [`mcp/structural_tools.go`](mcp/structural_tools.go) |
 | DB indexing (static SQL / live introspection; Postgres · MySQL · MariaDB · SQLite) | [`internal/sql/`](internal/sql/), [`internal/db/`](internal/db/), [`mcp/db/`](mcp/db/), [docs/db-indexing.md](docs/db-indexing.md) |
 | MCP server, cache, clone, SSRF guard | [`mcp/`](mcp/) (`server.go`, `cache.go`, `clone.go`, `run.go`) |
-| Binary wiring, env validation, auto-fetch | [`cmd/ken-mcp/`](cmd/ken-mcp/) (`main.go`) + [`internal/envcfg/`](internal/envcfg/) |
+| Binary wiring, env validation, auto-fetch | [`cmd/ken-mcp/main.go`](cmd/ken-mcp/main.go) (what the binary links) → [`cmd/ken-mcp/internal/server/`](cmd/ken-mcp/internal/server/) (`LoadConfig`, `Run`) + [`internal/envcfg/`](internal/envcfg/) |
 | Logger (`mcp.Logger` is an alias of it) | [`internal/mcplog/`](internal/mcplog/) |
 | Layering guard | [`internal/buildchecks/importrules_test.go`](internal/buildchecks/importrules_test.go) |
 | Benchmarks | [`bench/ndcg/`](bench/ndcg/), [`bench/tokens/`](bench/tokens/), [docs/BENCH.md](docs/BENCH.md) |
