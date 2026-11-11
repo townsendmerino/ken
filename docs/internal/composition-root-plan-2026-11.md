@@ -1,6 +1,6 @@
 # One composition root: design note (phase 0)
 
-**Status:** proposal, awaiting Francis's yes. No code has changed.
+**Status:** accepted with the decisions below (Francis, 2026-11-10). Slice 0 and the cmd/ken slices are approved; the mcp and cmd/ken-mcp slices wait for a report after cmd/ken.
 **Date:** 2026-11-10. **Tree:** `main` at `87eca6f` (v1.14.0 plus one docs commit).
 **From:** the 2026-11-09 architecture audit's "one composition root" item.
 
@@ -245,7 +245,7 @@ caller and a comparison.
 |---|---|---|
 | **0. Baseline** | Commit the before/after comparison harness (today it lives in a scratch directory) and record the semble recall benchmark with the parse budget off. No behavior change. | none |
 | **1a. cmd/ken: search, index, build-index, status, doctor** | engine: `SearchOptions.Telemetry`, `Hit.Label`, `Status` additions, `OpenReranker`, `BuildIndexBytes`, `Workspace.WriteSnapshot`, `InspectSnapshot`, `InspectRerankCache`, `SetEnrichFileBudgetLog`. cmd/ken's five commands move. | cmd/ken keeps `internal/search` (bench, perf remain) |
-| **1b. cmd/ken: bench and perf** | engine: `SearchOptions.Tuning`. bench moves; perf per the decision in 3.4. | cmd/ken drops `internal/search` and `internal/structural`, gains `engine` |
+| **1b. cmd/ken: bench and perf** | Both move, unchanged, into one private package under `cmd/ken` that keeps importing `internal/search` (decision 6/7). | cmd/ken drops `internal/search` and `internal/structural` and gains `engine`; the private measurement package is the table's one named exception |
 | **2a. mcp: NewServer and Cache** | engine: `WrapIndex`, the structural additions the tools need, `SearchOptions.NoArmRanks`, the markdown option from 3.2. mcp: `RepoBundle.Workspace`, handlers and the three tool files on Workspace, public signatures on engine aliases. ADR superseding ADR-048's rejection. | mcp keeps `internal/search` only for `run.go` |
 | **2b. mcp: Run** | engine: `OpenFS`, `Options.Prebuilt`, `Options.ModelFS`. `mcp.Run` moves, with the test binary from 3.3. | mcp drops `internal/search`, `internal/structural`; gains `engine` |
 | **3a. cmd/ken-mcp: stop reaching past the Workspace** | Reranker through `OpenReranker`, pre-built index through `Options.Prebuilt`, the frozen bundle's structural builder through the Workspace, DB chunks through `Workspace.SetExtraChunks`. | cmd/ken-mcp drops `internal/search`, `internal/structural` |
@@ -256,27 +256,57 @@ Each slice carries the comparison (every environment setting, both modes,
 search, find_related, the structural tools, status, index, build-index,
 snapshot hashes) and stops if an output would change.
 
-## Questions that need a decision
+## Decisions (Francis, 2026-11-10)
 
-1. **mcp's public types (3.1).** Accept that mcp's public signatures keep
-   naming the three escape-hatch alias types, as their one remaining use inside
-   ken, with `engine.WrapIndex` for third-party bundles?
-2. **Markdown registration (3.2).** (a) accept the change for third-party mcp
-   binaries, (b) move registration behind an engine option, or (c) an option
-   that keeps today's behavior for mcp, recommended.
-3. **ADR-048 (3.2).** Confirm that `mcp` importing `engine` is now wanted and
-   the earlier rejection is superseded.
-4. **ken-mcp's assembly (3.5).** Private `cmd/ken-mcp/internal/server`
-   (recommended) or a public `mcp/server`?
-5. **Auto-fetch and DB tier 2 (3.5).** Keep both out of `engine.Options`, so
-   tack links neither a downloader nor database drivers?
-6. **`ken perf` (3.4).** Engine-level timings with a one-time shift in its
-   numbers, or move it under `tools/`?
-7. **`ken bench`'s research knobs (section 2).** Expose them as
-   `SearchOptions.Tuning`, marked experimental and permanently outside the
-   stability promise?
-8. **The comparison harness (slice 0).** Commit it to the repo, and if so under
-   `tools/` or `scripts/`?
+1. **mcp's public types (3.1): yes.** mcp's public signatures name the engine
+   alias types, as their one remaining use inside ken, with `engine.WrapIndex`
+   for third-party bundles.
+2. **Markdown registration (3.2): option (c), as plumbing between mcp and
+   engine rather than a public `Options` field, if possible.** It is not
+   possible as plumbing alone; see "Open after the decisions" below.
+3. **ADR-048: superseded.** A new ADR records why `mcp` importing `engine` is
+   now wanted. It lands with slice 2a.
+4. **ken-mcp's assembly (3.5): private**, `cmd/ken-mcp/internal/server`.
+5. **Auto-fetch and DB tier 2 stay out of `engine.Options`.** tack must not
+   link a downloader or database drivers.
+6. and 7. **`ken perf` and `ken bench` are measurement harnesses** and get
+   neither timing hooks nor a public `Tuning` option. Their implementation
+   moves into one private package under `cmd/ken` that may import
+   `internal/search`, as the single named exception in the import-rules table.
+   Commands, flags and output stay exactly as they are. This replaces section
+   2's `SearchOptions.Tuning` row, the perf alternatives in 3.4 and slice 1b's
+   contents.
+8. **The comparison harness is committed under `tools/`**, in slice 0.
+
+With decision 6/7 the end state reads: `engine` is the only package outside
+`internal/` that imports `internal/search` or `internal/structural`, except
+the one private measurement package under `cmd/ken`.
+
+### Open after the decisions
+
+**Decision 2 cannot be done as plumbing.** The markdown chunker registers
+itself in its package `init`. Any binary that imports `engine` therefore has
+it registered before `main` runs, and neither `mcp` nor `internal/search` can
+tell "the binary linked it" from "engine linked it". A flag passed from mcp to
+engine could only switch markdown routing off for every mcp binary, which
+would change `ken-mcp` and `ken-mcp-docs`, or leave it on for all of them,
+which is option (a). The routes that do preserve every binary's output:
+
+- **Split engine.** The Workspace implementation moves to an internal package
+  that does not import the markdown chunker; `engine` stays the public face,
+  aliases the type and keeps the blank import. `mcp` uses the internal package,
+  so its signatures still say `*engine.Workspace` (same type) but an mcp binary
+  links the chunker only if it imports it. The import-rules table would show
+  `mcp` importing that internal package rather than `engine`, and `engine`
+  would no longer be the *only* importer of `internal/search`; the internal
+  core would be.
+- **Change aikit** so the markdown package no longer self-registers. That
+  breaks every other user of the package.
+- **Accept (a):** third-party mcp binaries that do not link the markdown
+  chunker start chunking `.md` files by heading. `ken-mcp` and `ken-mcp-docs`
+  are unaffected.
+
+This needs a decision before slice 2a, not before the cmd/ken slices.
 
 ## Inferred, not verified
 
