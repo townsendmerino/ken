@@ -22,7 +22,7 @@ pre-built binaries.
 
 ### Fixed
 
-- **`ken index --write-snapshot` records the settings the snapshot was built with.** It hard-coded "enrichment on" and omitted the dense store in the snapshot's key. Since 1.14.0 made `KEN_ENRICH` and `KEN_ANN` apply to this command, a snapshot written under `KEN_ENRICH=off` was labelled as enriched, and a `ken-mcp` running with enrichment on would have loaded it as its own. The key is now the one `ken-mcp` computes for the same settings. With both variables unset the key is unchanged.
+- **`ken index --write-snapshot` records the settings the snapshot was built with.** It hard-coded "enrichment on" and omitted the dense store in the snapshot's key. Since 1.14.0 made `KEN_ENRICH` and `KEN_ANN` apply to this command, a snapshot written under `KEN_ENRICH=off` was labelled as enriched, and a `ken-mcp` running with enrichment on would have loaded it as its own. The key is now the one `ken-mcp` computes for the same settings. **Who is affected:** a snapshot written by an earlier `ken index --write-snapshot` with `KEN_ENRICH` or `KEN_ANN` set no longer matches and is rebuilt once, on the next `ken-mcp` start or the next `--write-snapshot`. With both variables unset nothing changes: the key and the snapshot bytes are identical.
 
 ### Documentation
 
