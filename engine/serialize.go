@@ -60,6 +60,9 @@ func BuildIndexBytes(fsys fs.FS, opts BuildIndexOptions) ([]byte, error) {
 // error instead of logging it, for a caller whose whole job is to produce
 // the snapshot (`ken index --write-snapshot`).
 func (w *Workspace) WriteSnapshot() error {
+	if w.wrapped {
+		return ErrWrappedIndex
+	}
 	key := snapshotConfigKey(w.mode, w.chunker, w.index.EmbedModel(), w.modelDir, w.fsOpts)
 	return search.WriteSnapshot(w.root, w.index, key)
 }

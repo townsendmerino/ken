@@ -50,6 +50,9 @@ var ErrPathOutsideRoot = errors.New("engine: path outside the workspace root")
 // it's behind, and so does the next watcher flush. A snapshot left behind
 // is still safe to load: the next Open reconciles the files that changed.
 func (w *Workspace) Refresh(ctx context.Context, changed, deleted []string) error {
+	if w.wrapped {
+		return ErrWrappedIndex
+	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("engine: refresh: %w", err)
 	}

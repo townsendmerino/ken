@@ -10,9 +10,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/townsendmerino/ken/engine"
 	"golang.org/x/sync/singleflight"
-
-	"github.com/townsendmerino/ken/internal/search"
 )
 
 // DefaultCacheSize is the LRU bound when KEN_MCP_CACHE_SIZE is unset.
@@ -117,9 +116,7 @@ func reapEntry(ent *cacheEntry) {
 		// corpus dir it's parsing (audit N7) — prevents a wasted 10-min parse
 		// of a deleted tree and a goroutine outliving the cache.
 		ent.bundle.stopStructuralBuild()
-		if ent.bundle.Index != nil {
-			_ = ent.bundle.Index.Close()
-		}
+		ent.bundle.closeIndex()
 	}
 	if ent.cleanup != nil {
 		ent.cleanup()
@@ -235,12 +232,12 @@ func NormalizeKey(source string) (string, bool, error) {
 // Back-compat: returns just the WatchedIndex from the cached bundle,
 // matching the pre-Stage-8 signature. Tool handlers that also need
 // the structural index call GetBundle instead.
-func (c *Cache) Get(ctx context.Context, source string) (*search.WatchedIndex, error) {
+func (c *Cache) Get(ctx context.Context, source string) (*engine.WatchedIndex, error) {
 	b, err := c.GetBundle(ctx, source)
 	if err != nil {
 		return nil, err
 	}
-	return b.Index, nil
+	return b.watchedIndex(), nil
 }
 
 // GetBundle returns the cached RepoBundle (WatchedIndex + lazy structural

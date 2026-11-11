@@ -46,7 +46,8 @@ graph LR
     kenmcp --> engine & mcppkg & mcpdb & search & structural & envcfg
     embedded --> mcppkg
     engine --> search & structural & repo
-    mcppkg --> search & structural & status & mcplog & envcfg
+    mcppkg --> engine & status & mcplog & envcfg
+    mcppkg -. "mcp.Run only" .-> search
     mcpdb --> mcppkg & dbpkg
     envcfg --> mcplog & repo
     search --> structural & repo & sqlpkg
@@ -56,7 +57,7 @@ graph LR
     sqlpkg & dbpkg --> chunk
 ```
 
-Arrows are imports and point down the layers: programs → public library packages → `internal/` → aikit. Nothing under `internal/` imports `engine` or `mcp`, and `mcp` does not import `engine` (ADR-048: `cmd/ken-mcp` adapts a `Workspace` to `mcp.StructuralSource` instead). The diagram leaves out the leaf packages' incoming edges (`search → binfmt`, `envcfg → bytesize`, `status → usage`, and the programs' own uses of `usage`, `modelfetch`, `embedcache`, `perf`, `bytesize`), the direct aikit imports of the programs and public packages (chunker registration, model loading, the `chunk.Chunk` type), and `bench/` and `tools/`; the table in the import-rules test has every edge.
+Arrows are imports and point down the layers: programs → public library packages → `internal/` → aikit. Nothing under `internal/` imports `engine` or `mcp`. `mcp` works through `engine` (ADR-057). The diagram leaves out the leaf packages' incoming edges (`search → binfmt`, `envcfg → bytesize`, `status → usage`, and the programs' own uses of `usage`, `modelfetch`, `embedcache`, `perf`, `bytesize`), the direct aikit imports of the programs and public packages (chunker registration, model loading, the `chunk.Chunk` type), and `bench/` and `tools/`; the table in the import-rules test has every edge.
 
 What moved to aikit and what stayed: tokenizer, BM25, embedding inference, fusion, ANN, and the chunkers are **generic** → aikit. The rerank heuristics ([`rerank.go`](internal/search/rerank.go), [`penalties.go`](internal/search/penalties.go), [`adaptive.go`](internal/search/adaptive.go)) are **semble-specific** and stay in `internal/search` under the verbatim-port precision contract.
 

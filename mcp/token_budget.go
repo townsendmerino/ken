@@ -3,7 +3,7 @@ package mcp
 import (
 	"fmt"
 
-	"github.com/townsendmerino/ken/internal/search"
+	"github.com/townsendmerino/ken/engine"
 )
 
 // Token-budget support for the search / find_related tools' max_tokens argument.
@@ -57,7 +57,7 @@ func approxTokens(s string) int {
 
 // resultTokens estimates the token cost of one rendered result: its chunk text,
 // its file path (part of every result's header), plus the fixed scaffolding.
-func resultTokens(r search.Result) int {
+func resultTokens(r engine.Result) int {
 	return approxTokens(r.Chunk.Text) + approxTokens(r.Chunk.File) + rowScaffoldTokens
 }
 
@@ -67,7 +67,7 @@ func resultTokens(r search.Result) int {
 // Returns the kept prefix, how many were dropped, and the approximate token
 // total of the kept set. maxTokens <= 0 is a no-op passthrough (dropped=0,
 // approxTotal=0) so callers can invoke it unconditionally.
-func applyTokenBudget(results []search.Result, maxTokens int) (kept []search.Result, dropped, approxTotal int) {
+func applyTokenBudget(results []engine.Result, maxTokens int) (kept []engine.Result, dropped, approxTotal int) {
 	if maxTokens <= 0 || len(results) == 0 {
 		return results, 0, 0
 	}
@@ -88,7 +88,7 @@ func applyTokenBudget(results []search.Result, maxTokens int) (kept []search.Res
 // `budget` field is present only when the agent asked for one), and a markdown
 // note to append (non-empty only when results were actually dropped). One place
 // so search and find_related stay consistent.
-func budgetResult(results []search.Result, maxTokens int) ([]search.Result, *BudgetMeta, string) {
+func budgetResult(results []engine.Result, maxTokens int) ([]engine.Result, *BudgetMeta, string) {
 	if maxTokens <= 0 {
 		return results, nil, ""
 	}

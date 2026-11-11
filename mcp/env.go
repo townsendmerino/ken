@@ -3,8 +3,8 @@ package mcp
 import (
 	"time"
 
+	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/envcfg"
-	"github.com/townsendmerino/ken/internal/structural"
 )
 
 // env.go: this package is an environment edge.
@@ -32,6 +32,6 @@ import (
 // budget alone (0 unless the program set one itself).
 func applyParseBudgetEnv() {
 	if micros, set := envcfg.EnrichFileBudgetMicros(); set {
-		structural.SetParseBudget(time.Duration(micros) * time.Microsecond)
+		engine.SetEnrichFileBudget(time.Duration(micros) * time.Microsecond)
 	}
 }

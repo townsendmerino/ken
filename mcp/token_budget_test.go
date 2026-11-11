@@ -96,7 +96,7 @@ func TestSearchMaxTokens_TruncatesAndReports(t *testing.T) {
 
 	run := func(maxTokens int) SearchResponse {
 		args := SearchArgs{Query: "alpha", TopK: 10, MaxTokens: maxTokens, Output: "json"}
-		res, _, err := runSearchWithTelemetry(ix, args, nil, false, nil, "", false)
+		res, _, err := runSearchWithTelemetry(indexView{ix}, args, nil, false, nil, "", false)
 		if err != nil {
 			t.Fatalf("runSearchWithTelemetry: %v", err)
 		}

@@ -274,8 +274,12 @@ func (w *Workspace) SearchWith(ctx context.Context, query string, k int, mode Mo
 	}
 	ix := w.index.Load()
 	gen := w.index.Generation()
-	var results []search.Result
-	var eff Mode
+	results, eff := searchResults(ix, query, k, mode, opts)
+	return w.toHits(ix, results, eff, gen, query, k, opts.NoArmRanks), eff, nil
+}
+
+// searchResults runs one query against one snapshot, as opts asks.
+func searchResults(ix *search.Index, query string, k int, mode Mode, opts SearchOptions) (results []search.Result, eff Mode) {
 	switch {
 	case opts.BudgetPacking:
 		results, eff = ix.SearchModeAblated(query, k, mode, search.AdaptiveAlphas, search.RankAblation{SaturationDecay: budgetPackingSaturationDecay})
@@ -284,7 +288,7 @@ func (w *Workspace) SearchWith(ctx context.Context, query string, k int, mode Mo
 	default:
 		results, eff = ix.SearchMode(query, k, mode)
 	}
-	return w.toHits(ix, results, eff, gen, query, k, opts.NoArmRanks), eff, nil
+	return results, eff
 }
 
 // FindRelated returns chunks semantically similar to the chunk containing

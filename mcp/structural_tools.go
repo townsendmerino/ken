@@ -33,8 +33,7 @@ import (
 	"strings"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/townsendmerino/ken/internal/structural"
+	"github.com/townsendmerino/ken/engine"
 )
 
 // resolveBundleForTool wraps Cache.GetBundle with the same repo-
@@ -84,18 +83,68 @@ func structuralUnavailableResult(bundle *RepoBundle, outputMode string) *sdk.Cal
 // both. On any failure it returns a nil index plus a ready-to-return MCP error
 // result (the caller returns it as `errResult, nil, nil`); on success errResult
 // is nil. Handlers use only the returned index — the bundle is consumed here.
-func resolveStructuralIndex(ctx context.Context, cfg *Config, repoArg, outputMode string) (*structural.Index, *sdk.CallToolResult) {
+func resolveStructuralIndex(ctx context.Context, cfg *Config, repoArg, outputMode string) (*structuralLookups, *sdk.CallToolResult) {
 	bundle, errResult := resolveBundleForTool(ctx, cfg, repoArg, outputMode)
 	if errResult != nil {
 		return nil, errResult
 	}
 	// Builds the structural symbol index on first use (lazy — cold-start M0);
 	// nil on unsupported corpus or build failure.
-	sidx := bundle.StructuralIndex(ctx)
-	if sidx == nil {
+	if bundle.StructuralIndex(ctx) == nil {
 		return nil, structuralUnavailableResult(bundle, outputMode)
 	}
-	return sidx, nil
+	return &structuralLookups{ctx: ctx, ws: bundle.workspace()}, nil
+}
+
+// structuralLookups is the structural index as the tool handlers use it:
+// the lookups of one tool call, made through the bundle's Workspace.
+// resolveStructuralIndex has already established that an index is
+// available, so a lookup that fails after that (the index went away
+// between the two calls) reads as "nothing found".
+type structuralLookups struct {
+	ctx context.Context
+	ws  *engine.Workspace
+}
+
+func (l *structuralLookups) Definition(sym string) []engine.DefinitionSite {
+	out, _ := l.ws.Definition(l.ctx, sym)
+	return out
+}
+
+func (l *structuralLookups) References(sym string) []engine.Reference {
+	out, _ := l.ws.References(l.ctx, sym)
+	return out
+}
+
+func (l *structuralLookups) Callers(sym string) []engine.CallSite {
+	out, _ := l.ws.Callers(l.ctx, sym)
+	return out
+}
+
+// HasFile reports whether the index holds path as a file.
+func (l *structuralLookups) HasFile(path string) bool {
+	_, ok, _ := l.ws.OutlineOfFile(l.ctx, path)
+	return ok
+}
+
+func (l *structuralLookups) Outline(path string) []engine.OutlineEntry {
+	out, _, _ := l.ws.OutlineOfFile(l.ctx, path)
+	return out
+}
+
+func (l *structuralLookups) FilesUnderPath(path string) []string {
+	out, _ := l.ws.StructuralFilesUnder(l.ctx, path)
+	return out
+}
+
+func (l *structuralLookups) Symbols() []string {
+	out, _ := l.ws.Symbols(l.ctx, "")
+	return out
+}
+
+func (l *structuralLookups) SymbolsInPath(path string) []string {
+	out, _ := l.ws.Symbols(l.ctx, path)
+	return out
 }
 
 // handleDefinition implements the `definition` tool: given a
@@ -121,7 +170,7 @@ func handleDefinition(ctx context.Context, cfg *Config, args DefinitionArgs) (*s
 	resp := DefinitionResponse{Symbol: sym, Definitions: make([]DefinitionRowOut, 0, len(sites))}
 	for _, s := range sites {
 		qname := ""
-		if s.Kind == structural.DefinitionKindMethod && s.QName != "" && s.QName != sym {
+		if s.Kind == engine.DefinitionKindMethod && s.QName != "" && s.QName != sym {
 			qname = s.QName
 		}
 		resp.Definitions = append(resp.Definitions, DefinitionRowOut{
@@ -190,7 +239,7 @@ func handleReferences(ctx context.Context, cfg *Config, args ReferencesArgs) (*s
 
 	// Group by file so the agent reads "this file uses it in these
 	// contexts" rather than a flat list of (file, kind) pairs.
-	byFile := make(map[string][]structural.ReferenceKind)
+	byFile := make(map[string][]engine.ReferenceKind)
 	lines := make(map[string][]int)
 	order := make([]string, 0)
 	for _, r := range refs {
@@ -364,11 +413,11 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	if rawPath == "" {
 		return errorResult(args.Output, "path is required (a file path or directory path relative to the repo root)"), nil, nil
 	}
-	path := structural.NormalizePath(rawPath)
+	path := engine.NormalizePath(rawPath)
 
 	// First, try as a single file: if the index has an entry for
 	// this exact path, render its outline directly.
-	if fs := sidx.File(path); fs != nil {
+	if sidx.HasFile(path) {
 		entries := sidx.Outline(path)
 		resp := OutlineResponse{
 			Path:    path,
@@ -408,7 +457,7 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	}
 	type fileOutline struct {
 		file    string
-		entries []structural.OutlineEntry
+		entries []engine.OutlineEntry
 	}
 	rendered := make([]fileOutline, 0, len(files))
 	for _, f := range files {
@@ -441,10 +490,10 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	return dispatchOutput(args.Output, resp, strings.TrimRight(b.String(), "\n"))
 }
 
-// convertOutlineEntries adapts structural.OutlineEntry rows into the
+// convertOutlineEntries adapts engine.OutlineEntry rows into the
 // JSON-stable shape. File is the path being outlined (added so a
 // flat Entries slice across multiple files is self-describing).
-func convertOutlineEntries(file string, entries []structural.OutlineEntry) []OutlineEntryOut {
+func convertOutlineEntries(file string, entries []engine.OutlineEntry) []OutlineEntryOut {
 	out := make([]OutlineEntryOut, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, OutlineEntryOut{
@@ -475,7 +524,7 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 	if path == "" || path == "." {
 		names = sidx.Symbols()
 	} else {
-		names = sidx.SymbolsInPath(structural.NormalizePath(path))
+		names = sidx.SymbolsInPath(engine.NormalizePath(path))
 	}
 	if names == nil {
 		names = []string{}
@@ -555,7 +604,7 @@ func pageWindow(total, offset, limit, max int) (lo, hi int, truncated, overshot 
 
 // === formatting helpers ===
 
-func formatOutline(path string, entries []structural.OutlineEntry) string {
+func formatOutline(path string, entries []engine.OutlineEntry) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Outline: `%s`\n\n", path)
 	if len(entries) == 0 {
@@ -566,7 +615,7 @@ func formatOutline(path string, entries []structural.OutlineEntry) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func formatOutlineEntries(entries []structural.OutlineEntry) string {
+func formatOutlineEntries(entries []engine.OutlineEntry) string {
 	var b strings.Builder
 	for _, e := range entries {
 		params := ""
@@ -580,7 +629,7 @@ func formatOutlineEntries(entries []structural.OutlineEntry) string {
 		switch {
 		case e.Container != "":
 			fmt.Fprintf(&b, "  - **%s.%s**%s%s\n", e.Container, e.Name, params, lines)
-		case e.Kind == structural.DefinitionKindClass:
+		case e.Kind == engine.DefinitionKindClass:
 			fmt.Fprintf(&b, "- class **%s**%s\n", e.Name, lines)
 		default:
 			fmt.Fprintf(&b, "- func **%s**%s%s\n", e.Name, params, lines)
@@ -589,21 +638,21 @@ func formatOutlineEntries(entries []structural.OutlineEntry) string {
 	return b.String()
 }
 
-func kindLabel(k structural.DefinitionKind) string {
+func kindLabel(k engine.DefinitionKind) string {
 	switch k {
-	case structural.DefinitionKindFunction:
+	case engine.DefinitionKindFunction:
 		return "function"
-	case structural.DefinitionKindClass:
+	case engine.DefinitionKindClass:
 		return "class"
-	case structural.DefinitionKindMethod:
+	case engine.DefinitionKindMethod:
 		return "method"
 	default:
 		return "definition"
 	}
 }
 
-func dedupRefKinds(kinds []structural.ReferenceKind) []string {
-	seen := make(map[structural.ReferenceKind]struct{}, len(kinds))
+func dedupRefKinds(kinds []engine.ReferenceKind) []string {
+	seen := make(map[engine.ReferenceKind]struct{}, len(kinds))
 	var out []string
 	for _, k := range kinds {
 		if _, dup := seen[k]; dup {
@@ -615,17 +664,17 @@ func dedupRefKinds(kinds []structural.ReferenceKind) []string {
 	return out
 }
 
-func refKindLabel(k structural.ReferenceKind) string {
+func refKindLabel(k engine.ReferenceKind) string {
 	switch k {
-	case structural.ReferenceKindCall:
+	case engine.ReferenceKindCall:
 		return "call"
-	case structural.ReferenceKindImport:
+	case engine.ReferenceKindImport:
 		return "import"
-	case structural.ReferenceKindRaise:
+	case engine.ReferenceKindRaise:
 		return "raise"
-	case structural.ReferenceKindAnnotation:
+	case engine.ReferenceKindAnnotation:
 		return "annotation"
-	case structural.ReferenceKindName:
+	case engine.ReferenceKindName:
 		return "name"
 	default:
 		return "reference"

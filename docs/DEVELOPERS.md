@@ -162,8 +162,11 @@ authors never need to import `internal/search`.
   `Config.TelemetryLog` (alias for `search.Telemetry`).
 - `Result` — single search hit returned by ken's hybrid pipeline
   (alias for `search.Result`); consumed by `FormatResults`.
-- `Cache`, `NewCache(max, builder)`, `RepoBundle{Index,
+- `Cache`, `NewCache(max, builder)`, `RepoBundle{Workspace, Index,
   StructuralBuilder, Structural}`, `Builder` — repo cache used by tools.
+  `Workspace` (best-effort, added after 1.0) is an `*engine.Workspace` that
+  serves the bundle on its own; the other three fields remain for Builders
+  that assemble an index themselves (ADR-057).
   `Structural` (a `StructuralSource`: `StructuralIndex`,
   `StructuralPending`, `StructuralIfBuilt`, `Close`) takes precedence over
   `StructuralBuilder`; cmd/ken-mcp sets it to an adapter over the
@@ -240,6 +243,14 @@ package:
   `ErrRerankCache*` errors; `BuildIndexBytes` / `BuildIndexOptions` (the
   pre-built index format); `Workspace.WriteSnapshot`; `InspectSnapshot`,
   `InspectRerankCache`; `SetEnrichFileBudgetLog`.
+- **Best-effort additions for the `mcp` package (composition-root slice
+  2a, outside the 1.0 commitment):** `Result` (alias of `search.Result`),
+  `ModeNames`, `Workspace.{SearchResults, FindRelatedResults, CurrentMode,
+  Warming, IndexStatus, StructuralStatus, StructuralPending, OutlineOfFile,
+  StructuralFilesUnder}`, `EnrichFileBudgetCounts`, `NormalizePath`,
+  `StripLabel`, and `WrapIndex(index, StructuralSource)`, which returns a
+  Workspace view over an index someone else built and owns
+  (`ErrWrappedIndex` from `Refresh` / `WriteSnapshot` on such a view).
 - `SetEnrichFileBudget(d time.Duration)` — the per-file parse budget
   behind enrichment and the structural index (what
   `KEN_ENRICH_FILE_BUDGET_MS` sets in the binaries). Process-wide, because

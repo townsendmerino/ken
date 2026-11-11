@@ -28,7 +28,7 @@ func TestRun_KenEnrichEnv(t *testing.T) {
 			t.Errorf("KEN_ENRICH=%q: index enriched = %v (%d chunks labeled), want %v", tc.env, got, ix.EnrichedChunks(), tc.wantEnriched)
 		}
 		// status reports the index, not the variable.
-		info := liveIndexInfo("(embedded corpus)", ix)
+		info := liveIndexInfo("(embedded corpus)", indexView{ix}.IndexStatus())
 		if (info.EnrichedChunks > 0) != tc.wantEnriched || info.DenseRetriever != "none" {
 			t.Errorf("KEN_ENRICH=%q: status reports EnrichedChunks=%d DenseRetriever=%q", tc.env, info.EnrichedChunks, info.DenseRetriever)
 		}
@@ -46,7 +46,7 @@ func TestRun_KenAnnEnv(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := liveIndexInfo("(embedded corpus)", ix).DenseRetriever; got != want {
+		if got := liveIndexInfo("(embedded corpus)", indexView{ix}.IndexStatus()).DenseRetriever; got != want {
 			t.Errorf("KEN_ANN=%q: mcp.Run index serves %q, want %q", env, got, want)
 		}
 	}
@@ -62,7 +62,7 @@ func TestStatus_ReportsLoadedIndexNotEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("KEN_ENRICH", "off") // changed after the index was built
-	opts := withStatusEnv(status.BuildOptions{LiveIndex: liveIndexInfo("repo", ix)})
+	opts := withStatusEnv(status.BuildOptions{LiveIndex: liveIndexInfo("repo", indexView{ix}.IndexStatus())})
 	text := status.RenderText(status.Build(opts), false)
 	if !strings.Contains(text, "disabled — KEN_ENRICH=off") {
 		t.Errorf("status should still show the configured setting; got:\n%s", text)
