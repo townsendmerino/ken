@@ -61,7 +61,7 @@ func toJSONResults(rs []search.Result) []cli.JSONResult {
 	return out
 }
 
-// cmdBench reads queries from stdin (one per line; lines beginning with
+// Bench is `ken bench`: it reads queries from stdin (one per line; lines beginning with
 // '#' are comments, blank lines skipped) and emits one JSON record per
 // query to stdout against a single in-process index. The Python adapter
 // in bench/semble/run_ken.py drives this for the semble benchmark.

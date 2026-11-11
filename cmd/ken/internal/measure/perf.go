@@ -13,6 +13,7 @@
 // "two lines" an earlier note claimed) were duplicated verbatim across the
 // perf subcommands, so they're factored into startCPUProfile / writeHeapProfile
 // below — a fix now lands in one place, not two.
+
 package measure
 
 import (
