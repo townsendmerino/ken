@@ -9,7 +9,7 @@ require (
 	github.com/google/jsonschema-go v0.4.3
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	github.com/odvcencio/gotreesitter v0.56.0
+	github.com/odvcencio/gotreesitter v0.57.0
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/townsendmerino/aikit v1.76.0
 	github.com/townsendmerino/aikit/chunk/treesitter v1.2.0
