@@ -66,7 +66,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-056](#adr-056-markdown-files-use-the-markdown-chunker-by-default-retroactive) | Markdown files use the markdown chunker by default (retroactive) | Accepted |
 | [ADR-057](#adr-057-mcp-works-through-engine-superseding-adr-048s-rejection) | `mcp` works through `engine` (superseding ADR-048's rejection) | Accepted |
 | [ADR-058](#adr-058-a-db-chunks-freshness-header-is-shown-not-indexed) | A DB chunk's freshness header is shown, not indexed | Accepted |
-| [ADR-059](#adr-059-a-go-typed-tier-that-asks-gopls-once-per-build-configuration) | A Go typed tier that asks gopls once per build configuration | Proposed |
+| [ADR-059](#adr-059-a-go-typed-tier-that-asks-gopls-once-per-build-configuration) | A Go typed tier that asks gopls once per build configuration | Accepted |
 
 ---
 
@@ -3145,14 +3145,15 @@ The freshness header stays in `Chunk.Text`, so every result still shows it, and 
   - Hybrid: ranks 1 to 4 are unchanged for every content query. One tail swap: for `widget`, the customers table and `Service.java` exchange ranks 5 and 6.
 - Across the before/after comparison's DB sessions (30 environment settings, BM25 and hybrid, 673 result lists): 629 keep their order and 669 keep their top three. The four top-three changes are the same tail swap on corpora cut down to a few chunks by a walk limit, where the customers table and `Service.java` exchange ranks 2 and 3 for `widget` behind the one real hit (three settings), and one in the wall-clock parse-budget setting, which differs between runs anyway. `find_related` from `store.go` no longer lists the customers table at rank 5 (cosine 0.169 with the header).
 - **The header's words no longer match.** A query for `indexed`, for the hour token, or for the engine and host named in the header (`sqlite`, `postgres`, `dev-pg`) no longer finds DB chunks through that line. The file path `db://<engine>@<host>/<object>` still names them and is shown, but paths are not indexed text. This is the intended effect, and the one a user could notice.
+- **Not measured:** `hybrid-rerank` over DB chunks. The neural reranker embeds the same text, so its scores for DB chunks change too; no before/after comparison of that mode was run.
 - Corpora without DB chunks are untouched: the semble benchmark is identical, and every non-DB output in the before/after comparison is identical.
 - `internal/db`'s `TestIndexTextDropsWhatDBEmits` fails if the header's format and the pattern `indexText` removes drift apart.
 
 ## ADR-059: A Go typed tier that asks gopls once per build configuration
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-11-13
-**Decided by:** Francis asked for it on 2026-11-13 ("go straight to ken"); the design below is the first build and is his to accept or change.
+**Decided by:** Francis asked for it on 2026-11-13 ("go straight to ken") and accepted the first build, with the addendum's two additions, the same day by choosing to merge it for 1.16.0.
 
 ### Context
 ken's `definition`, `references` and `callers` answer from the tree-sitter index by name, and say so. For Go that leaves three questions an agent asks during a refactor unanswered: which lines refer to *this* method and not another one with the same name, which types implement an interface, and what a rename has to edit.
@@ -3187,7 +3188,7 @@ A new package, `internal/gotypes`, reached through `engine` (ADR-057), with thre
 - Not done here: the three tools do not replace `references`/`callers` for Go, the structural index is not consulted, and nothing caches between calls.
 
 ### Addendum, 2026-11-13: counts, and the reverse query
-Two additions from the first real use (an architecture survey of goinfer; `docs/prompts/goinfer-modularize-session-feedback-2026-11-13.md`, items 1 and 3). Both are Francis's to accept with the rest of this ADR.
+Two additions from the first real use (an architecture survey of goinfer; `docs/prompts/goinfer-modularize-session-feedback-2026-11-13.md`, items 1 and 3). Both were accepted with the rest of this ADR.
 
 - **`group_by` (`package`, `dir`, `file`) on references and implementations.** The answer to a coupling question is the counts; the lines cost 732,078 characters of JSON for one symbol. Grouping is done on the merged hits, so the header, the per-configuration counts and the `INCOMPLETE` lines are the ungrouped ones. A test file is one ending `_test.go`. The name-grade `references` and `callers` did not get it: `references` records lines for calls only (an import or a raise is a file, not a line), so its counts would mix units, and the two tools would then differ.
 - **`go_uses`: the identifiers of one package that another names.** gopls has no command for this; the nearest is one `references` run per exported declaration or per importing file, each seconds long. Instead, per configuration, `go list -deps -test -json` (through `wrap`) names the files the importer and its dependencies are built from, and ken type-checks them from source with the standard library's `go/types`: dependencies without function bodies, the importer in full, its external test package against the importer-with-tests. An identifier counts when the object it resolves to is declared in the imported package, so aliased and dot imports count, a same-named local does not, and methods and fields are reported as `Type.Member`. Counts are of lines, to agree with `go_references`.
