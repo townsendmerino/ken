@@ -113,6 +113,12 @@ type Hit struct {
 	In      string   `json:"in,omitempty"` // enclosing function or method
 	Text    string   `json:"text,omitempty"`
 	Configs []string `json:"configs"` // every configuration that reported this line
+	// Through is set on a references hit that does not name the queried declaration itself: it names the method
+	// given here (pkg.Type.Method), which corresponds to the queried one through an interface. For a concrete method
+	// that is a call through an interface it satisfies; for an interface method, a call on a type that implements it
+	// or through an interface around it. Several names are joined with ", ". Empty on a direct use, and on every hit
+	// of a result that is not Labelled.
+	Through string `json:"through,omitempty"`
 
 	pkg string // the file's package clause, for GroupBy
 }
@@ -129,6 +135,15 @@ type Result struct {
 	// Incomplete is true when a declaration compiles under no listed configuration or a gopls run failed: the hits
 	// are then a lower bound, and Runs says which part is missing.
 	Incomplete bool `json:"incomplete"`
+	// Labelled is true when the references hits tell direct uses from uses through a corresponding method
+	// (Hit.Through); Direct then counts the lines that name the declaration itself, and Total-Direct name another
+	// method. The in-process engine labels; gopls's answers (the lsp and cli engines) cannot be, and neither can
+	// implementations.
+	Labelled bool `json:"labelled,omitempty"`
+	Direct   int  `json:"direct,omitempty"`
+	// DirectOnlyApplied is set by DirectOnly: the hits through other methods were dropped, and Total and Files count
+	// what is left.
+	DirectOnlyApplied bool `json:"direct_only,omitempty"`
 	// GroupedBy and Groups are set by GroupBy, which replaces Hits with counts.
 	GroupedBy string  `json:"group_by,omitempty"`
 	Groups    []Group `json:"groups,omitempty"`
@@ -230,9 +245,12 @@ func (k reqKind) lspMethod() string {
 
 // reply is gopls's answer to one question under one configuration.
 type reply struct {
-	text  []byte              // references, implementations: one "path:line:col" per line
-	edits map[string][]string // rename over LSP: the new lines of each file the rename edits, by absolute path
-	hunks map[string][]string // rename over the command line: the diff hunk lines of each file, by absolute path
+	text []byte // references, implementations: one "path:line:col" per line
+	// labelled says the lines of text tell direct uses from uses of a corresponding method: a line that names
+	// another method carries that method's name after a tab. Only the in-process engine can say.
+	labelled bool
+	edits    map[string][]string // rename over LSP: the new lines of each file the rename edits, by absolute path
+	hunks    map[string][]string // rename over the command line: the diff hunk lines of each file, by absolute path
 }
 
 // files returns the absolute paths of the files a rename edits.
@@ -424,11 +442,19 @@ func (r *Runner) locations(ctx context.Context, symbol, query string, kind reqKi
 		line int
 	}
 	seen := map[key]map[string]bool{}
+	direct := map[key]bool{}             // the line names the declaration itself, under some configuration
+	through := map[key]map[string]bool{} // the other methods the line names
+	labelled, unlabelled := false, false
 	runs, incomplete := r.each(ctx, decls, kind, "", func(bc BuildConfig, _ Decl, rp reply) int {
-		stdout := rp.text
+		if rp.labelled {
+			labelled = true
+		} else {
+			unlabelled = true
+		}
 		n := 0
-		for _, ln := range strings.Split(string(stdout), "\n") {
-			m := locRE.FindStringSubmatch(strings.TrimSpace(ln))
+		for _, ln := range strings.Split(string(rp.text), "\n") {
+			loc, via, _ := strings.Cut(ln, "\t")
+			m := locRE.FindStringSubmatch(strings.TrimSpace(loc))
 			if m == nil {
 				continue
 			}
@@ -445,16 +471,38 @@ func (r *Runner) locations(ctx context.Context, symbol, query string, kind reqKi
 				seen[k][bc.Name] = true
 				n++
 			}
+			if via == "" {
+				direct[k] = true
+			} else {
+				if through[k] == nil {
+					through[k] = map[string]bool{}
+				}
+				through[k][via] = true
+			}
 		}
 		return n
 	})
 	res := &Result{Symbol: symbol, Query: query, Decls: decls, Runs: runs, Incomplete: incomplete}
+	// every answer that came back was labelled: the result is
+	res.Labelled = labelled && !unlabelled
 	files := map[string]bool{}
 	for k, cfgs := range seen {
 		h := Hit{File: k.file, Line: k.line}
 		for _, bc := range r.Config.Configs {
 			if cfgs[bc.Name] {
 				h.Configs = append(h.Configs, bc.Name)
+			}
+		}
+		if res.Labelled {
+			if direct[k] {
+				res.Direct++
+			} else {
+				names := make([]string, 0, len(through[k]))
+				for name := range through[k] {
+					names = append(names, name)
+				}
+				sort.Strings(names)
+				h.Through = strings.Join(names, ", ")
 			}
 		}
 		res.Hits = append(res.Hits, h)

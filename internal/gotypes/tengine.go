@@ -135,15 +135,19 @@ func (r *Runner) askAllTyped(ctx context.Context, decls []Decl, kind reqKind) []
 				cell.err, cell.seconds = err, time.Since(t).Seconds()
 				continue
 			}
-			var hits []token.Pos
+			var text []byte
 			if kind == askImplementations {
+				var hits []token.Pos
 				hits, err = prog.implementations(abs[di], d.Line, d.Col)
+				text = prog.positionsText(hits)
 			} else {
-				hits, err = prog.references(abs[di], d.Line, d.Col, r.GoplsExact)
+				var hits []refHit
+				hits, err = prog.referencesLabelled(abs[di], d.Line, d.Col, r.GoplsExact)
+				text = prog.labelledText(hits)
 			}
 			cell.err, cell.seconds = err, time.Since(t).Seconds()
 			if err == nil {
-				cell.rp = reply{text: prog.positionsText(hits)}
+				cell.rp = reply{text: text, labelled: kind == askReferences}
 			}
 		}
 	}
@@ -201,6 +205,24 @@ func (p *program) positionsText(hits []token.Pos) []byte {
 			continue
 		}
 		fmt.Fprintf(&b, "%s:%d:%d\n", at.Filename, at.Line, at.Column)
+	}
+	return b.Bytes()
+}
+
+// labelledText is positionsText for a references answer: a line whose identifier names a corresponding method, not
+// the queried declaration, carries that method's name after a tab.
+func (p *program) labelledText(hits []refHit) []byte {
+	var b bytes.Buffer
+	for _, h := range hits {
+		at := p.fset.Position(h.pos)
+		if !strings.HasSuffix(at.Filename, ".go") {
+			continue
+		}
+		fmt.Fprintf(&b, "%s:%d:%d", at.Filename, at.Line, at.Column)
+		if h.through != nil {
+			fmt.Fprintf(&b, "\t%s", methodName(h.through))
+		}
+		b.WriteByte('\n')
 	}
 	return b.Bytes()
 }

@@ -13,6 +13,9 @@ type Group struct {
 	Name    string `json:"group"`
 	NonTest int    `json:"non_test"`
 	Test    int    `json:"test"`
+	// Direct counts the group's lines that name the declaration itself, when the result is Labelled; the rest name
+	// a corresponding method.
+	Direct int `json:"direct,omitempty"`
 }
 
 // GroupKeys are the values GroupBy takes.
@@ -44,6 +47,9 @@ func (r *Result) GroupBy(by string) error {
 			groups[i].Test++
 		} else {
 			groups[i].NonTest++
+		}
+		if r.Labelled && h.Through == "" {
+			groups[i].Direct++
 		}
 	}
 	sort.SliceStable(groups, func(i, j int) bool {
@@ -77,7 +83,7 @@ func groupKey(by string) (func(Hit) string, error) {
 func isTestFile(file string) bool { return strings.HasSuffix(file, "_test.go") }
 
 // groupLines writes one aligned row per group; maxRows caps them (0 means all).
-func groupLines(b *strings.Builder, groups []Group, maxRows int) {
+func groupLines(b *strings.Builder, groups []Group, maxRows int, labelled bool) {
 	shown := groups
 	if maxRows > 0 && len(shown) > maxRows {
 		shown = shown[:maxRows]
@@ -89,9 +95,31 @@ func groupLines(b *strings.Builder, groups []Group, maxRows int) {
 		tw = max(tw, len(fmt.Sprint(g.Test)))
 	}
 	for _, g := range shown {
-		fmt.Fprintf(b, "%-*s  %*d non-test  %*d test\n", w, g.Name, nw, g.NonTest, tw, g.Test)
+		fmt.Fprintf(b, "%-*s  %*d non-test  %*d test", w, g.Name, nw, g.NonTest, tw, g.Test)
+		if labelled {
+			fmt.Fprintf(b, "  (%d direct)", g.Direct)
+		}
+		b.WriteByte('\n')
 	}
 	if len(shown) < len(groups) {
 		fmt.Fprintf(b, "… %d more groups not shown\n", len(groups)-len(shown))
 	}
+}
+
+// DirectOnly drops the hits that do not name the declaration itself (Hit.Through), and brings Total and Files down to
+// what is left. It applies to a Labelled result before GroupBy; on any other it reports an error and changes nothing.
+func (r *Result) DirectOnly() error {
+	if !r.Labelled {
+		return fmt.Errorf("direct uses cannot be told from uses through an interface in this answer: only references answered by the in-process engine are labelled")
+	}
+	kept := r.Hits[:0:0]
+	files := map[string]bool{}
+	for _, h := range r.Hits {
+		if h.Through == "" {
+			kept = append(kept, h)
+			files[h.File] = true
+		}
+	}
+	r.Hits, r.Total, r.Files, r.DirectOnlyApplied = kept, len(kept), len(files), true
+	return nil
 }

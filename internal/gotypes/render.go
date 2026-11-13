@@ -83,12 +83,18 @@ func incompleteLines(b *strings.Builder, decls []Decl, runs []ConfigRun) {
 func (r *Result) Text(nConfigs, maxHits int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s of %s: %d lines in %d files\n", r.Query, r.Symbol, r.Total, r.Files)
+	switch {
+	case r.DirectOnlyApplied:
+		b.WriteString("direct uses only: lines that name another method which corresponds to it through an interface are left out\n")
+	case r.Labelled && r.Direct < r.Total:
+		fmt.Fprintf(&b, "%d direct, %d through a corresponding method (marked \"via\": a call through an interface it satisfies, or on a type that implements it)\n", r.Direct, r.Total-r.Direct)
+	}
 	rememberedLine(&b, r.Cached, r.CacheAgeSeconds)
 	declLines(&b, r.Decls)
 	fmt.Fprintf(&b, "per configuration: %s\n", runsLine(r.Runs))
 	incompleteLines(&b, r.Decls, r.Runs)
 	if r.GroupedBy != "" {
-		groupLines(&b, r.Groups, maxHits)
+		groupLines(&b, r.Groups, maxHits, r.Labelled && !r.DirectOnlyApplied && r.Direct < r.Total)
 		return b.String()
 	}
 	last := ""
@@ -107,6 +113,9 @@ func (r *Result) Text(nConfigs, maxHits int) string {
 		}
 		if len(h.Configs) < nConfigs {
 			fmt.Fprintf(&b, " [%s]", strings.Join(h.Configs, ","))
+		}
+		if h.Through != "" {
+			fmt.Fprintf(&b, " (via %s)", h.Through)
 		}
 		fmt.Fprintf(&b, ": %s\n", h.Text)
 	}

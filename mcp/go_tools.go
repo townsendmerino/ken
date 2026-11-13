@@ -22,6 +22,8 @@ type GoSymbolArgs struct {
 	repoArg
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default, compact lines grouped by file) or 'json'."`
 	Max    int    `json:"max,omitempty" jsonschema:"Cap on the result lines shown (default 200; the header always carries the full totals)."`
+	// DirectOnly drops the references that name a corresponding method, not the symbol itself.
+	DirectOnly bool `json:"direct_only,omitempty" jsonschema:"go_references only. Leave out the lines that name another method which corresponds to this one through an interface (a call through an interface the method satisfies, or on a type that implements the interface method). Without it those lines are returned marked 'via <method>' (JSON: 'through'), and the header gives both counts. Use it to see who calls this exact declaration."`
 	// GroupBy asks for counts in place of the lines.
 	GroupBy string `json:"group_by,omitempty" jsonschema:"Return counts instead of lines: one row per 'package', 'dir' or 'file', each with its non-test and test (_test.go) line counts, largest first. Use it for 'how many per package' questions: the reply is a few rows where the full list can be thousands of lines."`
 }
@@ -60,7 +62,8 @@ func registerGoTools(srv *sdk.Server, cfg *Config, haveGopls bool) {
 		Name: "go_references",
 		Description: "Find every line that refers to a Go symbol: compiler-grade, unlike `references` and `callers`, " +
 			"which match by name. For a method this includes calls made through an interface it satisfies and calls " +
-			"on each implementing type. Use it before changing a declaration. " + goTierNote,
+			"on each implementing type; each such line is marked with the method it actually names (`via pkg.Type.Method`), " +
+			"and `direct_only` leaves them out. Use it before changing a declaration. " + goTierNote,
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args GoSymbolArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken go_references")
 		defer stop()
@@ -164,6 +167,11 @@ func handleGoLocations(ctx context.Context, cfg *Config, args GoSymbolArgs,
 	res, err := query(gt, ctx, sym)
 	if err != nil {
 		return goQueryError(args.Output, err), nil, nil
+	}
+	if args.DirectOnly {
+		if err := res.DirectOnly(); err != nil {
+			return errorResult(args.Output, "direct_only: "+err.Error()), nil, nil
+		}
 	}
 	limit := args.Max
 	if limit <= 0 {

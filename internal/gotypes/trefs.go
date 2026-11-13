@@ -225,6 +225,36 @@ func (p *program) buildXrefs() {
 
 var errNoObject = errors.New("no identifier or object at the declaration's position")
 
+// refHit is one identifier a references query found. through is nil when the identifier names the queried
+// declaration itself; otherwise it is the other method the identifier names, which corresponds to the queried one
+// through an interface (the interface method a concrete method satisfies, or the method of a type that implements
+// the queried interface).
+type refHit struct {
+	pos     token.Pos
+	through types.Object
+}
+
+// methodName names a method the way a symbol argument does: pkg.Type.Method, the package by its name. A method of the
+// predeclared error interface is error.Error; one of an interface with no name is (interface).Method.
+func methodName(obj types.Object) string {
+	owner := "(interface)"
+	if fn, ok := obj.(*types.Func); ok {
+		if sig, ok := fn.Type().(*types.Signature); ok && sig.Recv() != nil {
+			t := types.Unalias(sig.Recv().Type())
+			if ptr, ok := t.(*types.Pointer); ok {
+				t = types.Unalias(ptr.Elem())
+			}
+			if named, ok := t.(*types.Named); ok {
+				owner = named.Obj().Name()
+			}
+		}
+	}
+	if obj.Pkg() == nil {
+		return owner + "." + obj.Name()
+	}
+	return obj.Pkg().Name() + "." + owner + "." + obj.Name()
+}
+
 // declOf finds the position of the declaring identifier at file:line:col and the narrowest package that compiles the
 // file.
 func (p *program) declOf(file string, line, col int) (token.Pos, *tPackage, error) {
@@ -253,6 +283,17 @@ func objectOf(tp *tPackage, pos token.Pos) types.Object {
 // With exact set, the answer is gopls's, line for line. Without it, the answer also has the uses gopls's index
 // drops though they are uses of the same declaration (xref.beyond): a superset, and the default (ADR-061).
 func (p *program) references(file string, line, col int, exact bool) ([]token.Pos, error) {
+	hits, err := p.referencesLabelled(file, line, col, exact)
+	out := make([]token.Pos, len(hits))
+	for i, h := range hits {
+		out[i] = h.pos
+	}
+	return out, err
+}
+
+// referencesLabelled is references with, for each position, whether it names the queried declaration or a
+// corresponding method.
+func (p *program) referencesLabelled(file string, line, col int, exact bool) ([]refHit, error) {
 	at, pkg0, err := p.declOf(file, line, col)
 	if err != nil {
 		return nil, err
@@ -264,17 +305,24 @@ func (p *program) references(file string, line, col int, exact bool) ([]token.Po
 	if !obj.Pos().IsValid() {
 		return nil, fmt.Errorf("references to builtin %q are not supported", obj.Name())
 	}
-	found := map[token.Pos]bool{}
+	// found maps each position to the corresponding method it names, or to nil when it names the declaration itself
+	// (which wins when a position is reached both ways).
+	found := map[token.Pos]types.Object{}
+	note := func(pos token.Pos, through types.Object) {
+		if prev, seen := found[pos]; !seen || (prev != nil && through == nil) {
+			found[pos] = through
+		}
+	}
 
 	// Every package holding the declaring file, intermediate test variants included: their importers count.
 	variants := p.variants(file, true)
 
 	// The cross-package search, for an exported object that other packages can name.
 	scope := map[*tPackage]bool{}
-	targets := map[xrefKey]bool{}
+	targets := map[xrefKey]types.Object{} // the corresponding method each stands for; nil for the declaration itself
 	expansions := map[*tPackage]bool{}
 	if obj.Exported() && p.hasPath(obj) {
-		targets[xrefKey{variants[0].PkgPath, obj.Pos()}] = true
+		targets[xrefKey{variants[0].PkgPath, obj.Pos()}] = nil
 		ws := p.workspacePackages()
 		inWS := map[*tPackage]bool{}
 		for _, tp := range ws {
@@ -304,7 +352,10 @@ func (p *program) references(file string, line, col int, exact bool) ([]token.Po
 					addRdeps(tp, true)
 					expansions[tp] = true
 					for _, r := range res {
-						targets[xrefKey{r.fn.Pkg().Path(), r.fn.Pos()}] = true
+						k := xrefKey{r.fn.Pkg().Path(), r.fn.Pos()}
+						if _, have := targets[k]; !have && r.fn.Pos() != obj.Pos() {
+							targets[k] = r.fn
+						}
 					}
 				}
 			}
@@ -321,7 +372,7 @@ func (p *program) references(file string, line, col int, exact bool) ([]token.Po
 		if target == nil {
 			continue
 		}
-		p.localReferences(v, map[types.Object]bool{target: true}, true, found)
+		p.localReferences(v, map[types.Object]bool{target: true}, true, obj.Pos(), note)
 	}
 	// Inside each package that declares a corresponding type: uses of the targets that are its own.
 	for e := range expansions {
@@ -338,33 +389,34 @@ func (p *program) references(file string, line, col int, exact bool) ([]token.Po
 			}
 		}
 		if len(own) > 0 {
-			p.localReferences(e, own, false, found)
+			p.localReferences(e, own, false, obj.Pos(), note)
 		}
 	}
 	// Across packages: the index, for the packages in scope.
 	if len(scope) > 0 {
 		p.buildXrefs()
-		for k := range targets {
+		for k, through := range targets {
 			for _, x := range p.xrefs[k] {
 				if scope[x.in] && !(exact && x.beyond) {
-					found[x.pos] = true
+					note(x.pos, through)
 				}
 			}
 		}
 	}
 	// Only uses are collected: the declaration is not one, so it is not in the answer unless the same identifier is
 	// also a use (the T of an embedded field struct{T} is), which gopls keeps too.
-	out := make([]token.Pos, 0, len(found))
-	for pos := range found {
-		out = append(out, pos)
+	out := make([]refHit, 0, len(found))
+	for pos, through := range found {
+		out = append(out, refHit{pos, through})
 	}
 	return out, nil
 }
 
-// localReferences adds to found each identifier in tp that uses one of targets or, when correspond is set and a
-// target is a method, a method of the same name with a mutually assignable receiver.
+// localReferences reports to note each identifier in tp that uses one of targets or, when correspond is set and a
+// target is a method, a method of the same name with a mutually assignable receiver. A use of anything but the queried
+// declaration (which is declared at queried) is reported with the method it names.
 // (gopls: internal/golang/references.go, localReferences.)
-func (p *program) localReferences(tp *tPackage, targets map[types.Object]bool, correspond bool, found map[token.Pos]bool) {
+func (p *program) localReferences(tp *tPackage, targets map[types.Object]bool, correspond bool, queried token.Pos, note func(token.Pos, types.Object)) {
 	var methodRecvs []types.Type
 	methodName := ""
 	if correspond {
@@ -399,7 +451,11 @@ func (p *program) localReferences(tp *tPackage, targets map[types.Object]bool, c
 	for name := range names {
 		for _, u := range tp.uses[name] {
 			if matches(u.obj) {
-				found[u.pos] = true
+				if o := originOf(u.obj); o.Pos() == queried {
+					note(u.pos, nil)
+				} else {
+					note(u.pos, o)
+				}
 			}
 		}
 	}

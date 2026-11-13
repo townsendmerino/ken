@@ -193,3 +193,50 @@ func TestGoTools_hostKeepsAnswersAndStatusReportsThem(t *testing.T) {
 		t.Errorf("a server that keeps nothing must not report a typed tier:\n%s", text)
 	}
 }
+
+// go_references marks the lines that name a corresponding method and, with direct_only, leaves them out.
+func TestGoReferences_directOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs the go command: skipped under -short")
+	}
+	if engine.GoPath() == "" {
+		t.Skip("go not on PATH")
+	}
+	t.Setenv("KEN_MCP_ALLOWED_REPO_ROOTS", "")
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", "-mod=mod")
+	repo := t.TempDir()
+	if r, err := filepath.EvalSymlinks(repo); err == nil {
+		repo = r
+	}
+	for name, body := range map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.21\n",
+		"a.go":   "package m\n\ntype Shape interface{ Area() int }\n\ntype Sq struct{}\n\nfunc (Sq) Area() int { return 1 }\n",
+		"b.go":   "package m\n\nfunc Use(s Shape) int {\n\treturn s.Area() +\n\t\tSq{}.Area()\n}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ask := func(args GoSymbolArgs) string {
+		args.Symbol, args.Repo = "Shape.Area", repo
+		res, _, err := handleGoLocations(context.Background(), &Config{}, args, (*engine.GoTyped).References)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resultText(t, res)
+	}
+	all := ask(GoSymbolArgs{})
+	for _, want := range []string{"2 lines in 1 files", "1 direct, 1 through a corresponding method", "(via m.Sq.Area)"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("go_references lacks %q:\n%s", want, all)
+		}
+	}
+	direct := ask(GoSymbolArgs{DirectOnly: true})
+	if !strings.Contains(direct, "1 lines in 1 files") || !strings.Contains(direct, "direct uses only") || strings.Contains(direct, "Sq{}.Area()") {
+		t.Errorf("direct_only should leave the call on Sq out and say so:\n%s", direct)
+	}
+	if js := ask(GoSymbolArgs{Output: "json"}); !strings.Contains(js, `"through": "m.Sq.Area"`) || !strings.Contains(js, `"labelled": true`) || !strings.Contains(js, `"direct": 1`) {
+		t.Errorf("the JSON form should carry through, labelled and direct:\n%s", js)
+	}
+}

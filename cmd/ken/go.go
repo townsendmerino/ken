@@ -13,7 +13,7 @@ import (
 	"github.com/townsendmerino/ken/engine"
 )
 
-const goUsage = `Usage: ken go refs        <repo> <symbol> [--json] [--max N] [--group-by K] [--config F]
+const goUsage = `Usage: ken go refs        <repo> <symbol> [--json] [--max N] [--group-by K] [--direct] [--config F]
        ken go impls       <repo> <symbol> [--json] [--max N] [--group-by K]
        ken go uses        <repo> <importer> <imported> [--json] [--max N]
        ken go rename-plan <repo> <symbol> <new-name> [--json] [--patch FILE]
@@ -34,6 +34,10 @@ refs, impls and uses are answered in process with go/types; rename-plan asks gop
   --max N      cap the printed lines (default 200; 0 = all)
   --group-by K counts instead of lines, one row per K: package, dir or file,
                each split into non-test and test (_test.go) lines
+  --direct     refs only: leave out the lines that name another method which
+               corresponds to this one through an interface (a call through an
+               interface it satisfies, or on a type that implements it). Those lines
+               are marked "via" otherwise. Needs the types engine
   --config F   read the build configurations from F instead of the repository
   --engine E   what answers refs and impls: types (default; in this process with
                go/types, by gopls's own rules, no gopls needed), lsp (gopls over its
@@ -59,6 +63,7 @@ func cmdGo(args []string) int {
 		cfgFile    string
 		groupBy    string
 		engineName string
+		directOnly bool
 		parallel   int
 		maxN       = 200
 	)
@@ -66,6 +71,8 @@ func cmdGo(args []string) int {
 		switch args[i] {
 		case "--json":
 			jsonOut = true
+		case "--direct":
+			directOnly = true
 		case "--patch", "--max", "--config", "--group-by", "--engine", "--parallel":
 			if i+1 >= len(args) {
 				fmt.Fprintf(os.Stderr, "ken go: %s needs a value\n", args[i])
@@ -104,6 +111,10 @@ func cmdGo(args []string) int {
 	want := map[string]int{"refs": 2, "impls": 2, "uses": 3, "rename-plan": 3}[args[0]]
 	if want == 0 || len(pos) != want {
 		fmt.Fprint(os.Stderr, goUsage)
+		return 2
+	}
+	if directOnly && args[0] != "refs" {
+		fmt.Fprintln(os.Stderr, "ken go: --direct goes with refs")
 		return 2
 	}
 	if groupBy != "" && (args[0] != "refs" && args[0] != "impls" || !slices.Contains(engine.GoGroupKeys(), groupBy)) {
@@ -162,6 +173,12 @@ func cmdGo(args []string) int {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ken go: %v\n", err)
 			return 1
+		}
+		if directOnly {
+			if err := res.DirectOnly(); err != nil {
+				fmt.Fprintf(os.Stderr, "ken go: --direct: %v\n", err)
+				return 2
+			}
 		}
 		if groupBy != "" {
 			if err := res.GroupBy(groupBy); err != nil {

@@ -802,3 +802,107 @@ func TestTypesEngine_goesBeyondGoplsOnlyForGenericFields(t *testing.T) {
 		}
 	}
 }
+
+// Each references hit says whether it names the queried declaration or a method that corresponds to it through an
+// interface, and which. The lines are gopls's either way; the label is what gopls does not give.
+func TestTypesEngine_labelsHitsDirectOrThroughAnotherMethod(t *testing.T) {
+	needGo(t)
+	root := writeTree(t, tricky)
+	r := &Runner{Repo: root, Config: Config{Configs: trickyConfigs.Configs[:1]}, Engine: EngineTypes}
+	ctx := context.Background()
+	labelled := func(sym string) (*Result, []string) {
+		t.Helper()
+		res, err := r.References(ctx, sym)
+		if err != nil || res.Incomplete {
+			t.Fatalf("%s: %v", sym, err)
+		}
+		if !res.Labelled {
+			t.Fatalf("%s: the in-process engine's references must be labelled", sym)
+		}
+		var out []string
+		for _, h := range res.Hits {
+			l := fmt.Sprintf("%s:%d", h.File, h.Line)
+			if h.Through != "" {
+				l += " via " + h.Through
+			}
+			out = append(out, l)
+		}
+		return res, out
+	}
+	check := func(what string, got, want []string) {
+		t.Helper()
+		if !slices.Equal(got, want) {
+			t.Errorf("%s:\n got  %q\n want %q", what, got, want)
+		}
+	}
+	// an interface method: a call through the interface is direct; a call on an implementing type, or through an
+	// interface around it, names that other method
+	res, got := labelled("Shape.Area")
+	check("Shape.Area", got, []string{
+		"a/a.go:30 via a.Square.Area",     // c.Area() in (*Cube).Volume: Square's method, promoted
+		"a/a.go:45",                       // s.Area() on a Shape
+		"a/a.go:84 via a.localShape.Area", // through a smaller interface
+		"a/a.go:93 via a.Square.Area",     // Alias{...}.Area()
+		"a/x_test.go:12",                  // s.Area() on an a.Shape, in the external test
+		"b/b.go:29 via a.Square.Area, b.areaOnly.Area",
+		"c/c.go:21 via a.Square.Area",
+	})
+	if res.Direct != 2 || res.Total != 7 {
+		t.Errorf("Shape.Area: %d direct of %d, want 2 of 7", res.Direct, res.Total)
+	}
+	if text := res.Text(1, 0); !strings.Contains(text, "2 direct, 5 through a corresponding method") || !strings.Contains(text, "(via a.Square.Area)") {
+		t.Errorf("the text does not carry the counts and the marks:\n%s", text)
+	}
+	// a concrete method: a call on the type is direct; a call through an interface it satisfies names the interface's
+	_, got = labelled("Square.Area")
+	check("Square.Area", got, []string{
+		"a/a.go:30", "a/a.go:45 via a.Shape.Area", "a/a.go:84 via a.localShape.Area", "a/a.go:93",
+		"a/x_test.go:12 via a.Shape.Area", "b/b.go:29", "c/c.go:21",
+	})
+	// a method that satisfies the predeclared error interface: err.Error() in its own package names error.Error
+	_, got = labelled("Err.Error")
+	check("Err.Error", got, []string{"a/a.go:52 via error.Error", "a/a.go:60 via error.Error", "a/x_test.go:14", "b/b.go:35"})
+	// not a method: every hit is direct, and nothing is marked
+	res, got = labelled("a.Total")
+	check("a.Total", got, []string{"a/a_test.go:14", "a/x_test.go:12", "b/b.go:29"})
+	if res.Direct != res.Total || strings.Contains(res.Text(1, 0), "through a corresponding method") {
+		t.Errorf("a.Total: %d direct of %d; a function has no corresponding methods:\n%s", res.Direct, res.Total, res.Text(1, 0))
+	}
+
+	// DirectOnly drops the others and recounts
+	res, _ = labelled("Shape.Area")
+	if err := res.DirectOnly(); err != nil {
+		t.Fatal(err)
+	}
+	if got := hitLines(res); !slices.Equal(got, []string{"a/a.go:45 plain", "a/x_test.go:12 plain"}) || res.Total != 2 || res.Files != 2 {
+		t.Errorf("DirectOnly: %v, total %d in %d files; want the two calls through Shape", got, res.Total, res.Files)
+	}
+	if !strings.Contains(res.Text(1, 0), "direct uses only") {
+		t.Errorf("a filtered answer must say so:\n%s", res.Text(1, 0))
+	}
+	// grouped, the counts carry how many are direct
+	res, _ = labelled("Shape.Area")
+	if err := res.GroupBy("dir"); err != nil {
+		t.Fatal(err)
+	}
+	var rows []string
+	for _, g := range res.Groups {
+		rows = append(rows, fmt.Sprintf("%s %d+%d direct %d", g.Name, g.NonTest, g.Test, g.Direct))
+	}
+	check("Shape.Area by dir", rows, []string{"a 4+1 direct 2", "b 1+0 direct 0", "c 1+0 direct 0"})
+
+	// gopls's own answers carry no labels, and say so when asked to filter by them
+	f := &lspFake{}
+	lr := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Engine: EngineLSP}
+	lres, err := lr.References(ctx, "a.Total")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lres.Labelled || lres.Direct != 0 || lres.DirectOnly() == nil {
+		t.Errorf("an answer from gopls is not labelled and cannot be filtered: labelled %v direct %d", lres.Labelled, lres.Direct)
+	}
+	ires, err := r.Implementations(ctx, "Shape")
+	if err != nil || ires.Labelled {
+		t.Errorf("implementations are not labelled: %v %v", ires.Labelled, err)
+	}
+}
