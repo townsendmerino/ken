@@ -22,8 +22,8 @@ type Status struct {
 	// search index's counter; the two move independently.
 	StructuralGeneration uint64
 
-	// GoTyped is what the Go typed tier holds between queries: resident gopls processes with their memory, and
-	// remembered answers. Nil when Options.GoTyped asked for nothing.
+	// GoTyped is what the Go typed tier holds between queries: resident programs and gopls processes with their
+	// memory, and remembered answers. Nil when Options.GoTyped keeps nothing (MaxResident < 0, no CacheBytes).
 	GoTyped *GoTypedStatus
 }
 

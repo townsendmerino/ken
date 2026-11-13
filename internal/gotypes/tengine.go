@@ -139,7 +139,7 @@ func (r *Runner) askAllTyped(ctx context.Context, decls []Decl, kind reqKind) []
 			if kind == askImplementations {
 				hits, err = prog.implementations(abs[di], d.Line, d.Col)
 			} else {
-				hits, err = prog.references(abs[di], d.Line, d.Col)
+				hits, err = prog.references(abs[di], d.Line, d.Col, r.GoplsExact)
 			}
 			cell.err, cell.seconds = err, time.Since(t).Seconds()
 			if err == nil {

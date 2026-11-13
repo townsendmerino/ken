@@ -125,6 +125,7 @@ func runDifferential(t *testing.T, repo string, cfg Config, o diffOptions) (aske
 		}
 		type tally struct{ n, same int }
 		stats := map[string]*tally{}
+		beyondDecls, beyondLines := 0, 0
 		lastBeat := time.Now()
 		var typesTime, goplsTime time.Duration
 		ask := func(d diffDecl, kind reqKind, label string) {
@@ -140,7 +141,7 @@ func runDifferential(t *testing.T, repo string, cfg Config, o diffOptions) (aske
 			if kind == askImplementations {
 				hits, terr = prog.implementations(d.file, d.line, d.col)
 			} else {
-				hits, terr = prog.references(d.file, d.line, d.col)
+				hits, terr = prog.references(d.file, d.line, d.col, true) // gopls's exact lines are what is compared
 			}
 			typesTime += time.Since(ta)
 			mine := map[string]bool{}
@@ -169,6 +170,32 @@ func runDifferential(t *testing.T, repo string, cfg Config, o diffOptions) (aske
 			for l := range theirs {
 				if !mine[l] {
 					onlyTheirs = append(onlyTheirs, l)
+				}
+			}
+			if kind == askReferences && terr == nil {
+				// The default answer may hold more than gopls's, never less, and only for fields (of generic types).
+				more, _ := prog.references(d.file, d.line, d.col, false)
+				extra := 0
+				seen := map[string]bool{}
+				for _, ln := range strings.Split(string(prog.positionsText(more)), "\n") {
+					if rel, ok := diffRel(repo, ln); ok && !seen[rel] {
+						seen[rel] = true
+						if !mine[rel] {
+							extra++
+						}
+					}
+				}
+				for l := range mine {
+					if !seen[l] {
+						t.Errorf("[%s] %s:%d:%d %s: the default answer lacks %s, which the exact answer has", bc.Name, d.file, d.line, d.col, d.name, l)
+					}
+				}
+				if extra > 0 {
+					beyondDecls++
+					beyondLines += extra
+					if d.kind != "field" {
+						t.Errorf("[%s] %s:%d:%d %s (%s): %d lines beyond gopls on something that is not a field", bc.Name, d.file, d.line, d.col, d.name, d.kind, extra)
+					}
 				}
 			}
 			if len(onlyMine) == 0 && len(onlyTheirs) == 0 && (terr == nil) == (gerr == nil) {
@@ -210,6 +237,7 @@ func runDifferential(t *testing.T, repo string, cfg Config, o diffOptions) (aske
 		for _, k := range keys {
 			logf("[%s] %-24s %6d asked  %6d equal  %d differ", bc.Name, k, stats[k].n, stats[k].same, stats[k].n-stats[k].same)
 		}
+		logf("[%s] beyond gopls by default: %d lines on %d fields (fields of generic types used through an instantiation in another package)", bc.Name, beyondLines, beyondDecls)
 		logf("[%s] done in %s: time in types %.1fs, in gopls %.1fs", bc.Name, time.Since(t0).Round(time.Second), typesTime.Seconds(), goplsTime.Seconds())
 	}
 	return asked, totalDiff
@@ -397,8 +425,8 @@ func TestRefreshAgainstAFreshLoadOnARepository(t *testing.T) {
 			asked, bad := 0, 0
 			for i := 0; i < len(decls); i += step {
 				d := decls[i]
-				a, aerr := np.references(d.file, d.line, d.col)
-				b, berr := fresh.references(d.file, d.line, d.col)
+				a, aerr := np.references(d.file, d.line, d.col, false)
+				b, berr := fresh.references(d.file, d.line, d.col, false)
 				asked++
 				if string(sortedLines(np.positionsText(a))) != string(sortedLines(fresh.positionsText(b))) || (aerr == nil) != (berr == nil) {
 					if bad++; bad <= 5 {

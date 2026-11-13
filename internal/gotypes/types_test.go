@@ -245,6 +245,18 @@ func First[K comparable, V any](p Pair[K, V]) K { return p.Key }
 
 func usePair() string { return First(Pair[string, int]{Key: "k", Val: 1}) }
 `,
+	"d/d.go": `package d
+
+import "example.com/tricky/c"
+
+// Peek uses fields of c's generic types through instantiations, from another package: gopls's references leave
+// these lines out (its rename edits them); this engine returns them unless asked for gopls's exact lines.
+func Peek() int {
+	bx := c.Box[int]{Item: 1}
+	p := c.Pair[string, int]{Key: "k", Val: 2}
+	return bx.Item + p.Val + len(p.Key) + bx.Get()
+}
+`,
 	"c/c_test.go": `package c
 
 import "testing"
@@ -316,9 +328,15 @@ func TestTypesEngine_answersWithoutGopls(t *testing.T) {
 	// Error on a type that is an error: err.Error() counts inside the declaring package and nowhere else
 	check("references of Err.Error", refs("Err.Error"), []string{
 		"a/a.go:52 plain,fancy", "a/a.go:60 plain,fancy", "a/x_test.go:14 plain,fancy", "b/b.go:35 plain,fancy"})
-	// a field of a generic type: the use through an instantiation in another package is not counted, as in gopls
+	// a field of a generic type: the uses through an instantiation in another package (d) are returned, which gopls's
+	// references leave out; GoplsExact gives gopls's lines
 	check("references of Box.Item", refs("Box.Item"), []string{
+		"c/c.go:11 plain,fancy", "c/c.go:13 plain,fancy", "c/c.go:18 plain,fancy", "c/c.go:21 plain,fancy", "c/c_test.go:6 plain,fancy",
+		"d/d.go:8 plain,fancy", "d/d.go:10 plain,fancy"})
+	r.GoplsExact = true
+	check("references of Box.Item, gopls's exact lines", refs("Box.Item"), []string{
 		"c/c.go:11 plain,fancy", "c/c.go:13 plain,fancy", "c/c.go:18 plain,fancy", "c/c.go:21 plain,fancy", "c/c_test.go:6 plain,fancy"})
+	r.GoplsExact = false
 	// an unexported type's exported field: inside the package only
 	check("references of hidden.Count", refs("hidden.Count"), []string{
 		"a/a.go:65 plain,fancy", "a/a.go:68 plain,fancy", "a/a.go:69 plain,fancy"})
@@ -539,7 +557,7 @@ func programAnswers(prog, lister *program, root string) map[string]string {
 			if kind == askImplementations {
 				hits, err = prog.implementations(d.file, d.line, d.col)
 			} else {
-				hits, err = prog.references(d.file, d.line, d.col)
+				hits, err = prog.references(d.file, d.line, d.col, false)
 			}
 			var lines []string
 			for _, ln := range strings.Split(string(prog.positionsText(hits)), "\n") {
@@ -696,6 +714,91 @@ func TestTypesEngine_holdsTheWrapLockWhileItTypeChecks(t *testing.T) {
 	for _, argv := range holders {
 		if argv[0] != "env" || !slices.Contains(argv, lockHolderScript) {
 			t.Errorf("lock holder argv %v, want the wrap prefix around the helper", argv)
+		}
+	}
+}
+
+// A cache that sizes itself grows to the configurations it is used for and no further than its ceiling; a cache given
+// a size keeps it.
+func TestProgramCache_sizesItselfToTheConfigurations(t *testing.T) {
+	c := NewAutoProgramCache(time.Minute)
+	defer c.Close()
+	if got := c.Status().MaxPrograms; got != 1 {
+		t.Errorf("starts with room for %d, want 1", got)
+	}
+	c.Fit(3)
+	c.Fit(2)
+	if got := c.Status().MaxPrograms; got != 3 {
+		t.Errorf("after Fit(3), Fit(2): %d, want 3", got)
+	}
+	c.Fit(100)
+	if got := c.Status().MaxPrograms; got != AutoProgramCeiling {
+		t.Errorf("after Fit(100): %d, want the ceiling %d", got, AutoProgramCeiling)
+	}
+	fixed := NewProgramCache(2, time.Minute)
+	defer fixed.Close()
+	fixed.Fit(5)
+	if got := fixed.Status().MaxPrograms; got != 2 {
+		t.Errorf("a cache given a size grew to %d", got)
+	}
+	var none *ProgramCache
+	none.Fit(3) // nothing to do, and nothing to crash on
+}
+
+// Where this engine returns more than gopls, it is for one stated reason and nothing else: on every declaration of
+// the tricky module the default answer holds gopls's exact answer, and the declarations with extra lines are the
+// fields of generic types, the extra lines their uses through an instantiation in another package.
+func TestTypesEngine_goesBeyondGoplsOnlyForGenericFields(t *testing.T) {
+	needGo(t)
+	root := writeTree(t, tricky)
+	r := &Runner{Repo: root, Config: trickyConfigs}
+	prog, err := r.loadWith(context.Background(), trickyConfigs.Configs[0], root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := func(hits []token.Pos) []string {
+		var out []string
+		for _, ln := range strings.Split(string(prog.positionsText(hits)), "\n") {
+			if rel, ok := diffRel(root, ln); ok {
+				out = append(out, rel)
+			}
+		}
+		sort.Strings(out)
+		return slices.Compact(out)
+	}
+	extra := map[string][]string{}
+	for _, d := range diffDecls(prog, root) {
+		exact, err1 := prog.references(d.file, d.line, d.col, true)
+		more, err2 := prog.references(d.file, d.line, d.col, false)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("%s: %v %v", d.name, err1, err2)
+		}
+		e, m := lines(exact), lines(more)
+		for _, l := range e {
+			if !slices.Contains(m, l) {
+				t.Errorf("%s (%s): the default answer lacks %s, which gopls's has", d.name, d.kind, l)
+			}
+		}
+		for _, l := range m {
+			if !slices.Contains(e, l) {
+				extra[d.kind+" "+d.name] = append(extra[d.kind+" "+d.name], l)
+			}
+		}
+	}
+	want := map[string][]string{
+		"field Item": {"d/d.go:10", "d/d.go:8"},
+		"field Key":  {"d/d.go:10", "d/d.go:9"},
+		"field Val":  {"d/d.go:10", "d/d.go:9"},
+	}
+	for k, v := range extra {
+		sort.Strings(v)
+		if !slices.Equal(v, want[k]) {
+			t.Errorf("beyond gopls for %s: %v, want %v", k, v, want[k])
+		}
+	}
+	for k := range want {
+		if extra[k] == nil {
+			t.Errorf("no lines beyond gopls for %s: the uses in package d were not found", k)
 		}
 	}
 }

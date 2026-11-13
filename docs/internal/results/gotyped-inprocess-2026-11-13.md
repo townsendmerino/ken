@@ -20,9 +20,11 @@ By kind, in the 1-in-17 run across the three configurations: references of 332 c
 
 The two tagged configurations do not type-check cleanly (1,637 and 280 type errors in the searched packages: a dependency that needs cgo under `CGO_ENABLED=0`). Both engines see the same errors, and the answers were still equal.
 
-**What "the same" includes.** gopls's answer is not "every use the type checker can see", and this engine follows it where it is narrower. Read from gopls's source (`internal/golang/references.go`, `implementation.go`, `internal/cache/xrefs`, `internal/cache/methodsets`, `go/types/objectpath`), and reproduced:
+**The comparison is of gopls's exact lines (`Runner.GoplsExact`).** By default the engine returns those and one kind of use gopls misses: a field of a generic type reached through an instantiation in another package (the first bullet below). On a small module gopls's references for such a field found the use in its own package and neither of the two in the importing package, while gopls's rename plan edited both. The default answer was checked to contain the exact one on every declaration of all three goinfer configurations (88,146 declarations) and to add **0 lines** there: goinfer has no such use. The tricky module has three such fields, and the extra lines are exactly their uses in the importing package.
 
-- A use in another package is found only for an exported identifier whose object has an object path. A field reached through an instantiated generic type (`Box[int]{}.Item` in another package) has none, and is not found.
+**What gopls's lines are.** gopls's answer is not "every use the type checker can see", and the exact mode follows it where it is narrower. Read from gopls's source (`internal/golang/references.go`, `implementation.go`, `internal/cache/xrefs`, `internal/cache/methodsets`, `go/types/objectpath`), and reproduced:
+
+- A use in another package is found only for an exported identifier whose object has an object path. A field reached through an instantiated generic type (`Box[int]{}.Item` in another package) has none, and is not found. (The default mode finds it.)
 - A method corresponds to the same-named methods of every package-level named type *of the workspace* related to its receiver by interface satisfaction, in either direction (an interface it is part of, an interface that extends it, each implementing type). The comparison is by name: package path and type name, method by method. An anonymous non-empty interface in a signature matches any other.
 - Inside the declaring package only, a method also corresponds to same-named methods of *any* type, the standard library's included: `(*E).Error` matches every `err.Error()` in its own package (112 lines for one of goinfer's) and none elsewhere.
 - Packages are searched as gopls compiles them: `p`, `p` with its tests, and the external test package; never a package recompiled for another package's test.
@@ -51,10 +53,10 @@ A merged query over the three configurations, `ken go`-equivalent (`tools/gotype
 |---|--:|--:|--:|--:|--:|--:|
 | gopls command line (ADR-059) | 37 s / 263 s | 28 s / 257 s | same | same | 0 | 2.9 GB |
 | gopls over LSP (ADR-060) *(a)* | 8.3 s | 6.9 s | 6.9 s | 6.6 s | 0 | 1.1 GB |
-| **go/types, nothing held (the default)** *(a)* | **5.3 s** | 4.7 s | 4.8 s | 4.7 s | **0** | **0.8 GB** |
+| **go/types, nothing held (`ken go`; `MaxResident: -1`)** *(a)* | **5.3 s** | 4.7 s | 4.8 s | 4.7 s | **0** | **0.8 GB** |
 | go/types, 3 configurations at once (`Parallel: 3`) *(a)* | 3.7 s | 4.0 s | 4.0 s | | 0 | 2.1 GB |
 | go/types + answer cache (ken-mcp's default) *(a)* | 4.6 s | **0.04 s** | 4.8 s | 4.7 s | under 1 MB | 0.8 GB |
-| go/types, 3 programs resident (`MaxResident: 3`) | 6.4 s *(a)* | 0.1 to 0.2 s (0.3 to 0.4 s *(b)*) | **0.1 to 0.2 s** (0.3 to 0.6 s *(b)*) | **1.9 s** after a hub file, 0.5 to 2.2 s after a leaf or test file *(b)* | **0.65 GB** live (about 0.22 GB per program); the process's RSS is 1.3 GB just after loading | 1.4 GB |
+| **go/types, 3 programs resident (the default for a Workspace and `ken-mcp`)** | 6.4 s *(a)* | 0.1 to 0.2 s (0.3 to 0.4 s *(b)*) | **0.1 to 0.2 s** (0.3 to 0.6 s *(b)*) | **1.9 s** after a hub file, 0.5 to 2.2 s after a leaf or test file *(b)* | **0.65 GB** live (about 0.22 GB per program); the process's RSS is 1.3 GB just after loading | 1.4 GB |
 | gopls resident ×3 (ADR-060) | 5.8 s | 1.5 s | 0.6 to 0.8 s | 2.1 to 3.1 s | 2.7 to 3.1 GB, 3.3 to 4.2 GB after edits | |
 
 Where a cold configuration's time goes *(b)*: `go list -deps -test -compiled` 0.7 to 0.8 s (a subprocess; all configurations are listed at once), type-check 1.0 to 1.2 s on all processors (the longest single package, `decoder` with its tests, 723 to 850 files, is 0.5 to 0.9 s of it and cannot be split), the query itself 1 to 6 ms. Per query, outside the configurations: finding the declaration 55 to 110 ms, the tree scan 15 ms, source lines and enclosing functions for the hits 10 to 27 ms.

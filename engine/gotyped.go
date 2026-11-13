@@ -71,8 +71,9 @@ func GoplsPath() string {
 //
 // configFile, when not empty, is read in place of the repository's own file.
 //
-// The returned tier holds nothing between queries: each query starts the gopls it needs and stops it. A caller that
-// asks repeatedly gets a faster tier from a GoTypedHost (see there), which is opt-in.
+// The returned tier holds nothing between queries: each query loads what it needs and lets it go, which is right for
+// a process that asks once. A caller that asks repeatedly gets a much faster tier from a GoTypedHost or from
+// Workspace.GoTyped, which keep the loaded programs.
 func OpenGoTyped(repo, configFile string) (*GoTyped, bool, error) {
 	return openGoTyped(repo, configFile, nil, nil, nil, 0, "")
 }
@@ -89,20 +90,28 @@ func openGoTyped(repo, configFile string, pool *gotypes.Pool, cache *gotypes.Cac
 	return &gotypes.Runner{Repo: repo, Config: cfg, Gopls: GoplsPath(), Pool: pool, Cache: cache, Programs: programs, Parallel: parallel, Engine: engineName}, found, nil
 }
 
-// GoTypedOptions chooses what the typed tier holds between queries (ADR-060). The zero value holds nothing: every
-// query starts the gopls processes it needs (one per build configuration, one after another) and stops them, which
-// costs about a second or two per configuration and peaks at 0.6 to 1.1 GB while it runs.
+// GoTypedOptions chooses what the typed tier holds between queries (ADR-060, ADR-061).
 //
-// Each field below opts in to one thing that is kept, with a bound. Nothing here reads the environment.
+// The zero value keeps the type-checked programs of the in-process engine, one per build configuration, for
+// IdleTimeout after their last query: about 0.2 GB each on goinfer (0.65 GB for its three configurations). A query on
+// an unchanged tree then takes a tenth of a second, and after an edit only the packages it can affect are checked
+// again. Francis chose this as the default on 2026-11-13; MaxResident: -1 turns it off, and each query then loads what
+// it needs (a second or two per configuration) and lets it go. The zero value keeps no answers and no gopls.
+//
+// Everything kept is bounded, checks the files on disk before each use, is reported by Status, and is released by
+// Close. Nothing here reads the environment.
 type GoTypedOptions struct {
 	// MaxResident is how many per-configuration backends may stay loaded between queries, across all repositories
-	// of the host (the least recently used idle one is dropped to make room): type-checked programs for the
-	// in-process engine (350 to 430 MB each on goinfer; the next query then takes milliseconds), gopls processes
-	// for the lsp engine (0.7 to 1.4 GB each). Set it to the number of build configurations or leave it at 0: with
-	// fewer, every query reloads the one it displaced. 0 keeps none.
+	// of the host (the least recently used idle one is dropped to make room).
+	//
+	//   0   the default: type-checked programs are kept, as many as the opened repositories have build
+	//       configurations (at most 8); no gopls is kept.
+	//   n>0 exactly n: programs for the in-process engine (about 0.2 GB each on goinfer), gopls processes for the
+	//       lsp engine (0.7 to 1.4 GB each). Fewer than a repository's configurations reloads on every query.
+	//   <0  nothing is kept loaded.
 	MaxResident int
-	// IdleTimeout stops a resident gopls this long after its last request (it is checked every quarter of it, so a
-	// server may live up to a quarter longer). 0 means 5 minutes. Used only when MaxResident > 0.
+	// IdleTimeout drops a resident program (or stops a resident gopls) this long after its last query (it is checked
+	// every quarter of it, so one may live up to a quarter longer). 0 means 5 minutes.
 	IdleTimeout time.Duration
 	// CacheBytes bounds the memory holding remembered answers, measured by their JSON size; the least recently used are
 	// dropped first. A remembered answer is returned only while no Go file or module file of the repository has
@@ -117,8 +126,9 @@ type GoTypedOptions struct {
 	Parallel int
 }
 
-// Enabled reports whether any option asks for something to be kept.
-func (o GoTypedOptions) Enabled() bool { return o.MaxResident > 0 || o.CacheBytes > 0 }
+// Enabled reports whether the options keep anything between queries: they do unless MaxResident is negative and
+// CacheBytes is zero.
+func (o GoTypedOptions) Enabled() bool { return o.MaxResident >= 0 || o.CacheBytes > 0 }
 
 // GoTypedStatus is what a GoTypedHost holds: the gopls processes it keeps alive with their memory, and the answer
 // cache.
@@ -132,9 +142,9 @@ type GoTypedStatus struct {
 	HeldBytes int64 `json:"held_bytes"`
 }
 
-// GoTypedHost owns what the typed tier keeps between queries, for one or more repositories: the resident gopls pool
-// and the answer cache. A GoTyped from Open shares them. With zero GoTypedOptions a host is stateless and Open is
-// OpenGoTyped.
+// GoTypedHost owns what the typed tier keeps between queries, for one or more repositories: the resident programs,
+// the resident gopls pool and the answer cache. A GoTyped from Open shares them. With MaxResident < 0 and no
+// CacheBytes a host is stateless and Open is OpenGoTyped.
 //
 // Every use of a resident gopls or a remembered answer first scans the repository's Go files and module files and
 // compares them with what it was built from, so an edit is never missed: the next query sees it whether or not the
@@ -146,15 +156,24 @@ type GoTypedHost struct {
 	cache    *gotypes.Cache
 }
 
-// NewGoTypedHost returns a host holding nothing until a query fills it. Close stops its gopls processes.
+// NewGoTypedHost returns a host holding nothing until a query fills it. Close releases what it holds.
 func NewGoTypedHost(opts GoTypedOptions) *GoTypedHost {
-	return &GoTypedHost{opts: opts, pool: gotypes.NewPool(opts.MaxResident, opts.IdleTimeout),
-		programs: gotypes.NewProgramCache(opts.MaxResident, opts.IdleTimeout), cache: gotypes.NewCache(opts.CacheBytes)}
+	h := &GoTypedHost{opts: opts, pool: gotypes.NewPool(opts.MaxResident, opts.IdleTimeout), cache: gotypes.NewCache(opts.CacheBytes)}
+	if opts.MaxResident == 0 {
+		h.programs = gotypes.NewAutoProgramCache(opts.IdleTimeout) // sized to the configurations of what is opened
+	} else {
+		h.programs = gotypes.NewProgramCache(opts.MaxResident, opts.IdleTimeout)
+	}
+	return h
 }
 
 // Open is OpenGoTyped with the host's pool and cache.
 func (h *GoTypedHost) Open(repo, configFile string) (*GoTyped, bool, error) {
-	return openGoTyped(repo, configFile, h.pool, h.cache, h.programs, h.opts.Parallel, h.opts.Engine)
+	gt, found, err := openGoTyped(repo, configFile, h.pool, h.cache, h.programs, h.opts.Parallel, h.opts.Engine)
+	if err == nil {
+		h.programs.Fit(len(gt.Config.Configs))
+	}
+	return gt, found, err
 }
 
 // goRelevant reports whether a change to rel can alter a typed answer.
@@ -215,8 +234,9 @@ func (h *GoTypedHost) Close() {
 }
 
 // GoTyped returns the typed tier for this Workspace's repository, reading its GoConfigFile (configFile, when not
-// empty, is read instead). With Options.GoTyped set, it shares the Workspace's resident gopls processes and answer
-// cache, and the Workspace's file watcher keeps them current; without it, it is OpenGoTyped(w.Root(), configFile).
+// empty, is read instead). It shares what the Workspace keeps between queries (Options.GoTyped: by default the
+// type-checked programs), and the Workspace's file watcher keeps that current; with MaxResident < 0 and no
+// CacheBytes it is OpenGoTyped(w.Root(), configFile).
 // The bool reports whether the repository has a GoConfigFile.
 func (w *Workspace) GoTyped(configFile string) (*GoTyped, bool, error) {
 	if w.goHost == nil {

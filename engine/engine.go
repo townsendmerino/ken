@@ -176,8 +176,9 @@ type Options struct {
 	// Best-effort, outside the stability promise.
 	Prebuilt []byte
 
-	// GoTyped chooses what the Go typed tier (Workspace.GoTyped) keeps between queries: resident gopls processes and
-	// remembered answers. The zero value keeps nothing. See GoTypedOptions.
+	// GoTyped chooses what the Go typed tier (Workspace.GoTyped) keeps between queries. The zero value keeps the
+	// type-checked programs loaded (a few hundred MB for a large repository, dropped after 5 idle minutes; nothing
+	// until the first typed query); MaxResident: -1 keeps nothing. See GoTypedOptions.
 	GoTyped GoTypedOptions
 
 	// GoTypedHost, when non-nil, is a typed-tier host shared with other Workspaces (ken-mcp keeps one for the whole

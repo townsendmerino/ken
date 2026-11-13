@@ -178,6 +178,10 @@ type xrefKey struct {
 type xref struct {
 	in  *tPackage
 	pos token.Pos
+	// beyond marks a use gopls's index does not hold: the identifier resolves to a field of an instantiated generic
+	// type (Box[int]{}.Item), which is a different object from the declared field and has no object path. It is the
+	// same declaration all the same. It is left out of an answer only when gopls's exact lines are asked for.
+	beyond bool
 }
 
 // buildXrefs indexes, for every searched package, each exported identifier that uses a symbol of a different
@@ -198,14 +202,21 @@ func (p *program) buildXrefs() {
 					if obj.Pkg() == nil || obj.Pkg() == tp.types {
 						continue
 					}
-					if fn, ok := obj.(*types.Func); ok {
-						obj = fn.Origin()
+					beyond := false
+					switch o := obj.(type) {
+					case *types.Func:
+						obj = o.Origin()
+					case *types.Var:
+						// gopls looks up the instantiated field as it is, finds no path, and drops the use.
+						if o.Origin() != o {
+							obj, beyond = o.Origin(), true
+						}
 					}
 					if !p.hasPath(obj) {
 						continue
 					}
 					k := xrefKey{obj.Pkg().Path(), obj.Pos()}
-					p.xrefs[k] = append(p.xrefs[k], xref{tp, u.pos})
+					p.xrefs[k] = append(p.xrefs[k], xref{tp, u.pos, beyond})
 				}
 			}
 		}
@@ -238,7 +249,10 @@ func objectOf(tp *tPackage, pos token.Pos) types.Object {
 
 // references returns the positions that refer to the object declared at file:line:col, the declaration itself left
 // out. (gopls: internal/golang/references.go, ordinaryReferences.)
-func (p *program) references(file string, line, col int) ([]token.Pos, error) {
+//
+// With exact set, the answer is gopls's, line for line. Without it, the answer also has the uses gopls's index
+// drops though they are uses of the same declaration (xref.beyond): a superset, and the default (ADR-061).
+func (p *program) references(file string, line, col int, exact bool) ([]token.Pos, error) {
 	at, pkg0, err := p.declOf(file, line, col)
 	if err != nil {
 		return nil, err
@@ -332,7 +346,7 @@ func (p *program) references(file string, line, col int) ([]token.Pos, error) {
 		p.buildXrefs()
 		for k := range targets {
 			for _, x := range p.xrefs[k] {
-				if scope[x.in] {
+				if scope[x.in] && !(exact && x.beyond) {
 					found[x.pos] = true
 				}
 			}

@@ -39,6 +39,10 @@ type Runner struct {
 	// did. A rename plan is always gopls's: over LSP, or the command line under EngineCLI. A Runner with Run set
 	// takes the command-line route, since Run replaces the command-line subprocess.
 	Engine string
+	// GoplsExact makes EngineTypes return exactly the lines gopls returns. By default it returns those and the uses
+	// gopls misses that are plainly uses of the same declaration: a field of a generic type reached through an
+	// instantiation in another package (gopls's own rename edits those lines; its references omit them). ADR-061.
+	GoplsExact bool
 	// Spawn starts a language server process; nil runs the real one. Tests substitute it.
 	Spawn SpawnFunc
 	// Pool, when non-nil, keeps language servers alive between queries. Nil starts and stops one per query.

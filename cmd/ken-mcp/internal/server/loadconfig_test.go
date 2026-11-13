@@ -75,8 +75,9 @@ func TestLoadConfig_NoDSNSkipsDBValidation(t *testing.T) {
 	}
 }
 
-// ken-mcp remembers up to 32 MB of Go typed-tier answers by default, keeps nothing else, and answers in process with
-// go/types; each is settable, and 0 turns the cache off (ADR-060, ADR-061).
+// ken-mcp by default remembers up to 32 MB of Go typed-tier answers, keeps the type-checked programs loaded, and
+// answers in process with go/types; each is settable, and 0 turns the cache or the resident programs off (ADR-060,
+// ADR-061).
 func TestLoadConfig_GoTypedDefaults(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("KEN_MCP_MODE", "bm25")
@@ -85,7 +86,11 @@ func TestLoadConfig_GoTypedDefaults(t *testing.T) {
 	cfg := LoadConfig(logger)
 	if cfg.GoTyped.CacheBytes != 32<<20 || cfg.GoTyped.MaxResident != 0 || cfg.GoTyped.IdleTimeout != 5*time.Minute ||
 		cfg.GoTyped.Engine != "types" || cfg.GoTyped.Parallel != 1 {
-		t.Errorf("defaults = %+v, want a 32 MB cache, nothing resident, 5m idle, the types engine, one configuration at a time", cfg.GoTyped)
+		t.Errorf("defaults = %+v, want a 32 MB cache, programs kept and sized automatically (MaxResident 0), 5m idle, the types engine, one configuration at a time", cfg.GoTyped)
+	}
+	t.Setenv("KEN_MCP_GO_RESIDENT", "0") // 0 opts out: nothing kept loaded
+	if cfg = LoadConfig(logger); cfg.GoTyped.MaxResident >= 0 {
+		t.Errorf("KEN_MCP_GO_RESIDENT=0 gave MaxResident %d, want a negative value (keep nothing loaded)", cfg.GoTyped.MaxResident)
 	}
 	t.Setenv("KEN_MCP_GO_CACHE_MB", "0")
 	t.Setenv("KEN_MCP_GO_RESIDENT", "3")

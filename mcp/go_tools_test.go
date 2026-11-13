@@ -142,7 +142,7 @@ func TestGoUses_handler(t *testing.T) {
 }
 
 // With a host that keeps answers, the second identical go_references call is served from memory and says so, and the
-// status tool reports what the tier holds. With no host (or a host built from zero options) nothing is kept or shown.
+// status tool reports what the tier holds. With no host (or a host that keeps nothing) nothing is kept or shown.
 func TestGoTools_hostKeepsAnswersAndStatusReportsThem(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs gopls: skipped under -short")
@@ -164,7 +164,7 @@ func TestGoTools_hostKeepsAnswersAndStatusReportsThem(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	host := engine.NewGoTypedHost(engine.GoTypedOptions{CacheBytes: 1 << 20})
+	host := engine.NewGoTypedHost(engine.GoTypedOptions{CacheBytes: 1 << 20, MaxResident: -1})
 	defer host.Close()
 	cfg := &Config{GoTyped: host}
 	ask := func() string {
@@ -188,7 +188,7 @@ func TestGoTools_hostKeepsAnswersAndStatusReportsThem(t *testing.T) {
 	if text := resultText(t, res); !strings.Contains(text, "Go typed tier (kept between queries)") || !strings.Contains(text, "1 remembered") {
 		t.Errorf("status does not report the typed tier's answers:\n%s", text)
 	}
-	res, _, _ = handleStatus(context.Background(), &Config{GoTyped: engine.NewGoTypedHost(engine.GoTypedOptions{})}, StatusArgs{})
+	res, _, _ = handleStatus(context.Background(), &Config{GoTyped: engine.NewGoTypedHost(engine.GoTypedOptions{MaxResident: -1})}, StatusArgs{})
 	if text := resultText(t, res); strings.Contains(text, "Go typed tier") {
 		t.Errorf("a server that keeps nothing must not report a typed tier:\n%s", text)
 	}

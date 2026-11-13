@@ -181,31 +181,54 @@ func residentStateFollowsEdits(t *testing.T, eng string) {
 	}
 }
 
-func TestGoTyped_HoldsNothingByDefault(t *testing.T) {
+// The default keeps the type-checked programs between queries (Francis, 2026-11-13: resident is opt-out), sized to the
+// repository's configurations, and nothing else; MaxResident: -1 keeps nothing at all.
+func TestGoTyped_KeepsProgramsByDefaultAndNothingWhenOptedOut(t *testing.T) {
 	root := goTypedFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	query := func(ws *engine.Workspace) {
+		t.Helper()
+		gt, _, err := ws.GoTyped("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 2; i++ {
+			res, err := gt.References(ctx, "Hello")
+			if err != nil || res.Cached || !slices.Equal(hitLines(res), []string{"b.go:3"}) {
+				t.Fatalf("query %d: %v cached %v err %v", i, hitLines(res), res.Cached, err)
+			}
+		}
+	}
+
 	ws, err := engine.Open(ctx, root, engine.Options{Mode: "bm25"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = ws.Close() }()
-	if ws.Status().GoTyped != nil {
-		t.Errorf("Options.GoTyped is the zero value, yet Status reports a typed tier: %+v", ws.Status().GoTyped)
+	query(ws)
+	st := ws.Status().GoTyped
+	if st == nil || !st.Enabled || len(st.Programs.Programs) != 1 || st.Programs.Loads != 1 || st.Programs.Reuses != 1 || st.HeldBytes <= 0 {
+		t.Errorf("default options: %+v, want one program kept (the fixture has one configuration), loaded once and reused once", st)
 	}
-	gt, _, err := ws.GoTyped("")
+	if st != nil && (len(st.Pool.Sessions) != 0 || st.Cache.Entries != 0) {
+		t.Errorf("default options keep a gopls or answers: %+v", st)
+	}
+	_ = ws.Close()
+	if st := ws.Status().GoTyped; st.HeldBytes != 0 || len(st.Programs.Programs) != 0 {
+		t.Errorf("after Close: %+v", st)
+	}
+
+	off, err := engine.Open(ctx, root, engine.Options{Mode: "bm25", GoTyped: engine.GoTypedOptions{MaxResident: -1}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2; i++ {
-		res, err := gt.References(ctx, "Hello")
-		if err != nil || res.Cached || !slices.Equal(hitLines(res), []string{"b.go:3"}) {
-			t.Fatalf("query %d: %v cached %v err %v", i, hitLines(res), res.Cached, err)
-		}
+	defer func() { _ = off.Close() }()
+	if off.Status().GoTyped != nil {
+		t.Errorf("MaxResident -1 and no cache, yet Status reports a typed tier: %+v", off.Status().GoTyped)
 	}
-	// the process holds no gopls after the query: nothing for status to report
-	host := engine.NewGoTypedHost(engine.GoTypedOptions{})
-	if st := host.Status(); st.Enabled || st.HeldBytes != 0 || len(st.Pool.Sessions) != 0 {
-		t.Errorf("a zero-option host reports %+v", st)
+	query(off)
+	host := engine.NewGoTypedHost(engine.GoTypedOptions{MaxResident: -1})
+	if st := host.Status(); st.Enabled || st.HeldBytes != 0 || len(st.Programs.Programs) != 0 {
+		t.Errorf("an opted-out host reports %+v", st)
 	}
 }

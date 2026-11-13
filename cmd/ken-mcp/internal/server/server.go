@@ -277,7 +277,8 @@ type Config struct {
 
 	// GoTyped is what the Go typed tier (go_references, go_implementations, go_rename_plan, go_uses) keeps between
 	// calls: KEN_MCP_GO_RESIDENT gopls processes, each stopped after KEN_MCP_GO_IDLE, and KEN_MCP_GO_CACHE_MB of
-	// remembered answers. The answer cache defaults to 32 MB; the resident gopls processes default to none (ADR-060).
+	// remembered answers. By default the programs are kept, sized to the configurations, and 32 MB of answers
+	// (ADR-060, ADR-061).
 	GoTyped engine.GoTypedOptions
 
 	// Index holds the index settings every repo is built with, and only
@@ -402,23 +403,42 @@ func LoadConfig(logger *kenmcp.Logger) Config {
 	// filesystem where mmap misbehaves (e.g. some network mounts).
 	mmapModel := envcfg.EnvBool("KEN_MCP_MMAP_MODEL", true, logger)
 
-	// Go typed tier (ADR-060), all opt-in. A resident gopls holds 0.7 to 1.4 GB on a repo the size of goinfer, so
-	// the cap is the operator's to set; the answer cache is small (32 MB at most, KEN_MCP_GO_CACHE_MB; 0 turns it off) and on by default, since a
+	// Go typed tier (ADR-060, ADR-061). The type-checked programs are kept by default (about 0.2 GB per build
+	// configuration on a repo the size of goinfer, dropped after KEN_MCP_GO_IDLE); the answer cache is small (32 MB at most, KEN_MCP_GO_CACHE_MB; 0 turns it off) and on by default, since a
 	// remembered answer is returned only while the files on disk are unchanged.
+	// KEN_MCP_GO_RESIDENT: unset keeps the type-checked programs loaded, as many as the repositories have
+	// configurations (GoTypedOptions.MaxResident 0); 0 keeps none; n keeps n.
+	const unset = -1 << 30
+	goResident := envcfg.EnvInt("KEN_MCP_GO_RESIDENT", unset, logger)
+	switch {
+	case goResident == unset:
+		goResident = 0
+	case goResident == 0:
+		goResident = -1
+	case goResident < 0:
+		logger.Logf(kenmcp.LogWarn, "KEN_MCP_GO_RESIDENT=%d: must not be negative — using the default (programs kept, sized to the configurations)", goResident)
+		goResident = 0
+	}
 	goTyped := engine.GoTypedOptions{
-		MaxResident: envcfg.EnvInt("KEN_MCP_GO_RESIDENT", 0, logger),
+		MaxResident: goResident,
 		IdleTimeout: envcfg.EnvDuration("KEN_MCP_GO_IDLE", 5*time.Minute, logger),
 		CacheBytes:  int64(envcfg.EnvInt("KEN_MCP_GO_CACHE_MB", defaultGoCacheMB, logger)) << 20,
 		Engine:      envcfg.EnvEnum("KEN_MCP_GO_ENGINE", engine.GoEngines(), engine.GoEngines()[0], logger),
 		Parallel:    envcfg.EnvInt("KEN_MCP_GO_PARALLEL", 1, logger),
 	}
-	if goTyped.MaxResident < 0 || goTyped.CacheBytes < 0 {
-		logger.Logf(kenmcp.LogWarn, "KEN_MCP_GO_RESIDENT / KEN_MCP_GO_CACHE_MB must not be negative: keeping nothing between Go typed queries")
-		goTyped.MaxResident, goTyped.CacheBytes = 0, 0
+	if goTyped.CacheBytes < 0 {
+		logger.Logf(kenmcp.LogWarn, "KEN_MCP_GO_CACHE_MB must not be negative: remembering no answers")
+		goTyped.CacheBytes = 0
 	}
 	if goTyped.Enabled() {
-		logger.Logf(kenmcp.LogInfo, "go typed tier (engine %s) keeps up to %d configurations resident (idle stop %s) and %d MB of answers (KEN_MCP_GO_*)",
-			goTyped.Engine, goTyped.MaxResident, goTyped.IdleTimeout, goTyped.CacheBytes>>20)
+		resident := "programs kept, sized to the configurations"
+		if goTyped.MaxResident > 0 {
+			resident = fmt.Sprintf("up to %d configurations kept", goTyped.MaxResident)
+		} else if goTyped.MaxResident < 0 {
+			resident = "nothing kept loaded"
+		}
+		logger.Logf(kenmcp.LogInfo, "go typed tier (engine %s): %s (idle stop %s), %d MB of answers (KEN_MCP_GO_*)",
+			goTyped.Engine, resident, goTyped.IdleTimeout, goTyped.CacheBytes>>20)
 	}
 
 	// M5: neural reranker — opt-in (default off), loaded lazily on the

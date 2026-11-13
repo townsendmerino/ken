@@ -23,6 +23,7 @@ import (
 // (trefresh.go) and by a fresh load otherwise.
 type ProgramCache struct {
 	max  int
+	auto bool // sized by Fit
 	idle time.Duration
 
 	mu        sync.Mutex
@@ -62,6 +63,30 @@ func NewProgramCache(max int, idle time.Duration) *ProgramCache {
 		idle = 5 * time.Minute
 	}
 	return &ProgramCache{max: max, idle: idle, held: map[string]*heldProgram{}}
+}
+
+// AutoProgramCeiling is the most programs a cache sized by Fit will keep.
+const AutoProgramCeiling = 8
+
+// NewAutoProgramCache returns a cache that sizes itself: it starts with room for one program, and Fit grows it to the
+// number of build configurations of the repositories it is used for, up to AutoProgramCeiling. A cache with fewer
+// slots than a repository has configurations reloads on every query, so the useful size is the configuration count,
+// which is not known until a repository is opened.
+func NewAutoProgramCache(idle time.Duration) *ProgramCache {
+	c := NewProgramCache(1, idle)
+	c.auto = true
+	return c
+}
+
+// Fit makes room for n programs in a cache that sizes itself. It never shrinks, and does nothing to a cache given a
+// fixed size.
+func (c *ProgramCache) Fit(n int) {
+	if c == nil || !c.auto {
+		return
+	}
+	c.mu.Lock()
+	c.max = max(c.max, min(n, AutoProgramCeiling))
+	c.mu.Unlock()
 }
 
 // ProgramStatus describes one held program.
