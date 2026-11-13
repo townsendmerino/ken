@@ -74,7 +74,7 @@ var importRules = map[string][]string{
 	"tools/subset-tags":             {"internal/devtools"},
 
 	// Public library packages.
-	"engine": {"internal/repo", "internal/search", "internal/structural"},
+	"engine": {"internal/gotypes", "internal/repo", "internal/search", "internal/structural"},
 	"mcp":    {"engine", "internal/envcfg", "internal/mcplog", "internal/status"},
 	"mcp/db": {"internal/db", "mcp"},
 
@@ -86,6 +86,7 @@ var importRules = map[string][]string{
 	"internal/devtools":    {},
 	"internal/embedcache":  {},
 	"internal/envcfg":      {"internal/bytesize", "internal/mcplog", "internal/repo"},
+	"internal/gotypes":     {},
 	"internal/mcplog":      {},
 	"internal/modelfetch":  {},
 	"internal/perf":        {},

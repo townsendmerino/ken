@@ -66,6 +66,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-056](#adr-056-markdown-files-use-the-markdown-chunker-by-default-retroactive) | Markdown files use the markdown chunker by default (retroactive) | Accepted |
 | [ADR-057](#adr-057-mcp-works-through-engine-superseding-adr-048s-rejection) | `mcp` works through `engine` (superseding ADR-048's rejection) | Accepted |
 | [ADR-058](#adr-058-a-db-chunks-freshness-header-is-shown-not-indexed) | A DB chunk's freshness header is shown, not indexed | Accepted |
+| [ADR-059](#adr-059-a-go-typed-tier-that-asks-gopls-once-per-build-configuration) | A Go typed tier that asks gopls once per build configuration | Proposed |
 
 ---
 
@@ -3147,3 +3148,51 @@ The freshness header stays in `Chunk.Text`, so every result still shows it, and 
 - Corpora without DB chunks are untouched: the semble benchmark is identical, and every non-DB output in the before/after comparison is identical.
 - `internal/db`'s `TestIndexTextDropsWhatDBEmits` fails if the header's format and the pattern `indexText` removes drift apart.
 
+## ADR-059: A Go typed tier that asks gopls once per build configuration
+
+**Status:** Proposed
+**Date:** 2026-11-13
+**Decided by:** Francis asked for it on 2026-11-13 ("go straight to ken"); the design below is the first build and is his to accept or change.
+
+### Context
+ken's `definition`, `references` and `callers` answer from the tree-sitter index by name, and say so. For Go that leaves three questions an agent asks during a refactor unanswered: which lines refer to *this* method and not another one with the same name, which types implement an interface, and what a rename has to edit.
+
+gopls answers all three, but for one build configuration (GOOS, GOARCH, tags) at a time. Measured on goinfer at `ed1ba79ba` (3,118 Go files in seven workspace modules, gopls v0.23.0, an M-series Mac), 2026-11-13:
+
+| question | by name | gopls, host default | gopls, three configurations merged |
+|---|--:|--:|--:|
+| files compiled | all | 1,984 (64%) | 3,085 (98.9%) |
+| lines referring to `ResidentForward.Forward` | 804 (text), 783 (`callers Forward`) | 68 | 496 |
+| non-test types implementing `ResidentForward` | not answerable | 1 | 3 |
+| files a rename of `ResidentForward` edits | 72 contain the word | 44 | 59 |
+
+The default configuration compiled 3% of that repository's CUDA backend and 1% of its WebGPU backend, so its answers were confidently short: a rename from it leaves 15 files stale, in builds the host cannot compile. One gopls run cost 2 to 17 s and 0.8 to 3.8 GB peak, freed when it exits; a resident gopls answered in under a second and held 1.7 GB for one configuration.
+
+### Decision
+A new package, `internal/gotypes`, reached through `engine` (ADR-057), with three queries: references, implementations, and a rename plan.
+
+- **The repository lists its build configurations** in `.ken-go.json` at its root: a name and an environment each, plus an optional `wrap` command prefix for a repository that serializes heavy work behind a lock. Without the file there is one configuration, the host default, and every answer says so.
+- **A symbol is given by name** (`Type.Member`, `pkg.Name`, `dir/sub.Name`) and resolved by parsing every `.go` file with `go/parser`, whatever its constraints. That finds the per-platform twins of a declaration (`x_linux.go`, `x_darwin.go`), which are separate objects to a type checker. A name that means two things is refused with the candidates.
+- **Each declaration is asked under each configuration that compiles its file** (the file's `//go:build` line and name suffix, evaluated against the configuration), by running the `gopls` command line. Hits are merged by line and each carries the configurations that saw it.
+- **A lower bound is labelled.** A declaration no listed configuration compiles, or a gopls run that fails, sets `incomplete` and prints an `INCOMPLETE` line naming what is missing; the CLI exits 3.
+- **A rename is a plan.** Each configuration's `gopls rename -d` diff is applied in memory and merged per line into one patch for `git apply`; a line two configurations edit differently is a reported conflict. The plan also lists the lines that still spell the old name in comments and markdown, which no rename edits. ken writes nothing to the repository.
+- **gopls is run, not linked.** No new module dependency; the binary stays pure Go. The MCP tools (`go_references`, `go_implementations`, `go_rename_plan`) are registered only when `gopls` is on PATH, and take local checkouts only.
+- **The `wrap` command is code the repository chose.** The MCP server honors it for the operator's default repo and on a server confined by `KEN_MCP_ALLOWED_REPO_ROOTS`; for an agent-supplied path on an unconfined server it is dropped and the reply says so.
+
+### Consequences
+- On goinfer the three queries reproduce the hand-merged figures in the table exactly (496 lines in 255 files; 64 implementations, 3 of them non-test; 59 files, and the merged patch passes `git apply --check`).
+- A merged query costs the sum of its configurations: about 35 s for the 496-line answer, against under a second from a resident server. Chosen for memory: nothing is held between queries. A resident mode is a later decision with its own measurement.
+- Running gopls builds code and runs the go command in that repository, with the server's permissions. The tools refuse URL clones for that reason.
+- The answer is only as wide as the configuration list. A configuration nobody listed (a third GOOS, a rarely used tag) is covered only where a declaration's own file needs it, which is what the `INCOMPLETE` line catches; references in files of an unlisted configuration are not.
+- Not done here: the three tools do not replace `references`/`callers` for Go, the structural index is not consulted, and nothing caches between calls.
+
+### Addendum, 2026-11-13: counts, and the reverse query
+Two additions from the first real use (an architecture survey of goinfer; `docs/prompts/goinfer-modularize-session-feedback-2026-11-13.md`, items 1 and 3). Both are Francis's to accept with the rest of this ADR.
+
+- **`group_by` (`package`, `dir`, `file`) on references and implementations.** The answer to a coupling question is the counts; the lines cost 732,078 characters of JSON for one symbol. Grouping is done on the merged hits, so the header, the per-configuration counts and the `INCOMPLETE` lines are the ungrouped ones. A test file is one ending `_test.go`. The name-grade `references` and `callers` did not get it: `references` records lines for calls only (an import or a raise is a file, not a line), so its counts would mix units, and the two tools would then differ.
+- **`go_uses`: the identifiers of one package that another names.** gopls has no command for this; the nearest is one `references` run per exported declaration or per importing file, each seconds long. Instead, per configuration, `go list -deps -test -json` (through `wrap`) names the files the importer and its dependencies are built from, and ken type-checks them from source with the standard library's `go/types`: dependencies without function bodies, the importer in full, its external test package against the importer-with-tests. An identifier counts when the object it resolves to is declared in the imported package, so aliased and dot imports count, a same-named local does not, and methods and fields are reported as `Type.Member`. Counts are of lines, to agree with `go_references`.
+  - No new module dependency: `golang.org/x/tools/go/packages` would do the loading, and was not added.
+  - Type-checking from source tolerates errors where compiling for export data (`go list -export`) does not: a configuration with type errors is counted, marked `partial` and `INCOMPLETE`.
+  - Measured on goinfer at `004d14023`, 2026-11-13: `backend/cuda` naming `decoder`, three configurations, 2.4 s wall in all; 650 identifiers (189 package-level, 90 of them from non-test code) on 7,103 lines. `decoder.Options` has 622 test lines there, the figure `go_references` grouped by package gives for `backend/cuda` (2,524 lines in all; `decoder` 51 non-test and 916 test). A regular expression over the same non-test files finds 115 names: the 25 extra are all mentions in comments.
+  - The type check runs in ken's process, so the repository's `wrap` command covers `go list` and not the second or so of checking. A repository whose lock must cover that too is not served by this design; re-running ken itself under `wrap` would be the fix.
+  - It is registered with the other typed tools (when gopls is on PATH), though it needs only `go`.

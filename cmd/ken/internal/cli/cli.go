@@ -115,6 +115,7 @@ usage:
   ken savings                            [--verbose] [--path FILE]    # render token-savings summary
   ken status                             [--json] [--verbose]         # build identity, models, enrichment, savings
   ken doctor                             [--json] [--verbose]         # health check + recommendations (model, rerank cache, config)
+  ken go              refs|impls|rename-plan <repo> <symbol> [new-name]   # type-resolved Go answers from gopls, merged over build configurations ('ken go --help')
 
 ken index --watch (default in v0.3+) keeps the process alive and re-indexes
 files on change; --no-watch is the v0.2 behavior (build once, print, exit).
