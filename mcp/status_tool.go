@@ -134,6 +134,13 @@ func goTypedInfo(st engine.GoTypedStatus) *status.GoTypedInfo {
 		CacheEntries: st.Cache.Entries, CacheBytes: st.Cache.Bytes, CacheMaxBytes: st.Cache.MaxBytes,
 		CacheHits: st.Cache.Hits, CacheMisses: st.Cache.Misses, CacheStale: st.Cache.Stale, CacheDropped: st.Cache.Dropped,
 		Starts: st.Pool.Starts, Reuses: st.Pool.Reuses,
+		ProgramLoads: st.Programs.Loads, ProgramReuses: st.Programs.Reuses, ProgramStale: st.Programs.Stale, ProgramDropped: st.Programs.Dropped,
+	}
+	if g.MaxResident == 0 {
+		g.MaxResident, g.IdleSeconds = st.Programs.MaxPrograms, st.Programs.IdleSeconds
+	}
+	for _, pr := range st.Programs.Programs {
+		g.Programs = append(g.Programs, status.GoTypedProgram{Repo: pr.Repo, Config: pr.Config, Bytes: pr.Bytes, Packages: pr.Packages, IdleSec: pr.IdleSec, Queries: pr.Queries})
 	}
 	for _, s := range st.Pool.Sessions {
 		g.Sessions = append(g.Sessions, status.GoTypedSession{Repo: s.Repo, Config: s.Config, PID: s.PID, RSSBytes: s.RSSBytes, IdleSec: s.IdleSec, Requests: s.Requests})

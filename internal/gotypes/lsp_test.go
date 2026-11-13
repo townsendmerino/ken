@@ -302,7 +302,7 @@ func settle(t *testing.T, root string) {
 func TestLSP_oneShotStartsOneServerPerConfigurationAndStopsIt(t *testing.T) {
 	root := writeTree(t, lspTree)
 	f := &lspFake{}
-	r := &Runner{Repo: root, Config: twoConfigs(), Spawn: f.spawn, Gopls: "gopls"}
+	r := &Runner{Repo: root, Config: twoConfigs(), Spawn: f.spawn, Engine: EngineLSP, Gopls: "gopls"}
 	res, err := r.References(context.Background(), "Hello")
 	if err != nil {
 		t.Fatal(err)
@@ -324,7 +324,7 @@ func TestLSP_wrapPrefixesTheOneShotServer(t *testing.T) {
 	f := &lspFake{}
 	cfg := twoConfigs()
 	cfg.Wrap = []string{"lockrun", "--label", "x", "--"}
-	r := &Runner{Repo: root, Config: cfg, Spawn: f.spawn}
+	r := &Runner{Repo: root, Config: cfg, Spawn: f.spawn, Engine: EngineLSP}
 	if _, err := r.References(context.Background(), "Hello"); err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +338,7 @@ func TestLSP_wrapPrefixesTheOneShotServer(t *testing.T) {
 func TestLSP_serverErrorMarksTheRunIncomplete(t *testing.T) {
 	root := writeTree(t, lspTree)
 	f := &lspFake{failRefs: "no package metadata for file"}
-	r := &Runner{Repo: root, Config: twoConfigs(), Spawn: f.spawn}
+	r := &Runner{Repo: root, Config: twoConfigs(), Spawn: f.spawn, Engine: EngineLSP}
 	res, err := r.References(context.Background(), "Hello")
 	if err != nil {
 		t.Fatal(err)
@@ -355,7 +355,7 @@ func TestLSP_implementationAndRename(t *testing.T) {
 		"b.go":   "package m\n\n// implements Shape\ntype Sq struct{}\n\nvar _ Shape = Sq{}\n",
 	})
 	f := &lspFake{}
-	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn}
+	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Engine: EngineLSP}
 	res, err := r.Implementations(context.Background(), "Shape")
 	if err != nil {
 		t.Fatal(err)
@@ -385,7 +385,7 @@ func TestPool_reusesAServerAndSeesEdits(t *testing.T) {
 	f := &lspFake{}
 	pool := NewPool(2, time.Minute)
 	defer pool.Close()
-	r := &Runner{Repo: root, Config: twoConfigs(), Spawn: f.spawn, Pool: pool}
+	r := &Runner{Repo: root, Config: twoConfigs(), Spawn: f.spawn, Engine: EngineLSP, Pool: pool}
 	ctx := context.Background()
 
 	res, err := r.References(ctx, "Hello")
@@ -448,7 +448,7 @@ func TestPool_seesASameSizeSameMtimeEditInsideTheRacyWindow(t *testing.T) {
 	f := &lspFake{}
 	pool := NewPool(1, time.Minute)
 	defer pool.Close()
-	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Pool: pool}
+	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Engine: EngineLSP, Pool: pool}
 	ctx := context.Background()
 	res, err := r.References(ctx, "Hello")
 	if err != nil || len(res.Hits) != 2 {
@@ -473,7 +473,7 @@ func TestPool_boundsServersAndStopsIdleOnes(t *testing.T) {
 	root := writeTree(t, lspTree)
 	f := &lspFake{}
 	pool := NewPool(1, 80*time.Millisecond)
-	r := &Runner{Repo: root, Config: twoConfigs(), Spawn: f.spawn, Pool: pool}
+	r := &Runner{Repo: root, Config: twoConfigs(), Spawn: f.spawn, Engine: EngineLSP, Pool: pool}
 	ctx := context.Background()
 	if _, err := r.References(ctx, "Hello"); err != nil {
 		t.Fatal(err)
@@ -511,7 +511,7 @@ func TestPool_statusReportsEachServer(t *testing.T) {
 	f := &lspFake{}
 	pool := NewPool(3, time.Minute)
 	defer pool.Close()
-	r := &Runner{Repo: root, Config: twoConfigs(), Spawn: f.spawn, Pool: pool}
+	r := &Runner{Repo: root, Config: twoConfigs(), Spawn: f.spawn, Engine: EngineLSP, Pool: pool}
 	if _, err := r.References(context.Background(), "Hello"); err != nil {
 		t.Fatal(err)
 	}
@@ -530,7 +530,7 @@ func TestPool_aServerThatDiesIsReplacedOnce(t *testing.T) {
 	f := &lspFake{dieOn: 2}
 	pool := NewPool(1, time.Minute)
 	defer pool.Close()
-	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Pool: pool}
+	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Engine: EngineLSP, Pool: pool}
 	ctx := context.Background()
 	if _, err := r.References(ctx, "Hello"); err != nil {
 		t.Fatal(err)
@@ -550,7 +550,7 @@ func TestPool_wrapLockIsHeldPerRequestNotWhileIdle(t *testing.T) {
 	pool := NewPool(1, time.Minute)
 	defer pool.Close()
 	cfg := Config{Configs: []BuildConfig{{Name: "one"}}, Wrap: []string{"lockrun", "--"}}
-	r := &Runner{Repo: root, Config: cfg, Spawn: f.spawn, Pool: pool}
+	r := &Runner{Repo: root, Config: cfg, Spawn: f.spawn, Engine: EngineLSP, Pool: pool}
 	ctx := context.Background()
 	for i := 0; i < 2; i++ {
 		if _, err := r.References(ctx, "Hello"); err != nil {
@@ -591,7 +591,7 @@ func TestCache_answersRepeatsWithoutAServerAndNeverReturnsAStaleAnswer(t *testin
 	settle(t, root)
 	f := &lspFake{}
 	cache := NewCache(1 << 20)
-	r := &Runner{Repo: root, Config: twoConfigs(), Spawn: f.spawn, Cache: cache}
+	r := &Runner{Repo: root, Config: twoConfigs(), Spawn: f.spawn, Engine: EngineLSP, Cache: cache}
 	ctx := context.Background()
 
 	first, err := r.References(ctx, "Hello")
@@ -647,7 +647,7 @@ func TestCache_answersRepeatsWithoutAServerAndNeverReturnsAStaleAnswer(t *testin
 func TestCache_seesASameSizeEditInsideTheRacyWindow(t *testing.T) {
 	root := writeTree(t, lspTree)
 	f := &lspFake{}
-	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Cache: NewCache(1 << 20)}
+	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Engine: EngineLSP, Cache: NewCache(1 << 20)}
 	ctx := context.Background()
 	if _, err := r.References(ctx, "Hello"); err != nil {
 		t.Fatal(err)
@@ -671,7 +671,7 @@ func TestCache_doesNotRememberIncompleteAnswersAndIsBounded(t *testing.T) {
 	root := writeTree(t, lspTree)
 	f := &lspFake{failRefs: "boom"}
 	cache := NewCache(1 << 20)
-	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Cache: cache}
+	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Engine: EngineLSP, Cache: cache}
 	ctx := context.Background()
 	if res, err := r.References(ctx, "Hello"); err != nil || !res.Incomplete {
 		t.Fatalf("want an incomplete answer: %v %v", res, err)
@@ -706,7 +706,7 @@ func TestCache_invalidateDropsARepo(t *testing.T) {
 	root := writeTree(t, lspTree)
 	f := &lspFake{}
 	cache := NewCache(1 << 20)
-	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Cache: cache}
+	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Engine: EngineLSP, Cache: cache}
 	if _, err := r.References(context.Background(), "Hello"); err != nil {
 		t.Fatal(err)
 	}
@@ -796,7 +796,7 @@ func TestCache_renamePlanSeesEditsToDocsAndTestdata(t *testing.T) {
 	tree["testdata/x.go"] = "package x\n\n// Hello lives elsewhere.\n"
 	root := writeTree(t, tree)
 	f := &lspFake{}
-	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Cache: NewCache(1 << 20)}
+	r := &Runner{Repo: root, Config: Config{Configs: []BuildConfig{{Name: "one"}}}, Spawn: f.spawn, Engine: EngineLSP, Cache: NewCache(1 << 20)}
 	ctx := context.Background()
 	mentionFiles := func(p *RenamePlan) []string {
 		var out []string

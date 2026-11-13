@@ -51,11 +51,18 @@ func hitLines(res *engine.GoResult) []string {
 }
 
 func TestGoTyped_ResidentStateFollowsEditsThroughTheWatcher(t *testing.T) {
+	for _, eng := range []string{"types", "lsp"} {
+		t.Run(eng, func(t *testing.T) { residentStateFollowsEdits(t, eng) })
+	}
+}
+
+// residentStateFollowsEdits drives one engine: "types" keeps type-checked programs, "lsp" keeps gopls processes.
+func residentStateFollowsEdits(t *testing.T, eng string) {
 	root := goTypedFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	ws, err := engine.Open(ctx, root, engine.Options{Mode: "bm25", Watch: true,
-		GoTyped: engine.GoTypedOptions{MaxResident: 1, IdleTimeout: time.Minute, CacheBytes: 1 << 20}})
+		GoTyped: engine.GoTypedOptions{MaxResident: 1, IdleTimeout: time.Minute, CacheBytes: 1 << 20, Engine: eng}})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -92,17 +99,26 @@ func TestGoTyped_ResidentStateFollowsEditsThroughTheWatcher(t *testing.T) {
 		}
 	}
 
-	// 1. the first query starts one gopls and fills the cache; the tier now holds memory, and says so
+	// what is resident (a program or a gopls), how many times one was started, and the memory it reports
+	resident := func() (n int, starts, bytes int64) {
+		st := ws.Status().GoTyped
+		if eng == "types" {
+			return len(st.Programs.Programs), st.Programs.Loads, st.Programs.Bytes
+		}
+		return len(st.Pool.Sessions), st.Pool.Starts, st.Pool.RSSBytes
+	}
+
+	// 1. the first query loads one backend and fills the cache; the tier now holds memory, and says so
 	first := refs()
 	if got, want := hitLines(first), []string{"b.go:3"}; !slices.Equal(got, want) || first.Cached {
 		t.Fatalf("first query: hits %v cached %v, want %v fresh", got, first.Cached, want)
 	}
 	st := ws.Status().GoTyped
-	if st == nil || !st.Enabled || len(st.Pool.Sessions) != 1 || st.Cache.Entries != 1 || st.HeldBytes <= 0 {
-		t.Fatalf("status after the first query: %+v, want one resident gopls with memory and one remembered answer", st)
+	if st == nil || !st.Enabled || st.Cache.Entries != 1 || st.HeldBytes <= 0 {
+		t.Fatalf("status after the first query: %+v, want something resident with memory and one remembered answer", st)
 	}
-	if st.Pool.Sessions[0].RSSBytes <= 0 {
-		t.Errorf("the resident gopls reports %d bytes: status must carry its memory", st.Pool.Sessions[0].RSSBytes)
+	if n, starts, bytes := resident(); n != 1 || starts != 1 || bytes <= 0 {
+		t.Errorf("resident after the first query: %d (started %d, %d bytes); want one, started once, with its memory reported", n, starts, bytes)
 	}
 
 	// 2. an unchanged tree answers from memory, with no new gopls
@@ -110,8 +126,8 @@ func TestGoTyped_ResidentStateFollowsEditsThroughTheWatcher(t *testing.T) {
 	if !again.Cached || !slices.Equal(hitLines(again), hitLines(first)) {
 		t.Errorf("repeat: cached %v hits %v", again.Cached, hitLines(again))
 	}
-	if st := ws.Status().GoTyped; st.Pool.Starts != 1 || st.Cache.Hits != 1 {
-		t.Errorf("status after the repeat %+v, want 1 start and 1 cache hit", st)
+	if _, starts, _ := resident(); starts != 1 || ws.Status().GoTyped.Cache.Hits != 1 {
+		t.Errorf("after the repeat: %d starts, %d cache hits; want 1 and 1", starts, ws.Status().GoTyped.Cache.Hits)
 	}
 
 	// 3. an edit, queried at once, before the watcher's debounce can have run: the tree check alone must catch it
@@ -146,15 +162,21 @@ func TestGoTyped_ResidentStateFollowsEditsThroughTheWatcher(t *testing.T) {
 	if got, want := hitLines(final), []string{"b.go:3", "b.go:5", "c.go:3"}; !slices.Equal(got, want) || final.Cached {
 		t.Errorf("after the watcher flushed: hits %v cached %v, want %v fresh", got, final.Cached, want)
 	}
-	if st := ws.Status().GoTyped; st.Pool.Starts != 1 {
-		t.Errorf("starts %d: edits must reach the resident gopls, not restart it", st.Pool.Starts)
+	if eng == "lsp" {
+		if _, starts, _ := resident(); starts != 1 {
+			t.Errorf("starts %d: edits must reach the resident gopls, not restart it", starts)
+		}
+	} else if st := ws.Status().GoTyped.Programs; st.Stale+st.Dropped < 2 || st.Loads < 3 {
+		// a program is never patched: each edit made the held one unusable (found stale at the next query, or dropped
+		// by the watcher first) and a new one was loaded
+		t.Errorf("programs %+v: want the held program replaced after each edit", st)
 	}
 
 	// 5. Close releases everything
 	if err := ws.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if st := ws.Status().GoTyped; len(st.Pool.Sessions) != 0 || st.Cache.Entries != 0 || st.HeldBytes != 0 {
+	if st := ws.Status().GoTyped; len(st.Pool.Sessions) != 0 || len(st.Programs.Programs) != 0 || st.Cache.Entries != 0 || st.HeldBytes != 0 {
 		t.Errorf("after Close the tier still holds %+v", st)
 	}
 }

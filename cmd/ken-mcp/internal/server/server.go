@@ -409,14 +409,16 @@ func LoadConfig(logger *kenmcp.Logger) Config {
 		MaxResident: envcfg.EnvInt("KEN_MCP_GO_RESIDENT", 0, logger),
 		IdleTimeout: envcfg.EnvDuration("KEN_MCP_GO_IDLE", 5*time.Minute, logger),
 		CacheBytes:  int64(envcfg.EnvInt("KEN_MCP_GO_CACHE_MB", defaultGoCacheMB, logger)) << 20,
+		Engine:      envcfg.EnvEnum("KEN_MCP_GO_ENGINE", engine.GoEngines(), engine.GoEngines()[0], logger),
+		Parallel:    envcfg.EnvInt("KEN_MCP_GO_PARALLEL", 1, logger),
 	}
 	if goTyped.MaxResident < 0 || goTyped.CacheBytes < 0 {
 		logger.Logf(kenmcp.LogWarn, "KEN_MCP_GO_RESIDENT / KEN_MCP_GO_CACHE_MB must not be negative: keeping nothing between Go typed queries")
-		goTyped = engine.GoTypedOptions{}
+		goTyped.MaxResident, goTyped.CacheBytes = 0, 0
 	}
 	if goTyped.Enabled() {
-		logger.Logf(kenmcp.LogInfo, "go typed tier keeps up to %d gopls resident (idle stop %s) and %d MB of answers (KEN_MCP_GO_*)",
-			goTyped.MaxResident, goTyped.IdleTimeout, goTyped.CacheBytes>>20)
+		logger.Logf(kenmcp.LogInfo, "go typed tier (engine %s) keeps up to %d configurations resident (idle stop %s) and %d MB of answers (KEN_MCP_GO_*)",
+			goTyped.Engine, goTyped.MaxResident, goTyped.IdleTimeout, goTyped.CacheBytes>>20)
 	}
 
 	// M5: neural reranker — opt-in (default off), loaded lazily on the

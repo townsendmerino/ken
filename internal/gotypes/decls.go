@@ -9,8 +9,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Decl is one declaration site of a symbol. The same qualified name can have several: a function declared once per
@@ -109,8 +111,7 @@ func FindDecls(repo, symbol string) ([]Decl, error) {
 		return nil, err
 	}
 	want := []byte(q.parts[len(q.parts)-1])
-	var out []Decl
-	fset := token.NewFileSet()
+	var paths []string
 	err = filepath.WalkDir(repo, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -121,75 +122,36 @@ func FindDecls(repo, symbol string) ([]Decl, error) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") {
-			return nil
-		}
-		src, err := os.ReadFile(path)
-		if err != nil || !bytes.Contains(src, want) {
-			return nil
-		}
-		// A file with syntax errors still yields the declarations parsed before them; only a nil file is skipped.
-		f, _ := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
-		if f == nil {
-			return nil
-		}
-		rel, _ := filepath.Rel(repo, path)
-		rel = filepath.ToSlash(rel)
-		dir, pkg, expr := filepath.ToSlash(filepath.Dir(rel)), f.Name.Name, buildExpr(src)
-		add := func(id *ast.Ident, kind, owner string) {
-			if id == nil || !q.matches(dir, pkg, owner, id.Name) {
-				return
-			}
-			p := fset.Position(id.Pos())
-			qn := pkg + "." + id.Name
-			if owner != "" {
-				qn = pkg + "." + owner + "." + id.Name
-			}
-			out = append(out, Decl{File: rel, Line: p.Line, Col: p.Column, Kind: kind, QName: qn, Constraint: expr})
-		}
-		for _, decl := range f.Decls {
-			switch d := decl.(type) {
-			case *ast.FuncDecl:
-				if d.Recv == nil || len(d.Recv.List) == 0 {
-					add(d.Name, "func", "")
-				} else {
-					add(d.Name, "method", recvName(d.Recv.List[0].Type))
-				}
-			case *ast.GenDecl:
-				for _, spec := range d.Specs {
-					switch s := spec.(type) {
-					case *ast.TypeSpec:
-						add(s.Name, "type", "")
-						switch t := s.Type.(type) {
-						case *ast.InterfaceType:
-							for _, m := range t.Methods.List {
-								for _, n := range m.Names {
-									add(n, "interface-method", s.Name.Name)
-								}
-							}
-						case *ast.StructType:
-							for _, fl := range t.Fields.List {
-								for _, n := range fl.Names {
-									add(n, "field", s.Name.Name)
-								}
-							}
-						}
-					case *ast.ValueSpec:
-						kind := "var"
-						if d.Tok == token.CONST {
-							kind = "const"
-						}
-						for _, n := range s.Names {
-							add(n, kind, "")
-						}
-					}
-				}
-			}
+		if strings.HasSuffix(path, ".go") {
+			paths = append(paths, path)
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	// Reading and parsing is most of a query's fixed cost on a large repository (a common name is in hundreds of
+	// files), and each file is independent: do them on every processor.
+	perFile := make([][]Decl, len(paths))
+	var wg sync.WaitGroup
+	next := make(chan int)
+	for range min(runtime.GOMAXPROCS(0), max(len(paths), 1)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				perFile[i] = declsIn(repo, paths[i], q, want)
+			}
+		}()
+	}
+	for i := range paths {
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+	var out []Decl
+	for _, ds := range perFile {
+		out = append(out, ds...)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].File != out[j].File {
@@ -233,5 +195,74 @@ func distinctQNames(decls []Decl) []string {
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+// declsIn returns the declarations in one file that q names. want is the name itself, for a cheap first test.
+func declsIn(repo, path string, q symbolQuery, want []byte) []Decl {
+	src, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(src, want) {
+		return nil
+	}
+	// A file with syntax errors still yields the declarations parsed before them; only a nil file is skipped.
+	fset := token.NewFileSet()
+	f, _ := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
+	if f == nil {
+		return nil
+	}
+	var out []Decl
+	rel, _ := filepath.Rel(repo, path)
+	rel = filepath.ToSlash(rel)
+	dir, pkg, expr := filepath.ToSlash(filepath.Dir(rel)), f.Name.Name, buildExpr(src)
+	add := func(id *ast.Ident, kind, owner string) {
+		if id == nil || !q.matches(dir, pkg, owner, id.Name) {
+			return
+		}
+		p := fset.Position(id.Pos())
+		qn := pkg + "." + id.Name
+		if owner != "" {
+			qn = pkg + "." + owner + "." + id.Name
+		}
+		out = append(out, Decl{File: rel, Line: p.Line, Col: p.Column, Kind: kind, QName: qn, Constraint: expr})
+	}
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Recv == nil || len(d.Recv.List) == 0 {
+				add(d.Name, "func", "")
+			} else {
+				add(d.Name, "method", recvName(d.Recv.List[0].Type))
+			}
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				switch s := spec.(type) {
+				case *ast.TypeSpec:
+					add(s.Name, "type", "")
+					switch t := s.Type.(type) {
+					case *ast.InterfaceType:
+						for _, m := range t.Methods.List {
+							for _, n := range m.Names {
+								add(n, "interface-method", s.Name.Name)
+							}
+						}
+					case *ast.StructType:
+						for _, fl := range t.Fields.List {
+							for _, n := range fl.Names {
+								add(n, "field", s.Name.Name)
+							}
+						}
+					}
+				case *ast.ValueSpec:
+					kind := "var"
+					if d.Tok == token.CONST {
+						kind = "const"
+					}
+					for _, n := range s.Names {
+						add(n, kind, "")
+					}
+				}
+			}
+		}
+	}
 	return out
 }

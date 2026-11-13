@@ -37,18 +37,155 @@ func buildFile(name string) bool {
 	return false
 }
 
-// scanTree stats every file a typed query depends on under repo: the .go files (whatever their build constraints, so
-// that a file a configuration does not compile today but may tomorrow is seen) and the module files. Directories the
-// go command never builds from are skipped, as FindDecls does.
-func scanTree(repo string) (map[string]fileStat, error) { return scan(repo, false) }
+// scanTree stats every file a typed query depends on: the .go files (whatever their build constraints, so that a file
+// a configuration does not compile today but may tomorrow is seen) and the module files, under repo and under every
+// other directory its build reads source from (sourceRoots). Directories the go command never builds from are skipped,
+// as FindDecls does.
+func scanTree(repo string) (map[string]fileStat, error) { return scanRoots(repo, false) }
 
-// scanTreeWithDocs is scanTree for a rename plan, which also reads every .go and .md file outside dot-directories,
-// vendor and node_modules (testdata and underscore directories included) to list the lines that still spell the old
-// name. Anything it reads is something the cached plan depends on.
-func scanTreeWithDocs(repo string) (map[string]fileStat, error) { return scan(repo, true) }
+// scanTreeWithDocs is scanTree for a rename plan, which also reads every .go and .md file of the repository outside
+// dot-directories, vendor and node_modules (testdata and underscore directories included) to list the lines that
+// still spell the old name. Anything it reads is something the cached plan depends on.
+func scanTreeWithDocs(repo string) (map[string]fileStat, error) { return scanRoots(repo, true) }
 
-func scan(repo string, docs bool) (map[string]fileStat, error) {
+func scanRoots(repo string, docs bool) (map[string]fileStat, error) {
 	out := map[string]fileStat{}
+	err := scanInto(out, repo, docs)
+	for _, root := range sourceRoots(repo) {
+		if root != repo && !inDir(repo, root) {
+			_ = scanInto(out, root, false) // a root that is missing changes nothing it could be read from
+		}
+	}
+	return out, err
+}
+
+// sourceRoots returns the directories, besides repo itself, that a build of repo reads Go source from and that can
+// change under it: the modules of the go.work that covers repo (found by walking up from it, as the go command does),
+// and the local directories its go.mod and go.work files replace modules with. The module cache and GOROOT are not
+// among them: a module version there does not change, and which version is used is in go.mod and go.sum.
+//
+// Without this, an edit in a sibling module of the same workspace would leave a remembered answer, or a resident
+// server, describing the tree before the edit.
+func sourceRoots(repo string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(dir string) bool {
+		dir = filepath.Clean(dir)
+		if seen[dir] {
+			return false
+		}
+		seen[dir] = true
+		out = append(out, dir)
+		return true
+	}
+	var fromMod func(modDir string)
+	fromMod = func(modDir string) {
+		for _, target := range localReplaces(filepath.Join(modDir, "go.mod")) {
+			if add(target) {
+				fromMod(target)
+			}
+		}
+	}
+	add(repo)
+	fromMod(repo)
+	for dir := repo; ; dir = filepath.Dir(dir) {
+		work := filepath.Join(dir, "go.work")
+		if b, err := os.ReadFile(work); err == nil {
+			for _, use := range directiveArgs(string(b), "use") {
+				if len(use) == 0 {
+					continue
+				}
+				d := use[0]
+				if !filepath.IsAbs(d) {
+					d = filepath.Join(dir, d)
+				}
+				if add(d) {
+					fromMod(d)
+				}
+			}
+			for _, target := range localReplaces(work) {
+				if add(target) {
+					fromMod(target)
+				}
+			}
+			// the workspace file itself is read too; it sits outside repo when found above it
+			if dir != repo && !inDir(repo, dir) {
+				add(work)
+			}
+			break
+		}
+		if filepath.Dir(dir) == dir {
+			break
+		}
+	}
+	return out[1:]
+}
+
+// localReplaces returns the directories that the replace directives of a go.mod or go.work file point at.
+func localReplaces(file string) []string {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, args := range directiveArgs(string(b), "replace") {
+		for i, a := range args {
+			if a == "=>" && i+1 < len(args) {
+				t := args[i+1]
+				if strings.HasPrefix(t, "./") || strings.HasPrefix(t, "../") || t == "." || t == ".." || filepath.IsAbs(t) {
+					if !filepath.IsAbs(t) {
+						t = filepath.Join(filepath.Dir(file), t)
+					}
+					out = append(out, filepath.Clean(t))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// directiveArgs returns the argument lists of every use of a directive in a go.mod or go.work file, in its one-line
+// form (directive a b) and its block form (directive ( a b \n c d )). Comments are dropped and quotes removed.
+func directiveArgs(src, directive string) [][]string {
+	var out [][]string
+	inBlock := false
+	for _, line := range strings.Split(src, "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		f := strings.Fields(line)
+		for i := range f {
+			f[i] = strings.Trim(f[i], "\"`")
+		}
+		switch {
+		case len(f) == 0:
+		case inBlock:
+			if f[0] == ")" {
+				inBlock = false
+			} else {
+				out = append(out, f)
+			}
+		case f[0] == directive && len(f) >= 2 && f[1] == "(":
+			inBlock = true
+		case f[0] == directive+"(":
+			inBlock = true
+		case f[0] == directive:
+			out = append(out, f[1:])
+		}
+	}
+	return out
+}
+
+// scanInto adds root's files to out. root may be a single file (a go.work above the repository).
+func scanInto(out map[string]fileStat, root string, docs bool) error {
+	if fi, err := os.Stat(root); err == nil && !fi.IsDir() {
+		out[root] = fileStat{fi.Size(), fi.ModTime().UnixNano()}
+		return nil
+	}
+	return scan(out, root, docs)
+}
+
+func scan(out map[string]fileStat, repo string, docs bool) error {
 	err := filepath.WalkDir(repo, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if d != nil && d.IsDir() {
@@ -79,7 +216,7 @@ func scan(repo string, docs bool) (map[string]fileStat, error) {
 		out[path] = fileStat{info.Size(), info.ModTime().UnixNano()}
 		return nil
 	})
-	return out, err
+	return err
 }
 
 // treeWatch is what a language server has been told about the files on disk.

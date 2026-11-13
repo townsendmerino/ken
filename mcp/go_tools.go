@@ -11,9 +11,10 @@ import (
 	"github.com/townsendmerino/ken/engine"
 )
 
-// The Go typed tier's tools (ADR-059). They answer from gopls, merged over the repository's build configurations,
-// where definition / references / callers answer from the tree-sitter index by name. They are registered only when
-// gopls is on PATH, so tools/list never offers a tool that can only fail.
+// The Go typed tier's tools (ADR-059, ADR-061). They answer from a type checker, merged over the repository's build
+// configurations, where definition / references / callers answer from the tree-sitter index by name. go_references,
+// go_implementations and go_uses run in this process with go/types and need the go command; go_rename_plan asks
+// gopls. Each is registered only when what it needs is on PATH, so tools/list never offers a tool that can only fail.
 
 // GoSymbolArgs is the argument schema for go_references and go_implementations.
 type GoSymbolArgs struct {
@@ -43,18 +44,18 @@ type GoRenameArgs struct {
 	Patch  bool   `json:"patch,omitempty" jsonschema:"Include the merged unified diff (apply with 'git apply'). Off by default: the summary lists the files, and the diff of a wide rename is large."`
 }
 
-const goTierNote = "Type-resolved by gopls and merged over every build configuration the repo lists in " +
+const goTierNote = "Type-resolved (by Go's own type checker, following gopls's rules for what counts) and merged over every build configuration the repo lists in " +
 	engine.GoConfigFile + " (GOOS, GOARCH, tags), so code behind a build tag is included and each result names " +
 	"the configurations that saw it. Without that file only the host's default configuration is asked. " +
-	"A reply with an INCOMPLETE line is a lower bound. Each configuration costs one to a few seconds (a gopls is " +
-	"started per configuration) unless the server keeps gopls processes or answers resident (KEN_MCP_GO_RESIDENT, " +
-	"KEN_MCP_GO_CACHE_MB), when a repeated query on an unchanged tree is much faster. Local Go repositories only."
+	"A reply with an INCOMPLETE line is a lower bound. Each configuration costs a second or two (its packages are " +
+	"type-checked for the query) unless the server keeps them loaded (KEN_MCP_GO_RESIDENT), when a query on an " +
+	"unchanged tree takes a fraction of a second; an identical repeat is remembered. Local Go repositories only."
 
 const goUsesNote = "merged over every build configuration the repo lists in " + engine.GoConfigFile +
 	" (without that file: the host's default only), each row naming the configurations that saw it when not all did. " +
 	"A reply with an INCOMPLETE line is a lower bound. Local Go repositories only."
 
-func registerGoTools(srv *sdk.Server, cfg *Config) {
+func registerGoTools(srv *sdk.Server, cfg *Config, haveGopls bool) {
 	sdk.AddTool(srv, &sdk.Tool{
 		Name: "go_references",
 		Description: "Find every line that refers to a Go symbol: compiler-grade, unlike `references` and `callers`, " +
@@ -87,6 +88,9 @@ func registerGoTools(srv *sdk.Server, cfg *Config) {
 		defer stop()
 		return handleGoUses(ctx, cfg, args)
 	})
+	if !haveGopls {
+		return
+	}
 	sdk.AddTool(srv, &sdk.Tool{
 		Name: "go_rename_plan",
 		Description: "Plan a rename of a Go symbol: the files and lines it would edit under every build configuration, " +

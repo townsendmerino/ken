@@ -40,6 +40,8 @@ func main() {
 	resident := flag.Int("resident", 0, "GoTypedOptions.MaxResident")
 	idle := flag.Duration("idle", 5*time.Minute, "GoTypedOptions.IdleTimeout")
 	cacheMB := flag.Int("cache-mb", 0, "GoTypedOptions.CacheBytes, in MB")
+	engineName := flag.String("engine", "", "GoTypedOptions.Engine: "+strings.Join(engine.GoEngines(), ", ")+" (default: the default engine)")
+	parallel := flag.Int("parallel", 1, "GoTypedOptions.Parallel")
 	hold := flag.Duration("hold", 0, "after the queries, keep the process (and any resident gopls) alive this long before closing, so the lock and memory can be inspected from outside")
 	edit := flag.String("edit", "", "repo-relative file to edit (comment appended) after the queries")
 	flag.Parse()
@@ -48,20 +50,21 @@ func main() {
 		fmt.Fprintln(os.Stderr, "gotypedbench: -repo is required")
 		os.Exit(2)
 	}
-	host := engine.NewGoTypedHost(engine.GoTypedOptions{MaxResident: *resident, IdleTimeout: *idle, CacheBytes: int64(*cacheMB) << 20})
+	host := engine.NewGoTypedHost(engine.GoTypedOptions{MaxResident: *resident, IdleTimeout: *idle, CacheBytes: int64(*cacheMB) << 20,
+		Engine: *engineName, Parallel: *parallel})
 	defer host.Close()
 	gt, found, err := host.Open(root, "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gotypedbench:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("repo %s  configs %d (file %v)  resident<=%d  cache %d MB\n", root, len(gt.Config.Configs), found, *resident, *cacheMB)
+	fmt.Printf("repo %s  configs %d (file %v)  engine %q  parallel %d  resident<=%d  cache %d MB\n", root, len(gt.Config.Configs), found, gt.Engine, *parallel, *resident, *cacheMB)
 	ctx := context.Background()
 
 	held := func() string {
 		st := host.Status()
-		return fmt.Sprintf("held %.0f MB (gopls %.0f MB in %d, answers %.1f MB in %d) · bench process %.0f MB",
-			float64(st.HeldBytes)/(1<<20), float64(st.Pool.RSSBytes)/(1<<20), len(st.Pool.Sessions),
+		return fmt.Sprintf("held %.0f MB (programs %.0f MB in %d, gopls %.0f MB in %d, answers %.1f MB in %d) · bench process %.0f MB",
+			float64(st.HeldBytes)/(1<<20), float64(st.Programs.Bytes)/(1<<20), len(st.Programs.Programs), float64(st.Pool.RSSBytes)/(1<<20), len(st.Pool.Sessions),
 			float64(st.Cache.Bytes)/(1<<20), st.Cache.Entries, rss(os.Getpid()))
 	}
 	run := func(label, q string) {

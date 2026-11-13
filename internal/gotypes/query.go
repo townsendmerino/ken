@@ -12,9 +12,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,20 +29,28 @@ type Runner struct {
 	Config  Config        // from LoadConfig
 	Gopls   string        // the gopls binary; "" means "gopls" on PATH
 	Go      string        // the go binary, which Uses runs; "" means "go" on PATH
-	Run     RunFunc       // nil runs the subprocess; a non-nil Run stands in for the gopls command line (see UseCLI)
+	Run     RunFunc       // nil runs the subprocess; a non-nil Run stands in for the gopls command line (see Engine)
 	Environ []string      // base environment for gopls and go; nil means the process's
 	Timeout time.Duration // per gopls or go run; 0 means 5 minutes
 
-	// UseCLI asks gopls through its command line, one process per question, as ADR-059 did. The default asks over the
-	// language-server protocol (ADR-060): the same server code, so the same answers, in a fraction of the time. A
-	// Runner with Run set also takes the command-line route, since Run replaces the command-line subprocess.
-	UseCLI bool
+	// Engine chooses what answers references and implementations: EngineTypes (the default, also "") answers in this
+	// process with go/types, following gopls's own search rules (ADR-061); EngineLSP asks gopls over the
+	// language-server protocol (ADR-060); EngineCLI runs the gopls command line, one process per question, as ADR-059
+	// did. A rename plan is always gopls's: over LSP, or the command line under EngineCLI. A Runner with Run set
+	// takes the command-line route, since Run replaces the command-line subprocess.
+	Engine string
 	// Spawn starts a language server process; nil runs the real one. Tests substitute it.
 	Spawn SpawnFunc
 	// Pool, when non-nil, keeps language servers alive between queries. Nil starts and stops one per query.
 	Pool *Pool
 	// Cache, when non-nil, remembers answers while the tree is unchanged. Nil remembers nothing.
 	Cache *Cache
+	// Programs, when non-nil, keeps the programs EngineTypes type-checks between queries. Nil loads one per
+	// configuration per query and lets it go.
+	Programs *ProgramCache
+	// Parallel is how many configurations EngineTypes type-checks at once. 0 or 1 is one at a time, which keeps one
+	// program in memory; more is faster and holds that many.
+	Parallel int
 }
 
 // realRepo is the repository root with symlinks resolved, which is how gopls names the files it reports.
@@ -62,8 +72,23 @@ func (r *Runner) rel(abs string) (string, bool) {
 	return "", false
 }
 
-// useLSP reports whether questions go to a language server rather than the gopls command line.
-func (r *Runner) useLSP() bool { return !r.UseCLI && r.Run == nil }
+// The values of Runner.Engine.
+const (
+	EngineTypes = "types"
+	EngineLSP   = "lsp"
+	EngineCLI   = "cli"
+)
+
+// Engines lists the values Runner.Engine takes, the default first.
+var Engines = []string{EngineTypes, EngineLSP, EngineCLI}
+
+// useLSP reports whether gopls is asked over LSP rather than through its command line.
+func (r *Runner) useLSP() bool { return r.Engine != EngineCLI && r.Run == nil }
+
+// useTypes reports whether kind is answered in this process.
+func (r *Runner) useTypes(kind reqKind) bool {
+	return (r.Engine == EngineTypes || r.Engine == "") && r.Run == nil && kind != askRename
+}
 
 // ConfigRun records one gopls run, or why a configuration was not asked.
 type ConfigRun struct {
@@ -268,7 +293,9 @@ func (r *Runner) ask(ctx context.Context, bc BuildConfig, kind reqKind, d Decl, 
 		text, err := s.ask(ctx, kind.lspMethod(), abs, d.Line, d.Col)
 		return reply{text: text}, err
 	}
-	if r.Pool != nil {
+	// Servers are kept resident only for the engine that answers from them: a rename plan under the in-process
+	// engine starts its gopls and stops it, and leaves nothing behind.
+	if r.Pool != nil && r.Engine == EngineLSP {
 		rp, err := r.askPooled(ctx, bc, do)
 		if !errors.Is(err, errPoolFull) && !errors.Is(err, errNoLockHolder) {
 			return rp, err
@@ -333,22 +360,33 @@ func (r *Runner) askPooled(ctx context.Context, bc BuildConfig, do func(*lspSess
 func (r *Runner) each(ctx context.Context, decls []Decl, kind reqKind, newName string,
 	got func(bc BuildConfig, d Decl, rp reply) int) (runs []ConfigRun, incomplete bool) {
 	shots := map[string]*lspSession{}
+	var typed [][]typedCell // [declaration][configuration], when answered in this process
+	if r.useTypes(kind) {
+		typed = r.askAllTyped(ctx, decls, kind)
+	}
 	defer func() {
 		for _, s := range shots {
 			s.close()
 		}
 	}()
-	for _, d := range decls {
+	for di, d := range decls {
 		where := d.File + ":" + strconv.Itoa(d.Line)
 		asked := false
-		for _, bc := range r.Config.Configs {
+		for ci, bc := range r.Config.Configs {
 			if !bc.Compiles(filepath.Base(d.File), d.Constraint) {
 				runs = append(runs, ConfigRun{Config: bc.Name, Decl: where, Skipped: "does not compile this file"})
 				continue
 			}
 			asked = true
 			t := time.Now()
-			rp, err := r.ask(ctx, bc, kind, d, newName, shots)
+			var rp reply
+			var err error
+			var spent float64
+			if typed != nil {
+				rp, err, spent = typed[di][ci].rp, typed[di][ci].err, typed[di][ci].seconds
+			} else {
+				rp, err = r.ask(ctx, bc, kind, d, newName, shots)
+			}
 			cr := ConfigRun{Config: bc.Name, Decl: where}
 			if err != nil {
 				msg := err.Error()
@@ -359,7 +397,7 @@ func (r *Runner) each(ctx context.Context, decls []Decl, kind reqKind, newName s
 			} else {
 				cr.Hits = got(bc, d, rp)
 			}
-			cr.Seconds = float64(time.Since(t).Milliseconds()) / 1000
+			cr.Seconds = float64(time.Since(t).Milliseconds())/1000 + float64(int(spent*1000))/1000
 			runs = append(runs, cr)
 		}
 		if !asked {
@@ -443,45 +481,70 @@ func (r *Runner) Implementations(ctx context.Context, symbol string) (*Result, e
 	})
 }
 
-// annotate fills each hit's source line and enclosing function, reading every file once.
+// annotate fills each hit's source line and enclosing function. Hits are sorted by file; each file is read and
+// parsed once, and the files are done on every processor (a wide answer touches a thousand of them).
 func (r *Runner) annotate(hits []Hit) {
+	type run struct{ lo, hi int } // hits[lo:hi] share a file
+	var runs []run
+	for i := 0; i < len(hits); {
+		j := i
+		for j < len(hits) && hits[j].File == hits[i].File {
+			j++
+		}
+		runs = append(runs, run{i, j})
+		i = j
+	}
+	var wg sync.WaitGroup
+	next := make(chan run)
+	for range min(runtime.GOMAXPROCS(0), max(len(runs), 1)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for rn := range next {
+				r.annotateFile(hits[rn.lo:rn.hi])
+			}
+		}()
+	}
+	for _, rn := range runs {
+		next <- rn
+	}
+	close(next)
+	wg.Wait()
+}
+
+// annotateFile fills the hits of one file.
+func (r *Runner) annotateFile(hits []Hit) {
 	type span struct {
 		start, end int
 		name       string
 	}
-	var (
-		cur   string
-		pkg   string
-		lines []string
-		funcs []span
-	)
-	for i := range hits {
-		h := &hits[i]
-		if h.File != cur {
-			cur, pkg, lines, funcs = h.File, "", nil, nil
-			src, err := os.ReadFile(filepath.Join(r.Repo, filepath.FromSlash(h.File)))
-			if err != nil {
+	file := hits[0].File
+	src, err := os.ReadFile(filepath.Join(r.Repo, filepath.FromSlash(file)))
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(src), "\n")
+	pkg := ""
+	var funcs []span
+	fset := token.NewFileSet()
+	if f, _ := parser.ParseFile(fset, file, src, parser.SkipObjectResolution); f != nil {
+		if f.Name != nil {
+			pkg = f.Name.Name
+		}
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok {
 				continue
 			}
-			lines = strings.Split(string(src), "\n")
-			fset := token.NewFileSet()
-			if f, _ := parser.ParseFile(fset, h.File, src, parser.SkipObjectResolution); f != nil {
-				if f.Name != nil {
-					pkg = f.Name.Name
-				}
-				for _, d := range f.Decls {
-					fd, ok := d.(*ast.FuncDecl)
-					if !ok {
-						continue
-					}
-					name := fd.Name.Name
-					if fd.Recv != nil && len(fd.Recv.List) > 0 {
-						name = recvName(fd.Recv.List[0].Type) + "." + name
-					}
-					funcs = append(funcs, span{fset.Position(fd.Pos()).Line, fset.Position(fd.End()).Line, name})
-				}
+			name := fd.Name.Name
+			if fd.Recv != nil && len(fd.Recv.List) > 0 {
+				name = recvName(fd.Recv.List[0].Type) + "." + name
 			}
+			funcs = append(funcs, span{fset.Position(fd.Pos()).Line, fset.Position(fd.End()).Line, name})
 		}
+	}
+	for i := range hits {
+		h := &hits[i]
 		h.pkg = pkg
 		if h.Line >= 1 && h.Line <= len(lines) {
 			t := strings.TrimSpace(lines[h.Line-1])

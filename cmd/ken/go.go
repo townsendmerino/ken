@@ -18,8 +18,9 @@ const goUsage = `Usage: ken go refs        <repo> <symbol> [--json] [--max N] [-
        ken go uses        <repo> <importer> <imported> [--json] [--max N]
        ken go rename-plan <repo> <symbol> <new-name> [--json] [--patch FILE]
 
-Type-resolved answers for a Go repository, from gopls, merged over the build
-configurations listed in <repo>/` + engine.GoConfigFile + ` (without the file: the host default only).
+Type-resolved answers for a Go repository, merged over the build configurations
+listed in <repo>/` + engine.GoConfigFile + ` (without the file: the host default only).
+refs, impls and uses are answered in process with go/types; rename-plan asks gopls.
 
   symbol       Name, Type.Member, pkg.Name, pkg.Type.Member, or dir/sub.Name
   refs         every line that refers to the symbol under any configuration
@@ -34,9 +35,13 @@ configurations listed in <repo>/` + engine.GoConfigFile + ` (without the file: t
   --group-by K counts instead of lines, one row per K: package, dir or file,
                each split into non-test and test (_test.go) lines
   --config F   read the build configurations from F instead of the repository
-  --engine E   how gopls is asked: lsp (default; its language-server protocol, one
-               process per configuration) or cli (its command line, one process
-               per question, as before 1.17; the same answers, much slower)
+  --engine E   what answers refs and impls: types (default; in this process with
+               go/types, by gopls's own rules, no gopls needed), lsp (gopls over its
+               language-server protocol, one process per configuration), or cli (the
+               gopls command line, one process per question: the same answers, much
+               slower). A rename plan is always gopls's
+  --parallel N type-check N configurations at once with --engine types (default 1:
+               one program in memory at a time; more is faster and holds that many)
 
 Exit status: 0 complete, 3 the answer is a lower bound (see INCOMPLETE lines),
 1 on error, 2 on usage.
@@ -48,19 +53,20 @@ func cmdGo(args []string) int {
 		return 0
 	}
 	var (
-		pos     []string
-		jsonOut bool
-		patch   string
-		cfgFile string
-		groupBy string
-		useCLI  bool
-		maxN    = 200
+		pos        []string
+		jsonOut    bool
+		patch      string
+		cfgFile    string
+		groupBy    string
+		engineName string
+		parallel   int
+		maxN       = 200
 	)
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--json":
 			jsonOut = true
-		case "--patch", "--max", "--config", "--group-by", "--engine":
+		case "--patch", "--max", "--config", "--group-by", "--engine", "--parallel":
 			if i+1 >= len(args) {
 				fmt.Fprintf(os.Stderr, "ken go: %s needs a value\n", args[i])
 				return 2
@@ -72,14 +78,18 @@ func cmdGo(args []string) int {
 			} else if args[i] == "--group-by" {
 				groupBy = args[i+1]
 			} else if args[i] == "--engine" {
-				switch args[i+1] {
-				case "lsp":
-				case "cli":
-					useCLI = true
-				default:
-					fmt.Fprintf(os.Stderr, "ken go: --engine takes lsp or cli, not %q\n", args[i+1])
+				if !slices.Contains(engine.GoEngines(), args[i+1]) {
+					fmt.Fprintf(os.Stderr, "ken go: --engine takes %s, not %q\n", strings.Join(engine.GoEngines(), ", "), args[i+1])
 					return 2
 				}
+				engineName = args[i+1]
+			} else if args[i] == "--parallel" {
+				n, err := strconv.Atoi(args[i+1])
+				if err != nil || n < 1 {
+					fmt.Fprintf(os.Stderr, "ken go: --parallel %q is not a count\n", args[i+1])
+					return 2
+				}
+				parallel = n
 			} else if n, err := strconv.Atoi(args[i+1]); err != nil || n < 0 {
 				fmt.Fprintf(os.Stderr, "ken go: --max %q is not a count\n", args[i+1])
 				return 2
@@ -105,12 +115,13 @@ func cmdGo(args []string) int {
 		fmt.Fprintf(os.Stderr, "ken go: %v\n", err)
 		return 1
 	}
-	if args[0] == "uses" {
-		if engine.GoPath() == "" {
-			fmt.Fprintln(os.Stderr, "ken go: go is not on PATH")
-			return 1
-		}
-	} else if engine.GoplsPath() == "" {
+	// refs and impls need gopls only when it is the engine asked for; a rename plan always does; all need go.
+	needsGopls := args[0] == "rename-plan" || (args[0] != "uses" && engineName != "" && engineName != engine.GoEngines()[0])
+	if engine.GoPath() == "" {
+		fmt.Fprintln(os.Stderr, "ken go: go is not on PATH")
+		return 1
+	}
+	if needsGopls && engine.GoplsPath() == "" {
 		fmt.Fprintln(os.Stderr, "ken go: gopls is not on PATH (go install golang.org/x/tools/gopls@latest)")
 		return 1
 	}
@@ -119,7 +130,7 @@ func cmdGo(args []string) int {
 		fmt.Fprintf(os.Stderr, "ken go: %v\n", err)
 		return 1
 	}
-	gt.UseCLI = useCLI
+	gt.Engine, gt.Parallel = engineName, parallel
 	if !found {
 		fmt.Fprintf(os.Stderr, "ken go: no %s in %s: asking under the host's default build configuration only\n", engine.GoConfigFile, repo)
 	}

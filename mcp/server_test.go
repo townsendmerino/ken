@@ -91,11 +91,15 @@ func TestServer_ListsRegisteredTools(t *testing.T) {
 		"status":           true,
 		"recently_changed": true,
 	}
-	// The Go typed tier's tools are offered exactly when gopls is on
-	// PATH (ADR-059); TestServer_GoToolsFollowGopls pins both cases.
-	if engine.GoplsPath() != "" {
-		for _, n := range []string{"go_references", "go_implementations", "go_uses", "go_rename_plan"} {
+	// The Go typed tier's tools are offered when what they need is on
+	// PATH (ADR-059, ADR-061): go for the three answered in process, gopls
+	// as well for the rename plan. TestServer_GoToolsFollowPath pins the cases.
+	if engine.GoPath() != "" {
+		for _, n := range []string{"go_references", "go_implementations", "go_uses"} {
 			wantNames[n] = true
+		}
+		if engine.GoplsPath() != "" {
+			wantNames["go_rename_plan"] = true
 		}
 	}
 	if len(res.Tools) != len(wantNames) {
@@ -116,11 +120,12 @@ func TestServer_ListsRegisteredTools(t *testing.T) {
 	}
 }
 
-// TestServer_GoToolsFollowGopls: tools/list offers the go_* tools when a gopls
-// binary is on PATH and not otherwise, so it never lists a tool that can only fail.
-func TestServer_GoToolsFollowGopls(t *testing.T) {
+// TestServer_GoToolsFollowPath: tools/list offers go_references, go_implementations and go_uses when a go binary
+// is on PATH (they are answered in process, from the go command's package lists), and go_rename_plan only when
+// gopls is there too, so it never lists a tool that can only fail.
+func TestServer_GoToolsFollowPath(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("the fake gopls is a shell script")
+		t.Skip("the fake binaries are shell scripts")
 	}
 	list := func() map[string]bool {
 		ctx, sess, cleanup := newInMemoryServerClient(t)
@@ -138,13 +143,28 @@ func TestServer_GoToolsFollowGopls(t *testing.T) {
 	empty := t.TempDir()
 	t.Setenv("PATH", empty)
 	if got := list(); got["go_references"] || got["go_implementations"] || got["go_uses"] || got["go_rename_plan"] {
-		t.Errorf("no gopls on PATH, yet go_* tools are listed: %v", got)
+		t.Errorf("neither go nor gopls on PATH, yet go_* tools are listed: %v", got)
 	}
-	if err := os.WriteFile(filepath.Join(empty, "gopls"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	fake := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(empty, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fake("gopls")
+	if got := list(); got["go_references"] || got["go_rename_plan"] {
+		t.Errorf("gopls but no go on PATH, yet go_* tools are listed (gopls itself needs go): %v", got)
+	}
+	if err := os.Remove(filepath.Join(empty, "gopls")); err != nil {
 		t.Fatal(err)
 	}
+	fake("go")
+	if got := list(); !got["go_references"] || !got["go_implementations"] || !got["go_uses"] || got["go_rename_plan"] {
+		t.Errorf("go without gopls: want the three in-process tools and no rename plan, got %v", got)
+	}
+	fake("gopls")
 	if got := list(); !got["go_references"] || !got["go_implementations"] || !got["go_uses"] || !got["go_rename_plan"] {
-		t.Errorf("gopls on PATH, yet the go_* tools are not all listed: %v", got)
+		t.Errorf("go and gopls on PATH, yet the go_* tools are not all listed: %v", got)
 	}
 }
 
