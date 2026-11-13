@@ -48,6 +48,10 @@ import (
 // in-flight request from hanging shutdown indefinitely.
 const defaultShutdownGrace = 5 * time.Second
 
+// defaultGoCacheMB is how much of the Go typed tier's merged answers ken-mcp remembers unless KEN_MCP_GO_CACHE_MB says
+// otherwise (ADR-060). Three answers on goinfer, one of them 2,525 lines, took 0.6 MB.
+const defaultGoCacheMB = 32
+
 // modelAvailable reports whether dir looks like a usable Model2Vec snapshot.
 func modelAvailable(dir string) bool {
 	if dir == "" {
@@ -273,7 +277,7 @@ type Config struct {
 
 	// GoTyped is what the Go typed tier (go_references, go_implementations, go_rename_plan, go_uses) keeps between
 	// calls: KEN_MCP_GO_RESIDENT gopls processes, each stopped after KEN_MCP_GO_IDLE, and KEN_MCP_GO_CACHE_MB of
-	// remembered answers. All three default to off, which keeps nothing (ADR-060).
+	// remembered answers. The answer cache defaults to 32 MB; the resident gopls processes default to none (ADR-060).
 	GoTyped engine.GoTypedOptions
 
 	// Index holds the index settings every repo is built with, and only
@@ -399,11 +403,12 @@ func LoadConfig(logger *kenmcp.Logger) Config {
 	mmapModel := envcfg.EnvBool("KEN_MCP_MMAP_MODEL", true, logger)
 
 	// Go typed tier (ADR-060), all opt-in. A resident gopls holds 0.7 to 1.4 GB on a repo the size of goinfer, so
-	// the cap is the operator's to set; the answer cache is small (bounded by KEN_MCP_GO_CACHE_MB) and still off.
+	// the cap is the operator's to set; the answer cache is small (32 MB at most, KEN_MCP_GO_CACHE_MB; 0 turns it off) and on by default, since a
+	// remembered answer is returned only while the files on disk are unchanged.
 	goTyped := engine.GoTypedOptions{
 		MaxResident: envcfg.EnvInt("KEN_MCP_GO_RESIDENT", 0, logger),
 		IdleTimeout: envcfg.EnvDuration("KEN_MCP_GO_IDLE", 5*time.Minute, logger),
-		CacheBytes:  int64(envcfg.EnvInt("KEN_MCP_GO_CACHE_MB", 0, logger)) << 20,
+		CacheBytes:  int64(envcfg.EnvInt("KEN_MCP_GO_CACHE_MB", defaultGoCacheMB, logger)) << 20,
 	}
 	if goTyped.MaxResident < 0 || goTyped.CacheBytes < 0 {
 		logger.Logf(kenmcp.LogWarn, "KEN_MCP_GO_RESIDENT / KEN_MCP_GO_CACHE_MB must not be negative: keeping nothing between Go typed queries")

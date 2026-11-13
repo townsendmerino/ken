@@ -15,7 +15,7 @@ pre-built binaries.
 
 ## [Unreleased]
 
-The Go typed tier is 5× to 40× faster and peaks at a third of the memory, with the same answers, and can now keep gopls processes and answers between calls if asked to (ADR-060). On goinfer's three build configurations: `ResidentForward.Forward` (497 lines) took 37 s and now takes 7 s; `decoder.Options` (2,525 lines) took 263 s and now takes 7 s; peak memory fell from 2.9 GB to 1.0 GB. Nothing is held between calls unless you set `KEN_MCP_GO_CACHE_MB` or `KEN_MCP_GO_RESIDENT`.
+The Go typed tier is 5× to 40× faster and peaks at a third of the memory, with the same answers, and can now keep gopls processes and answers between calls if asked to (ADR-060). On goinfer's three build configurations: `ResidentForward.Forward` (497 lines) took 37 s and now takes 7 s; `decoder.Options` (2,525 lines) took 263 s and now takes 7 s; peak memory fell from 2.9 GB to 1.0 GB. `ken-mcp` remembers up to 32 MB of answers by default (`KEN_MCP_GO_CACHE_MB=0` turns that off); nothing else is held between calls unless you set `KEN_MCP_GO_RESIDENT`, and the library and CLI hold nothing.
 
 ### Changed
 
@@ -24,7 +24,7 @@ The Go typed tier is 5× to 40× faster and peaks at a third of the memory, with
 ### Added
 
 - **`engine.GoTypedOptions` and `GoTypedHost`: an opt-in, bounded, releasable cache of answers and pool of resident gopls processes.** `CacheBytes` remembers merged answers (a repeat on an unchanged tree: 0.04 s, under 1 MB); `MaxResident` and `IdleTimeout` keep gopls processes alive (a different query on an unchanged tree: 0.6 to 0.8 s, after an edit 2 to 3 s; about 1 GB per process, 2.7 to 3.1 GB for three configurations). The zero value holds nothing. Both check the repository's Go and module files on disk before every answer, so a stale answer is never returned whether or not the file watcher has run; a `Workspace`'s watcher also tells the host to drop and reload sooner. A pooled gopls does not hold the repository's `wrap` lock while idle: each request takes it for as long as it runs. `engine.Status.GoTyped` and the MCP `status` tool report the resident processes, their memory and the cache.
-- **`KEN_MCP_GO_CACHE_MB`, `KEN_MCP_GO_RESIDENT`, `KEN_MCP_GO_IDLE` for `ken-mcp`**, all off by default (see the README).
+- **`KEN_MCP_GO_CACHE_MB`, `KEN_MCP_GO_RESIDENT`, `KEN_MCP_GO_IDLE` for `ken-mcp`**, the cache defaults to 32 MB, the resident pool to none (see the README).
 - **`tools/gotypedbench`**, the harness behind [`docs/internal/results/gotyped-resident-2026-11-13.md`](docs/internal/results/gotyped-resident-2026-11-13.md).
 
 ## [1.16.0] — 2026-11-13 — type-resolved Go queries that see every build configuration, and repeatable hybrid search over database chunks

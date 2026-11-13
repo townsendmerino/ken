@@ -3218,7 +3218,7 @@ The measurement found that the server was never the cost. `gopls references` on 
    - `CacheBytes`: an in-memory cache of merged answers, least recently used out first. A hit costs 0.04 s on goinfer.
    - `MaxResident` and `IdleTimeout`: gopls processes kept alive between queries, at most `MaxResident` across all repositories of the host (the least recently used idle one is stopped to make room), each stopped after `IdleTimeout` (default 5 minutes) without a request.
    - A `GoTypedHost` owns both and is shared (`Workspace.GoTyped`, `Options.GoTypedHost`, `GoTypedHost.Open`). Zero options make it stateless. `Close` releases everything. `engine.Status.GoTyped` and the MCP `status` tool report the resident gopls processes with their RSS, and the cache with its size and traffic.
-   - `ken-mcp` reads `KEN_MCP_GO_RESIDENT` (default 0), `KEN_MCP_GO_IDLE` (5m) and `KEN_MCP_GO_CACHE_MB` (0) in `LoadConfig` (ADR-053).
+   - `ken-mcp` reads `KEN_MCP_GO_RESIDENT` (default 0), `KEN_MCP_GO_IDLE` (5m) and `KEN_MCP_GO_CACHE_MB` (32) in `LoadConfig` (ADR-053). Francis chose the 32 MB cache as the one thing `ken-mcp` holds by default (it holds under 1 MB for the answers measured, and cannot return a stale one); `engine.GoTypedOptions{}` and the CLI still hold nothing, and resident gopls stays off.
 3. **Staleness is excluded by construction, not by notification.** Every use of the cache or of a resident gopls first scans the Go files and module files of the repository (a stat per file; about 40 ms for goinfer's 3,139 files, 67 ms with the `.md` files a rename plan reads) and compares:
    - the cache stores a fingerprint of the scan and returns an answer only if the tree still has it. Files modified within 2 s of the scan are compared by content, so an edit that kept the size and mtime inside a coarse timestamp tick is still seen. An answer is not stored if the tree changed while it was being computed. A rename plan's fingerprint also covers the `.md` files and `testdata` it reads for leftover mentions.
    - a resident gopls is told about the changed, created and deleted files with `workspace/didChangeWatchedFiles` before the request.
@@ -3229,7 +3229,8 @@ The measurement found that the server was never the cost. `gopls references` on 
 ### Memory held between queries
 | | held | bound |
 |---|--:|---|
-| default (`GoTypedOptions{}`, `ken go`, `ken-mcp` unset) | **0** | |
+| default (`GoTypedOptions{}`, `ken go`) | **0** | |
+| default for `ken-mcp` | answers only: under 1 MB in use, 32 MB at most | `KEN_MCP_GO_CACHE_MB` (0 = none) |
 | answer cache | 0.1 MB (a 497-line answer) to 0.5 MB (2,525 lines) | `CacheBytes`; an answer bigger than the whole cache is not stored |
 | resident gopls | 0.6 to 0.9 GB each after the first query, 0.9 to 1.4 GB after several; **2.7 to 3.1 GB for goinfer's three configurations, 3.3 to 4.2 GB after edits** | `MaxResident` and `IdleTimeout`; not a hard bound on a process's size: set `GOMEMLIMIT` in a configuration's `env` for a soft one (−18 % in one test) |
 
