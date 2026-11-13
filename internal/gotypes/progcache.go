@@ -36,6 +36,7 @@ type ProgramCache struct {
 	reaped    int64
 	dropped   int64
 	reapT     *time.Timer
+	freeT     *time.Timer
 }
 
 type heldProgram struct {
@@ -142,21 +143,15 @@ func (r *Runner) scanNow() *treeScan {
 	return &treeScan{stats, time.Now(), err}
 }
 
-// fresh reports whether the program held for dir under bc was built from the tree as scanned.
-func (c *ProgramCache) fresh(r *Runner, bc BuildConfig, dir string, scan *treeScan) bool {
-	if c == nil || scan.err != nil {
+// holds reports whether a program for dir under bc is held, current or not.
+func (c *ProgramCache) holds(r *Runner, bc BuildConfig, dir string) bool {
+	if c == nil {
 		return false
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	h := c.held[programKey(r, bc, dir)]
-	var fp0 [sha256.Size]byte
-	var asOf time.Time
-	ok := h != nil && h.prog != nil
-	if ok {
-		fp0, asOf = h.fp, h.asOf
-	}
-	c.mu.Unlock()
-	return ok && fingerprint(scan.stats, asOf) == fp0
+	return h != nil && h.prog != nil
 }
 
 // heapNow returns the live heap after a collection, and gives the pages the collection freed back to the operating
@@ -229,7 +224,13 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 		c.held[key] = h
 		c.mu.Unlock()
 
-		before := heapNow()
+		// The heap is measured around a load, to say what the kept program costs. A refresh replaces a program by
+		// one of about the same size and keeps its figure: no measurement, and so no forced collection, on the path
+		// an edit loop takes.
+		var before int64
+		if stale == nil {
+			before = heapNow()
+		}
 		var p *program
 		var err error
 		refreshed := false
@@ -270,7 +271,6 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 			c.mu.Unlock()
 			return p, func() {}, nil
 		}
-		after := heapNow()
 		h.prog, h.fp, h.asOf, h.stats, h.lastUsed = p, fp, scanned, stats, time.Now()
 		// The heap's growth across the load is the measure. Other work in the process moves the heap too, so it is
 		// an estimate, and never reported below what the program's own tables are known to take. A refreshed program
@@ -278,8 +278,15 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 		if refreshed {
 			h.bytes = max(stale.bytes, p.tableBytes())
 			c.refreshes++
+			c.freeSoon()
 		} else {
-			h.bytes = max(after-before, p.tableBytes())
+			c.mu.Unlock()
+			if stale != nil {
+				before = heapNow() - stale.bytes // the replaced program is garbage by now, or soon
+			}
+			grown := heapNow() - before
+			c.mu.Lock()
+			h.bytes = max(grown, p.tableBytes())
 			c.loads++
 		}
 		h.busy, h.uses = 1, 1
@@ -287,6 +294,16 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 		c.mu.Unlock()
 		return p, func() { c.release(h) }, nil
 	}
+}
+
+// freeSoon gives the memory of replaced programs back to the operating system shortly after the last replacement,
+// off the path of any query: the runtime would otherwise keep those pages for minutes, and a process that holds
+// programs should not also hold what they replaced. c.mu is held.
+func (c *ProgramCache) freeSoon() {
+	if c.freeT != nil {
+		c.freeT.Stop()
+	}
+	c.freeT = time.AfterFunc(2*time.Second, debug.FreeOSMemory)
 }
 
 func (c *ProgramCache) release(h *heldProgram) {
@@ -350,6 +367,9 @@ func (c *ProgramCache) Close() {
 	c.closed = true
 	if c.reapT != nil {
 		c.reapT.Stop()
+	}
+	if c.freeT != nil {
+		c.freeT.Stop()
 	}
 	for k := range c.held {
 		delete(c.held, k)

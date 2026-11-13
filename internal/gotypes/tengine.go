@@ -59,8 +59,9 @@ func (r *Runner) askAllTyped(ctx context.Context, decls []Decl, kind reqKind) []
 		scan = r.scanNow() // once, for every configuration
 	}
 	for _, j := range jobs {
-		// list ahead unless a held program will answer without one
-		if r.Programs == nil || !r.Programs.fresh(r, r.Config.Configs[j.ci], filepath.Dir(abs[j.decls[0]]), scan) {
+		// list ahead, unless a program is held: it will answer as it is, or be refreshed without a listing (and if
+		// it cannot be, the load lists then)
+		if r.Programs == nil || !r.Programs.holds(r, r.Config.Configs[j.ci], filepath.Dir(abs[j.decls[0]])) {
 			j.ahead = make(chan *listing, 1)
 			go func() {
 				l, _ := r.listWorkspace(ctx, r.Config.Configs[j.ci], filepath.Dir(abs[j.decls[0]]))
@@ -147,6 +148,18 @@ func (r *Runner) askAllTyped(ctx context.Context, decls []Decl, kind reqKind) []
 		}
 	}
 	par := max(r.Parallel, 1)
+	if r.Programs != nil {
+		// When every program asked for is held, they are all in memory already: bringing them up to date one at a
+		// time would save none, and an edit would cost the sum of the configurations instead of the slowest. A
+		// program that has to be loaded is loaded as Parallel says (its memory is also measured as it loads).
+		all := true
+		for _, j := range jobs {
+			all = all && r.Programs.holds(r, r.Config.Configs[j.ci], filepath.Dir(abs[j.decls[0]]))
+		}
+		if all {
+			par = max(par, len(jobs))
+		}
+	}
 	if par == 1 {
 		for _, j := range jobs {
 			run(j)

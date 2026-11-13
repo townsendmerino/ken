@@ -63,8 +63,8 @@ func main() {
 
 	held := func() string {
 		st := host.Status()
-		return fmt.Sprintf("held %.0f MB (programs %.0f MB in %d, gopls %.0f MB in %d, answers %.1f MB in %d) · bench process %.0f MB",
-			float64(st.HeldBytes)/(1<<20), float64(st.Programs.Bytes)/(1<<20), len(st.Programs.Programs), float64(st.Pool.RSSBytes)/(1<<20), len(st.Pool.Sessions),
+		return fmt.Sprintf("held %.0f MB (programs %.0f MB in %d [%d loads, %d refreshes], gopls %.0f MB in %d, answers %.1f MB in %d) · bench process %.0f MB",
+			float64(st.HeldBytes)/(1<<20), float64(st.Programs.Bytes)/(1<<20), len(st.Programs.Programs), st.Programs.Loads, st.Programs.Refreshes, float64(st.Pool.RSSBytes)/(1<<20), len(st.Pool.Sessions),
 			float64(st.Cache.Bytes)/(1<<20), st.Cache.Entries, rss(os.Getpid()))
 	}
 	run := func(label, q string) {

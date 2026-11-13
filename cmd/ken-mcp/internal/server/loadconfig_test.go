@@ -75,21 +75,24 @@ func TestLoadConfig_NoDSNSkipsDBValidation(t *testing.T) {
 	}
 }
 
-// ken-mcp remembers up to 32 MB of Go typed-tier answers by default and keeps no gopls alive; both are settable, and
-// 0 turns the cache off (ADR-060).
+// ken-mcp remembers up to 32 MB of Go typed-tier answers by default, keeps nothing else, and answers in process with
+// go/types; each is settable, and 0 turns the cache off (ADR-060, ADR-061).
 func TestLoadConfig_GoTypedDefaults(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("KEN_MCP_MODE", "bm25")
 	t.Setenv("KEN_MCP_AUTO_FETCH", "0")
 	logger, _ := newCapturedLogger()
 	cfg := LoadConfig(logger)
-	if cfg.GoTyped.CacheBytes != 32<<20 || cfg.GoTyped.MaxResident != 0 || cfg.GoTyped.IdleTimeout != 5*time.Minute {
-		t.Errorf("defaults = %+v, want a 32 MB cache, no resident gopls, 5m idle", cfg.GoTyped)
+	if cfg.GoTyped.CacheBytes != 32<<20 || cfg.GoTyped.MaxResident != 0 || cfg.GoTyped.IdleTimeout != 5*time.Minute ||
+		cfg.GoTyped.Engine != "types" || cfg.GoTyped.Parallel != 1 {
+		t.Errorf("defaults = %+v, want a 32 MB cache, nothing resident, 5m idle, the types engine, one configuration at a time", cfg.GoTyped)
 	}
 	t.Setenv("KEN_MCP_GO_CACHE_MB", "0")
 	t.Setenv("KEN_MCP_GO_RESIDENT", "3")
+	t.Setenv("KEN_MCP_GO_ENGINE", "lsp")
+	t.Setenv("KEN_MCP_GO_PARALLEL", "2")
 	cfg = LoadConfig(logger)
-	if cfg.GoTyped.CacheBytes != 0 || cfg.GoTyped.MaxResident != 3 {
-		t.Errorf("with KEN_MCP_GO_CACHE_MB=0 and KEN_MCP_GO_RESIDENT=3: %+v", cfg.GoTyped)
+	if cfg.GoTyped.CacheBytes != 0 || cfg.GoTyped.MaxResident != 3 || cfg.GoTyped.Engine != "lsp" || cfg.GoTyped.Parallel != 2 {
+		t.Errorf("with the four variables set: %+v", cfg.GoTyped)
 	}
 }

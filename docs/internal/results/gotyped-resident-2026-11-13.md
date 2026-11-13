@@ -78,6 +78,8 @@ A cap below the number of configurations does not help (1b): with three configur
 
 ## 2. Answer in this process with go/types (rejected)
 
+*Reversed by ADR-061 on the same day: a port of gopls's search, not an approximation of it, matched gopls on every declaration compared, and is now the default. See [`gotyped-inprocess-2026-11-13.md`](gotyped-inprocess-2026-11-13.md). What follows is the prototype that was rejected.*
+
 A throwaway prototype (not kept; about 600 lines, standard library only): `go list -e -deps -test -json` for every module's `./...`, then `go/types` from source with function bodies for every in-repository package, and a scan of `Uses`. For methods it also follows the interface relation as gopls's `references` does, which gopls's source (`internal/golang/references.go`, `internal/cache/methodsets`) shows is more than "implements": a method corresponds to the same-named methods of every type in the workspace, in either direction, plus, inside the declaring package, to those of any interface from any dependency.
 
 | per configuration | go list | type-check | query | peak | heap if held |

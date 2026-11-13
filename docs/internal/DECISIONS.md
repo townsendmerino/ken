@@ -68,6 +68,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-058](#adr-058-a-db-chunks-freshness-header-is-shown-not-indexed) | A DB chunk's freshness header is shown, not indexed | Accepted |
 | [ADR-059](#adr-059-a-go-typed-tier-that-asks-gopls-once-per-build-configuration) | A Go typed tier that asks gopls once per build configuration | Accepted |
 | [ADR-060](#adr-060-the-go-typed-tier-asks-gopls-over-lsp-and-keeps-nothing-unless-told-to) | The Go typed tier asks gopls over LSP and keeps nothing unless told to (amends ADR-059) | Accepted |
+| [ADR-061](#adr-061-references-and-implementations-are-answered-in-process-with-gotypes-held-to-gopls-by-a-differential) | References and implementations are answered in process with go/types, held to gopls by a differential (amends ADR-060) | Accepted |
 
 ---
 
@@ -3256,7 +3257,7 @@ The ADR-059 regression table, re-run on the new default engine at `d22c2c0c4`: r
 `internal/gotypes/lsp_test.go` drives a fake server that, like gopls, reads the tree at start and again only for files it is told about, so an unannounced edit gets the old answer. `engine/gotyped_test.go` drives a real gopls through a Workspace with its watcher running: query, repeat (from memory), edit and query at once (before the watcher can have flushed), edit and wait for the watcher's flush and observe the cache dropped by the watcher's hook, then query. Mutation-tested: making the cache ignore a fingerprint mismatch, not sending `didChangeWatchedFiles`, not dropping on the watcher's hook, and removing the 2 s window each fail a named test.
 
 ### Rejected
-- **Answer in this process with `go/types` (candidate 2).** Fast (2.7 s per configuration, 420 to 460 MB peak, 285 to 340 MB if held) and exact on 4,257 of 4,257 sampled types, functions, fields, constants and variables. On 1,143 methods and interface methods it differed from gopls on 22 (gopls reports more), and on 1 of 28 implementation queries. gopls's notion of which methods "correspond" is a version-specific heuristic (fingerprint-based, workspace-wide, with a different rule inside the declaring package), so a re-derivation can be right on a sample and still not be gopls. The brief said identical.
+- **Answer in this process with `go/types` (candidate 2).** *(Reversed by ADR-061: Francis asked for it, and porting gopls's search instead of approximating it closed the gap.)* Fast (2.7 s per configuration, 420 to 460 MB peak, 285 to 340 MB if held) and exact on 4,257 of 4,257 sampled types, functions, fields, constants and variables. On 1,143 methods and interface methods it differed from gopls on 22 (gopls reports more), and on 1 of 28 implementation queries. gopls's notion of which methods "correspond" is a version-specific heuristic (fingerprint-based, workspace-wide, with a different rule inside the declaring package), so a re-derivation can be right on a sample and still not be gopls. The brief said identical.
 - **A resident gopls by default.** 2.7 to 3.1 GB for three configurations. Offered, off.
 - **A cap below the number of configurations** (1 or 2 residents for 3). Every query evicts and restarts: 6.0 s, the same as nothing held, with 0.9 to 1.9 GB sitting there. The documentation says to set the cap to the number of configurations or not at all.
 - **Skipping a configuration whose compiled files equal another's (candidate 4).** On goinfer no pair is equal for either symbol (20 to 30 of 106 packages differ). Left out; it costs a `go list` per configuration to find out.
@@ -3270,3 +3271,66 @@ The ADR-059 regression table, re-run on the new default engine at `d22c2c0c4`: r
 - The first answer of a pooled server under `wrap` takes the lock for its whole start and load; later requests take it for as long as they run.
 - gopls versions: the LSP requests used are the standard ones, and gopls answers them with the same server code as the command line (checked for v0.23.0). `ken go … --engine cli` is the way back if a future gopls diverges.
 - Not done: incremental per-package invalidation; sharing a resident gopls between Workspaces of different repositories beyond the global `MaxResident` cap; reporting a resident gopls's children (only the gopls process's RSS is counted; `go list` children come and go).
+
+---
+
+## ADR-061: References and implementations are answered in process with go/types, held to gopls by a differential
+
+**Status:** Accepted (amends ADR-060)
+**Date:** 2026-11-13
+**Decided by:** Francis, on reading ADR-060's comparison: "no hybrid, just go/types please ... let's make it 1) accurate, then 2) as fast as possible." The measurements are in [`results/gotyped-inprocess-2026-11-13.md`](results/gotyped-inprocess-2026-11-13.md).
+
+### Context
+ADR-060 rejected a go/types engine because its prototype agreed with gopls on 99.6 % of sampled declarations and the brief said identical. Every difference was a method: the prototype approximated which methods "correspond" through interfaces. gopls's rule is not a property of the language; it is an algorithm with an index behind it, and it can be read.
+
+### Decision
+1. **A third engine, `types`, and the default for references and implementations.** The go command lists the workspace (`go list -e -deps -test -compiled`, one record per package *and test variant*), the standard library's go/types checks every package from source, and the search is a port of gopls v0.23.0's, step for step:
+   - `internal/golang/references.go`: the declaring package's variants searched by type, with method correspondence in either direction; for an exported object with an object path, the importers (direct for a package-level object, transitive for a field or method), restricted to workspace packages; for a method, every workspace type whose method set is related to its receiver's, their methods as further targets and their importers as further scope;
+   - `internal/cache/xrefs`: what the cross-package index holds (exported identifiers that use another package's object, when that object has an object path);
+   - `internal/cache/methodsets` and `internal/util/fingerprint`: method sets compared by name and signature fingerprint, with unification where a signature has a type parameter or an anonymous interface;
+   - `go/types/objectpath`: which objects have a path (package-level ones, and what is reached from them without entering a function body);
+   - `implementation.go`: by type inside the declaring package (function-local types included), by name everywhere else;
+   - package variants as gopls keeps them: `p`, `p [p.test]`, `p_test [p.test]` searched; `q [p.test]` imported, never searched.
+   `internal/gotypes/tload.go`, `tmsets.go`, `trefs.go`. No gopls is needed for either query.
+2. **"Accurate" means the lines gopls returns**, including where gopls returns fewer than a type checker could (a field used through an instantiated generic in another package; a standard-library interface's method counted only inside the declaring package). That is what can be measured, and it is what ADR-059's answers were. Returning more is a separate decision, not taken.
+3. **The gate is a differential, kept in the tree.** `TestDifferentialAgainstGopls` (off unless `KEN_GOTYPES_DIFF_REPO` is set) asks both engines about every declaration of a repository under every configuration; `TestTypesEngine_matchesGoplsOnTheTrickyModule` does the same on a module built from the awkward cases, whenever gopls is installed; `TestTypesEngine_answersWithoutGopls` pins those answers where it is not.
+4. **A rename plan stays gopls's** (over LSP, ADR-060). Its edits follow rules of their own, which are not ported. `go_rename_plan` is offered when gopls is on PATH; the other three tools need only `go`.
+5. **Then speed, each step exact:**
+   - packages are checked on every processor, and a file is parsed once for all the variants that compile it;
+   - a plain package whose test variant exists is checked for declarations only: the variant holds every file of it and imports what it imports, so each identifier means the same there and everything computed from its types only grows; the union gopls takes of the two is the variant's answer. The exception is a test file that declares a method (it can change what a selector in a non-test file resolves to); then both are checked in full;
+   - as each package finishes, its syntax and `types.Info` are replaced by tables (declaring positions, uses by name, type declarations), which are a fraction of their size;
+   - the go command lists all configurations at once (a subprocess each); the type-checks run one configuration at a time unless `Parallel` says more, so one program is in memory;
+   - `FindDecls` and the hit annotation use every processor (they were two thirds of a resident query).
+6. **Opt-in resident programs, refreshed after an edit.** With `GoTypedOptions.MaxResident`, type-checked programs are kept (`ProgramCache`: bounded by count, idle timeout, reported with their memory, dropped by the watcher's hook and by `Close`). Each use scans the tree first, as ADR-060's cache does. When the tree changed, the program is refreshed if no file appeared or disappeared, go.mod and go.work are untouched, and every changed file kept its package clause, build constraints and imports (then the go command's list cannot have changed): the packages compiling a changed file and their importers are checked again, the rest keep their types and tables, and the listing is reused. An unchanged file of a re-checked package is parsed again at its old position in the file set, so that positions other packages hold for its declarations stay true. Otherwise it is loaded afresh. `TestRefresh_equalsAFreshLoad` holds a refreshed program to a fresh load on every declaration after each of a chain of edits.
+7. **`wrap`.** The go command runs behind the wrap command, as before. The type-check and the refresh run in this process, so the lock is taken for them through the helper of ADR-060 (`wrap sh -c 'echo ready; exec cat'`), after the listing and never around it. A resident program holds memory and no lock.
+8. **Staleness, widened.** The tree scan behind every remembered answer, resident gopls and resident program now covers the whole workspace: the go.work modules found by walking up from the repository, and the directories go.mod and go.work replace modules with. ADR-060's scan stopped at the repository, so an edit in a sibling module of the same workspace was not seen; that was a bug in what shipped on the branch, fixed here.
+9. **Knobs.** `Runner.Engine` (`types`, `lsp`, `cli`) replaces `UseCLI`; `GoTypedOptions.Engine` and `Parallel`; `MaxResident` now counts per-configuration backends of either kind. `ken go --engine`, `--parallel`; `KEN_MCP_GO_ENGINE` (default `types`), `KEN_MCP_GO_PARALLEL` (default 1).
+
+### Results (goinfer, 3 configurations)
+Accuracy: every declaration of the default configuration (27,217 declarations, 33,574 questions) with the first port, a 1-in-17 sample of all three configurations (6,368 questions) with the speed work in, and the tricky module: no difference. Refresh against a fresh load: 22,020 comparisons, no difference. A full run of the final engine on all three configurations was in progress when this was written; its result is added below.
+
+| | first query | different symbol, tree unchanged | after an edit | held | peak |
+|---|--:|--:|--:|--:|--:|
+| gopls over LSP (ADR-060) | 8.3 s | 6.9 s | 6.6 s | 0 | 1.1 GB |
+| go/types, nothing held (default) | 5.3 s | 4.8 s | 4.7 s | 0 | 0.8 GB |
+| go/types, 3 programs resident | 6.4 s | 0.1 to 0.2 s | 1.9 s (hub file), 0.5 to 2.2 s (leaf, test) under heavy load | 0.65 GB | 1.4 GB |
+| gopls resident ×3 (ADR-060) | 5.8 s | 0.6 to 0.8 s | 2.1 to 3.1 s | 2.7 to 3.1 GB | |
+
+An identical repeat is 0.04 s from the answer cache under either engine. The machine was loaded while these were taken (see the record).
+
+### Consequences
+- The typed tier no longer needs gopls except for rename plans, and its default path is the fastest and the smallest measured.
+- Its answers are gopls v0.23.0's by rule, not by running gopls. A gopls that changes its rules would differ; `--engine lsp` and the differential test are how that is seen and what to fall back on.
+- A resident program is cheaper to hold than a resident gopls by a factor of four, and the one mode that makes a different second query take a fraction of a second.
+- The resident figures are of live heap at load. The Go runtime returns freed memory to the system late; the cache asks for it back after a load and shortly after a refresh.
+
+### Not done, and why
+- **Dependencies from export data** (`go list -export`): it would skip parsing and checking some 400 dependency packages, about a third of a load, but it compiles them first (tens of seconds once per configuration) and fails where a dependency does not compile.
+- **Bodies only for the packages a query can reach.** For a symbol with few importers most packages need no bodies; it would cut a cold load roughly in half for those, and a resident program would then need them anyway.
+- **Sharing packages between configurations** with the same GOOS and GOARCH (`default` and `darwin-gpu` compile the same files in 86 of 106 packages).
+- **A rename plan in process.**
+- **Answers gopls does not give** (decision 2).
+
+### Limits
+- One repository and one fixture. goinfer has no package of its own that imports "C"; such a package is checked from the go command's cgo-processed files, and that path has not been compared with gopls.
+- Windows has not been run.

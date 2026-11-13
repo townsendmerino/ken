@@ -261,7 +261,7 @@ go-git on the local working tree).
 
 ## Go: type-resolved answers across build configurations
 
-`references` and `callers` match by name. For Go, four more tools answer from a type checker: `go_references`, `go_implementations` and `go_rename_plan` from gopls, the Go language server, and `go_uses` from the go command and Go's own type checker (`ken go refs|impls|uses|rename-plan` on the command line). They appear only when `gopls` is on PATH, and they work on local checkouts.
+`references` and `callers` match by name. For Go, four more tools answer from a type checker: `go_references`, `go_implementations` and `go_uses` in ken's own process with Go's type checker (they need the `go` command), and `go_rename_plan` from gopls, the Go language server (`ken go refs|impls|uses|rename-plan` on the command line). Each appears when what it needs is on PATH, and they work on local checkouts. `go_references` and `go_implementations` return exactly the lines gopls would: that is tested, declaration by declaration, against gopls itself.
 
 A type checker sees one build configuration at a time, so code behind a build tag or another GOOS is invisible from the default one. List the repository's configurations once, in `.ken-go.json` at its root:
 
@@ -280,22 +280,22 @@ Each query then runs under every configuration that compiles the symbol's declar
 $ ken go refs . decoder.ResidentForward.Forward
 references of decoder.ResidentForward.Forward: 497 lines in 255 files
 declared: decoder/residency.go:43  interface-method decoder.ResidentForward.Forward
-per configuration: default 68 (1.7s) · darwin-gpu 276 (1.9s) · linux-cuda 249 (1.9s)
+per configuration: default 68 (2.2s) · darwin-gpu 276 (1.1s) · linux-cuda 249 (1.0s)
 backend/cuda/a13_multimodel_test.go
   51 TestA13_MultiModelUnloadPoisons [linux-cuda]: before, err := rb.Forward(emb, 0)
 ```
 
-- **Cost.** Each query starts one gopls per configuration, one after another, and stops it: about 2 s and 1 GB at its peak for each, on a 3,000-file repository (7 s for the three configurations above). The command line and the library keep nothing unless asked; `ken-mcp` keeps one thing by default. Two things can be kept, each bounded and listed by `status`: answers (`KEN_MCP_GO_CACHE_MB`, default 32 in `ken-mcp`, 0 turns it off; an identical question on an unchanged tree then takes 0.04 s and the answers held are usually under a megabyte), and `KEN_MCP_GO_RESIDENT=3` keeps gopls processes alive for `KEN_MCP_GO_IDLE` (default 5m; a different question on an unchanged tree then takes about a second, and an edit about two) at roughly 1 GB per process, so only set it as high as your number of configurations (a lower cap evicts on every query and gains nothing). Both check the files on disk before every answer, so an edit is always seen. In a Go program, `engine.GoTypedOptions` does the same.
+- **Cost.** Each query lists and type-checks the repository once per configuration, one after another: a second or two and under 1 GB at its peak for each, on a 3,000-file repository (about 5 s for the three configurations above). The command line and the library keep nothing between queries unless asked; `ken-mcp` keeps one thing by default. Two things can be kept, each bounded and listed by `status`: answers (`KEN_MCP_GO_CACHE_MB`, default 32 in `ken-mcp`, 0 turns it off; an identical question on an unchanged tree then takes 0.04 s), and the type-checked programs themselves (`KEN_MCP_GO_RESIDENT=3`, dropped after `KEN_MCP_GO_IDLE`, default 5m): any question on an unchanged tree then takes 0.1 to 0.2 s, and after an edit only the packages the edit can affect are checked again (a second or two), at about 0.2 GB per configuration. Set it to your number of configurations or leave it off: a lower cap reloads on every query. Both check the files on disk before every answer, across the whole Go workspace, so an edit is always seen. In a Go program, `engine.GoTypedOptions` does the same. `--engine lsp` (`KEN_MCP_GO_ENGINE=lsp`) asks gopls itself instead.
 - **Symbols** are `Name`, `Type.Member`, `pkg.Name`, `pkg.Type.Member`, or `dir/sub.Name` to pick a package by directory. A method or field needs its type.
 - **`[linux-cuda]`** after a line means only that configuration saw it. No label means every configuration did.
-- **An `INCOMPLETE` line means a lower bound**: a declaration that no listed configuration compiles, or a gopls run that failed. Add the missing configuration and ask again.
+- **An `INCOMPLETE` line means a lower bound**: a declaration that no listed configuration compiles, or a configuration that failed to load. Add the missing configuration and ask again.
 - **`group_by` gives counts, not lines.** `go_references` and `go_implementations` take `group_by: "package" | "dir" | "file"` (`--group-by` on the command line). The header stays; the lines become one row per group, largest first, each split into non-test and test lines (a test file is one ending `_test.go`). `max` caps the rows. `package` counts an external test package (`package x_test`) with the package it tests and adds the package name where it differs from the directory's (`cmd/ken (main)`); `dir` is the directory alone. Ask this way for a coupling question: the reply is a few rows where the full list can be thousands of lines.
 
   ```
   $ ken go refs . decoder.Options --group-by package
   references of decoder.Options: 2525 lines in 979 files
   declared: decoder/options.go:14  type decoder.Options
-  per configuration: default 1089 (1.5s) · darwin-gpu 1902 (1.8s) · linux-cuda 1739 (1.8s)
+  per configuration: default 1089 (2.2s) · darwin-gpu 1902 (1.1s) · linux-cuda 1739 (1.0s)
   decoder                 51 non-test  916 test
   backend/cuda             0 non-test  622 test
   backend/metal            0 non-test  546 test
