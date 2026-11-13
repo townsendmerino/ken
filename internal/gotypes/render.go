@@ -5,6 +5,13 @@ import (
 	"strings"
 )
 
+// rememberedLine says an answer was served from memory, and that its times are those of the run that made it.
+func rememberedLine(b *strings.Builder, cached bool, age float64) {
+	if cached {
+		fmt.Fprintf(b, "remembered answer (computed %.0f s ago; no Go or module file has changed since, so no gopls ran)\n", age)
+	}
+}
+
 func runsLine(runs []ConfigRun) string {
 	var parts []string
 	for _, cr := range runs {
@@ -76,6 +83,7 @@ func incompleteLines(b *strings.Builder, decls []Decl, runs []ConfigRun) {
 func (r *Result) Text(nConfigs, maxHits int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s of %s: %d lines in %d files\n", r.Query, r.Symbol, r.Total, r.Files)
+	rememberedLine(&b, r.Cached, r.CacheAgeSeconds)
 	declLines(&b, r.Decls)
 	fmt.Fprintf(&b, "per configuration: %s\n", runsLine(r.Runs))
 	incompleteLines(&b, r.Decls, r.Runs)
@@ -114,6 +122,7 @@ func (p *RenamePlan) Text(nConfigs, maxMentions int) string {
 		lines += len(f.Lines)
 	}
 	fmt.Fprintf(&b, "rename %s -> %s: %d lines in %d files\n", p.Symbol, p.NewName, lines, len(p.Files))
+	rememberedLine(&b, p.Cached, p.CacheAgeSeconds)
 	declLines(&b, p.Decls)
 	fmt.Fprintf(&b, "per configuration (new edits each added): %s\n", runsLine(p.Runs))
 	incompleteLines(&b, p.Decls, p.Runs)

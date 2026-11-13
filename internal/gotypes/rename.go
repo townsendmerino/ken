@@ -41,6 +41,9 @@ type RenamePlan struct {
 	Mentions   []Mention   `json:"mentions,omitempty"`
 	Runs       []ConfigRun `json:"runs"`
 	Incomplete bool        `json:"incomplete"`
+	// Cached and CacheAgeSeconds: see Result.
+	Cached          bool    `json:"cached,omitempty"`
+	CacheAgeSeconds float64 `json:"cache_age_seconds,omitempty"`
 }
 
 // RenamePlan computes the edits that rename symbol to newName. One configuration's rename leaves stale every file
@@ -50,6 +53,12 @@ func (r *Runner) RenamePlan(ctx context.Context, symbol, newName string) (*Renam
 	if !token.IsIdentifier(newName) {
 		return nil, fmt.Errorf("new name %q is not an identifier", newName)
 	}
+	return cached(r, "rename", []string{symbol, newName}, func() (*RenamePlan, error) {
+		return r.renamePlan(ctx, symbol, newName)
+	})
+}
+
+func (r *Runner) renamePlan(ctx context.Context, symbol, newName string) (*RenamePlan, error) {
 	decls, err := r.resolve(symbol)
 	if err != nil {
 		return nil, err
@@ -60,15 +69,14 @@ func (r *Runner) RenamePlan(ctx context.Context, symbol, newName string) (*Renam
 	by := map[string]map[int]string{}    // file -> line index -> configuration that set it
 	cfgs := map[string]map[string]bool{} // file -> configurations that edited it
 	conflict := map[string]bool{}
-	plan.Runs, plan.Incomplete = r.each(ctx, decls, []string{"rename", "-d"}, []string{newName},
-		func(bc BuildConfig, _ Decl, stdout []byte) int {
+	plan.Runs, plan.Incomplete = r.each(ctx, decls, askRename, newName,
+		func(bc BuildConfig, _ Decl, rp reply) int {
 			edits := 0
-			for abs, hunks := range splitDiff(string(stdout)) {
-				rel, err := filepath.Rel(r.Repo, abs)
-				if err != nil || strings.HasPrefix(rel, "..") {
+			for _, abs := range rp.files() {
+				rel, inRepo := r.rel(abs)
+				if !inRepo {
 					continue
 				}
-				rel = filepath.ToSlash(rel)
 				if _, ok := orig[rel]; !ok {
 					src, err := os.ReadFile(abs)
 					if err != nil {
@@ -79,7 +87,7 @@ func (r *Runner) RenamePlan(ctx context.Context, symbol, newName string) (*Renam
 					merged[rel] = append([]string{}, orig[rel]...)
 					by[rel], cfgs[rel] = map[int]string{}, map[string]bool{}
 				}
-				next, err := applyHunks(orig[rel], hunks)
+				next, err := rp.newLines(abs, orig[rel])
 				if err != nil || len(next) != len(orig[rel]) {
 					conflict[fmt.Sprintf("%s: %s's edit is not line-for-line; apply that configuration's rename by hand", rel, bc.Name)] = true
 					continue

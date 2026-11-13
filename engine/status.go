@@ -21,6 +21,10 @@ type Status struct {
 	// watcher flush that changed a file's structure. Generation is the
 	// search index's counter; the two move independently.
 	StructuralGeneration uint64
+
+	// GoTyped is what the Go typed tier holds between queries: resident gopls processes with their memory, and
+	// remembered answers. Nil when Options.GoTyped asked for nothing.
+	GoTyped *GoTypedStatus
 }
 
 // countUniqueFiles counts distinct non-tombstoned files across ix's chunks.
@@ -41,7 +45,13 @@ func countUniqueFiles(ix *search.Index) int {
 // parse cost.
 func (w *Workspace) Status() Status {
 	ix := w.index.Load()
+	var goTyped *GoTypedStatus
+	if w.goHost != nil {
+		st := w.goHost.Status()
+		goTyped = &st
+	}
 	return Status{
+		GoTyped:              goTyped,
 		Root:                 w.root,
 		Mode:                 ix.Mode(),
 		Chunker:              w.chunker,

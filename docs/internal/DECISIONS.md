@@ -67,6 +67,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-057](#adr-057-mcp-works-through-engine-superseding-adr-048s-rejection) | `mcp` works through `engine` (superseding ADR-048's rejection) | Accepted |
 | [ADR-058](#adr-058-a-db-chunks-freshness-header-is-shown-not-indexed) | A DB chunk's freshness header is shown, not indexed | Accepted |
 | [ADR-059](#adr-059-a-go-typed-tier-that-asks-gopls-once-per-build-configuration) | A Go typed tier that asks gopls once per build configuration | Accepted |
+| [ADR-060](#adr-060-the-go-typed-tier-asks-gopls-over-lsp-and-keeps-nothing-unless-told-to) | The Go typed tier asks gopls over LSP and keeps nothing unless told to (amends ADR-059) | Accepted |
 
 ---
 
@@ -3182,7 +3183,7 @@ A new package, `internal/gotypes`, reached through `engine` (ADR-057), with thre
 
 ### Consequences
 - On goinfer the three queries reproduce the hand-merged figures in the table exactly (496 lines in 255 files; 64 implementations, 3 of them non-test; 59 files, and the merged patch passes `git apply --check`).
-- A merged query costs the sum of its configurations: about 35 s for the 496-line answer, against under a second from a resident server. Chosen for memory: nothing is held between queries. A resident mode is a later decision with its own measurement.
+- A merged query costs the sum of its configurations: about 35 s for the 496-line answer, against under a second from a resident server. Chosen for memory: nothing is held between queries. A resident mode is a later decision with its own measurement. *(ADR-060 made that measurement, and found the cost was the command line, not the server: the same query is 7 s with nothing held.)*
 - Running gopls builds code and runs the go command in that repository, with the server's permissions. The tools refuse URL clones for that reason.
 - The answer is only as wide as the configuration list. A configuration nobody listed (a third GOOS, a rarely used tag) is covered only where a declaration's own file needs it, which is what the `INCOMPLETE` line catches; references in files of an unlisted configuration are not.
 - Not done here: the three tools do not replace `references`/`callers` for Go, the structural index is not consulted, and nothing caches between calls.
@@ -3197,3 +3198,74 @@ Two additions from the first real use (an architecture survey of goinfer; `docs/
   - Measured on goinfer at `004d14023`, 2026-11-13: `backend/cuda` naming `decoder`, three configurations, 2.4 s wall in all; 650 identifiers (189 package-level, 90 of them from non-test code) on 7,103 lines. `decoder.Options` has 622 test lines there, the figure `go_references` grouped by package gives for `backend/cuda` (2,524 lines in all; `decoder` 51 non-test and 916 test). A regular expression over the same non-test files finds 115 names: the 25 extra are all mentions in comments.
   - The type check runs in ken's process, so the repository's `wrap` command covers `go list` and not the second or so of checking. A repository whose lock must cover that too is not served by this design; re-running ken itself under `wrap` would be the fix.
   - It is registered with the other typed tools (when gopls is on PATH), though it needs only `go`.
+
+---
+
+## ADR-060: The Go typed tier asks gopls over LSP and keeps nothing unless told to
+
+**Status:** Accepted (amends ADR-059)
+**Date:** 2026-11-13
+**Decided by:** Francis asked for the typed tier to be cheap enough to call inside an agent loop (tack, on a 16 GB Mac with a local model loaded), to be measured before a mechanism was chosen, to answer identically, and to hold nothing between queries by default. The numbers are in [`results/gotyped-resident-2026-11-13.md`](results/gotyped-resident-2026-11-13.md).
+
+### Context
+ADR-059 runs the gopls command line once per build configuration and throws the process away. On goinfer (3 configurations) that was 37 s for `ResidentForward.Forward` (497 lines), 263 s for `decoder.Options` (2,525 lines), 1.1 to 2.9 GB peak. ADR-059 deferred a resident mode "with its own measurement".
+
+The measurement found that the server was never the cost. `gopls references` on the command line calls `openFile` on every file that holds a reference, to print line:column, and each open makes gopls type-check that file's packages (979 files for `decoder.Options`). The same gopls answers the same `textDocument/references` request, opening only the declaration's file, in 1.5 to 2 s per configuration.
+
+### Decision
+1. **Ask gopls over its language-server protocol, not its command line.** `internal/gotypes/lsp.go` is a stdio JSON-RPC client of about 650 lines: `initialize`, `didOpen` of the declaration's file, `references` / `implementation` / `rename`, `didClose`, `shutdown`. The default for every typed query. One gopls per configuration, started lazily, stopped when the query ends, behind the repository's `wrap` command exactly as before. The command line stays as `Runner.UseCLI` / `ken go … --engine cli`, and is what a `Runner` with a test double `Run` still uses.
+2. **Opt-in, bounded, releasable state, through `engine.GoTypedOptions` (no environment read in `engine`):**
+   - `CacheBytes`: an in-memory cache of merged answers, least recently used out first. A hit costs 0.04 s on goinfer.
+   - `MaxResident` and `IdleTimeout`: gopls processes kept alive between queries, at most `MaxResident` across all repositories of the host (the least recently used idle one is stopped to make room), each stopped after `IdleTimeout` (default 5 minutes) without a request.
+   - A `GoTypedHost` owns both and is shared (`Workspace.GoTyped`, `Options.GoTypedHost`, `GoTypedHost.Open`). Zero options make it stateless. `Close` releases everything. `engine.Status.GoTyped` and the MCP `status` tool report the resident gopls processes with their RSS, and the cache with its size and traffic.
+   - `ken-mcp` reads `KEN_MCP_GO_RESIDENT` (default 0), `KEN_MCP_GO_IDLE` (5m) and `KEN_MCP_GO_CACHE_MB` (0) in `LoadConfig` (ADR-053).
+3. **Staleness is excluded by construction, not by notification.** Every use of the cache or of a resident gopls first scans the Go files and module files of the repository (a stat per file; about 40 ms for goinfer's 3,139 files, 67 ms with the `.md` files a rename plan reads) and compares:
+   - the cache stores a fingerprint of the scan and returns an answer only if the tree still has it. Files modified within 2 s of the scan are compared by content, so an edit that kept the size and mtime inside a coarse timestamp tick is still seen. An answer is not stored if the tree changed while it was being computed. A rename plan's fingerprint also covers the `.md` files and `testdata` it reads for leftover mentions.
+   - a resident gopls is told about the changed, created and deleted files with `workspace/didChangeWatchedFiles` before the request.
+   - The Workspace's file watcher calls `GoTypedHost.Invalidate` on every flush: the cache drops the repository's answers and idle gopls processes reload at once, so the next query pays less. It is an optimisation; correctness never depends on it. The tests drive both paths (below).
+4. **A resident process and `wrap`.** The timing lock must cover the heavy work and must not be held by something that is merely sitting there. So a pooled gopls is **not** started under `wrap` (it would hold the lock for its whole life, and refuse every timed run). Each request instead runs the prefix around a helper, `wrap sh -c 'echo ready; exec cat'`, waits for `ready` (the wrapper has the lock), does its work, and closes the helper's stdin to release. The first request of a server holds the lock through its start and workspace load. Verified with the real `timing_lock.py` on goinfer: with three pooled gopls processes idle, `status` printed `free` and a timed exclusive run started. Consequences, stated: (a) a gopls does some background work after an edit, and the watcher hook starts that early, both outside the lock; (b) idle servers hold memory but no CPU while a timed run goes on; (c) the helper needs `sh`, and where there is none (Windows) a pooled request falls back to a one-shot wrapped gopls; (d) `go_uses` is unchanged: `go list` through `wrap`, the type check in this process, not covered (ADR-059 addendum).
+5. **Not used:** `gopls -remote=auto`. Checked: it fails from this shell (`dialing remote: dial unix …/gopls-…-daemon…: no such file or directory`; the socket never appears).
+
+### Memory held between queries
+| | held | bound |
+|---|--:|---|
+| default (`GoTypedOptions{}`, `ken go`, `ken-mcp` unset) | **0** | |
+| answer cache | 0.1 MB (a 497-line answer) to 0.5 MB (2,525 lines) | `CacheBytes`; an answer bigger than the whole cache is not stored |
+| resident gopls | 0.6 to 0.9 GB each after the first query, 0.9 to 1.4 GB after several; **2.7 to 3.1 GB for goinfer's three configurations, 3.3 to 4.2 GB after edits** | `MaxResident` and `IdleTimeout`; not a hard bound on a process's size: set `GOMEMLIMIT` in a configuration's `env` for a soft one (−18 % in one test) |
+
+Nothing here holds more than ½ GB by default. Resident gopls is far past it, and is off.
+
+### Results (goinfer, 3 configurations; ±20 % noise)
+| | before | after, nothing held | with `CacheBytes` | with `MaxResident` ≥ 3 |
+|---|--:|--:|--:|--:|
+| `Forward`, first | 37.4 s | 7.0 s | 7.0 s | 5.8 s |
+| `Forward`, repeat | 28.3 s | 7.0 s | **0.04 s** | 1.5 s |
+| `decoder.Options`, first | 263 s | 6.7 s | 6.9 s | |
+| `decoder.Options`, repeat | 257 s | 6.7 s | **0.04 s** | 0.8 s |
+| a different symbol, tree unchanged | | 6.7 s | 6.7 s | **0.6 to 0.8 s** |
+| after an edit | | 6.6 s | 6.6 s | 2.1 to 3.1 s |
+| peak RSS | 2.9 GB | 1.0 GB | 1.0 GB | 2.7 to 4.2 GB held |
+
+The goal "a repeat or second query on an unchanged tree in about a second" is met in two different ways at two different prices: an identical repeat for under a megabyte (cache), a different query for about 3 GB (resident). The first query is 5× to 40× cheaper than before at no cost in memory held.
+
+### Identical answers
+The ADR-059 regression table, re-run on the new default engine at `d22c2c0c4`: references 497 lines in 255 files and 2,525 in 979, hit for hit (file, line, configurations, enclosing function, text); implementations 64, of which 3 non-test; rename 59 files, no conflicts, mentions equal and the merged patch byte-identical; no `INCOMPLETE`. The `INCOMPLETE` behaviour is unchanged: a request that fails, or a declaration no configuration compiles, still sets it (tests with a fake server, and the existing fake-CLI tests). A server that dies mid-request is replaced once.
+
+### Staleness tests
+`internal/gotypes/lsp_test.go` drives a fake server that, like gopls, reads the tree at start and again only for files it is told about, so an unannounced edit gets the old answer. `engine/gotyped_test.go` drives a real gopls through a Workspace with its watcher running: query, repeat (from memory), edit and query at once (before the watcher can have flushed), edit and wait for the watcher's flush and observe the cache dropped by the watcher's hook, then query. Mutation-tested: making the cache ignore a fingerprint mismatch, not sending `didChangeWatchedFiles`, not dropping on the watcher's hook, and removing the 2 s window each fail a named test.
+
+### Rejected
+- **Answer in this process with `go/types` (candidate 2).** Fast (2.7 s per configuration, 420 to 460 MB peak, 285 to 340 MB if held) and exact on 4,257 of 4,257 sampled types, functions, fields, constants and variables. On 1,143 methods and interface methods it differed from gopls on 22 (gopls reports more), and on 1 of 28 implementation queries. gopls's notion of which methods "correspond" is a version-specific heuristic (fingerprint-based, workspace-wide, with a different rule inside the declaring package), so a re-derivation can be right on a sample and still not be gopls. The brief said identical.
+- **A resident gopls by default.** 2.7 to 3.1 GB for three configurations. Offered, off.
+- **A cap below the number of configurations** (1 or 2 residents for 3). Every query evicts and restarts: 6.0 s, the same as nothing held, with 0.9 to 1.9 GB sitting there. The documentation says to set the cap to the number of configurations or not at all.
+- **Skipping a configuration whose compiled files equal another's (candidate 4).** On goinfer no pair is equal for either symbol (20 to 30 of 106 packages differ). Left out; it costs a `go list` per configuration to find out.
+- **A cache keyed per configuration on the files that configuration compiles.** An edit forces a gopls round anyway, and per-configuration keys need the build constraints of every file (more reads than the scan costs). The whole-tree key is simple and sound; a finer one is a follow-up if edits between queries turn out common and configurations independent.
+- **Parallel configurations.** Memory would multiply (3 × 1 GB) for a 2× gain; not done.
+- **Tying the cache to the watcher alone.** A query a moment after an edit would precede the watcher's debounce.
+
+### Consequences
+- A typed query now starts a gopls per configuration and nothing else: 7 s for a merged answer on goinfer, 1.5 to 2 s per configuration, 1 GB at its peak.
+- A host that opts in holds memory and says how much in `status`; closing the Workspace or the host, or the idle timeout, gives it back.
+- The first answer of a pooled server under `wrap` takes the lock for its whole start and load; later requests take it for as long as they run.
+- gopls versions: the LSP requests used are the standard ones, and gopls answers them with the same server code as the command line (checked for v0.23.0). `ken go … --engine cli` is the way back if a future gopls diverges.
+- Not done: incremental per-package invalidation; sharing a resident gopls between Workspaces of different repositories beyond the global `MaxResident` cap; reporting a resident gopls's children (only the gopls process's RSS is counted; `go list` children come and go).

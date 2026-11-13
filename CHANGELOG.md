@@ -15,6 +15,18 @@ pre-built binaries.
 
 ## [Unreleased]
 
+The Go typed tier is 5× to 40× faster and peaks at a third of the memory, with the same answers, and can now keep gopls processes and answers between calls if asked to (ADR-060). On goinfer's three build configurations: `ResidentForward.Forward` (497 lines) took 37 s and now takes 7 s; `decoder.Options` (2,525 lines) took 263 s and now takes 7 s; peak memory fell from 2.9 GB to 1.0 GB. Nothing is held between calls unless you set `KEN_MCP_GO_CACHE_MB` or `KEN_MCP_GO_RESIDENT`.
+
+### Changed
+
+- **The Go typed tier asks gopls over its language-server protocol, not its command line (ADR-060).** The command line opens every file that holds a reference before it prints, so gopls type-checked the packages of all 979 files that mention `decoder.Options`; over the protocol the same request opens one. The answers are the same: references, implementations and the rename patch are identical to the ADR-059 figures (497 lines in 255 files; 64 implementations, 3 non-test; 59 rename files, byte-identical patch). `wrap` still covers every gopls run. `ken go … --engine cli` runs the old way.
+
+### Added
+
+- **`engine.GoTypedOptions` and `GoTypedHost`: an opt-in, bounded, releasable cache of answers and pool of resident gopls processes.** `CacheBytes` remembers merged answers (a repeat on an unchanged tree: 0.04 s, under 1 MB); `MaxResident` and `IdleTimeout` keep gopls processes alive (a different query on an unchanged tree: 0.6 to 0.8 s, after an edit 2 to 3 s; about 1 GB per process, 2.7 to 3.1 GB for three configurations). The zero value holds nothing. Both check the repository's Go and module files on disk before every answer, so a stale answer is never returned whether or not the file watcher has run; a `Workspace`'s watcher also tells the host to drop and reload sooner. A pooled gopls does not hold the repository's `wrap` lock while idle: each request takes it for as long as it runs. `engine.Status.GoTyped` and the MCP `status` tool report the resident processes, their memory and the cache.
+- **`KEN_MCP_GO_CACHE_MB`, `KEN_MCP_GO_RESIDENT`, `KEN_MCP_GO_IDLE` for `ken-mcp`**, all off by default (see the README).
+- **`tools/gotypedbench`**, the harness behind [`docs/internal/results/gotyped-resident-2026-11-13.md`](docs/internal/results/gotyped-resident-2026-11-13.md).
+
 ## [1.16.0] — 2026-11-13 — type-resolved Go queries that see every build configuration, and repeatable hybrid search over database chunks
 
 ken can now answer three refactoring questions about Go code with the compiler's precision: which lines refer to this symbol, which types implement this interface, and what a rename would edit. It asks gopls once per build configuration the repository lists (GOOS, GOARCH, tags) and merges the answers, so code behind a build tag is no longer invisible. On a repository that gates its GPU backends behind tags, the host's default configuration saw 68 of the 496 references to one interface method, 1 of its 3 real implementers, and left 15 of 59 files stale in a rename; the merged answer has all of them, each line labelled with the configurations that saw it.

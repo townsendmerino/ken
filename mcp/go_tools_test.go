@@ -140,3 +140,56 @@ func TestGoUses_handler(t *testing.T) {
 		t.Errorf("unknown importer: %q", resultText(t, res))
 	}
 }
+
+// With a host that keeps answers, the second identical go_references call is served from memory and says so, and the
+// status tool reports what the tier holds. With no host (or a host built from zero options) nothing is kept or shown.
+func TestGoTools_hostKeepsAnswersAndStatusReportsThem(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs gopls: skipped under -short")
+	}
+	if engine.GoplsPath() == "" || engine.GoPath() == "" {
+		t.Skip("gopls or go not on PATH")
+	}
+	t.Setenv("KEN_MCP_ALLOWED_REPO_ROOTS", "")
+	repo := t.TempDir()
+	if r, err := filepath.EvalSymlinks(repo); err == nil {
+		repo = r
+	}
+	for name, body := range map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.21\n",
+		"a.go":   "package m\n\nfunc Hello() {}\n",
+		"b.go":   "package m\n\nfunc Use() { Hello() }\n",
+	} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	host := engine.NewGoTypedHost(engine.GoTypedOptions{CacheBytes: 1 << 20})
+	defer host.Close()
+	cfg := &Config{GoTyped: host}
+	ask := func() string {
+		res, _, err := handleGoLocations(context.Background(), cfg, GoSymbolArgs{Symbol: "Hello", repoArg: repoArg{Repo: repo}}, (*engine.GoTyped).References)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resultText(t, res)
+	}
+	first, second := ask(), ask()
+	if !strings.Contains(first, "b.go") || strings.Contains(first, "INCOMPLETE") {
+		t.Fatalf("the first answer should list the use in b.go:\n%s", first)
+	}
+	if strings.Contains(first, "remembered answer") || !strings.Contains(second, "remembered answer") {
+		t.Errorf("first:\n%s\nsecond:\n%s\nwant only the second to be remembered", first, second)
+	}
+	res, _, err := handleStatus(context.Background(), cfg, StatusArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := resultText(t, res); !strings.Contains(text, "Go typed tier (kept between queries)") || !strings.Contains(text, "1 remembered") {
+		t.Errorf("status does not report the typed tier's answers:\n%s", text)
+	}
+	res, _, _ = handleStatus(context.Background(), &Config{GoTyped: engine.NewGoTypedHost(engine.GoTypedOptions{})}, StatusArgs{})
+	if text := resultText(t, res); strings.Contains(text, "Go typed tier") {
+		t.Errorf("a server that keeps nothing must not report a typed tier:\n%s", text)
+	}
+}

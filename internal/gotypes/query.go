@@ -27,10 +27,43 @@ type Runner struct {
 	Config  Config        // from LoadConfig
 	Gopls   string        // the gopls binary; "" means "gopls" on PATH
 	Go      string        // the go binary, which Uses runs; "" means "go" on PATH
-	Run     RunFunc       // nil runs the subprocess
+	Run     RunFunc       // nil runs the subprocess; a non-nil Run stands in for the gopls command line (see UseCLI)
 	Environ []string      // base environment for gopls and go; nil means the process's
 	Timeout time.Duration // per gopls or go run; 0 means 5 minutes
+
+	// UseCLI asks gopls through its command line, one process per question, as ADR-059 did. The default asks over the
+	// language-server protocol (ADR-060): the same server code, so the same answers, in a fraction of the time. A
+	// Runner with Run set also takes the command-line route, since Run replaces the command-line subprocess.
+	UseCLI bool
+	// Spawn starts a language server process; nil runs the real one. Tests substitute it.
+	Spawn SpawnFunc
+	// Pool, when non-nil, keeps language servers alive between queries. Nil starts and stops one per query.
+	Pool *Pool
+	// Cache, when non-nil, remembers answers while the tree is unchanged. Nil remembers nothing.
+	Cache *Cache
 }
+
+// realRepo is the repository root with symlinks resolved, which is how gopls names the files it reports.
+func (r *Runner) realRepo() string {
+	if real, err := filepath.EvalSymlinks(r.Repo); err == nil {
+		return real
+	}
+	return r.Repo
+}
+
+// rel returns abs relative to the repository, slash-separated, and false for a path outside it. abs may be spelled
+// through the repository path as given or through its symlink-resolved form.
+func (r *Runner) rel(abs string) (string, bool) {
+	for _, root := range []string{r.Repo, r.realRepo()} {
+		if rel, err := filepath.Rel(root, abs); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return filepath.ToSlash(rel), true
+		}
+	}
+	return "", false
+}
+
+// useLSP reports whether questions go to a language server rather than the gopls command line.
+func (r *Runner) useLSP() bool { return !r.UseCLI && r.Run == nil }
 
 // ConfigRun records one gopls run, or why a configuration was not asked.
 type ConfigRun struct {
@@ -70,6 +103,10 @@ type Result struct {
 	// GroupedBy and Groups are set by GroupBy, which replaces Hits with counts.
 	GroupedBy string  `json:"group_by,omitempty"`
 	Groups    []Group `json:"groups,omitempty"`
+	// Cached is true when the answer was remembered from an earlier identical query on a tree that has not changed
+	// since; CacheAgeSeconds says how long ago that query ran. Runs then describes the original run.
+	Cached          bool    `json:"cached,omitempty"`
+	CacheAgeSeconds float64 `json:"cache_age_seconds,omitempty"`
 }
 
 // ErrAmbiguous is returned when a symbol names declarations of more than one thing.
@@ -132,9 +169,175 @@ func (r *Runner) resolve(symbol string) ([]Decl, error) {
 
 var locRE = regexp.MustCompile(`^(.+\.go):(\d+):(\d+)`)
 
-// each runs one gopls subcommand at every declaration under every configuration that compiles it.
-func (r *Runner) each(ctx context.Context, decls []Decl, sub []string, extra []string,
-	got func(bc BuildConfig, d Decl, stdout []byte) int) (runs []ConfigRun, incomplete bool) {
+// reqKind is the question put to gopls.
+type reqKind int
+
+const (
+	askReferences reqKind = iota
+	askImplementations
+	askRename
+)
+
+// cliArgs is the gopls command-line spelling of a question, minus its position.
+func (k reqKind) cliArgs() []string {
+	switch k {
+	case askImplementations:
+		return []string{"implementation"}
+	case askRename:
+		return []string{"rename", "-d"}
+	}
+	return []string{"references"}
+}
+
+func (k reqKind) lspMethod() string {
+	switch k {
+	case askImplementations:
+		return "textDocument/implementation"
+	case askRename:
+		return "textDocument/rename"
+	}
+	return "textDocument/references"
+}
+
+// reply is gopls's answer to one question under one configuration.
+type reply struct {
+	text  []byte              // references, implementations: one "path:line:col" per line
+	edits map[string][]string // rename over LSP: the new lines of each file the rename edits, by absolute path
+	hunks map[string][]string // rename over the command line: the diff hunk lines of each file, by absolute path
+}
+
+// files returns the absolute paths of the files a rename edits.
+func (rp reply) files() []string {
+	var out []string
+	for p := range rp.edits {
+		out = append(out, p)
+	}
+	for p := range rp.hunks {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// newLines returns file abs, whose current lines are orig, after the rename.
+func (rp reply) newLines(abs string, orig []string) ([]string, error) {
+	if h, ok := rp.hunks[abs]; ok {
+		return applyHunks(orig, h)
+	}
+	return rp.edits[abs], nil
+}
+
+func errText(stderr []byte, err error) string {
+	msg := strings.TrimSpace(string(stderr))
+	if msg == "" {
+		msg = err.Error()
+	}
+	if len(msg) > 300 {
+		msg = msg[:300]
+	}
+	return msg
+}
+
+// ask puts one question about the declaration at abs:line:col to gopls under bc.
+func (r *Runner) ask(ctx context.Context, bc BuildConfig, kind reqKind, d Decl, newName string, shots map[string]*lspSession) (reply, error) {
+	abs := filepath.Join(r.Repo, filepath.FromSlash(d.File))
+	if r.useLSP() {
+		abs = filepath.Join(r.realRepo(), filepath.FromSlash(d.File))
+	}
+	if !r.useLSP() {
+		args := append(append([]string{}, kind.cliArgs()...), fmt.Sprintf("%s:%d:%d", abs, d.Line, d.Col))
+		if kind == askRename {
+			args = append(args, newName)
+		}
+		stdout, stderr, err := r.run(ctx, bc, args...)
+		if err != nil {
+			return reply{}, errors.New(errText(stderr, err))
+		}
+		if kind != askRename {
+			return reply{text: stdout}, nil
+		}
+		return reply{hunks: splitDiff(string(stdout))}, nil
+	}
+	do := func(s *lspSession) (reply, error) {
+		ctx, cancel := context.WithTimeout(ctx, r.timeout())
+		defer cancel()
+		if kind == askRename {
+			edits, err := s.rename(ctx, abs, d.Line, d.Col, newName)
+			return reply{edits: edits}, err
+		}
+		text, err := s.ask(ctx, kind.lspMethod(), abs, d.Line, d.Col)
+		return reply{text: text}, err
+	}
+	if r.Pool != nil {
+		rp, err := r.askPooled(ctx, bc, do)
+		if !errors.Is(err, errPoolFull) && !errors.Is(err, errNoLockHolder) {
+			return rp, err
+		}
+		// every pooled server is busy, or the wrap lock cannot be held per request: run on a server of our own
+	}
+	s := shots[bc.Name]
+	if s == nil {
+		var err error
+		if s, err = r.startSession(ctx, bc, true); err != nil {
+			return reply{}, err
+		}
+		shots[bc.Name] = s
+	}
+	return do(s)
+}
+
+var errNoLockHolder = errors.New("gotypes: cannot hold the wrap lock per request")
+
+// askPooled runs do on the pooled server for bc, started on first use. The wrap lock is held for the length of the
+// request, including a start, and not while the server sits idle.
+func (r *Runner) askPooled(ctx context.Context, bc BuildConfig, do func(*lspSession) (reply, error)) (reply, error) {
+	for attempt := 0; ; attempt++ {
+		release, err := r.holdLock(ctx)
+		if err != nil {
+			return reply{}, fmt.Errorf("%w: %v", errNoLockHolder, err)
+		}
+		rp, err := func() (reply, error) {
+			defer release()
+			pc, err := r.Pool.acquire(ctx, r, bc, func() (*lspSession, error) {
+				before, _ := scanTree(r.realRepo()) // before the server reads anything, so no edit can fall between
+				at := time.Now()
+				s, err := r.startSession(ctx, bc, false)
+				if err == nil {
+					s.tree = &treeWatch{stats: before, at: at}
+				}
+				return s, err
+			})
+			if err != nil {
+				return reply{}, err
+			}
+			defer r.Pool.release(pc)
+			pc.s.reqMu.Lock()
+			defer pc.s.reqMu.Unlock()
+			if err := pc.s.syncTree(); err != nil {
+				return reply{}, err
+			}
+			rp, err := do(pc.s)
+			if errors.Is(err, errSessionClosed) {
+				r.Pool.discard(pc)
+			}
+			return rp, err
+		}()
+		if errors.Is(err, errSessionClosed) && attempt == 0 {
+			continue // the server died under us; one retry on a fresh one
+		}
+		return rp, err
+	}
+}
+
+// each asks one question at every declaration under every configuration that compiles it.
+func (r *Runner) each(ctx context.Context, decls []Decl, kind reqKind, newName string,
+	got func(bc BuildConfig, d Decl, rp reply) int) (runs []ConfigRun, incomplete bool) {
+	shots := map[string]*lspSession{}
+	defer func() {
+		for _, s := range shots {
+			s.close()
+		}
+	}()
 	for _, d := range decls {
 		where := d.File + ":" + strconv.Itoa(d.Line)
 		asked := false
@@ -144,23 +347,19 @@ func (r *Runner) each(ctx context.Context, decls []Decl, sub []string, extra []s
 				continue
 			}
 			asked = true
-			pos := fmt.Sprintf("%s:%d:%d", filepath.Join(r.Repo, filepath.FromSlash(d.File)), d.Line, d.Col)
-			args := append(append(append([]string{}, sub...), pos), extra...)
 			t := time.Now()
-			stdout, stderr, err := r.run(ctx, bc, args...)
-			cr := ConfigRun{Config: bc.Name, Decl: where, Seconds: float64(time.Since(t).Milliseconds()) / 1000}
+			rp, err := r.ask(ctx, bc, kind, d, newName, shots)
+			cr := ConfigRun{Config: bc.Name, Decl: where}
 			if err != nil {
-				msg := strings.TrimSpace(string(stderr))
-				if msg == "" {
-					msg = err.Error()
-				}
+				msg := err.Error()
 				if len(msg) > 300 {
 					msg = msg[:300]
 				}
 				cr.Err, incomplete = msg, true
 			} else {
-				cr.Hits = got(bc, d, stdout)
+				cr.Hits = got(bc, d, rp)
 			}
+			cr.Seconds = float64(time.Since(t).Milliseconds()) / 1000
 			runs = append(runs, cr)
 		}
 		if !asked {
@@ -170,7 +369,7 @@ func (r *Runner) each(ctx context.Context, decls []Decl, sub []string, extra []s
 	return runs, incomplete
 }
 
-func (r *Runner) locations(ctx context.Context, symbol, query string, sub []string) (*Result, error) {
+func (r *Runner) locations(ctx context.Context, symbol, query string, kind reqKind) (*Result, error) {
 	decls, err := r.resolve(symbol)
 	if err != nil {
 		return nil, err
@@ -180,19 +379,20 @@ func (r *Runner) locations(ctx context.Context, symbol, query string, sub []stri
 		line int
 	}
 	seen := map[key]map[string]bool{}
-	runs, incomplete := r.each(ctx, decls, sub, nil, func(bc BuildConfig, _ Decl, stdout []byte) int {
+	runs, incomplete := r.each(ctx, decls, kind, "", func(bc BuildConfig, _ Decl, rp reply) int {
+		stdout := rp.text
 		n := 0
 		for _, ln := range strings.Split(string(stdout), "\n") {
 			m := locRE.FindStringSubmatch(strings.TrimSpace(ln))
 			if m == nil {
 				continue
 			}
-			rel, err := filepath.Rel(r.Repo, m[1])
-			if err != nil || strings.HasPrefix(rel, "..") {
+			rel, ok := r.rel(m[1])
+			if !ok {
 				continue // a dependency outside the repository
 			}
 			line, _ := strconv.Atoi(m[2])
-			k := key{filepath.ToSlash(rel), line}
+			k := key{rel, line}
 			if seen[k] == nil {
 				seen[k] = map[string]bool{}
 			}
@@ -230,13 +430,17 @@ func (r *Runner) locations(ctx context.Context, symbol, query string, sub []stri
 // References returns every line that refers to symbol under any configuration. For a method, gopls includes the
 // calls made through an interface the method satisfies and the calls on each type that implements it.
 func (r *Runner) References(ctx context.Context, symbol string) (*Result, error) {
-	return r.locations(ctx, symbol, "references", []string{"references"})
+	return cached(r, "references", []string{symbol}, func() (*Result, error) {
+		return r.locations(ctx, symbol, "references", askReferences)
+	})
 }
 
 // Implementations returns, for an interface or interface method, the types or methods that implement it; for a
 // concrete type or method, the interfaces it satisfies.
 func (r *Runner) Implementations(ctx context.Context, symbol string) (*Result, error) {
-	return r.locations(ctx, symbol, "implementations", []string{"implementation"})
+	return cached(r, "implementations", []string{symbol}, func() (*Result, error) {
+		return r.locations(ctx, symbol, "implementations", askImplementations)
+	})
 }
 
 // annotate fills each hit's source line and enclosing function, reading every file once.

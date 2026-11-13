@@ -176,6 +176,16 @@ type Options struct {
 	// Best-effort, outside the stability promise.
 	Prebuilt []byte
 
+	// GoTyped chooses what the Go typed tier (Workspace.GoTyped) keeps between queries: resident gopls processes and
+	// remembered answers. The zero value keeps nothing. See GoTypedOptions.
+	GoTyped GoTypedOptions
+
+	// GoTypedHost, when non-nil, is a typed-tier host shared with other Workspaces (ken-mcp keeps one for the whole
+	// process, so the cap on resident gopls processes holds across every repository it serves). The Workspace opens
+	// its GoTyped through it and feeds it its watcher's changes; it does not close a host it was given, and
+	// GoTyped is ignored.
+	GoTypedHost *GoTypedHost
+
 	// LogWriter receives best-effort diagnostic lines (snapshot load/write
 	// outcomes, fold-migration warnings). nil discards. MUST NOT be stdout
 	// for any caller that also speaks a stdio protocol on stdout (ken-mcp's
@@ -212,6 +222,11 @@ type Workspace struct {
 	onFlush   func(msg string)
 
 	structural structuralState
+
+	// goHost holds the Go typed tier's resident state (Options.GoTyped, or the shared Options.GoTypedHost); nil when
+	// none was asked for. goHostOwned says Close should close it.
+	goHost      *GoTypedHost
+	goHostOwned bool
 
 	// matcher is the walk's admission rules (gitignore, size cap, binary
 	// and symlink rejection), built on the first structural update; see
@@ -371,7 +386,17 @@ func Open(ctx context.Context, root string, opts Options) (*Workspace, error) {
 	// Every flush — the watcher's, or Refresh's — hands its paths to the
 	// structural index too (K13), on the flushing goroutine, before the
 	// OnFlush callbacks below run.
-	wi.SetOnBatch(w.structural.apply)
+	switch {
+	case opts.GoTypedHost != nil:
+		w.goHost = opts.GoTypedHost
+	case opts.GoTyped.Enabled():
+		w.goHost, w.goHostOwned = NewGoTypedHost(opts.GoTyped), true
+	}
+	wi.SetOnBatch(func(paths []string, resync bool) {
+		w.structural.apply(paths, resync)
+		// The typed tier verifies the tree itself on every use; this only lets it free or refresh sooner.
+		w.goHost.Invalidate(w.root, paths)
+	})
 	wi.SetOnFlush(func(msg string) {
 		if opts.Snapshot {
 			if w.refreshing.Load() > 0 {
@@ -422,6 +447,9 @@ func (w *Workspace) Close() error {
 		return nil
 	}
 	w.structural.stop()
+	if w.goHostOwned {
+		w.goHost.Close()
+	}
 	err := w.index.Close()
 	if w.snapshotEnabled && w.snapshotDirty.CompareAndSwap(true, false) {
 		w.persistSnapshot(w.index)

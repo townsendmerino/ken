@@ -46,8 +46,9 @@ type GoRenameArgs struct {
 const goTierNote = "Type-resolved by gopls and merged over every build configuration the repo lists in " +
 	engine.GoConfigFile + " (GOOS, GOARCH, tags), so code behind a build tag is included and each result names " +
 	"the configurations that saw it. Without that file only the host's default configuration is asked. " +
-	"A reply with an INCOMPLETE line is a lower bound. Each configuration costs seconds, not milliseconds. " +
-	"Local Go repositories only."
+	"A reply with an INCOMPLETE line is a lower bound. Each configuration costs one to a few seconds (a gopls is " +
+	"started per configuration) unless the server keeps gopls processes or answers resident (KEN_MCP_GO_RESIDENT, " +
+	"KEN_MCP_GO_CACHE_MB), when a repeated query on an unchanged tree is much faster. Local Go repositories only."
 
 const goUsesNote = "merged over every build configuration the repo lists in " + engine.GoConfigFile +
 	" (without that file: the host's default only), each row naming the configurations that saw it when not all did. " +
@@ -116,7 +117,11 @@ func openGoTyped(cfg *Config, repoArg, outputMode string) (gt *engine.GoTyped, n
 	if isURL {
 		return nil, "", errorResult(outputMode, "the go_* tools need a local checkout: gopls builds the code, and ken does not build a repository it cloned from a URL")
 	}
-	gt, found, err := engine.OpenGoTyped(key, "")
+	open := engine.OpenGoTyped
+	if cfg.GoTyped != nil {
+		open = cfg.GoTyped.Open
+	}
+	gt, found, err := open(key, "")
 	if err != nil {
 		return nil, "", errorResult(outputMode, err.Error())
 	}

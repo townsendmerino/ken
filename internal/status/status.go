@@ -79,6 +79,11 @@ type Status struct {
 	// JSON): what the per-file parse budget did to this server's builds.
 	ParseBudget *ParseBudgetInfo `json:",omitempty"`
 
+	// GoTyped is non-nil only on the MCP surface, and only when the server
+	// was started to keep something between Go typed-tier queries (ADR-060):
+	// the resident gopls processes with their memory, and the answer cache.
+	GoTyped *GoTypedInfo `json:",omitempty"`
+
 	// Process / runtime. Populated by Build; useful for "is this
 	// the binary I think it is" sanity checks.
 	Process ProcessInfo
@@ -184,6 +189,35 @@ type StructuralInfo struct {
 	PerLanguageFiles map[string]int
 }
 
+// GoTypedInfo is what the Go typed tier holds between queries.
+type GoTypedInfo struct {
+	MaxResident int     // configured cap on resident gopls processes
+	IdleSeconds float64 // idle timeout of a resident gopls
+	Sessions    []GoTypedSession
+	// HeldBytes is the memory held between queries: the resident gopls
+	// processes' RSS plus the cached answers.
+	HeldBytes     int64
+	CacheEntries  int
+	CacheBytes    int64
+	CacheMaxBytes int64
+	CacheHits     int64
+	CacheMisses   int64
+	CacheStale    int64 // lookups that found an answer the tree had moved past
+	CacheDropped  int64 // answers removed because the file watcher reported a change
+	Starts        int64 // gopls processes started
+	Reuses        int64 // queries served by an already-running one
+}
+
+// GoTypedSession is one resident gopls.
+type GoTypedSession struct {
+	Repo     string
+	Config   string
+	PID      int
+	RSSBytes int64
+	IdleSec  float64
+	Requests int
+}
+
 // ParseBudgetInfo counts what the per-file parse budget
 // (KEN_ENRICH_FILE_BUDGET_MS) did to this process's index builds (MCP-only).
 type ParseBudgetInfo struct {
@@ -248,6 +282,9 @@ type BuildOptions struct {
 	// nil (a `ken status` process has built nothing).
 	ParseBudget *ParseBudgetInfo
 
+	// GoTyped, when non-nil, is reported as Status.GoTyped (MCP only).
+	GoTyped *GoTypedInfo
+
 	// Now overrides the clock for tests. Zero = time.Now().
 	Now time.Time
 }
@@ -286,6 +323,7 @@ func Build(opts BuildOptions) Status {
 		st.Cache = *opts.LiveCache
 	}
 	st.ParseBudget = opts.ParseBudget
+	st.GoTyped = opts.GoTyped
 	return st
 }
 

@@ -34,6 +34,9 @@ configurations listed in <repo>/` + engine.GoConfigFile + ` (without the file: t
   --group-by K counts instead of lines, one row per K: package, dir or file,
                each split into non-test and test (_test.go) lines
   --config F   read the build configurations from F instead of the repository
+  --engine E   how gopls is asked: lsp (default; its language-server protocol, one
+               process per configuration) or cli (its command line, one process
+               per question, as before 1.17; the same answers, much slower)
 
 Exit status: 0 complete, 3 the answer is a lower bound (see INCOMPLETE lines),
 1 on error, 2 on usage.
@@ -50,13 +53,14 @@ func cmdGo(args []string) int {
 		patch   string
 		cfgFile string
 		groupBy string
+		useCLI  bool
 		maxN    = 200
 	)
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--json":
 			jsonOut = true
-		case "--patch", "--max", "--config", "--group-by":
+		case "--patch", "--max", "--config", "--group-by", "--engine":
 			if i+1 >= len(args) {
 				fmt.Fprintf(os.Stderr, "ken go: %s needs a value\n", args[i])
 				return 2
@@ -67,6 +71,15 @@ func cmdGo(args []string) int {
 				cfgFile = args[i+1]
 			} else if args[i] == "--group-by" {
 				groupBy = args[i+1]
+			} else if args[i] == "--engine" {
+				switch args[i+1] {
+				case "lsp":
+				case "cli":
+					useCLI = true
+				default:
+					fmt.Fprintf(os.Stderr, "ken go: --engine takes lsp or cli, not %q\n", args[i+1])
+					return 2
+				}
 			} else if n, err := strconv.Atoi(args[i+1]); err != nil || n < 0 {
 				fmt.Fprintf(os.Stderr, "ken go: --max %q is not a count\n", args[i+1])
 				return 2
@@ -106,6 +119,7 @@ func cmdGo(args []string) int {
 		fmt.Fprintf(os.Stderr, "ken go: %v\n", err)
 		return 1
 	}
+	gt.UseCLI = useCLI
 	if !found {
 		fmt.Fprintf(os.Stderr, "ken go: no %s in %s: asking under the host's default build configuration only\n", engine.GoConfigFile, repo)
 	}

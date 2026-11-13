@@ -133,6 +133,20 @@ func RenderText(s Status, verbose bool) string {
 		fmt.Fprintln(&b)
 	}
 
+	// ---------- Go typed tier (MCP only, when it keeps something) ----------
+	if g := s.GoTyped; g != nil {
+		fmt.Fprintln(&b, "Go typed tier (kept between queries)")
+		fmt.Fprintf(&b, "  held:        %s (resident gopls + remembered answers)\n", formatBytes(g.HeldBytes))
+		fmt.Fprintf(&b, "  gopls:       %d of %d resident, each stopped after %.0f s idle\n", len(g.Sessions), g.MaxResident, g.IdleSeconds)
+		for _, ss := range g.Sessions {
+			fmt.Fprintf(&b, "    pid %d  %s [%s]  %s  idle %.0fs  %d requests\n", ss.PID, ss.Repo, ss.Config, formatBytes(ss.RSSBytes), ss.IdleSec, ss.Requests)
+		}
+		fmt.Fprintf(&b, "  answers:     %d remembered, %s of %s; %d hits, %d misses, %d stale, %d dropped by the watcher\n",
+			g.CacheEntries, formatBytes(g.CacheBytes), formatBytes(g.CacheMaxBytes), g.CacheHits, g.CacheMisses, g.CacheStale, g.CacheDropped)
+		fmt.Fprintf(&b, "  servers:     %d started, %d queries served by one already running\n", g.Starts, g.Reuses)
+		fmt.Fprintln(&b)
+	}
+
 	// ---------- Live cache (MCP only) ----------
 	if s.Cache.Capacity > 0 || s.Cache.InUse > 0 {
 		fmt.Fprintln(&b, "Repo cache (MCP)")

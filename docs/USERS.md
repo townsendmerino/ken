@@ -278,13 +278,14 @@ Each query then runs under every configuration that compiles the symbol's declar
 
 ```
 $ ken go refs . decoder.ResidentForward.Forward
-references of decoder.ResidentForward.Forward: 496 lines in 255 files
+references of decoder.ResidentForward.Forward: 497 lines in 255 files
 declared: decoder/residency.go:43  interface-method decoder.ResidentForward.Forward
-per configuration: default 68 (5.1s) · darwin-gpu 276 (16.3s) · linux-cuda 248 (13.2s)
+per configuration: default 68 (1.7s) · darwin-gpu 276 (1.9s) · linux-cuda 249 (1.9s)
 backend/cuda/a13_multimodel_test.go
   51 TestA13_MultiModelUnloadPoisons [linux-cuda]: before, err := rb.Forward(emb, 0)
 ```
 
+- **Cost.** Each query starts one gopls per configuration, one after another, and stops it: about 2 s and 1 GB at its peak for each, on a 3,000-file repository (7 s for the three configurations above). Nothing is kept between queries unless you ask. Two things can be kept, each bounded and listed by `status`: `KEN_MCP_GO_CACHE_MB=32` remembers answers (an identical question on an unchanged tree then takes 0.04 s and holds under a megabyte), and `KEN_MCP_GO_RESIDENT=3` keeps gopls processes alive for `KEN_MCP_GO_IDLE` (default 5m; a different question on an unchanged tree then takes about a second, and an edit about two) at roughly 1 GB per process, so only set it as high as your number of configurations (a lower cap evicts on every query and gains nothing). Both check the files on disk before every answer, so an edit is always seen. In a Go program, `engine.GoTypedOptions` does the same.
 - **Symbols** are `Name`, `Type.Member`, `pkg.Name`, `pkg.Type.Member`, or `dir/sub.Name` to pick a package by directory. A method or field needs its type.
 - **`[linux-cuda]`** after a line means only that configuration saw it. No label means every configuration did.
 - **An `INCOMPLETE` line means a lower bound**: a declaration that no listed configuration compiles, or a gopls run that failed. Add the missing configuration and ask again.
@@ -292,9 +293,9 @@ backend/cuda/a13_multimodel_test.go
 
   ```
   $ ken go refs . decoder.Options --group-by package
-  references of decoder.Options: 2524 lines in 978 files
-  declared: decoder/model.go:425  type decoder.Options
-  per configuration: default 1089 (9.4s) · darwin-gpu 1902 (155.0s) · linux-cuda 1738 (119.9s)
+  references of decoder.Options: 2525 lines in 979 files
+  declared: decoder/options.go:14  type decoder.Options
+  per configuration: default 1089 (1.5s) · darwin-gpu 1902 (1.8s) · linux-cuda 1739 (1.8s)
   decoder                 51 non-test  916 test
   backend/cuda             0 non-test  622 test
   backend/metal            0 non-test  546 test
