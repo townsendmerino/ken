@@ -261,7 +261,7 @@ go-git on the local working tree).
 
 ## Go: type-resolved answers across build configurations
 
-`references` and `callers` match by name. For Go, three more tools answer from gopls, the Go language server: `go_references`, `go_implementations` and `go_rename_plan` (and `ken go refs|impls|rename-plan` on the command line). They appear only when `gopls` is on PATH, and they work on local checkouts.
+`references` and `callers` match by name. For Go, four more tools answer from a type checker: `go_references`, `go_implementations` and `go_rename_plan` from gopls, the Go language server, and `go_uses` from the go command and Go's own type checker (`ken go refs|impls|uses|rename-plan` on the command line). They appear only when `gopls` is on PATH, and they work on local checkouts.
 
 A type checker sees one build configuration at a time, so code behind a build tag or another GOOS is invisible from the default one. List the repository's configurations once, in `.ken-go.json` at its root:
 
@@ -288,8 +288,33 @@ backend/cuda/a13_multimodel_test.go
 - **Symbols** are `Name`, `Type.Member`, `pkg.Name`, `pkg.Type.Member`, or `dir/sub.Name` to pick a package by directory. A method or field needs its type.
 - **`[linux-cuda]`** after a line means only that configuration saw it. No label means every configuration did.
 - **An `INCOMPLETE` line means a lower bound**: a declaration that no listed configuration compiles, or a gopls run that failed. Add the missing configuration and ask again.
+- **`group_by` gives counts, not lines.** `go_references` and `go_implementations` take `group_by: "package" | "dir" | "file"` (`--group-by` on the command line). The header stays; the lines become one row per group, largest first, each split into non-test and test lines (a test file is one ending `_test.go`). `max` caps the rows. `package` counts an external test package (`package x_test`) with the package it tests and adds the package name where it differs from the directory's (`cmd/ken (main)`); `dir` is the directory alone. Ask this way for a coupling question: the reply is a few rows where the full list can be thousands of lines.
+
+  ```
+  $ ken go refs . decoder.Options --group-by package
+  references of decoder.Options: 2524 lines in 978 files
+  declared: decoder/model.go:425  type decoder.Options
+  per configuration: default 1089 (9.4s) · darwin-gpu 1902 (155.0s) · linux-cuda 1738 (119.9s)
+  decoder                 51 non-test  916 test
+  backend/cuda             0 non-test  622 test
+  backend/metal            0 non-test  546 test
+  internal/app/serveapp    3 non-test   36 test
+  ```
+- **`go_uses` is the reverse question**: which identifiers of one package another package names (`importer`, `imported`; `ken go uses <repo> <importer> <imported>`). It sizes a package boundary. Each package is a directory (`backend/cuda`), the tail of one, or a package name; the imported one may also be an import path, and need not be in the repository. Rows are package-level names and, as `Type.Member`, the methods and fields named, each with its non-test and test line counts and the same configuration label. It is type-resolved: an aliased or dot import counts, and a local variable that shares the package's name does not. A count is of lines, as in `go_references`, so the two agree on a symbol.
+
+  ```
+  $ ken go uses . backend/cuda decoder
+  uses of decoder by backend/cuda: 650 identifiers, 7103 lines in 283 files
+  import paths: github.com/townsendmerino/goinfer/decoder <- github.com/townsendmerino/goinfer/backend/cuda
+  package-level: 189 (90 named by non-test code) · methods and fields: 461 (244 named by non-test code)
+  per configuration (lines): default 0 (0.1s) · darwin-gpu 0 (0.1s) · linux-cuda 7103 (1.2s)
+  Options      type     0 non-test  622 test  [linux-cuda]
+  Model.Close  method   0 non-test  544 test  [linux-cuda]
+  ```
+
+  It costs a second or two per configuration: `go list` names the files each configuration builds (through `wrap`, like gopls), and ken type-checks them from source in its own process, which `wrap` does not cover. A configuration that does not build the importer is skipped; one whose files have type errors is counted and marked `partial`, with an `INCOMPLETE` line.
 - **`go_rename_plan` writes nothing.** It lists the files a rename edits under each configuration and the lines that still spell the old name in comments and markdown; with `patch: true` (`--patch FILE` on the command line) it gives one merged diff for `git apply`. Vet every configuration afterwards.
-- **Stability**: these three tools are new and best-effort; they are not part of the 1.0-stable nine.
+- **Stability**: these four tools are new and best-effort; they are not part of the 1.0-stable nine.
 - **Cost**: each configuration is a gopls run, seconds each, and memory is freed when it exits. `"wrap": ["cmd", "arg", "--"]` in the file prefixes every run, for a repository that serializes heavy work behind a lock. `ken-mcp` honors `wrap` for its default repo, or when `KEN_MCP_ALLOWED_REPO_ROOTS` confines it.
 
 ## Configuration
