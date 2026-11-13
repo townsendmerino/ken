@@ -26,9 +26,10 @@ type Runner struct {
 	Repo    string        // absolute path of the repository root
 	Config  Config        // from LoadConfig
 	Gopls   string        // the gopls binary; "" means "gopls" on PATH
+	Go      string        // the go binary, which Uses runs; "" means "go" on PATH
 	Run     RunFunc       // nil runs the subprocess
-	Environ []string      // base environment for gopls; nil means the process's
-	Timeout time.Duration // per gopls run; 0 means 5 minutes
+	Environ []string      // base environment for gopls and go; nil means the process's
+	Timeout time.Duration // per gopls or go run; 0 means 5 minutes
 }
 
 // ConfigRun records one gopls run, or why a configuration was not asked.
@@ -39,6 +40,8 @@ type ConfigRun struct {
 	Seconds float64 `json:"seconds,omitempty"`
 	Skipped string  `json:"skipped,omitempty"` // set when the configuration does not compile the declaration's file
 	Err     string  `json:"error,omitempty"`   // gopls's complaint, when it failed
+	// Partial is set by Uses when the configuration's files did not type-check cleanly: Hits counts what resolved.
+	Partial string `json:"partial,omitempty"`
 }
 
 // Hit is one source line a query found.
@@ -48,6 +51,8 @@ type Hit struct {
 	In      string   `json:"in,omitempty"` // enclosing function or method
 	Text    string   `json:"text,omitempty"`
 	Configs []string `json:"configs"` // every configuration that reported this line
+
+	pkg string // the file's package clause, for GroupBy
 }
 
 // Result is the merged answer of a references or implementations query.
@@ -62,6 +67,9 @@ type Result struct {
 	// Incomplete is true when a declaration compiles under no listed configuration or a gopls run failed: the hits
 	// are then a lower bound, and Runs says which part is missing.
 	Incomplete bool `json:"incomplete"`
+	// GroupedBy and Groups are set by GroupBy, which replaces Hits with counts.
+	GroupedBy string  `json:"group_by,omitempty"`
+	Groups    []Group `json:"groups,omitempty"`
 }
 
 // ErrAmbiguous is returned when a symbol names declarations of more than one thing.
@@ -75,7 +83,12 @@ func (r *Runner) run(ctx context.Context, bc BuildConfig, args ...string) ([]byt
 	if gopls == "" {
 		gopls = "gopls"
 	}
-	argv := append(append([]string{}, r.Config.Wrap...), gopls)
+	return r.exec(ctx, bc, gopls, args...)
+}
+
+// exec runs bin under one configuration's environment, from the repository root, behind the repository's wrap command.
+func (r *Runner) exec(ctx context.Context, bc BuildConfig, bin string, args ...string) ([]byte, []byte, error) {
+	argv := append(append([]string{}, r.Config.Wrap...), bin)
 	argv = append(argv, args...)
 	base := r.Environ
 	if base == nil {
@@ -96,7 +109,7 @@ func (r *Runner) run(ctx context.Context, bc BuildConfig, args ...string) ([]byt
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
-		err = fmt.Errorf("gopls timed out after %s", timeout)
+		err = fmt.Errorf("%s timed out after %s", filepath.Base(bin), timeout)
 	}
 	return out.Bytes(), errb.Bytes(), err
 }
@@ -234,13 +247,14 @@ func (r *Runner) annotate(hits []Hit) {
 	}
 	var (
 		cur   string
+		pkg   string
 		lines []string
 		funcs []span
 	)
 	for i := range hits {
 		h := &hits[i]
 		if h.File != cur {
-			cur, lines, funcs = h.File, nil, nil
+			cur, pkg, lines, funcs = h.File, "", nil, nil
 			src, err := os.ReadFile(filepath.Join(r.Repo, filepath.FromSlash(h.File)))
 			if err != nil {
 				continue
@@ -248,6 +262,9 @@ func (r *Runner) annotate(hits []Hit) {
 			lines = strings.Split(string(src), "\n")
 			fset := token.NewFileSet()
 			if f, _ := parser.ParseFile(fset, h.File, src, parser.SkipObjectResolution); f != nil {
+				if f.Name != nil {
+					pkg = f.Name.Name
+				}
 				for _, d := range f.Decls {
 					fd, ok := d.(*ast.FuncDecl)
 					if !ok {
@@ -261,6 +278,7 @@ func (r *Runner) annotate(hits []Hit) {
 				}
 			}
 		}
+		h.pkg = pkg
 		if h.Line >= 1 && h.Line <= len(lines) {
 			t := strings.TrimSpace(lines[h.Line-1])
 			if len(t) > 140 {

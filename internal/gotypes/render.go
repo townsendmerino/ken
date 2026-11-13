@@ -13,6 +13,8 @@ func runsLine(runs []ConfigRun) string {
 			continue
 		case cr.Err != "":
 			parts = append(parts, fmt.Sprintf("%s FAILED (%s)", cr.Config, firstLine(cr.Err)))
+		case cr.Partial != "":
+			parts = append(parts, fmt.Sprintf("%s %d, partial (%.1fs)", cr.Config, cr.Hits, cr.Seconds))
 		default:
 			parts = append(parts, fmt.Sprintf("%s %d (%.1fs)", cr.Config, cr.Hits, cr.Seconds))
 		}
@@ -70,12 +72,17 @@ func incompleteLines(b *strings.Builder, decls []Decl, runs []ConfigRun) {
 
 // Text renders the result as compact lines grouped by file. A hit names its configurations only when some listed
 // configuration did not report it. maxHits caps the hit lines (0 means all); the header always carries the totals.
+// After GroupBy the hit lines are replaced by one row per group, capped the same way.
 func (r *Result) Text(nConfigs, maxHits int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s of %s: %d lines in %d files\n", r.Query, r.Symbol, r.Total, r.Files)
 	declLines(&b, r.Decls)
 	fmt.Fprintf(&b, "per configuration: %s\n", runsLine(r.Runs))
 	incompleteLines(&b, r.Decls, r.Runs)
+	if r.GroupedBy != "" {
+		groupLines(&b, r.Groups, maxHits)
+		return b.String()
+	}
 	last := ""
 	for i, h := range r.Hits {
 		if maxHits > 0 && i == maxHits {
