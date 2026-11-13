@@ -15,6 +15,16 @@ pre-built binaries.
 
 ## [Unreleased]
 
+## [1.16.0] — 2026-11-13 — type-resolved Go queries that see every build configuration, and repeatable hybrid search over database chunks
+
+ken can now answer three refactoring questions about Go code with the compiler's precision: which lines refer to this symbol, which types implement this interface, and what a rename would edit. It asks gopls once per build configuration the repository lists (GOOS, GOARCH, tags) and merges the answers, so code behind a build tag is no longer invisible. On a repository that gates its GPU backends behind tags, the host's default configuration saw 68 of the 496 references to one interface method, 1 of its 3 real implementers, and left 15 of 59 files stale in a rename; the merged answer has all of them, each line labelled with the configurations that saw it.
+
+Two additions came out of the first real use, an architecture survey. `group_by` turns a references answer into counts per package, directory or file: one symbol's 2,523 references were 732,078 characters of JSON and are now one row per package. `go_uses` answers the reverse question, which identifiers of one package another package names, in about a second per configuration; on that survey it replaced a regular expression whose count was about a fifth too high because it also matched comments.
+
+Separately, hybrid search over a corpus with live-database chunks (`KEN_DB_DSN`, `mcp/db`) now returns the same scores whenever the schema was read, and `ken-mcp` reads all of its settings at startup.
+
+Three things to check before upgrading. The Go tools appear only when `gopls` is on PATH, and without a `.ken-go.json` at the repository root they ask the host's default configuration only and say so on every reply; they are new and best-effort, not part of the 1.0-stable tool set. If you use database chunks, their ranking changes slightly, and a query for the engine or host name no longer matches them through their first line. Corpora without database chunks return the same search results as 1.15.0.
+
 ### Added
 
 - **A Go typed tier: `ken go refs|impls|rename-plan` and the MCP tools `go_references`, `go_implementations`, `go_rename_plan` (ADR-059).** They answer from gopls, where `references` and `callers` match by name, and they ask once per build configuration the repository lists in `.ken-go.json`, merging the answers and labelling each line with the configurations that saw it. A type checker sees one configuration at a time: on a repository that gates backends behind tags, the default configuration returned 68 of 496 references. The rename plan is one merged patch for `git apply` plus the lines that still spell the old name in comments and markdown; ken writes nothing to the repository. The MCP tools appear only when `gopls` is on PATH and take local checkouts only.
