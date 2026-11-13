@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -20,6 +21,17 @@ type GoSymbolArgs struct {
 	repoArg
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default, compact lines grouped by file) or 'json'."`
 	Max    int    `json:"max,omitempty" jsonschema:"Cap on the result lines shown (default 200; the header always carries the full totals)."`
+	// GroupBy asks for counts in place of the lines.
+	GroupBy string `json:"group_by,omitempty" jsonschema:"Return counts instead of lines: one row per 'package', 'dir' or 'file', each with its non-test and test (_test.go) line counts, largest first. Use it for 'how many per package' questions: the reply is a few rows where the full list can be thousands of lines."`
+}
+
+// GoUsesArgs is the argument schema for go_uses.
+type GoUsesArgs struct {
+	Importer string `json:"importer" jsonschema:"The package doing the importing: a repo-relative directory (backend/cuda), the tail of one, or a package name."`
+	Imported string `json:"imported" jsonschema:"The package whose identifiers are counted: a directory, the tail of one, a package name, or an import path (it need not be in the repo)."`
+	repoArg
+	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default, one aligned row per identifier) or 'json'."`
+	Max    int    `json:"max,omitempty" jsonschema:"Cap on the identifier rows shown (default 200; the header always carries the full totals)."`
 }
 
 // GoRenameArgs is the argument schema for go_rename_plan.
@@ -36,6 +48,10 @@ const goTierNote = "Type-resolved by gopls and merged over every build configura
 	"the configurations that saw it. Without that file only the host's default configuration is asked. " +
 	"A reply with an INCOMPLETE line is a lower bound. Each configuration costs seconds, not milliseconds. " +
 	"Local Go repositories only."
+
+const goUsesNote = "merged over every build configuration the repo lists in " + engine.GoConfigFile +
+	" (without that file: the host's default only), each row naming the configurations that saw it when not all did. " +
+	"A reply with an INCOMPLETE line is a lower bound. Local Go repositories only."
 
 func registerGoTools(srv *sdk.Server, cfg *Config) {
 	sdk.AddTool(srv, &sdk.Tool{
@@ -56,6 +72,19 @@ func registerGoTools(srv *sdk.Server, cfg *Config) {
 		stop := startProgressHeartbeat(ctx, req, "ken go_implementations")
 		defer stop()
 		return handleGoLocations(ctx, cfg, args, (*engine.GoTyped).Implementations)
+	})
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: "go_uses",
+		Description: "List the identifiers of one Go package that another package names, each with its line count " +
+			"split non-test and test: the surface a package boundary carries (`importer` backend/cuda, `imported` " +
+			"decoder). Type-resolved: aliased and dot imports count, a local variable that shares the package's " +
+			"name does not, and methods and fields are listed as Type.Member beside the package-level names. " +
+			"`go_references` answers the opposite question (who names one symbol). Type-checked with the go " +
+			"command's file lists, " + goUsesNote,
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args GoUsesArgs) (*sdk.CallToolResult, any, error) {
+		stop := startProgressHeartbeat(ctx, req, "ken go_uses")
+		defer stop()
+		return handleGoUses(ctx, cfg, args)
 	})
 	sdk.AddTool(srv, &sdk.Tool{
 		Name: "go_rename_plan",
@@ -115,6 +144,10 @@ func handleGoLocations(ctx context.Context, cfg *Config, args GoSymbolArgs,
 	if sym == "" {
 		return errorResult(args.Output, "symbol is required"), nil, nil
 	}
+	by := strings.TrimSpace(args.GroupBy)
+	if by != "" && !slices.Contains(engine.GoGroupKeys(), by) { // before the query: it can run for minutes
+		return errorResult(args.Output, fmt.Sprintf("group_by %q: want one of %s", by, strings.Join(engine.GoGroupKeys(), ", "))), nil, nil
+	}
 	gt, note, errResult := openGoTyped(cfg, args.Repo, args.Output)
 	if errResult != nil {
 		return errResult, nil, nil
@@ -127,10 +160,44 @@ func handleGoLocations(ctx context.Context, cfg *Config, args GoSymbolArgs,
 	if limit <= 0 {
 		limit = 200
 	}
+	if by != "" {
+		if err := res.GroupBy(by); err != nil {
+			return errorResult(args.Output, err.Error()), nil, nil
+		}
+		md := note + res.Text(len(gt.Config.Configs), limit)
+		if len(res.Groups) > limit && args.Output == "json" {
+			res.Groups = res.Groups[:limit]
+		}
+		return dispatchOutput(args.Output, res, md)
+	}
 	if len(res.Hits) > limit && args.Output == "json" {
 		res.Hits = res.Hits[:limit] // Files and the per-configuration counts keep the full totals
 	}
 	return dispatchOutput(args.Output, res, note+res.Text(len(gt.Config.Configs), limit))
+}
+
+func handleGoUses(ctx context.Context, cfg *Config, args GoUsesArgs) (*sdk.CallToolResult, any, error) {
+	importer, imported := strings.TrimSpace(args.Importer), strings.TrimSpace(args.Imported)
+	if importer == "" || imported == "" {
+		return errorResult(args.Output, "importer and imported are required"), nil, nil
+	}
+	gt, note, errResult := openGoTyped(cfg, args.Repo, args.Output)
+	if errResult != nil {
+		return errResult, nil, nil
+	}
+	res, err := gt.Uses(ctx, importer, imported)
+	if err != nil {
+		return errorResult(args.Output, err.Error()), nil, nil
+	}
+	limit := args.Max
+	if limit <= 0 {
+		limit = 200
+	}
+	md := note + res.Text(len(gt.Config.Configs), limit)
+	if len(res.Uses) > limit && args.Output == "json" {
+		res.Uses = res.Uses[:limit] // the totals in the header fields keep the full counts
+	}
+	return dispatchOutput(args.Output, res, md)
 }
 
 func handleGoRename(ctx context.Context, cfg *Config, args GoRenameArgs) (*sdk.CallToolResult, any, error) {

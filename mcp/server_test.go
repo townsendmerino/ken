@@ -91,10 +91,10 @@ func TestServer_ListsRegisteredTools(t *testing.T) {
 		"status":           true,
 		"recently_changed": true,
 	}
-	// The Go typed tier's three tools are offered exactly when gopls is on
+	// The Go typed tier's tools are offered exactly when gopls is on
 	// PATH (ADR-059); TestServer_GoToolsFollowGopls pins both cases.
 	if engine.GoplsPath() != "" {
-		for _, n := range []string{"go_references", "go_implementations", "go_rename_plan"} {
+		for _, n := range []string{"go_references", "go_implementations", "go_uses", "go_rename_plan"} {
 			wantNames[n] = true
 		}
 	}
@@ -137,13 +137,13 @@ func TestServer_GoToolsFollowGopls(t *testing.T) {
 	}
 	empty := t.TempDir()
 	t.Setenv("PATH", empty)
-	if got := list(); got["go_references"] || got["go_implementations"] || got["go_rename_plan"] {
+	if got := list(); got["go_references"] || got["go_implementations"] || got["go_uses"] || got["go_rename_plan"] {
 		t.Errorf("no gopls on PATH, yet go_* tools are listed: %v", got)
 	}
 	if err := os.WriteFile(filepath.Join(empty, "gopls"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := list(); !got["go_references"] || !got["go_implementations"] || !got["go_rename_plan"] {
+	if got := list(); !got["go_references"] || !got["go_implementations"] || !got["go_uses"] || !got["go_rename_plan"] {
 		t.Errorf("gopls on PATH, yet the go_* tools are not all listed: %v", got)
 	}
 }

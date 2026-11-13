@@ -9,6 +9,10 @@ import (
 // The Go typed tier (ADR-059): type-resolved references, implementations and rename plans for a Go repository, merged
 // over the build configurations the repository lists in GoConfigFile. It runs gopls as a subprocess and is
 // independent of the search index: no Workspace is needed.
+//
+// GoResult.GroupBy turns a references or implementations answer into counts per package, directory or file.
+// GoTyped.Uses is the reverse question (which identifiers of one package another names); it runs the go command and
+// type-checks in process, and does not need gopls.
 type (
 	GoTyped       = gotypes.Runner
 	GoConfig      = gotypes.Config
@@ -18,6 +22,9 @@ type (
 	GoDecl        = gotypes.Decl
 	GoConfigRun   = gotypes.ConfigRun
 	GoRenamePlan  = gotypes.RenamePlan
+	GoGroup       = gotypes.Group
+	GoUse         = gotypes.Use
+	GoUsesResult  = gotypes.UsesResult
 )
 
 // GoConfigFile is the repository-root file that lists a Go repository's build configurations.
@@ -28,6 +35,18 @@ var (
 	ErrGoAmbiguous = gotypes.ErrAmbiguous
 	ErrGoNotFound  = gotypes.ErrNotFound
 )
+
+// GoGroupKeys are the values GoResult.GroupBy takes.
+func GoGroupKeys() []string { return append([]string(nil), gotypes.GroupKeys...) }
+
+// GoPath returns the go binary on PATH, or "" when there is none; GoTyped.Uses needs it.
+func GoPath() string {
+	p, err := exec.LookPath("go")
+	if err != nil {
+		return ""
+	}
+	return p
+}
 
 // GoplsPath returns the gopls binary on PATH, or "" when there is none; the typed tier is unavailable without it.
 func GoplsPath() string {

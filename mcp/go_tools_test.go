@@ -83,8 +83,60 @@ func TestGoHandlers_symbolErrorsAreToolResults(t *testing.T) {
 	if !strings.Contains(resultText(t, res), "symbol is required") {
 		t.Errorf("empty symbol: %q", resultText(t, res))
 	}
+	res, _, _ = handleGoLocations(context.Background(), &Config{}, GoSymbolArgs{Symbol: "Hello", GroupBy: "module", repoArg: repoArg{Repo: repo}}, (*engine.GoTyped).References)
+	if !strings.Contains(resultText(t, res), "want one of package, dir, file") {
+		t.Errorf("unknown group_by: %q", resultText(t, res))
+	}
 	res, _, _ = handleGoRename(context.Background(), &Config{}, GoRenameArgs{Symbol: "Hello", repoArg: repoArg{Repo: repo}})
 	if !strings.Contains(resultText(t, res), "new_name are required") {
 		t.Errorf("rename without a new name: %q", resultText(t, res))
+	}
+}
+
+// go_uses end to end through the handler: the go command lists the files, the rows come back counted, and the JSON
+// form is cut to max while its totals stay whole.
+func TestGoUses_handler(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs go list: skipped under -short")
+	}
+	if engine.GoPath() == "" {
+		t.Skip("go not on PATH")
+	}
+	t.Setenv("KEN_MCP_ALLOWED_REPO_ROOTS", "")
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", "-mod=mod")
+	repo := t.TempDir()
+	for name, body := range map[string]string{
+		"go.mod":        "module example.com/m\n\ngo 1.21\n",
+		"lib/lib.go":    "package lib\n\ntype T struct{ N int }\n\nfunc New() T { return T{} }\n",
+		"app/app.go":    "package app\n\nimport l \"example.com/m/lib\"\n\nfunc F() int {\n\tlib := l.New()\n\treturn lib.N\n}\n",
+		"app/a_test.go": "package app\n\nimport \"example.com/m/lib\"\n\nvar _ lib.T\n",
+	} {
+		p := filepath.Join(repo, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, _, err := handleGoUses(context.Background(), &Config{}, GoUsesArgs{Importer: "app", Imported: "lib", repoArg: repoArg{Repo: repo}})
+	text := resultText(t, res)
+	for _, want := range []string{"uses of lib by app: 3 identifiers, 3 lines in 2 files", "New  func   1 non-test  0 test", "T    type   0 non-test  1 test", "T.N  field  1 non-test  0 test", "no " + engine.GoConfigFile} {
+		if err != nil || !strings.Contains(text, want) {
+			t.Errorf("go_uses lacks %q (err %v):\n%s", want, err, text)
+		}
+	}
+	res, _, _ = handleGoUses(context.Background(), &Config{}, GoUsesArgs{Importer: "app", Imported: "lib", Output: "json", Max: 1, repoArg: repoArg{Repo: repo}})
+	if js := resultText(t, res); !strings.Contains(js, `"total": 3`) || strings.Count(js, `"kind"`) != 1 {
+		t.Errorf("json with max 1 should carry one row and the full total:\n%s", js)
+	}
+	res, _, _ = handleGoUses(context.Background(), &Config{}, GoUsesArgs{Importer: "app", repoArg: repoArg{Repo: repo}})
+	if !strings.Contains(resultText(t, res), "importer and imported are required") {
+		t.Errorf("missing imported: %q", resultText(t, res))
+	}
+	res, _, _ = handleGoUses(context.Background(), &Config{}, GoUsesArgs{Importer: "nope", Imported: "lib", repoArg: repoArg{Repo: repo}})
+	if !strings.Contains(resultText(t, res), "no directory or package") {
+		t.Errorf("unknown importer: %q", resultText(t, res))
 	}
 }
