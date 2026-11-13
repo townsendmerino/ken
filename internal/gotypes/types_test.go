@@ -2,10 +2,15 @@ package gotypes
 
 import (
 	"context"
+	"fmt"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -426,8 +431,8 @@ func TestProgramCache_keepsAProgramAndReloadsAfterAnEdit(t *testing.T) {
 	if len(after) != len(before)+1 || !slices.Contains(after, "b/b.go:44 plain,fancy") {
 		t.Errorf("after an edit: %v, want the new use at b/b.go:44 added to %v", after, before)
 	}
-	if st := pc.Status(); st.Stale != 2 || st.Loads != 4 {
-		t.Errorf("after an edit: %+v, want both programs found stale and reloaded", st)
+	if st := pc.Status(); st.Stale != 2 || st.Refreshes != 2 || st.Loads != 2 {
+		t.Errorf("after an edit: %+v, want both programs found stale and refreshed, with no new load", st)
 	}
 	pc.Invalidate("/elsewhere")
 	if len(pc.Status().Programs) != 2 {
@@ -516,5 +521,181 @@ func TestSourceRoots_coverTheWorkspaceAndLocalReplaces(t *testing.T) {
 	}
 	if after, _ := r.References(ctx, "Hello"); after.Cached {
 		t.Error("an edit in a sibling module of the workspace left the remembered answer in use")
+	}
+}
+
+// programAnswers asks prog about every declaration of want's listing (references, and implementations for types and
+// methods) and returns the lines of each answer, by question.
+func programAnswers(prog, lister *program, root string) map[string]string {
+	out := map[string]string{}
+	for _, d := range diffDecls(lister, root) {
+		rel, _ := filepath.Rel(root, d.file)
+		for _, kind := range []reqKind{askReferences, askImplementations} {
+			if kind == askImplementations && d.kind != "type" && d.kind != "method" && d.kind != "interface-method" {
+				continue
+			}
+			var hits []token.Pos
+			var err error
+			if kind == askImplementations {
+				hits, err = prog.implementations(d.file, d.line, d.col)
+			} else {
+				hits, err = prog.references(d.file, d.line, d.col)
+			}
+			var lines []string
+			for _, ln := range strings.Split(string(prog.positionsText(hits)), "\n") {
+				if r, ok := diffRel(root, ln); ok {
+					lines = append(lines, r)
+				}
+			}
+			sort.Strings(lines)
+			lines = slices.Compact(lines)
+			out[fmt.Sprintf("%d %s:%d:%d %s", kind, filepath.ToSlash(rel), d.line, d.col, d.name)] = fmt.Sprintf("%v err=%v", lines, err != nil)
+		}
+	}
+	return out
+}
+
+// A refreshed program must answer exactly as a program loaded afresh from the same tree. A chain of edits is applied
+// to the tricky module; after each, the program refreshed from the previous one is compared with a fresh load on
+// every declaration. The chain also has the edits that must not be refreshed (the go command's list could differ),
+// and checks that they are refused.
+func TestRefresh_equalsAFreshLoad(t *testing.T) {
+	needGo(t)
+	root := writeTree(t, tricky)
+	ctx := context.Background()
+	r := &Runner{Repo: root, Config: trickyConfigs}
+	edit := func(name string, change func(string) string) string {
+		t.Helper()
+		p := filepath.Join(root, filepath.FromSlash(name))
+		src, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next := change(string(src))
+		if next == string(src) {
+			t.Fatalf("the edit to %s changed nothing", name)
+		}
+		if err := os.WriteFile(p, []byte(next), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	replace := func(old, new string) func(string) string {
+		return func(s string) string { return strings.Replace(s, old, new, 1) }
+	}
+	steps := []struct {
+		what    string
+		file    string
+		change  func(string) string
+		refresh bool // whether a refresh must be possible (under the fancy configuration, which compiles every file)
+		leaf    bool // whether only a few packages should be checked again
+	}{
+		{"a statement in a function body, moving every line below it", "a/a.go",
+			replace("func use() (string, error) {\n", "func use() (string, error) {\n\t_ = Total(nil)\n\t_ = Describe(Square{})\n"), true, false},
+		{"a new function in an importer", "b/b.go",
+			func(s string) string {
+				return s + "\nfunc Extra() string { return alias.Describe(Circle{R: 2}) + Circle{}.Name() }\n"
+			}, true, false},
+		{"a method renamed, so a type stops implementing an interface", "b/b.go",
+			replace("func (c Circle) Name() string  { return \"circle\" }", "func (c Circle) Label() string { return \"circle\" }"), false, false},
+		{"a test body", "a/a_test.go",
+			replace("\t_ = Fail(&Err{})\n", "\t_ = Fail(&Err{})\n\t_ = Describe(testShape{}) + (&Err{}).Error()\n"), true, false},
+		{"a generic function's body, in a leaf package", "c/c.go",
+			replace("func usePair() string { return First(Pair[string, int]{Key: \"k\", Val: 1}) }",
+				"func usePair() string {\n\tp := Pair[string, int]{Key: \"k\", Val: 2}\n\t_ = p.Val\n\treturn First(p)\n}"), true, true},
+		{"a file behind a build tag", "b/b_fancy.go",
+			replace("func Fancy() float64 {", "func Fancy2() float64 { return Star{Points: 3}.Area() }\n\nfunc Fancy() float64 {"), true, false},
+		{"a field added to a struct that other packages embed", "a/a.go",
+			replace("type Cube struct {\n\tSquare\n\tDepth float64\n}", "type Cube struct {\n\tSquare\n\tDepth float64\n\tTint  string\n}"), true, false},
+		// These change what the go command would list, or which packages are searched: a refresh must refuse them.
+		{"a new import", "c/c.go", replace("import (\n", "import (\n\t\"strings\"\n"), false, false},
+		{"use of the new import", "c/c.go", func(s string) string { return s + "\nvar _ = strings.ToUpper\n" }, true, true},
+		{"a first method in a test file", "c/c_test.go", func(s string) string { return s + "\nfunc (b Box[T]) Peek() T { return b.Item }\n" }, false, false},
+		{"a build constraint", "b/b_fancy.go", replace("//go:build fancy", "//go:build fancy && !never"), false, false},
+	}
+	// "a method renamed" is refreshable in principle (no import, clause or constraint changes): let it be, and compare.
+	steps[2].refresh = true
+
+	for _, bc := range trickyConfigs.Configs {
+		t.Run(bc.Name, func(t *testing.T) {
+			// each configuration walks the chain on its own copy of the module
+			root = writeTree(t, tricky)
+			r = &Runner{Repo: root, Config: trickyConfigs}
+			prog, err := r.load(ctx, bc, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, st := range steps {
+				file := edit(st.file, st.change)
+				compiled := len(prog.byFile[file]) > 0
+				np, ok := prog.refresh([]string{file}, false)
+				fresh, err := r.loadWith(ctx, bc, root, true)
+				if err != nil {
+					t.Fatalf("%s: fresh load: %v", st.what, err)
+				}
+				if compiled && ok != st.refresh {
+					t.Errorf("%s: refresh possible = %v, want %v", st.what, ok, st.refresh)
+				}
+				if !ok {
+					prog, err = r.load(ctx, bc, root) // what the cache does when a refresh is refused
+					if err != nil {
+						t.Fatal(err)
+					}
+					continue
+				}
+				if st.leaf && compiled && (np.refreshed == 0 || np.refreshed > 4) {
+					t.Errorf("%s: %d packages were checked again, want only the leaf package's own variants", st.what, np.refreshed)
+				}
+				got, want := programAnswers(np, fresh, root), programAnswers(fresh, fresh, root)
+				if len(want) < 100 {
+					t.Fatalf("%s: only %d questions", st.what, len(want))
+				}
+				bad := 0
+				for q, w := range want {
+					if got[q] != w {
+						if bad++; bad <= 5 {
+							t.Errorf("after %q, %s:\n refreshed %s\n fresh     %s", st.what, q, got[q], w)
+						}
+					}
+				}
+				if bad > 0 {
+					t.Fatalf("after %q: %d of %d answers differ between the refreshed program and a fresh load", st.what, bad, len(want))
+				}
+				prog = np
+			}
+		})
+	}
+}
+
+// The type-check runs in this process, where no wrapped subprocess covers it: the repository's wrap lock is taken for
+// it through the helper, once per configuration loaded, after that configuration's go list has run behind the wrap
+// command itself.
+func TestTypesEngine_holdsTheWrapLockWhileItTypeChecks(t *testing.T) {
+	needGo(t)
+	if _, err := exec.LookPath("env"); err != nil {
+		t.Skip("no env command to stand in for a wrap command")
+	}
+	root := writeTree(t, tricky)
+	cfg := trickyConfigs
+	cfg.Wrap = []string{"env"} // a wrapper that changes nothing
+	var mu sync.Mutex
+	var holders [][]string
+	r := &Runner{Repo: root, Config: cfg, Engine: EngineTypes, Spawn: func(ctx context.Context, dir string, env, argv []string) (Proc, error) {
+		mu.Lock()
+		holders = append(holders, append([]string{}, argv...))
+		mu.Unlock()
+		return spawnExec(ctx, dir, env, argv)
+	}}
+	res, err := r.References(context.Background(), "a.Total")
+	if err != nil || res.Incomplete || len(res.Hits) != 4 {
+		t.Fatalf("hits %v incomplete %v err %v", hitLines(res), res.Incomplete, err)
+	}
+	if len(holders) != len(cfg.Configs) {
+		t.Fatalf("the lock was held %d times, want once per configuration (%d): %v", len(holders), len(cfg.Configs), holders)
+	}
+	for _, argv := range holders {
+		if argv[0] != "env" || !slices.Contains(argv, lockHolderScript) {
+			t.Errorf("lock holder argv %v, want the wrap prefix around the helper", argv)
+		}
 	}
 }

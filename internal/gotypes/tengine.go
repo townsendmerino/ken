@@ -95,12 +95,24 @@ func (r *Runner) askAllTyped(ctx context.Context, decls []Decl, kind reqKind) []
 			var err error
 			if prog == nil {
 				load := func() (*program, error) {
+					var l *listing
 					if n == 0 && j.ahead != nil {
-						if l := <-j.ahead; l != nil {
-							return l.build(false)
+						l = <-j.ahead
+					}
+					if l == nil {
+						var lerr error
+						if l, lerr = r.listWorkspace(ctx, bc, dir); lerr != nil {
+							return nil, lerr
 						}
 					}
-					return r.load(ctx, bc, dir)
+					// The go command ran behind the wrap command. The type-check runs here, so the lock is
+					// taken for it too (after the listing, never around it: a lock is not taken twice).
+					release, herr := r.holdForWork(ctx)
+					if herr != nil {
+						return nil, herr
+					}
+					defer release()
+					return l.build(false)
 				}
 				var rel func()
 				if r.Programs != nil {

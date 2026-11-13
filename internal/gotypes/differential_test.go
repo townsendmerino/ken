@@ -312,3 +312,116 @@ func diffDecls(p *program, repo string) []diffDecl {
 	})
 	return out
 }
+
+// TestRefreshAgainstAFreshLoadOnARepository holds the refresh of a held program (trefresh.go) to a fresh load, on a
+// real repository: it edits one file at a time (a new function is appended, which moves nothing and changes no
+// import), refreshes, loads afresh, and compares the two on every Nth declaration. It writes to the repository and
+// restores each file, so give it a copy:
+//
+//	KEN_GOTYPES_REFRESH_REPO=/tmp/copy-of-repo go test ./internal/gotypes -run TestRefreshAgainstAFreshLoadOnARepository -v -timeout 1h
+//
+//	KEN_GOTYPES_REFRESH_FILES=a/x.go,b/y.go   the files to edit (default: 6 spread over the searched packages)
+//	KEN_GOTYPES_DIFF_STEP=N                   compare on every Nth declaration (default 20)
+func TestRefreshAgainstAFreshLoadOnARepository(t *testing.T) {
+	repo := os.Getenv("KEN_GOTYPES_REFRESH_REPO")
+	if repo == "" {
+		t.Skip("set KEN_GOTYPES_REFRESH_REPO to a copy of a Go repository (the test edits and restores files in it)")
+	}
+	repo, err := filepath.Abs(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if real, err := filepath.EvalSymlinks(repo); err == nil {
+		repo = real
+	}
+	step := 20
+	if v := os.Getenv("KEN_GOTYPES_DIFF_STEP"); v != "" {
+		if step, err = strconv.Atoi(v); err != nil || step < 1 {
+			t.Fatalf("KEN_GOTYPES_DIFF_STEP=%q", v)
+		}
+	}
+	cfg, _, err := LoadConfig(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Wrap = nil
+	r := &Runner{Repo: repo, Config: cfg}
+	ctx := context.Background()
+	for _, bc := range cfg.Configs {
+		prog, err := r.load(ctx, bc, repo)
+		if err != nil {
+			t.Fatalf("%s: %v", bc.Name, err)
+		}
+		var files []string
+		if v := os.Getenv("KEN_GOTYPES_REFRESH_FILES"); v != "" {
+			for _, f := range strings.Split(v, ",") {
+				files = append(files, filepath.Join(repo, filepath.FromSlash(strings.TrimSpace(f))))
+			}
+		} else {
+			var all []string
+			for f, users := range prog.byFile {
+				if inDir(repo, f) && len(users) > 0 && users[0].Workspace {
+					all = append(all, f)
+				}
+			}
+			sort.Strings(all)
+			for i := 0; i < 6 && len(all) > 0; i++ {
+				files = append(files, all[(i*len(all))/6])
+			}
+		}
+		for n, file := range files {
+			orig, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restore := func() { _ = os.WriteFile(file, orig, 0o644) }
+			if err := os.WriteFile(file, append(append([]byte{}, orig...), []byte(fmt.Sprintf("\nfunc kenRefreshProbe%d() int { return %d }\n", n, n))...), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t0 := time.Now()
+			np, ok := prog.refresh([]string{file}, false)
+			tRefresh := time.Since(t0)
+			if !ok {
+				restore()
+				t.Errorf("[%s] %s: the refresh was refused", bc.Name, file)
+				continue
+			}
+			t1 := time.Now()
+			fresh, err := r.loadWith(ctx, bc, repo, true)
+			tFresh := time.Since(t1)
+			if err != nil {
+				restore()
+				t.Fatal(err)
+			}
+			decls := diffDecls(fresh, repo)
+			asked, bad := 0, 0
+			for i := 0; i < len(decls); i += step {
+				d := decls[i]
+				a, aerr := np.references(d.file, d.line, d.col)
+				b, berr := fresh.references(d.file, d.line, d.col)
+				asked++
+				if string(sortedLines(np.positionsText(a))) != string(sortedLines(fresh.positionsText(b))) || (aerr == nil) != (berr == nil) {
+					if bad++; bad <= 5 {
+						t.Errorf("[%s] after editing %s, references of %s:%d:%d differ: refreshed %d, fresh %d", bc.Name, file, d.file, d.line, d.col, len(a), len(b))
+					}
+				}
+			}
+			rel, _ := filepath.Rel(repo, file)
+			fmt.Fprintf(os.Stderr, "[%s] edit %d %s: refresh %.2fs (%d of %d packages checked again), fresh load %.2fs; %d questions, %d differ\n",
+				bc.Name, n+1, rel, tRefresh.Seconds(), np.refreshed, len(np.order), tFresh.Seconds(), asked, bad)
+			restore()
+			// back to the original content: refresh again, so the next edit starts from a program of the restored tree
+			if prog, ok = np.refresh([]string{file}, false); !ok {
+				if prog, err = r.load(ctx, bc, repo); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+}
+
+func sortedLines(b []byte) []byte {
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	sort.Strings(lines)
+	return []byte(strings.Join(lines, "\n"))
+}

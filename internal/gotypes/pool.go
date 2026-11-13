@@ -355,7 +355,7 @@ func (r *Runner) holdLock(ctx context.Context) (func(), error) {
 	}
 	sh, err := exec.LookPath("sh")
 	if err != nil {
-		return nil, fmt.Errorf("a pooled server under a wrap command needs sh to hold the lock: %w", err)
+		return nil, fmt.Errorf("%w: %v", errNoShell, err)
 	}
 	argv := append(append([]string{}, r.Config.Wrap...), sh, "-c", "echo ready; exec cat")
 	base := r.Environ
@@ -402,6 +402,20 @@ func (r *Runner) holdLock(ctx context.Context) (func(), error) {
 		return nil, fmt.Errorf("the wrap command did not take the lock within %s", timeout)
 	}
 	return func() { _ = proc.Close() }, nil
+}
+
+// errNoShell means the wrap lock cannot be held around work in this process: there is no sh to run the helper.
+var errNoShell = errors.New("holding the wrap lock needs sh")
+
+// holdForWork takes the repository's wrap lock for heavy work done in this process (type-checking a configuration),
+// which no wrapped subprocess covers. Without a wrap command, or without sh to hold it with, the work proceeds
+// unlocked; a wrap command that refuses is an error, as it is for a wrapped subprocess.
+func (r *Runner) holdForWork(ctx context.Context) (func(), error) {
+	release, err := r.holdLock(ctx)
+	if errors.Is(err, errNoShell) {
+		return func() {}, nil
+	}
+	return release, err
 }
 
 func (r *Runner) timeout() time.Duration {

@@ -3,7 +3,6 @@ package gotypes
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -20,21 +19,23 @@ import (
 // unused. It starts empty.
 //
 // A held program is used only while every Go and module file it was built from is unchanged: each use scans the
-// tree first (tree.go) and reloads on any difference. Nothing is updated in place.
+// tree first (tree.go). On a difference the program is replaced, by a refresh of it when the edit allows one
+// (trefresh.go) and by a fresh load otherwise.
 type ProgramCache struct {
 	max  int
 	idle time.Duration
 
-	mu      sync.Mutex
-	held    map[string]*heldProgram
-	closed  bool
-	loads   int64
-	reuses  int64
-	stale   int64
-	evicts  int64
-	reaped  int64
-	dropped int64
-	reapT   *time.Timer
+	mu        sync.Mutex
+	held      map[string]*heldProgram
+	closed    bool
+	loads     int64
+	refreshes int64
+	reuses    int64
+	stale     int64
+	evicts    int64
+	reaped    int64
+	dropped   int64
+	reapT     *time.Timer
 }
 
 type heldProgram struct {
@@ -46,8 +47,8 @@ type heldProgram struct {
 	bytes             int64
 	uses              int
 	busy              int
-	ready             chan struct{} // closed when the load finished
-	err               error
+	stats             map[string]fileStat // the scan it was built from, to tell what changed
+	ready             chan struct{}       // closed when the load finished
 }
 
 // NewProgramCache returns a cache of at most max programs (>= 1), each dropped after idle without a query (<= 0 means
@@ -78,9 +79,10 @@ type ProgramCacheStatus struct {
 	IdleSeconds float64         `json:"idle_timeout_seconds"`
 	Programs    []ProgramStatus `json:"programs"`
 	Bytes       int64           `json:"bytes"`
-	Loads       int64           `json:"loads"`
+	Loads       int64           `json:"loads"`     // programs loaded from scratch
+	Refreshes   int64           `json:"refreshes"` // programs brought up to date after an edit without a full load
 	Reuses      int64           `json:"reuses"`
-	Stale       int64           `json:"stale"`   // uses that found the tree changed and reloaded
+	Stale       int64           `json:"stale"`   // uses that found the tree changed
 	Dropped     int64           `json:"dropped"` // programs dropped because a watcher said the tree changed
 	Evictions   int64           `json:"evictions"`
 	IdleStops   int64           `json:"idle_stops"`
@@ -93,7 +95,7 @@ func (c *ProgramCache) Status() ProgramCacheStatus {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	st := ProgramCacheStatus{MaxPrograms: c.max, IdleSeconds: c.idle.Seconds(), Loads: c.loads, Reuses: c.reuses,
+	st := ProgramCacheStatus{MaxPrograms: c.max, IdleSeconds: c.idle.Seconds(), Loads: c.loads, Refreshes: c.refreshes, Reuses: c.reuses,
 		Stale: c.stale, Dropped: c.dropped, Evictions: c.evicts, IdleStops: c.reaped}
 	now := time.Now()
 	for _, h := range c.held {
@@ -168,8 +170,9 @@ func heapNow() int64 {
 }
 
 // get returns the program for dir under bc and a function to call when done with it. A held program is returned when
-// the tree is the one it was built from; otherwise load runs, and its program replaces it. Callers asking for the
-// same program at once share one load.
+// the tree is the one it was built from. When the tree has changed, the held program is refreshed (only what the edit
+// can affect is checked again) if that is possible, and otherwise load runs; either way the result replaces it.
+// Callers asking for the same program at once share one load.
 func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir string, scan *treeScan, load func() (*program, error)) (*program, func(), error) {
 	key := programKey(r, bc, dir)
 	stats, scanned, serr := scan.stats, scan.at, scan.err
@@ -180,8 +183,9 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 			p, err := load()
 			return p, func() {}, err
 		}
+		var stale *heldProgram
 		if h, ok := c.held[key]; ok {
-			if h.prog == nil && h.err == nil { // loading
+			if h.prog == nil { // being loaded by another caller
 				c.mu.Unlock()
 				select {
 				case <-h.ready:
@@ -190,28 +194,17 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 				}
 				continue
 			}
-			fp0, asOf := h.fp, h.asOf
-			c.mu.Unlock()
-			if serr == nil && fingerprint(stats, asOf) == fp0 {
-				c.mu.Lock()
-				if c.held[key] == h && h.prog != nil {
-					h.busy++
-					h.uses++
-					c.reuses++
-					p := h.prog
-					c.mu.Unlock()
-					return p, func() { c.release(h) }, nil
-				}
+			if serr == nil && fingerprint(stats, h.asOf) == h.fp {
+				h.busy++
+				h.uses++
+				c.reuses++
+				p := h.prog
 				c.mu.Unlock()
-				continue
+				return p, func() { c.release(h) }, nil
 			}
-			c.mu.Lock()
-			if c.held[key] == h {
-				delete(c.held, key)
-				c.stale++
-			}
-			c.mu.Unlock()
-			continue
+			delete(c.held, key)
+			c.stale++
+			stale = h
 		}
 		// make room, then reserve the slot while loading
 		for len(c.held) >= c.max {
@@ -237,11 +230,30 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 		c.mu.Unlock()
 
 		before := heapNow()
-		p, err := load()
+		var p *program
+		var err error
+		refreshed := false
+		if stale != nil && serr == nil {
+			tw := &treeWatch{stats: stale.stats, at: stale.asOf}
+			var changed []string
+			createdOrDeleted := false
+			for _, ch := range tw.diff(stats) {
+				if ch.kind != 2 {
+					createdOrDeleted = true
+				}
+				changed = append(changed, ch.path)
+			}
+			if release, herr := r.holdForWork(ctx); herr == nil {
+				p, refreshed = stale.prog.refresh(changed, createdOrDeleted)
+				release()
+			}
+		}
+		if !refreshed {
+			p, err = load()
+		}
 		c.mu.Lock()
 		if err != nil || serr != nil {
 			delete(c.held, key)
-			h.err = err
 			close(h.ready)
 			c.mu.Unlock()
 			return p, func() {}, err
@@ -249,20 +261,28 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 		// An edit during the load could leave a program built from a mixture of two trees: keep it only if the
 		// tree is still the one scanned before the load.
 		fp := fingerprint(stats, scanned)
-		if again, aerr := scanTree(r.realRepo()); aerr != nil || fingerprint(again, scanned) != fp {
+		c.mu.Unlock()
+		again, aerr := scanTree(r.realRepo())
+		c.mu.Lock()
+		if aerr != nil || fingerprint(again, scanned) != fp {
 			delete(c.held, key)
-			h.err = errors.New("the tree changed during the load")
 			close(h.ready)
 			c.mu.Unlock()
 			return p, func() {}, nil
 		}
 		after := heapNow()
-		h.prog, h.fp, h.asOf, h.lastUsed = p, fp, scanned, time.Now()
+		h.prog, h.fp, h.asOf, h.stats, h.lastUsed = p, fp, scanned, stats, time.Now()
 		// The heap's growth across the load is the measure. Other work in the process moves the heap too, so it is
-		// an estimate, and never reported below what the program's own tables are known to take.
-		h.bytes = max(after-before, p.tableBytes())
+		// an estimate, and never reported below what the program's own tables are known to take. A refreshed program
+		// replaces one of about the same size, so it keeps that one's figure.
+		if refreshed {
+			h.bytes = max(stale.bytes, p.tableBytes())
+			c.refreshes++
+		} else {
+			h.bytes = max(after-before, p.tableBytes())
+			c.loads++
+		}
 		h.busy, h.uses = 1, 1
-		c.loads++
 		close(h.ready)
 		c.mu.Unlock()
 		return p, func() { c.release(h) }, nil

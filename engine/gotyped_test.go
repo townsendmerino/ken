@@ -166,9 +166,9 @@ func residentStateFollowsEdits(t *testing.T, eng string) {
 		if _, starts, _ := resident(); starts != 1 {
 			t.Errorf("starts %d: edits must reach the resident gopls, not restart it", starts)
 		}
-	} else if st := ws.Status().GoTyped.Programs; st.Stale+st.Dropped < 2 || st.Loads < 3 {
-		// a program is never patched: each edit made the held one unusable (found stale at the next query, or dropped
-		// by the watcher first) and a new one was loaded
+	} else if st := ws.Status().GoTyped.Programs; st.Stale+st.Dropped < 2 || st.Loads+st.Refreshes < 3 {
+		// each edit made the held program unusable: found stale at the next query and refreshed or reloaded, or
+		// dropped by the watcher first and loaded again
 		t.Errorf("programs %+v: want the held program replaced after each edit", st)
 	}
 

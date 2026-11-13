@@ -137,8 +137,8 @@ func RenderText(s Status, verbose bool) string {
 	if g := s.GoTyped; g != nil {
 		fmt.Fprintln(&b, "Go typed tier (kept between queries)")
 		fmt.Fprintf(&b, "  held:        %s (resident programs and gopls + remembered answers)\n", formatBytes(g.HeldBytes))
-		fmt.Fprintf(&b, "  programs:    %d of %d resident, each dropped after %.0f s idle; %d loads, %d reuses, %d reloaded after an edit, %d dropped by the watcher\n",
-			len(g.Programs), g.MaxResident, g.IdleSeconds, g.ProgramLoads, g.ProgramReuses, g.ProgramStale, g.ProgramDropped)
+		fmt.Fprintf(&b, "  programs:    %d of %d resident, each dropped after %.0f s idle; %d loads, %d refreshed after an edit, %d reuses, %d dropped by the watcher\n",
+			len(g.Programs), g.MaxResident, g.IdleSeconds, g.ProgramLoads, g.ProgramRefreshes, g.ProgramReuses, g.ProgramDropped)
 		for _, pr := range g.Programs {
 			fmt.Fprintf(&b, "    %s [%s]  %s  %d packages  idle %.0fs  %d queries\n", pr.Repo, pr.Config, formatBytes(pr.Bytes), pr.Packages, pr.IdleSec, pr.Queries)
 		}

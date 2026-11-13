@@ -320,8 +320,11 @@ var errNoLockHolder = errors.New("gotypes: cannot hold the wrap lock per request
 func (r *Runner) askPooled(ctx context.Context, bc BuildConfig, do func(*lspSession) (reply, error)) (reply, error) {
 	for attempt := 0; ; attempt++ {
 		release, err := r.holdLock(ctx)
-		if err != nil {
+		if errors.Is(err, errNoShell) {
 			return reply{}, fmt.Errorf("%w: %v", errNoLockHolder, err)
+		}
+		if err != nil {
+			return reply{}, err
 		}
 		rp, err := func() (reply, error) {
 			defer release()

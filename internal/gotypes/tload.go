@@ -10,6 +10,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"hash/fnv"
 	"io"
 	"os"
 	"path/filepath"
@@ -102,6 +103,8 @@ type program struct {
 
 	keepSyntax bool // the differential test walks declarations
 
+	refreshBroken atomic.Bool // a refresh found a file it took for unchanged to be different: its result is discarded
+
 	// derived, built on first use
 	xrefsOnce sync.Once
 	xrefs     map[xrefKey][]xref
@@ -114,15 +117,24 @@ type program struct {
 
 	mods                      []string
 	listSeconds, checkSeconds float64
+	refreshed                 int // packages checked again, when this program was refreshed from another
 }
 
 type parsedFile struct {
-	once      sync.Once
-	file      *ast.File
-	tfile     *token.File
+	once  sync.Once
+	file  *ast.File
+	tfile *token.File
+	users atomic.Int32 // packages that compile it and have not been checked yet
+
+	// What is kept about the file after its syntax is dropped. metaOK says these are known: set by a parse, or
+	// carried over from the program this one was refreshed from.
+	metaOK    bool
 	parsedOK  bool
-	hasMethod bool         // declares a method (see needsBodies); kept after the syntax is dropped
-	users     atomic.Int32 // packages that compile it and have not been checked yet
+	hasMethod bool   // declares a method (see needsBodies)
+	header    uint64 // headerSig of its source: what the go command's package list depends on
+	// base, when not 0, is where an unchanged file sat in the file set of the program this one was refreshed from:
+	// it is parsed again at the same place, so that every position in it is the position it had.
+	base int
 }
 
 type rdepsKey struct {
@@ -325,8 +337,28 @@ func (p *program) parse(file string) *ast.File {
 	}
 	p.parseMu.Unlock()
 	pf.once.Do(func() {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			pf.metaOK = true
+			return
+		}
+		fset := p.fset
+		if pf.base > 0 {
+			// An unchanged file of a refreshed program: parse it in a scratch file set at its old base. The
+			// positions in the syntax are then the old ones, which the program's file set still resolves.
+			if pf.tfile == nil || pf.tfile.Size() != len(src) {
+				p.refreshBroken.Store(true) // not the file it was: the refresh is abandoned
+				pf.metaOK = true
+				return
+			}
+			fset = token.NewFileSet()
+			if pf.base > 1 {
+				fset.AddFile("", 1, pf.base-2)
+			}
+		}
 		// A file with syntax errors still yields what parsed before them.
-		pf.file, _ = parser.ParseFile(p.fset, file, nil, parser.SkipObjectResolution)
+		pf.file, _ = parser.ParseFile(fset, file, src, parser.SkipObjectResolution)
+		pf.parsedOK, pf.hasMethod, pf.header = false, false, headerSig(src, pf.file)
 		if pf.file != nil {
 			pf.parsedOK = true
 			for _, d := range pf.file.Decls {
@@ -335,11 +367,16 @@ func (p *program) parse(file string) *ast.File {
 					break
 				}
 			}
-			pf.tfile = p.fset.File(pf.file.Pos())
-			p.parseMu.Lock()
-			p.tfiles[file] = pf.tfile
-			p.parseMu.Unlock()
+			if pf.base == 0 {
+				pf.tfile = p.fset.File(pf.file.Pos())
+				p.parseMu.Lock()
+				p.tfiles[file] = pf.tfile
+				p.parseMu.Unlock()
+			} else if fset.File(pf.file.Pos()).Base() != pf.base {
+				p.refreshBroken.Store(true)
+			}
 		}
+		pf.metaOK = true
 	})
 	return pf.file
 }
@@ -444,10 +481,15 @@ func (p *program) needsBodies(tp *tPackage, files []*ast.File) bool {
 		if own[f] {
 			continue
 		}
-		p.parse(f)
 		p.parseMu.Lock()
 		pf := p.parsed[f]
 		p.parseMu.Unlock()
+		if pf == nil || !pf.metaOK {
+			p.parse(f)
+			p.parseMu.Lock()
+			pf = p.parsed[f]
+			p.parseMu.Unlock()
+		}
 		if pf == nil || !pf.parsedOK || pf.hasMethod {
 			return true // a method in a test file, or a file that did not parse: search both
 		}
@@ -634,4 +676,47 @@ func (p *program) rdeps(tp *tPackage, transitive bool) map[*tPackage]bool {
 	}
 	p.rdepsMemo[k] = out
 	return out
+}
+
+// headerSig summarizes what the go command's list of a file's package depends on in the file itself: its package
+// clause, its build constraints, and what it imports. Two versions of a file with the same signature are listed the
+// same way, so an edit that keeps it leaves `go list` unchanged.
+func headerSig(src []byte, f *ast.File) uint64 {
+	h := fnv.New64a()
+	put := func(s string) { h.Write([]byte(s)); h.Write([]byte{0}) }
+	// constraint lines sit before the package clause
+	rest := src
+	for len(rest) > 0 {
+		line := rest
+		if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+			line, rest = rest[:i], rest[i+1:]
+		} else {
+			rest = nil
+		}
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("//go:build")) || bytes.HasPrefix(line, []byte("// +build")) || bytes.HasPrefix(line, []byte("//+build")) {
+			put(string(line))
+		}
+		if bytes.HasPrefix(line, []byte("package ")) {
+			break
+		}
+	}
+	if f == nil {
+		put("unparsed")
+		return h.Sum64()
+	}
+	if f.Name != nil {
+		put("package " + f.Name.Name)
+	}
+	var imps []string
+	for _, im := range f.Imports {
+		if im.Path != nil {
+			imps = append(imps, im.Path.Value)
+		}
+	}
+	sort.Strings(imps)
+	for _, im := range imps {
+		put(im)
+	}
+	return h.Sum64()
 }

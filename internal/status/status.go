@@ -191,11 +191,11 @@ type StructuralInfo struct {
 
 // GoTypedInfo is what the Go typed tier holds between queries.
 type GoTypedInfo struct {
-	MaxResident                                               int     // configured cap on resident programs, and on resident gopls processes
-	IdleSeconds                                               float64 // idle timeout of either
-	Sessions                                                  []GoTypedSession
-	Programs                                                  []GoTypedProgram
-	ProgramLoads, ProgramReuses, ProgramStale, ProgramDropped int64
+	MaxResident                                                                 int     // configured cap on resident programs, and on resident gopls processes
+	IdleSeconds                                                                 float64 // idle timeout of either
+	Sessions                                                                    []GoTypedSession
+	Programs                                                                    []GoTypedProgram
+	ProgramLoads, ProgramRefreshes, ProgramReuses, ProgramStale, ProgramDropped int64
 	// HeldBytes is the memory held between queries: the resident gopls
 	// processes' RSS plus the cached answers.
 	HeldBytes     int64

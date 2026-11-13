@@ -134,7 +134,7 @@ func goTypedInfo(st engine.GoTypedStatus) *status.GoTypedInfo {
 		CacheEntries: st.Cache.Entries, CacheBytes: st.Cache.Bytes, CacheMaxBytes: st.Cache.MaxBytes,
 		CacheHits: st.Cache.Hits, CacheMisses: st.Cache.Misses, CacheStale: st.Cache.Stale, CacheDropped: st.Cache.Dropped,
 		Starts: st.Pool.Starts, Reuses: st.Pool.Reuses,
-		ProgramLoads: st.Programs.Loads, ProgramReuses: st.Programs.Reuses, ProgramStale: st.Programs.Stale, ProgramDropped: st.Programs.Dropped,
+		ProgramLoads: st.Programs.Loads, ProgramRefreshes: st.Programs.Refreshes, ProgramReuses: st.Programs.Reuses, ProgramStale: st.Programs.Stale, ProgramDropped: st.Programs.Dropped,
 	}
 	if g.MaxResident == 0 {
 		g.MaxResident, g.IdleSeconds = st.Programs.MaxPrograms, st.Programs.IdleSeconds
