@@ -7,6 +7,10 @@
 // lists its configurations in ConfigFile; every query runs under each one that compiles the declaration, and each hit
 // carries the names of the configurations that saw it. docs/internal/DECISIONS.md ADR-059 has the measurements.
 //
+// Uses is the one query gopls has no command for (which identifiers of one package another names). It asks the go
+// command for each configuration's file lists and type-checks them here, from source, with the standard library's
+// go/types.
+//
 // The package runs gopls and go as subprocesses and links neither, so ken stays pure Go with no new module
 // dependency. It never writes to the repository.
 package gotypes
