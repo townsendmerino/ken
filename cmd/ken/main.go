@@ -94,6 +94,8 @@ func main() {
 		os.Exit(cmdStatus(os.Args[2:]))
 	case "doctor":
 		os.Exit(cmdDoctor(os.Args[2:]))
+	case "go":
+		os.Exit(cmdGo(os.Args[2:]))
 	default:
 		cli.Usage()
 		os.Exit(2)

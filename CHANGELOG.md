@@ -15,6 +15,10 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Added
+
+- **A Go typed tier: `ken go refs|impls|rename-plan` and the MCP tools `go_references`, `go_implementations`, `go_rename_plan` (ADR-059).** They answer from gopls, where `references` and `callers` match by name, and they ask once per build configuration the repository lists in `.ken-go.json`, merging the answers and labelling each line with the configurations that saw it. A type checker sees one configuration at a time: on a repository that gates backends behind tags, the default configuration returned 68 of 496 references. The rename plan is one merged patch for `git apply` plus the lines that still spell the old name in comments and markdown; ken writes nothing to the repository. The MCP tools appear only when `gopls` is on PATH and take local checkouts only.
+
 ### Changed
 
 - **`ken-mcp` reads every setting at startup, so warnings about invalid values may appear in a different order.** The `KEN_DB_*` family, `KEN_MCP_RERANK_TELEMETRY`, `KEN_NO_USAGE_STATS`, `KEN_USAGE_STATS_PATH` and `KEN_MCP_SHUTDOWN_GRACE` were read where they were used: after the `starting (…)` line, after the default repo was indexed, or, for the shutdown grace, only when a shutdown signal arrived. They are now read with the rest, before `starting (…)`. Their warnings have the same text; an invalid `KEN_MCP_SHUTDOWN_GRACE` is now reported at startup, not at shutdown. Nothing else changes: with valid settings the log and all tool output are identical. With `KEN_DB_DSN` unset the other `KEN_DB_*` variables are still not read or validated.

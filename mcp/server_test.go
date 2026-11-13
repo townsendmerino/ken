@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +15,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/townsendmerino/aikit/chunk"
+	"github.com/townsendmerino/ken/engine"
 	"github.com/townsendmerino/ken/internal/search"
 	"github.com/townsendmerino/ken/internal/structural"
 )
@@ -87,6 +91,13 @@ func TestServer_ListsRegisteredTools(t *testing.T) {
 		"status":           true,
 		"recently_changed": true,
 	}
+	// The Go typed tier's three tools are offered exactly when gopls is on
+	// PATH (ADR-059); TestServer_GoToolsFollowGopls pins both cases.
+	if engine.GoplsPath() != "" {
+		for _, n := range []string{"go_references", "go_implementations", "go_rename_plan"} {
+			wantNames[n] = true
+		}
+	}
 	if len(res.Tools) != len(wantNames) {
 		t.Fatalf("got %d tools, want %d (DB unset → reindex_db not registered)",
 			len(res.Tools), len(wantNames))
@@ -102,6 +113,38 @@ func TestServer_ListsRegisteredTools(t *testing.T) {
 	}
 	if got["reindex_db"] {
 		t.Errorf("reindex_db should NOT be listed when Config.DB is nil")
+	}
+}
+
+// TestServer_GoToolsFollowGopls: tools/list offers the go_* tools when a gopls
+// binary is on PATH and not otherwise, so it never lists a tool that can only fail.
+func TestServer_GoToolsFollowGopls(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake gopls is a shell script")
+	}
+	list := func() map[string]bool {
+		ctx, sess, cleanup := newInMemoryServerClient(t)
+		defer cleanup()
+		res, err := sess.ListTools(ctx, nil)
+		if err != nil {
+			t.Fatalf("ListTools: %v", err)
+		}
+		got := map[string]bool{}
+		for _, tl := range res.Tools {
+			got[tl.Name] = true
+		}
+		return got
+	}
+	empty := t.TempDir()
+	t.Setenv("PATH", empty)
+	if got := list(); got["go_references"] || got["go_implementations"] || got["go_rename_plan"] {
+		t.Errorf("no gopls on PATH, yet go_* tools are listed: %v", got)
+	}
+	if err := os.WriteFile(filepath.Join(empty, "gopls"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := list(); !got["go_references"] || !got["go_implementations"] || !got["go_rename_plan"] {
+		t.Errorf("gopls on PATH, yet the go_* tools are not all listed: %v", got)
 	}
 }
 

@@ -259,6 +259,39 @@ go-git on the local working tree).
 - Returns: per-commit markdown with hash, author, time, message,
   and changed file list.
 
+## Go: type-resolved answers across build configurations
+
+`references` and `callers` match by name. For Go, three more tools answer from gopls, the Go language server: `go_references`, `go_implementations` and `go_rename_plan` (and `ken go refs|impls|rename-plan` on the command line). They appear only when `gopls` is on PATH, and they work on local checkouts.
+
+A type checker sees one build configuration at a time, so code behind a build tag or another GOOS is invisible from the default one. List the repository's configurations once, in `.ken-go.json` at its root:
+
+```json
+{
+  "configs": [
+    {"name": "default"},
+    {"name": "linux-cuda", "env": {"GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "0", "GOFLAGS": "-tags=cuda,testhooks"}}
+  ]
+}
+```
+
+Each query then runs under every configuration that compiles the symbol's declaration and merges the results:
+
+```
+$ ken go refs . decoder.ResidentForward.Forward
+references of decoder.ResidentForward.Forward: 496 lines in 255 files
+declared: decoder/residency.go:43  interface-method decoder.ResidentForward.Forward
+per configuration: default 68 (5.1s) · darwin-gpu 276 (16.3s) · linux-cuda 248 (13.2s)
+backend/cuda/a13_multimodel_test.go
+  51 TestA13_MultiModelUnloadPoisons [linux-cuda]: before, err := rb.Forward(emb, 0)
+```
+
+- **Symbols** are `Name`, `Type.Member`, `pkg.Name`, `pkg.Type.Member`, or `dir/sub.Name` to pick a package by directory. A method or field needs its type.
+- **`[linux-cuda]`** after a line means only that configuration saw it. No label means every configuration did.
+- **An `INCOMPLETE` line means a lower bound**: a declaration that no listed configuration compiles, or a gopls run that failed. Add the missing configuration and ask again.
+- **`go_rename_plan` writes nothing.** It lists the files a rename edits under each configuration and the lines that still spell the old name in comments and markdown; with `patch: true` (`--patch FILE` on the command line) it gives one merged diff for `git apply`. Vet every configuration afterwards.
+- **Stability**: these three tools are new and best-effort; they are not part of the 1.0-stable nine.
+- **Cost**: each configuration is a gopls run, seconds each, and memory is freed when it exits. `"wrap": ["cmd", "arg", "--"]` in the file prefixes every run, for a repository that serializes heavy work behind a lock. `ken-mcp` honors `wrap` for its default repo, or when `KEN_MCP_ALLOWED_REPO_ROOTS` confines it.
+
 ## Configuration
 
 The env vars you'll actually touch:

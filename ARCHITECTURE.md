@@ -39,13 +39,14 @@ graph LR
         status["status — doctor/status report"]
         envcfg["envcfg — every KEN_* env read + parsing"]
         mcplog["mcplog — stderr logger"]
+        gotypes["gotypes — Go typed tier<br/>(runs gopls; ADR-059)"]
         small["leaves: binfmt · bytesize · usage ·<br/>modelfetch · embedcache · perf"]
     end
     ken --> engine & status & envcfg
     ken -. "bench / perf only<br/>(cmd/ken/internal/measure)" .-> search
     kenmcp --> engine & mcppkg & mcpdb & envcfg
     embedded --> mcppkg
-    engine --> search & structural & repo
+    engine --> search & structural & repo & gotypes
     mcppkg --> engine & status & mcplog & envcfg
     mcpdb --> mcppkg & dbpkg
     envcfg --> mcplog & repo
@@ -78,7 +79,7 @@ The concurrency model is **immutable snapshots behind atomic pointers** — no R
 ```mermaid
 flowchart TD
     agent["MCP client (agent)"] <-->|"JSON-RPC over stdio<br/>(stdout is sacred)"| sdk["go-sdk server loop"]
-    sdk --> handlers["tool handlers<br/>search · find_related · 7 structural · status · reindex_db*"]
+    sdk --> handlers["tool handlers<br/>search · find_related · 7 structural · status · reindex_db* · 3 go_*†"]
     handlers --> cache["mcp.Cache (repo → WatchedIndex)<br/>LRU eviction · singleflight build dedup"]
     cache -->|local path| wi["WatchedIndex"]
     cache -->|https URL| clone["shallow clone via go-git<br/>SSRF guard (clone.go)"] --> wi
@@ -93,6 +94,8 @@ flowchart TD
 ```
 
 \* `reindex_db` registers only when a DB is wired, so `tools/list` stays honest.
+
+† The Go typed tier (`go_references`, `go_implementations`, `go_rename_plan`; ADR-059) registers only when `gopls` is on PATH. It does not use the index: each call runs gopls once per build configuration the repo lists in `.ken-go.json` and merges the answers.
 
 Long-lived goroutines and who owns them: the SDK stdio loop (process lifetime); one fsnotify + one debouncer goroutine per `WatchedIndex` (owned by the Cache, shut down on eviction/close — goleak-tested); the one-shot model auto-fetch ([`cmd/ken-mcp/internal/server/server.go`](cmd/ken-mcp/internal/server/server.go)); the DB refresher ([`mcp/db`](mcp/db/)). The same snapshot-swap pattern recurs at the `mcp.Run` layer for DB extras: `baseIx.WithExtraChunks(extras)` rebuilds against the *original* snapshot (extras replace, never accumulate — [`mcp/run.go`](mcp/run.go)).
 
@@ -151,6 +154,7 @@ Every constant and the pipeline order are pinned to semble's Python — see DESI
 | Watch mode | [`internal/search/watch.go`](internal/search/watch.go) (ADR-012) |
 | Cold start: snapshots, serve-before-warm, parse budget, GC | [`engine/snapshot.go`](engine/snapshot.go) (ADR-039); [`cmd/ken-mcp/internal/server/`](cmd/ken-mcp/internal/server/) (`enrich_budget.go`, `gc.go`); env: `KEN_MCP_SNAPSHOT` / `KEN_MCP_STAGED` / `KEN_MCP_LAZY_ENRICH` / `KEN_MCP_EMBED_CACHE` |
 | Walker / gitignore | [`internal/repo/`](internal/repo/) |
+| Go typed tier: references, implementations, rename plans from gopls, merged over build configurations (ADR-059) | [`internal/gotypes/`](internal/gotypes/), [`engine/gotyped.go`](engine/gotyped.go), [`mcp/go_tools.go`](mcp/go_tools.go), [`cmd/ken/go.go`](cmd/ken/go.go) |
 | Structural extraction + enrichment + structural MCP tools | [`internal/structural/`](internal/structural/), [`mcp/structural_tools.go`](mcp/structural_tools.go) |
 | DB indexing (static SQL / live introspection; Postgres · MySQL · MariaDB · SQLite) | [`internal/sql/`](internal/sql/), [`internal/db/`](internal/db/), [`mcp/db/`](mcp/db/), [docs/db-indexing.md](docs/db-indexing.md) |
 | MCP server, cache, clone, SSRF guard | [`mcp/`](mcp/) (`server.go`, `cache.go`, `clone.go`, `run.go`) |

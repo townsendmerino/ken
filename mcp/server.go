@@ -356,6 +356,11 @@ func NewServer(cfg Config) *sdk.Server {
 		return handleStatus(ctx, &cfg, args)
 	})
 
+	// The Go typed tier (ADR-059) needs gopls; without it the tools are not offered.
+	if engine.GoplsPath() != "" {
+		registerGoTools(srv, &cfg)
+	}
+
 	return srv
 }
 
