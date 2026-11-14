@@ -99,3 +99,36 @@ func TestProjectDirs(t *testing.T) {
 		}
 	}
 }
+
+func TestWordColAndUnifiedDiff(t *testing.T) {
+	for _, tc := range []struct {
+		line, name string
+		want       int
+	}{
+		{"def scale(s):", "scale", 5},
+		{"rescale = scale", "scale", 11},
+		{"rescale = scale_up", "scale", 0},
+		{"const $scale = scale$;", "scale", 0},
+		{"x", "", 0},
+	} {
+		if got := wordCol(tc.line, tc.name); got != tc.want {
+			t.Errorf("wordCol(%q, %q) = %d, want %d", tc.line, tc.name, got, tc.want)
+		}
+	}
+	lines := func(s string) []string { return strings.Split(s, "\n") }
+	var b strings.Builder
+	// lines far apart are two hunks; a rename keeps the line count
+	a := "1\n2\n3\n4 old\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14 old\n15\n"
+	writeUnified(&b, "f.ts", lines(a), lines(strings.ReplaceAll(a, "old", "new")))
+	want := "--- a/f.ts\n+++ b/f.ts\n@@ -1,7 +1,7 @@\n 1\n 2\n 3\n-4 old\n+4 new\n 5\n 6\n 7\n@@ -11,5 +11,5 @@\n 11\n 12\n 13\n-14 old\n+14 new\n 15\n"
+	if b.String() != want {
+		t.Errorf("same length:\n%s\nwant:\n%s", b.String(), want)
+	}
+	// an edit that changes the line count is one hunk around what changed
+	b.Reset()
+	writeUnified(&b, "g.ts", lines("a\nb\nc\nd\ne\nf\n"), lines("a\nb\nc\nX\nY\ne\nf\n"))
+	want = "--- a/g.ts\n+++ b/g.ts\n@@ -1,6 +1,7 @@\n a\n b\n c\n-d\n+X\n+Y\n e\n f\n"
+	if b.String() != want {
+		t.Errorf("another length:\n%s\nwant:\n%s", b.String(), want)
+	}
+}

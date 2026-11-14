@@ -19,6 +19,9 @@ type (
 	TSEditCheck   = tstypes.EditCheck
 	TSEditFinding = tstypes.EditFinding
 	TSEditedFile  = tstypes.EditedFile
+	// TSRenamePlan is what TSTyped.RenamePlan returns: the edits the project's compiler computes for a rename, put
+	// to the edit check. A plan that would not compile is refused and carries no patch.
+	TSRenamePlan = tstypes.RenamePlan
 )
 
 // ErrNoTSCompiler is what errors.Is matches when a repository has no TypeScript 7 compiler installed.

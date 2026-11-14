@@ -303,3 +303,39 @@ func (r *Runner) CheckEdit(ctx context.Context, edits []FileEdit) (*EditCheck, e
 	return lspcheck.Run(ctx, lspcheck.Options{Server: srv, Languages: sourceExts,
 		Timeout: r.Timeout, MaxFiles: r.MaxFiles, Parallel: r.Parallel, Spawn: r.Spawn, Environ: r.Environ}, patch)
 }
+
+// RenamePlan is a rename the project's checker computed and the edit check then checked.
+type RenamePlan = lspcheck.RenamePlan
+
+// RenamePlan asks the project's checker for the edits that rename the symbol called name on line (1-based) of file
+// to newName, applies them as unsaved contents and checks the result as CheckEdit does. Nothing is written. A plan
+// that would not type-check, or that edits a file outside the repository's own source, is refused and carries no
+// patch. mypy cannot compute a rename: a project with mypy alone gets an error that says so.
+func (r *Runner) RenamePlan(ctx context.Context, file string, line int, name, newName string) (*RenamePlan, error) {
+	root, err := filepath.EvalSymlinks(r.Repo)
+	if err != nil {
+		return nil, err
+	}
+	c := Checker{Kind: KindOf(r.Checker), Path: r.Checker}
+	if r.Checker == "" {
+		abs := file
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(root, filepath.FromSlash(file))
+		}
+		if c, err = FindChecker(root, filepath.Dir(abs)); err != nil {
+			return nil, err
+		}
+	}
+	if c.Kind == Mypy {
+		return nil, fmt.Errorf("%w a rename: the project's checker is mypy (%s), which checks an edit but has no language server to compute one. Install ty, pyright or basedpyright beside it", ErrNoChecker, c.Path)
+	}
+	srv, err := server(c)
+	if err != nil {
+		return nil, err
+	}
+	pinned := *r
+	pinned.Checker = c.Path
+	return lspcheck.Rename(ctx, lspcheck.Options{Server: srv, Languages: sourceExts,
+		Timeout: r.Timeout, MaxFiles: r.MaxFiles, Parallel: r.Parallel, Spawn: r.Spawn, Environ: r.Environ},
+		root, file, line, name, newName, pinned.CheckEdit)
+}

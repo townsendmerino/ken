@@ -489,3 +489,60 @@ func TestCheckEdit_againstTheRealCheckers(t *testing.T) {
 		t.Skip("none of KEN_TEST_TY, KEN_TEST_PYRIGHT, KEN_TEST_BASEDPYRIGHT and KEN_TEST_MYPY is set")
 	}
 }
+
+func TestRenamePlan_againstTheRealCheckers(t *testing.T) {
+	ran := false
+	for kind, env := range map[string]string{Ty: "KEN_TEST_TY", Pyright: "KEN_TEST_PYRIGHT", BasedPyright: "KEN_TEST_BASEDPYRIGHT"} {
+		program := os.Getenv(env)
+		if program == "" {
+			continue
+		}
+		ran = true
+		t.Run(kind, func(t *testing.T) {
+			root := writeTree(t, realFixture)
+			r := &Runner{Repo: root, Checker: program}
+			p, err := r.RenamePlan(context.Background(), "pkg/core/shape.py", 16, "scale", "resize")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("\n%s%s", p.Text(0), p.Patch)
+			var got []string
+			for _, f := range p.Files {
+				got = append(got, fmt.Sprintf("%s%v", f.File, f.Lines))
+			}
+			if want := "pkg/app/main.py[1 5] pkg/core/shape.py[16]"; strings.Join(got, " ") != want {
+				t.Errorf("files %v, want %s", got, want)
+			}
+			if !p.Verified || p.Refused || p.Patch == "" || len(p.Mentions) != 0 {
+				t.Errorf("verified %v, refused %v, mentions %v", p.Verified, p.Refused, p.Mentions)
+			}
+			// a method: the protocol's member and the class's are one name to a caller
+			p, err = r.RenamePlan(context.Background(), "pkg/core/shape.py", 5, "area", "surface")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("\n%s%s", p.Text(0), p.Patch)
+			// Measured on ty 0.0.104, pyright 1.1.414 and basedpyright 1.40.2: none renames Square.area with the
+			// protocol member it satisfies, so the plan each gives breaks the one place a Square is used as a Shape.
+			// The check is what finds that, and the line the server left is listed.
+			if !p.Refused || p.Patch != "" || len(p.Conflicts) != 1 || !strings.HasPrefix(p.Conflicts[0], "pkg/app/main.py:8: ") ||
+				len(p.Mentions) != 1 || p.Mentions[0].File != "pkg/core/shape.py" || fmt.Sprint(p.Mentions[0].Lines) != "[12]" {
+				t.Errorf("refused %v, conflicts %v, mentions %v", p.Refused, p.Conflicts, p.Mentions)
+			}
+		})
+	}
+	if !ran {
+		t.Skip("none of KEN_TEST_TY, KEN_TEST_PYRIGHT and KEN_TEST_BASEDPYRIGHT is set")
+	}
+}
+
+func TestRenamePlan_mypyCannot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the layout below is the POSIX one")
+	}
+	root := writeTree(t, map[string]string{".venv/bin/mypy": "", "a.py": "x = 1\n"})
+	_, err := (&Runner{Repo: root}).RenamePlan(context.Background(), "a.py", 1, "x", "y")
+	if !errors.Is(err, ErrNoChecker) || !strings.Contains(err.Error(), "has no language server to compute one") {
+		t.Errorf("err = %v", err)
+	}
+}

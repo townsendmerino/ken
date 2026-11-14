@@ -14,6 +14,7 @@ import (
 
 const pyUsage = `Usage: ken py check-edit <repo> <file> <new-contents-file> [--json] [--max N] [--checker PATH]
        ken py check-edit <repo> --edits FILE [--json] [--max N] [--checker PATH]
+       ken py rename-plan <repo> <file>:<line> <name> <new-name> [--json] [--patch FILE] [--checker PATH]
 
 Answers about a Python repository from the type checker the project itself
 installed: ty, basedpyright or mypy in its virtual environment (.venv or venv),
@@ -30,19 +31,26 @@ Where a project has several, the one it configures is asked.
                ("-" reads standard input). --edits FILE is a JSON list of
                {"file","old_string","new_string","replace_all"} or
                {"file","content"} ("-" reads standard input).
+` + renamePlanUsage + `               (ty, pyright or basedpyright compute it; mypy cannot). None of
+               them renames a method together with the protocol member it
+               satisfies: the check reports the classes that would be left behind
   --checker PATH  the program to run, in place of the one found for the edited
                file's project: a ty or mypy binary, or the pyright-langserver
                or basedpyright-langserver launcher
   --max N      cap on the error lines shown (default 200; 0 shows all)
 
-Exit status: 0 when the edit causes no new error, 3 when it does or when not
-every file could be checked, 1 on error, 2 on usage.
+Exit status: 0 when the edit causes no new error (rename-plan: the plan is
+checked and holds), 3 when it does or when not every file could be checked,
+1 on error, 2 on usage.
 `
 
 func cmdPy(args []string) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		fmt.Print(pyUsage)
 		return 0
+	}
+	if args[0] == "rename-plan" {
+		return cmdLSPRename("py", "--checker", args[1:])
 	}
 	var (
 		pos       []string

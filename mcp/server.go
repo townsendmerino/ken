@@ -200,6 +200,7 @@ func NewServer(cfg Config) *sdk.Server {
 		ts:      tsToolsAvailable(&cfg),
 		py:      pyToolsAvailable(&cfg),
 	}
+	typed.pyRename = typed.py && pyRenameAvailable(&cfg)
 	typed.goRename = typed.goTools && (!cfg.GoTyped.NeedsGopls() || engine.GoplsPath() != "")
 	if cfg.Instructions == "" {
 		cfg.Instructions = defaultInstructions(typed)
@@ -403,10 +404,14 @@ func NewServer(cfg Config) *sdk.Server {
 	// the default repository has one.
 	if typed.ts {
 		registerTSTools(srv, &cfg)
+		registerTSRenameTool(srv, &cfg)
 	}
 	// The Python typed tier (ADR-065) asks the type checker the repository installed, by the same rule.
 	if typed.py {
 		registerPyTools(srv, &cfg)
+		if typed.pyRename {
+			registerPyRenameTool(srv, &cfg)
+		}
 	}
 
 	return srv

@@ -14,6 +14,7 @@ import (
 
 const tsUsage = `Usage: ken ts check-edit <repo> <file> <new-contents-file> [--json] [--max N] [--tsc PATH]
        ken ts check-edit <repo> --edits FILE [--json] [--max N] [--tsc PATH]
+       ken ts rename-plan <repo> <file>:<line> <name> <new-name> [--json] [--patch FILE] [--tsc PATH]
 
 Answers about a TypeScript or JavaScript repository from the project's own
 compiler: the native TypeScript 7 program in its node_modules. No Node is run.
@@ -25,19 +26,23 @@ compiler: the native TypeScript 7 program in its node_modules. No Node is run.
                ("-" reads standard input). --edits FILE is a JSON list of
                {"file","old_string","new_string","replace_all"} or
                {"file","content"} ("-" reads standard input).
-  --tsc PATH   the native compiler to run, in place of the one found in the
+` + renamePlanUsage + `  --tsc PATH   the native compiler to run, in place of the one found in the
                node_modules of the edited file's project
                (node_modules/@typescript/typescript-<os>-<arch>/lib/tsc)
   --max N      cap on the error lines shown (default 200; 0 shows all)
 
-Exit status: 0 when the edit causes no new error, 3 when it does or when not
-every file could be checked, 1 on error, 2 on usage.
+Exit status: 0 when the edit causes no new error (rename-plan: the plan is
+checked and holds), 3 when it does or when not every file could be checked,
+1 on error, 2 on usage.
 `
 
 func cmdTS(args []string) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		fmt.Print(tsUsage)
 		return 0
+	}
+	if args[0] == "rename-plan" {
+		return cmdLSPRename("ts", "--tsc", args[1:])
 	}
 	var (
 		pos       []string

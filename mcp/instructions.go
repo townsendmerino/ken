@@ -6,8 +6,9 @@ import "strings"
 type typedTools struct {
 	goTools  bool // go_references, go_implementations, go_uses, go_check_edit
 	goRename bool // go_rename_plan
-	ts       bool // ts_check_edit
+	ts       bool // ts_check_edit, ts_rename_plan
 	py       bool // py_check_edit
+	pyRename bool // py_rename_plan
 }
 
 // defaultInstructions is what a server tells an agent when its Config sets no Instructions. The search guidance is
@@ -41,6 +42,17 @@ func defaultInstructions(t typedTools) string {
 	if len(checks) > 0 {
 		b.WriteString(" Before an edit that changes a signature, a type, or anything other files use, call " + strings.Join(checks, " or ") +
 			" with the edit: it reports the errors the edit would cause anywhere in the repo, and writes nothing.")
+	}
+	var renames []string
+	if t.ts {
+		renames = append(renames, "`ts_rename_plan`")
+	}
+	if t.pyRename {
+		renames = append(renames, "`py_rename_plan`")
+	}
+	if len(renames) > 0 {
+		b.WriteString(" For a rename there, " + strings.Join(renames, " or ") +
+			" returns the edits the project's own tool computes, checked the same way before you make them.")
 	}
 	return b.String()
 }

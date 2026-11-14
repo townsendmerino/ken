@@ -17,6 +17,9 @@ type (
 	PyEditCheck   = pytypes.EditCheck
 	PyEditFinding = pytypes.EditFinding
 	PyEditedFile  = pytypes.EditedFile
+	// PyRenamePlan is what PyTyped.RenamePlan returns: the edits the project's checker computes for a rename, put
+	// to the edit check. A plan that would not type-check is refused and carries no patch. mypy cannot compute one.
+	PyRenamePlan = pytypes.RenamePlan
 )
 
 // ErrNoPyChecker is what errors.Is matches when a repository has no Python type checker this tier can ask.

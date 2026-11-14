@@ -152,9 +152,39 @@ func (r *Runner) CheckEdit(ctx context.Context, edits []FileEdit) (*EditCheck, e
 			return nil, err
 		}
 	}
-	return lspcheck.Run(ctx, lspcheck.Options{
+	return lspcheck.Run(ctx, r.options(tsc), patch)
+}
+
+func (r *Runner) options(tsc string) lspcheck.Options {
+	return lspcheck.Options{
 		Server: lspcheck.Server{Name: "tsc", Label: "TypeScript", Where: "the project's compiler", Verdict: "WOULD NOT COMPILE",
 			Argv: []string{tsc, "--lsp", "--stdio"}, CodePrefix: "TS"},
 		Languages: sourceExts, Timeout: r.Timeout, MaxFiles: r.MaxFiles, Parallel: r.Parallel, Spawn: r.Spawn, Environ: r.Environ,
-	}, patch)
+	}
+}
+
+// RenamePlan is a rename the project's compiler computed and the edit check then checked.
+type RenamePlan = lspcheck.RenamePlan
+
+// RenamePlan asks the project's compiler for the edits that rename the symbol called name on line (1-based) of file
+// to newName, applies them as unsaved contents and checks the result as CheckEdit does. Nothing is written. A plan
+// that would not compile, or that edits a file outside the repository's own source, is refused and carries no patch.
+func (r *Runner) RenamePlan(ctx context.Context, file string, line int, name, newName string) (*RenamePlan, error) {
+	root, err := filepath.EvalSymlinks(r.Repo)
+	if err != nil {
+		return nil, err
+	}
+	tsc := r.Tsc
+	if tsc == "" {
+		abs := file
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(root, filepath.FromSlash(file))
+		}
+		if tsc, err = FindCompiler(root, filepath.Dir(abs)); err != nil {
+			return nil, err
+		}
+	}
+	pinned := *r
+	pinned.Tsc = tsc
+	return lspcheck.Rename(ctx, r.options(tsc), root, file, line, name, newName, pinned.CheckEdit)
 }
