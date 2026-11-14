@@ -98,6 +98,8 @@ func main() {
 		os.Exit(cmdGo(os.Args[2:]))
 	case "ts":
 		os.Exit(cmdTS(os.Args[2:]))
+	case "py":
+		os.Exit(cmdPy(os.Args[2:]))
 	default:
 		cli.Usage()
 		os.Exit(2)

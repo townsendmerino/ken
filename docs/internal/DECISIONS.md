@@ -72,6 +72,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-062](#adr-062-a-rename-plan-is-computed-in-process-and-checked-by-making-it) | A rename plan is computed in process and checked by making it (amends ADR-061) | Accepted |
 | [ADR-063](#adr-063-an-edit-the-caller-wrote-is-checked-the-way-a-rename-plan-is) | An edit the caller wrote is checked the way a rename plan is | Accepted |
 | [ADR-064](#adr-064-a-typed-tier-for-typescript-asks-the-projects-own-compiler-over-lsp-starting-with-a-check-for-an-edit) | A typed tier for TypeScript asks the project's own compiler over LSP, starting with a check for an edit | Accepted |
+| [ADR-065](#adr-065-the-python-edit-check-asks-the-checker-the-project-installed-ty-or-pyright) | The Python edit check asks the checker the project installed, ty or pyright | Accepted |
 
 ---
 
@@ -3504,3 +3505,41 @@ M1 Pro, TypeScript 7.0.2.
 - A monorepo that installs the compiler only in a nested package is found at check time, but the tool is not offered for it, because the offer looks at the root.
 - References, implementations and a checked rename for TypeScript are the plan's next phases. The pool, answer cache and tree fingerprint of the Go tier are still in `internal/gotypes`.
 - The `exit` notification is now sent without a `params` field. TypeScript's server rejects `"params": null`; gopls accepts either.
+
+## ADR-065: The Python edit check asks the checker the project installed, ty or pyright
+
+**Status:** Accepted
+**Date:** 2026-11-14
+**Decided by:** Francis: "Project's own, either", to the question of which checker `py_check_edit` should use.
+
+### Context
+
+`ts_check_edit` (ADR-064) asks a project's compiler what an edit would break. Python has no compile step, so an agent that changes a signature learns about a broken caller only when a test reaches it. The same check is worth more there.
+
+A TypeScript project has one compiler. A Python project may use mypy, pyright, basedpyright, ty or pyrefly, or none, and they disagree about what an error is. Phase 0 ([`results/python-lsp-phase0-2026-11.md`](results/python-lsp-phase0-2026-11.md)) drove pyright 1.1.414 and ty 0.0.104 as language servers: neither reports on a file that is not open unless configured to, both report on open files and follow an unsaved change in another file, and the workspace-wide diagnostic request gave no answer in 10 s from either when nothing had changed.
+
+### Decision
+
+1. **`py_check_edit` (`ken py check-edit`, `PyTyped.CheckEdit`) asks the checker the project installed, and no other.** ty is looked for in the project's virtual environment (`.venv/bin/ty`, `venv/bin/ty`), pyright in its `node_modules` (`node_modules/.bin/pyright-langserver`), from the edited file's directory up to the repository root. Where a directory has both, the configured one wins (`pyrightconfig.json` or `[tool.pyright]`; `ty.toml` or `[tool.ty]`), and ty when neither or both are. ken installs nothing and does not fall back to a checker of its own choosing: an error the project's checker would not report is noise.
+2. **A project with neither gets an error that says what to install**, and that mypy has no language server.
+3. **pyright installed from pip is not run.** That package fetches Node and pyright when first started. The error names the case.
+4. **One procedure for both, in `internal/lspcheck`**, moved out of `internal/tstypes`: open every source file, ask each for its errors, apply the edit as a change to the open file (or open a new one), ask each again. For TypeScript the files are not opened first, since its server answers for unopened ones. A tier is now a finder and a description of its server (`lspcheck.Server`): the command, whether to open every file, how a diagnostic's code is written.
+5. **The tool is offered and confined as `ts_check_edit` is**: listed when the default repository has a checker at its root, and a `repo` argument is refused on a server without allowed roots.
+
+### What was measured
+
+M1 Pro, Python 3.12.10, a seven-file fixture with no third-party imports.
+
+- A test runs six edits through the check with each checker (a body change, a new parameter, a method a protocol needs renamed away, a fix, a new file, a syntax error) and holds each answer to the checker's own command line: the edit is written to a copy, `ty check` or `pyright` runs over the copy and the original, and the errors the run gains must be the errors the check reported, by file and line. All twelve agree. It runs only where `KEN_TEST_TY` or `KEN_TEST_PYRIGHT` names a program; elsewhere the opening and changing of files is tested against a fake server that reports only on open files.
+- A whole check of the fixture: 0.03 s with ty, 0.38 s with pyright from the command line (about 1 s in the test, which also starts Node cold).
+
+**Not measured: a real project.** Nothing here used a virtual environment with installed packages, so whether each server finds the interpreter and third-party types unaided is unknown. Opening every file makes the server hold every file; what that costs at 5,000 files is unknown.
+
+### Consequences and what is not done
+
+- The answer is one checker's opinion under the project's configuration. ty is at 0.0.x and its rules are still changing.
+- A project that uses mypy, basedpyright or pyrefly is not served. basedpyright and pyrefly have language servers and were not measured.
+- No check that a name still means what it meant. Both servers hand out a rename that turns a parameter into a module-level name its function reads; the result is valid Python that means something else.
+- pyright needs `node` on PATH. Its diagnostics are pulled for open files, which the server does not advertise in its handshake; the oracle test is what holds that this works.
+- The limits of ADR-064 apply unchanged: one server per check, every file asked about twice, 20,000 files at most, no deletion.
+- The MCP tool's verdict line for an edit that breaks something is `WOULD NOT TYPE-CHECK`, where the TypeScript tool says `WOULD NOT COMPILE`.

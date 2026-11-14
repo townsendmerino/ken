@@ -117,6 +117,7 @@ usage:
   ken doctor                             [--json] [--verbose]         # health check + recommendations (model, rerank cache, config)
   ken go              refs|impls|rename-plan|check-edit <repo> ...   # type-resolved Go answers from gopls, merged over build configurations ('ken go --help')
   ken ts              check-edit <repo> ...                          # what an edit does to a TypeScript build, from the project's own TypeScript 7 ('ken ts --help')
+  ken py              check-edit <repo> ...                          # what an edit does to a Python project's type check, from the project's own ty or pyright ('ken py --help')
 
 ken index --watch (default in v0.3+) keeps the process alive and re-indexes
 files on change; --no-watch is the v0.2 behavior (build once, print, exit).

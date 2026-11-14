@@ -337,6 +337,20 @@ WOULD NOT COMPILE: 2 new errors
 
 The edit is opened as unsaved contents in the compiler; nothing is written. Errors that are there already are not listed, and errors the edit removes are counted. It covers every `tsconfig` project of the repository in one run. What it does not do, and `go_check_edit` does: report a name on an untouched line that now refers to another declaration, or list changed exports. Each call starts the compiler and asks about every source file twice; that took 0.24 s on the 58-file project above and has not been measured on a large one. The MCP tool appears when the server's default repository has the compiler at its root, and on a server without `KEN_MCP_ALLOWED_REPO_ROOTS` it checks that repository only, because the check runs a program the repository supplies.
 
+### Python: `py_check_edit`
+
+`py_check_edit` (`ken py check-edit <repo> <file> <new-contents-file>`, or `--edits FILE`) does the same for Python, where it matters more: there is no compile step to catch a caller an edit broke. It asks the type checker the project itself installed and no other: **ty** in the project's virtual environment (`.venv/bin/ty` or `venv/bin/ty`), or **pyright** in its `node_modules` (which needs `node` on PATH). `--checker PATH` names one. ken installs neither. A project with neither is told what to install; a project on mypy cannot be served, because mypy has no language server, and pyright installed from pip is not run, because that package downloads Node when first started.
+
+```
+$ ken py check-edit . --edits edits.json
+check edit: 1 files edited; 6 source files checked with ty 0.0.104 (b4bb5b2c8 2026-11-13) in 0.03s
+  pkg/core/shape.py
+ERROR: pkg/app/main.py:5: missing-argument: No argument provided for required parameter `digits` of function `scale`
+WOULD NOT TYPE-CHECK: 1 new errors
+```
+
+What counts as an error is that checker's opinion under the project's configuration; errors it already reports are not listed. The limits are those of `ts_check_edit`. It has been measured on a seven-file fixture only, not on a project with installed dependencies.
+
   The reply has three kinds of line. `ERROR` is a compile error that is not there now, in the edited files or in any package that depends on them, with the configurations it holds under when that is not all of them: change a function's parameters and every caller is listed, the one in `x_windows.go` included. Unused variables and imports count, as they do for the compiler. `MOVED` is an identifier on a line the edit does not touch that would refer to another declaration: a variable the edit shadows, a builtin a new function captures. That code compiles and means something else, so check each is intended. `API` is an exported declaration of an edited package that the edit removes or changes: what code outside the repository would see, which nothing here can check. Errors that are already there are not reported, and the reply says how many of them the edit fixes.
 
   With no such line the reply says `checked`. That is a statement about types, not behaviour: tests still have to run. An edit that leaves a file's imports alone costs what a query after an edit costs (a fraction of a second on a server that holds the repository); one that changes them, or adds a file, has the go command list the packages again and takes a second or more per configuration. An edited file that does not parse is reported as that and nothing is type-checked. Only `.go` files can be edited, a file cannot be deleted, and `go vet`'s checks are not run.

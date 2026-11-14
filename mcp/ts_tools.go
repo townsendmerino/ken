@@ -65,22 +65,9 @@ func handleTSCheckEdit(ctx context.Context, cfg *Config, args TSCheckEditArgs) (
 	if len(args.Edits) == 0 {
 		return errorResult(args.Output, "edits is required: at least one {file, old_string, new_string} or {file, content}"), nil, nil
 	}
-	// The check runs the compiler in the repository's node_modules, which is running code the repository chose. That
-	// is honored for the operator's default repo and on a server confined to allowed roots, as the Go tier's wrap
-	// command is, and refused for a path an agent supplied to an unconfined server.
-	if args.Repo != "" && RepoConfinementWarning() != "" {
-		return errorResult(args.Output, "ts_check_edit runs the TypeScript compiler installed in the repo, so on a server that is not confined to allowed repo roots it checks the default repo only: leave `repo` out"), nil, nil
-	}
-	repo, err := resolveRepo(cfg, args.Repo)
-	if err != nil {
-		return errorResult(args.Output, err.Error()), nil, nil
-	}
-	key, isURL, err := NormalizeKey(repo)
-	if err != nil {
-		return errorResult(args.Output, err.Error()), nil, nil
-	}
-	if isURL {
-		return errorResult(args.Output, "ts_check_edit needs a local checkout with its dependencies installed: the compiler it asks is the one in the repo's node_modules"), nil, nil
+	key, errResult := localRepoForItsOwnTool(cfg, args.Repo, args.Output, "ts_check_edit", "the TypeScript compiler installed in the repo")
+	if errResult != nil {
+		return errResult, nil, nil
 	}
 	edits := make([]engine.TSFileEdit, len(args.Edits))
 	for i, e := range args.Edits {
@@ -95,4 +82,28 @@ func handleTSCheckEdit(ctx context.Context, cfg *Config, args TSCheckEditArgs) (
 		limit = 40
 	}
 	return dispatchOutput(args.Output, res, res.Text(limit))
+}
+
+// localRepoForItsOwnTool resolves a tool's repo argument to a local checkout for a tool that runs a program the
+// repository installed (what names it: "the TypeScript compiler installed in the repo").
+//
+// Running that program is running code the repository chose. It is honored for the operator's default repo and on a
+// server confined to allowed roots, as the Go tier's wrap command is, and refused for a path an agent supplied to an
+// unconfined server.
+func localRepoForItsOwnTool(cfg *Config, repoArg, outputMode, tool, what string) (key string, errResult *sdk.CallToolResult) {
+	if repoArg != "" && RepoConfinementWarning() != "" {
+		return "", errorResult(outputMode, tool+" runs "+what+", so on a server that is not confined to allowed repo roots it checks the default repo only: leave `repo` out")
+	}
+	repo, err := resolveRepo(cfg, repoArg)
+	if err != nil {
+		return "", errorResult(outputMode, err.Error())
+	}
+	key, isURL, err := NormalizeKey(repo)
+	if err != nil {
+		return "", errorResult(outputMode, err.Error())
+	}
+	if isURL {
+		return "", errorResult(outputMode, tool+" needs a local checkout with its dependencies installed: it asks "+what)
+	}
+	return key, nil
 }
