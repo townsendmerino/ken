@@ -15,6 +15,14 @@ pre-built binaries.
 
 ## [Unreleased]
 
+## [1.18.0] — 2026-11-14 — check an edit before making it, in Go, TypeScript and Python
+
+Three tools answer one question before a file is written: would this edit break the build? `go_check_edit` applies the edit in memory and type-checks every package it reaches, in ken's own process, under every build configuration (ADR-063). `ts_check_edit` and `py_check_edit` open the edit as unsaved contents in the checker the project itself installed (TypeScript 7; ty or pyright) and ask every source file for its errors, before and after (ADR-064, ADR-065). Each reply lists the errors the edit would cause, wherever they land, and counts the ones it fixes. Nothing is written.
+
+The Go check takes 0.04 to 0.09 s on a server that holds the repository (ken's own source, 449 files). The TypeScript and Python checks are measured on small trees only: 0.24 s on a 58-file TypeScript project, 0.03 s (ty) and 0.38 s (pyright) on a seven-file Python fixture. A large TypeScript or Python repository is not measured.
+
+Three things to check before upgrading. `ts_check_edit` and `py_check_edit` run a program from the repository (`node_modules`, `.venv`), so `ken-mcp` offers them only when its default repository has that program, and refuses a `repo` argument unless `KEN_MCP_ALLOWED_REPO_ROOTS` is set. ken installs no compiler or checker: a project on TypeScript 5 or 6, or on mypy, is told what it needs. And only the Go check reports a name that now refers to another declaration; the other two report errors only.
+
 ### Added
 
 - **`py_check_edit` and `ken py check-edit`: check an edit to Python files before making it (ADR-065).** The edit is opened as unsaved contents in the type checker the project itself installed, ty (in `.venv` or `venv`) or pyright (in `node_modules`; needs `node` on PATH), and every Python file is asked for its errors, before and after. The reply lists the errors the edit would cause, with file, line and the checker's rule, and counts the ones it fixes. Nothing is written. ken installs no checker and does not choose one: a project with neither is told what to install, and a project on mypy cannot be served, because mypy has no language server. Measured on a seven-file fixture only (0.03 s with ty, 0.38 s with pyright); a real project with dependencies is not measured.
