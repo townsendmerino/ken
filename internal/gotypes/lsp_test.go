@@ -489,6 +489,14 @@ func TestPool_boundsServersAndStopsIdleOnes(t *testing.T) {
 	if st := pool.Status(); len(st.Sessions) != 0 || st.IdleStops < 1 {
 		t.Errorf("status %+v, want the idle server stopped", st)
 	}
+	// The pool takes a server out of its table first and tells it to shut down after, off its lock (an evicted one on
+	// a goroutine of its own), so an empty table does not yet mean both have heard: wait for the servers themselves.
+	for time.Now().Before(deadline) {
+		if _, shut, _, _ := f.snapshot(); shut >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	starts, shut, _, _ := f.snapshot()
 	if starts != 2 || shut != 2 {
 		t.Errorf("starts %d shutdowns %d, want every started server shut down", starts, shut)
