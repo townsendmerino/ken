@@ -261,7 +261,7 @@ go-git on the local working tree).
 
 ## Go: type-resolved answers across build configurations
 
-`references` and `callers` match by name. For Go, four more tools answer from a type checker: `go_references`, `go_implementations` and `go_rename_plan` from gopls, the Go language server, and `go_uses` from the go command and Go's own type checker (`ken go refs|impls|uses|rename-plan` on the command line). They appear only when `gopls` is on PATH, and they work on local checkouts.
+`references` and `callers` match by name. For Go, four more tools answer from a type checker, in ken's own process: `go_references`, `go_implementations`, `go_uses` and `go_rename_plan` (`ken go refs|impls|uses|rename-plan` on the command line). They need the `go` command on PATH and nothing else (no gopls), and they work on local checkouts. `go_references` and `go_implementations` return the lines gopls would (that is tested, declaration by declaration, against gopls itself) and one kind gopls leaves out: uses of a generic type's field through an instantiation in another package.
 
 A type checker sees one build configuration at a time, so code behind a build tag or another GOOS is invisible from the default one. List the repository's configurations once, in `.ken-go.json` at its root:
 
@@ -278,23 +278,25 @@ Each query then runs under every configuration that compiles the symbol's declar
 
 ```
 $ ken go refs . decoder.ResidentForward.Forward
-references of decoder.ResidentForward.Forward: 496 lines in 255 files
+references of decoder.ResidentForward.Forward: 497 lines in 255 files
 declared: decoder/residency.go:43  interface-method decoder.ResidentForward.Forward
-per configuration: default 68 (5.1s) · darwin-gpu 276 (16.3s) · linux-cuda 248 (13.2s)
+per configuration: default 68 (2.2s) · darwin-gpu 276 (1.1s) · linux-cuda 249 (1.0s)
 backend/cuda/a13_multimodel_test.go
   51 TestA13_MultiModelUnloadPoisons [linux-cuda]: before, err := rb.Forward(emb, 0)
 ```
 
+- **Cost.** Each query lists and type-checks the repository once per configuration, one after another: a second or two and under 1 GB at its peak for each, on a 3,000-file repository (about 5 s for the three configurations above). The `ken go` command line asks once and keeps nothing. A long-lived host (`ken-mcp`, or a program using `engine.Workspace`) keeps the type-checked programs loaded after the first query, one per configuration, about 0.2 GB each, until they have been idle for `KEN_MCP_GO_IDLE` (default 5m): any question on an unchanged tree then takes 0.1 to 0.2 s, and after an edit only the packages the edit can affect are checked again (a second or two). `KEN_MCP_GO_RESIDENT=0` (`GoTypedOptions.MaxResident: -1` in a Go program) turns that off. `ken-mcp` also remembers answers (`KEN_MCP_GO_CACHE_MB`, default 32, 0 turns it off): an identical question on an unchanged tree takes 0.04 s. Everything kept is bounded and listed by `status`. Both check the files on disk before every answer, across the whole Go workspace, so an edit is always seen. In a Go program, `engine.GoTypedOptions` does the same. `--engine lsp` (`KEN_MCP_GO_ENGINE=lsp`) asks gopls itself instead.
 - **Symbols** are `Name`, `Type.Member`, `pkg.Name`, `pkg.Type.Member`, or `dir/sub.Name` to pick a package by directory. A method or field needs its type.
 - **`[linux-cuda]`** after a line means only that configuration saw it. No label means every configuration did.
-- **An `INCOMPLETE` line means a lower bound**: a declaration that no listed configuration compiles, or a gopls run that failed. Add the missing configuration and ask again.
+- **`(via pkg.Type.Method)`** after a line of `go_references` means the line does not name the symbol you asked about but a method that corresponds to it through an interface: asking about a concrete method, a call made through an interface it satisfies; asking about an interface method, a call on a type that implements it. The header gives both counts (`177 direct, 320 through a corresponding method`), `--group-by` rows carry the direct count, and `direct_only` (`--direct`) leaves the others out. gopls counts all of them as references and does not say which is which; `--engine lsp` answers are not marked.
+- **An `INCOMPLETE` line means a lower bound**: a declaration that no listed configuration compiles, or a configuration that failed to load. Add the missing configuration and ask again.
 - **`group_by` gives counts, not lines.** `go_references` and `go_implementations` take `group_by: "package" | "dir" | "file"` (`--group-by` on the command line). The header stays; the lines become one row per group, largest first, each split into non-test and test lines (a test file is one ending `_test.go`). `max` caps the rows. `package` counts an external test package (`package x_test`) with the package it tests and adds the package name where it differs from the directory's (`cmd/ken (main)`); `dir` is the directory alone. Ask this way for a coupling question: the reply is a few rows where the full list can be thousands of lines.
 
   ```
   $ ken go refs . decoder.Options --group-by package
-  references of decoder.Options: 2524 lines in 978 files
-  declared: decoder/model.go:425  type decoder.Options
-  per configuration: default 1089 (9.4s) · darwin-gpu 1902 (155.0s) · linux-cuda 1738 (119.9s)
+  references of decoder.Options: 2525 lines in 979 files
+  declared: decoder/options.go:14  type decoder.Options
+  per configuration: default 1089 (2.2s) · darwin-gpu 1902 (1.1s) · linux-cuda 1739 (1.0s)
   decoder                 51 non-test  916 test
   backend/cuda             0 non-test  622 test
   backend/metal            0 non-test  546 test
@@ -313,9 +315,17 @@ backend/cuda/a13_multimodel_test.go
   ```
 
   It costs a second or two per configuration: `go list` names the files each configuration builds (through `wrap`, like gopls), and ken type-checks them from source in its own process, which `wrap` does not cover. A configuration that does not build the importer is skipped; one whose files have type errors is counted and marked `partial`, with an `INCOMPLETE` line.
-- **`go_rename_plan` writes nothing.** It lists the files a rename edits under each configuration and the lines that still spell the old name in comments and markdown; with `patch: true` (`--patch FILE` on the command line) it gives one merged diff for `git apply`. Vet every configuration afterwards.
+- **`go_rename_plan` writes nothing, and checks what it proposes.** It lists the files a rename edits under each configuration and the lines that still spell the old name in comments, strings, markdown and assembly; with `patch: true` (`--patch FILE` on the command line) it gives one merged diff for `git apply`. The edits follow gopls's rename: every identifier, the name in the declaration's doc comment, doc links, a type together with the embedded fields named after it, and an interface method together with the methods of the types used as that interface (a concrete method tied to an interface is refused: rename the interface's).
+
+  Before it answers, the merged patch is applied in memory and every configuration is type-checked again. The plan says `checked` when nothing changed but the name: no new type error, every identifier still refers to the declaration it referred to (nothing shadowed or captured), every type has the fields and methods it had (nothing hidden, merged or made ambiguous), and every type assertion that could succeed still can. Otherwise it lists each difference as a `CONFLICT` line and gives **no patch**. A plan with an `INCOMPLETE` line (a declaration no listed configuration compiles) is a lower bound and is not called checked. A `PARTIAL` line means a configuration has type errors of its own: identifiers inside code that does not type-check are not renamed.
+
+  What the check cannot see: reflection, struct tags, names inside strings, and a type that stops (or starts) satisfying an interface it is only ever converted to at run time, such as `fmt.Stringer`.
+
+  It will also refuse some renames an editor makes: `main` in package main and `init` (the result compiles and is a different program); a field of a struct that the code converts to or from another struct with the same fields (the conversion would stop compiling: rename both, or neither); a method of a type whose own method hides an embedded type's method of the same name (the embedded one would take its place wherever an interface asks for that name).
+
+  **Cost.** On a host that already holds the programs (`ken-mcp` after any typed query), a plan is read off them and checked by type-checking again only what the patch touches: on the 3,000-file repository above, 0.6 s for a type used in 980 files, 0.3 s for a function, about 1.6 s for a field or a method (those are checked with every function body of every package they reach, one configuration at a time, holding about 0.7 GB more while they run), and a method's first rename takes about 2 s longer while ken works out which methods interfaces tie together. From the command line each configuration is loaded first: 4 to 5 s for the three, 7 to 8 s for a method.
 - **Stability**: these four tools are new and best-effort; they are not part of the 1.0-stable nine.
-- **Cost**: each configuration is a gopls run, seconds each, and memory is freed when it exits. `"wrap": ["cmd", "arg", "--"]` in the file prefixes every run, for a repository that serializes heavy work behind a lock. `ken-mcp` honors `wrap` for its default repo, or when `KEN_MCP_ALLOWED_REPO_ROOTS` confines it.
+- **`wrap`**: `"wrap": ["cmd", "arg", "--"]` in the file prefixes every `go` (and, under the `lsp` and `cli` engines, gopls) run, and ken holds the same lock while it type-checks in its own process, for a repository that serializes heavy work behind a lock. `ken-mcp` honors `wrap` for its default repo, or when `KEN_MCP_ALLOWED_REPO_ROOTS` confines it.
 
 ## Configuration
 

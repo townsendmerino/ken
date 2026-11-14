@@ -133,6 +133,25 @@ func RenderText(s Status, verbose bool) string {
 		fmt.Fprintln(&b)
 	}
 
+	// ---------- Go typed tier (MCP only, when it keeps something) ----------
+	if g := s.GoTyped; g != nil {
+		fmt.Fprintln(&b, "Go typed tier (kept between queries)")
+		fmt.Fprintf(&b, "  held:        %s (resident programs and gopls + remembered answers)\n", formatBytes(g.HeldBytes))
+		fmt.Fprintf(&b, "  programs:    %d of %d resident, each dropped after %.0f s idle; %d loads, %d refreshed after an edit, %d reuses, %d dropped by the watcher\n",
+			len(g.Programs), g.MaxResident, g.IdleSeconds, g.ProgramLoads, g.ProgramRefreshes, g.ProgramReuses, g.ProgramDropped)
+		for _, pr := range g.Programs {
+			fmt.Fprintf(&b, "    %s [%s]  %s  %d packages  idle %.0fs  %d queries\n", pr.Repo, pr.Config, formatBytes(pr.Bytes), pr.Packages, pr.IdleSec, pr.Queries)
+		}
+		fmt.Fprintf(&b, "  gopls:       %d of %d resident, each stopped after %.0f s idle\n", len(g.Sessions), g.MaxResident, g.IdleSeconds)
+		for _, ss := range g.Sessions {
+			fmt.Fprintf(&b, "    pid %d  %s [%s]  %s  idle %.0fs  %d requests\n", ss.PID, ss.Repo, ss.Config, formatBytes(ss.RSSBytes), ss.IdleSec, ss.Requests)
+		}
+		fmt.Fprintf(&b, "  answers:     %d remembered, %s of %s; %d hits, %d misses, %d stale, %d dropped by the watcher\n",
+			g.CacheEntries, formatBytes(g.CacheBytes), formatBytes(g.CacheMaxBytes), g.CacheHits, g.CacheMisses, g.CacheStale, g.CacheDropped)
+		fmt.Fprintf(&b, "  servers:     %d started, %d queries served by one already running\n", g.Starts, g.Reuses)
+		fmt.Fprintln(&b)
+	}
+
 	// ---------- Live cache (MCP only) ----------
 	if s.Cache.Capacity > 0 || s.Cache.InUse > 0 {
 		fmt.Fprintln(&b, "Repo cache (MCP)")

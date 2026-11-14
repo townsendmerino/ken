@@ -11,9 +11,11 @@ import (
 	"github.com/townsendmerino/ken/engine"
 )
 
-// The Go typed tier's tools (ADR-059). They answer from gopls, merged over the repository's build configurations,
-// where definition / references / callers answer from the tree-sitter index by name. They are registered only when
-// gopls is on PATH, so tools/list never offers a tool that can only fail.
+// The Go typed tier's tools (ADR-059, ADR-061, ADR-062). They answer from a type checker, merged over the
+// repository's build configurations, where definition / references / callers answer from the tree-sitter index by
+// name. All four run in this process with go/types and need only the go command, unless the host was configured
+// with an engine that asks gopls: go_rename_plan is then registered only with gopls on PATH, so tools/list never
+// offers a tool that can only fail.
 
 // GoSymbolArgs is the argument schema for go_references and go_implementations.
 type GoSymbolArgs struct {
@@ -21,6 +23,8 @@ type GoSymbolArgs struct {
 	repoArg
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default, compact lines grouped by file) or 'json'."`
 	Max    int    `json:"max,omitempty" jsonschema:"Cap on the result lines shown (default 200; the header always carries the full totals)."`
+	// DirectOnly drops the references that name a corresponding method, not the symbol itself.
+	DirectOnly bool `json:"direct_only,omitempty" jsonschema:"go_references only. Leave out the lines that name another method which corresponds to this one through an interface (a call through an interface the method satisfies, or on a type that implements the interface method). Without it those lines are returned marked 'via <method>' (JSON: 'through'), and the header gives both counts. Use it to see who calls this exact declaration."`
 	// GroupBy asks for counts in place of the lines.
 	GroupBy string `json:"group_by,omitempty" jsonschema:"Return counts instead of lines: one row per 'package', 'dir' or 'file', each with its non-test and test (_test.go) line counts, largest first. Use it for 'how many per package' questions: the reply is a few rows where the full list can be thousands of lines."`
 }
@@ -43,22 +47,24 @@ type GoRenameArgs struct {
 	Patch  bool   `json:"patch,omitempty" jsonschema:"Include the merged unified diff (apply with 'git apply'). Off by default: the summary lists the files, and the diff of a wide rename is large."`
 }
 
-const goTierNote = "Type-resolved by gopls and merged over every build configuration the repo lists in " +
+const goTierNote = "Type-resolved (by Go's own type checker, following gopls's rules for what counts) and merged over every build configuration the repo lists in " +
 	engine.GoConfigFile + " (GOOS, GOARCH, tags), so code behind a build tag is included and each result names " +
 	"the configurations that saw it. Without that file only the host's default configuration is asked. " +
-	"A reply with an INCOMPLETE line is a lower bound. Each configuration costs seconds, not milliseconds. " +
-	"Local Go repositories only."
+	"A reply with an INCOMPLETE line is a lower bound. Each configuration costs a second or two (its packages are " +
+	"type-checked for the query) unless the server keeps them loaded (KEN_MCP_GO_RESIDENT), when a query on an " +
+	"unchanged tree takes a fraction of a second; an identical repeat is remembered. Local Go repositories only."
 
 const goUsesNote = "merged over every build configuration the repo lists in " + engine.GoConfigFile +
 	" (without that file: the host's default only), each row naming the configurations that saw it when not all did. " +
 	"A reply with an INCOMPLETE line is a lower bound. Local Go repositories only."
 
-func registerGoTools(srv *sdk.Server, cfg *Config) {
+func registerGoTools(srv *sdk.Server, cfg *Config, canRename bool) {
 	sdk.AddTool(srv, &sdk.Tool{
 		Name: "go_references",
 		Description: "Find every line that refers to a Go symbol: compiler-grade, unlike `references` and `callers`, " +
 			"which match by name. For a method this includes calls made through an interface it satisfies and calls " +
-			"on each implementing type. Use it before changing a declaration. " + goTierNote,
+			"on each implementing type; each such line is marked with the method it actually names (`via pkg.Type.Method`), " +
+			"and `direct_only` leaves them out. Use it before changing a declaration. " + goTierNote,
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args GoSymbolArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken go_references")
 		defer stop()
@@ -86,12 +92,19 @@ func registerGoTools(srv *sdk.Server, cfg *Config) {
 		defer stop()
 		return handleGoUses(ctx, cfg, args)
 	})
+	if !canRename {
+		return
+	}
 	sdk.AddTool(srv, &sdk.Tool{
 		Name: "go_rename_plan",
 		Description: "Plan a rename of a Go symbol: the files and lines it would edit under every build configuration, " +
 			"the lines that still spell the old name in comments or prose, and (with `patch`) one merged diff. " +
 			"It writes nothing. A rename computed under one configuration leaves the files only another " +
-			"configuration compiles stale; this asks each and merges. " + goTierNote,
+			"configuration compiles stale; this computes each and merges. Renaming an interface method renames the " +
+			"methods of the types used as that interface; a concrete method tied to an interface is refused (rename " +
+			"the interface's). Before it answers, the patch is applied in memory and every configuration is " +
+			"type-checked again: a rename that would break the build, or make any identifier refer to a different " +
+			"declaration (a clash, a shadowed name), comes back with CONFLICT lines and no patch. " + goTierNote,
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args GoRenameArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken go_rename_plan")
 		defer stop()
@@ -116,7 +129,11 @@ func openGoTyped(cfg *Config, repoArg, outputMode string) (gt *engine.GoTyped, n
 	if isURL {
 		return nil, "", errorResult(outputMode, "the go_* tools need a local checkout: gopls builds the code, and ken does not build a repository it cloned from a URL")
 	}
-	gt, found, err := engine.OpenGoTyped(key, "")
+	open := engine.OpenGoTyped
+	if cfg.GoTyped != nil {
+		open = cfg.GoTyped.Open
+	}
+	gt, found, err := open(key, "")
 	if err != nil {
 		return nil, "", errorResult(outputMode, err.Error())
 	}
@@ -155,6 +172,11 @@ func handleGoLocations(ctx context.Context, cfg *Config, args GoSymbolArgs,
 	res, err := query(gt, ctx, sym)
 	if err != nil {
 		return goQueryError(args.Output, err), nil, nil
+	}
+	if args.DirectOnly {
+		if err := res.DirectOnly(); err != nil {
+			return errorResult(args.Output, "direct_only: "+err.Error()), nil, nil
+		}
 	}
 	limit := args.Max
 	if limit <= 0 {

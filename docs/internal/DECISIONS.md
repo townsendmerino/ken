@@ -67,6 +67,9 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-057](#adr-057-mcp-works-through-engine-superseding-adr-048s-rejection) | `mcp` works through `engine` (superseding ADR-048's rejection) | Accepted |
 | [ADR-058](#adr-058-a-db-chunks-freshness-header-is-shown-not-indexed) | A DB chunk's freshness header is shown, not indexed | Accepted |
 | [ADR-059](#adr-059-a-go-typed-tier-that-asks-gopls-once-per-build-configuration) | A Go typed tier that asks gopls once per build configuration | Accepted |
+| [ADR-060](#adr-060-the-go-typed-tier-asks-gopls-over-lsp-and-keeps-nothing-unless-told-to) | The Go typed tier asks gopls over LSP and keeps nothing unless told to (amends ADR-059) | Accepted |
+| [ADR-061](#adr-061-references-and-implementations-are-answered-in-process-with-gotypes-held-to-gopls-by-a-differential) | References and implementations are answered in process with go/types, held to gopls by a differential (amends ADR-060) | Accepted |
+| [ADR-062](#adr-062-a-rename-plan-is-computed-in-process-and-checked-by-making-it) | A rename plan is computed in process and checked by making it (amends ADR-061) | Accepted |
 
 ---
 
@@ -3182,7 +3185,7 @@ A new package, `internal/gotypes`, reached through `engine` (ADR-057), with thre
 
 ### Consequences
 - On goinfer the three queries reproduce the hand-merged figures in the table exactly (496 lines in 255 files; 64 implementations, 3 of them non-test; 59 files, and the merged patch passes `git apply --check`).
-- A merged query costs the sum of its configurations: about 35 s for the 496-line answer, against under a second from a resident server. Chosen for memory: nothing is held between queries. A resident mode is a later decision with its own measurement.
+- A merged query costs the sum of its configurations: about 35 s for the 496-line answer, against under a second from a resident server. Chosen for memory: nothing is held between queries. A resident mode is a later decision with its own measurement. *(ADR-060 made that measurement, and found the cost was the command line, not the server: the same query is 7 s with nothing held.)*
 - Running gopls builds code and runs the go command in that repository, with the server's permissions. The tools refuse URL clones for that reason.
 - The answer is only as wide as the configuration list. A configuration nobody listed (a third GOOS, a rarely used tag) is covered only where a declaration's own file needs it, which is what the `INCOMPLETE` line catches; references in files of an unlisted configuration are not.
 - Not done here: the three tools do not replace `references`/`callers` for Go, the structural index is not consulted, and nothing caches between calls.
@@ -3197,3 +3200,220 @@ Two additions from the first real use (an architecture survey of goinfer; `docs/
   - Measured on goinfer at `004d14023`, 2026-11-13: `backend/cuda` naming `decoder`, three configurations, 2.4 s wall in all; 650 identifiers (189 package-level, 90 of them from non-test code) on 7,103 lines. `decoder.Options` has 622 test lines there, the figure `go_references` grouped by package gives for `backend/cuda` (2,524 lines in all; `decoder` 51 non-test and 916 test). A regular expression over the same non-test files finds 115 names: the 25 extra are all mentions in comments.
   - The type check runs in ken's process, so the repository's `wrap` command covers `go list` and not the second or so of checking. A repository whose lock must cover that too is not served by this design; re-running ken itself under `wrap` would be the fix.
   - It is registered with the other typed tools (when gopls is on PATH), though it needs only `go`.
+
+---
+
+## ADR-060: The Go typed tier asks gopls over LSP and keeps nothing unless told to
+
+**Status:** Accepted (amends ADR-059)
+**Date:** 2026-11-13
+**Decided by:** Francis asked for the typed tier to be cheap enough to call inside an agent loop (tack, on a 16 GB Mac with a local model loaded), to be measured before a mechanism was chosen, to answer identically, and to hold nothing between queries by default. The numbers are in [`results/gotyped-resident-2026-11-13.md`](results/gotyped-resident-2026-11-13.md).
+
+### Context
+ADR-059 runs the gopls command line once per build configuration and throws the process away. On goinfer (3 configurations) that was 37 s for `ResidentForward.Forward` (497 lines), 263 s for `decoder.Options` (2,525 lines), 1.1 to 2.9 GB peak. ADR-059 deferred a resident mode "with its own measurement".
+
+The measurement found that the server was never the cost. `gopls references` on the command line calls `openFile` on every file that holds a reference, to print line:column, and each open makes gopls type-check that file's packages (979 files for `decoder.Options`). The same gopls answers the same `textDocument/references` request, opening only the declaration's file, in 1.5 to 2 s per configuration.
+
+### Decision
+1. **Ask gopls over its language-server protocol, not its command line.** `internal/gotypes/lsp.go` is a stdio JSON-RPC client of about 650 lines: `initialize`, `didOpen` of the declaration's file, `references` / `implementation` / `rename`, `didClose`, `shutdown`. The default for every typed query. One gopls per configuration, started lazily, stopped when the query ends, behind the repository's `wrap` command exactly as before. The command line stays as `Runner.UseCLI` / `ken go … --engine cli`, and is what a `Runner` with a test double `Run` still uses.
+2. **Opt-in, bounded, releasable state, through `engine.GoTypedOptions` (no environment read in `engine`):**
+   - `CacheBytes`: an in-memory cache of merged answers, least recently used out first. A hit costs 0.04 s on goinfer.
+   - `MaxResident` and `IdleTimeout`: gopls processes kept alive between queries, at most `MaxResident` across all repositories of the host (the least recently used idle one is stopped to make room), each stopped after `IdleTimeout` (default 5 minutes) without a request.
+   - A `GoTypedHost` owns both and is shared (`Workspace.GoTyped`, `Options.GoTypedHost`, `GoTypedHost.Open`). Zero options make it stateless. `Close` releases everything. `engine.Status.GoTyped` and the MCP `status` tool report the resident gopls processes with their RSS, and the cache with its size and traffic.
+   - `ken-mcp` reads `KEN_MCP_GO_RESIDENT` (default 0), `KEN_MCP_GO_IDLE` (5m) and `KEN_MCP_GO_CACHE_MB` (32) in `LoadConfig` (ADR-053). Francis chose the 32 MB cache as the one thing `ken-mcp` holds by default (it holds under 1 MB for the answers measured, and cannot return a stale one); `engine.GoTypedOptions{}` and the CLI still hold nothing, and resident gopls stays off.
+3. **Staleness is excluded by construction, not by notification.** Every use of the cache or of a resident gopls first scans the Go files and module files of the repository (a stat per file; about 40 ms for goinfer's 3,139 files, 67 ms with the `.md` files a rename plan reads) and compares:
+   - the cache stores a fingerprint of the scan and returns an answer only if the tree still has it. Files modified within 2 s of the scan are compared by content, so an edit that kept the size and mtime inside a coarse timestamp tick is still seen. An answer is not stored if the tree changed while it was being computed. A rename plan's fingerprint also covers the `.md` files and `testdata` it reads for leftover mentions.
+   - a resident gopls is told about the changed, created and deleted files with `workspace/didChangeWatchedFiles` before the request.
+   - The Workspace's file watcher calls `GoTypedHost.Invalidate` on every flush: the cache drops the repository's answers and idle gopls processes reload at once, so the next query pays less. It is an optimisation; correctness never depends on it. The tests drive both paths (below).
+4. **A resident process and `wrap`.** The timing lock must cover the heavy work and must not be held by something that is merely sitting there. So a pooled gopls is **not** started under `wrap` (it would hold the lock for its whole life, and refuse every timed run). Each request instead runs the prefix around a helper, `wrap sh -c 'echo ready; exec cat'`, waits for `ready` (the wrapper has the lock), does its work, and closes the helper's stdin to release. The first request of a server holds the lock through its start and workspace load. Verified with the real `timing_lock.py` on goinfer: with three pooled gopls processes idle, `status` printed `free` and a timed exclusive run started. Consequences, stated: (a) a gopls does some background work after an edit, and the watcher hook starts that early, both outside the lock; (b) idle servers hold memory but no CPU while a timed run goes on; (c) the helper needs `sh`, and where there is none (Windows) a pooled request falls back to a one-shot wrapped gopls; (d) `go_uses` is unchanged: `go list` through `wrap`, the type check in this process, not covered (ADR-059 addendum).
+5. **Not used:** `gopls -remote=auto`. Checked: it fails from this shell (`dialing remote: dial unix …/gopls-…-daemon…: no such file or directory`; the socket never appears).
+
+### Memory held between queries
+| | held | bound |
+|---|--:|---|
+| default (`GoTypedOptions{}`, `ken go`) | **0** | |
+| default for `ken-mcp` | answers only: under 1 MB in use, 32 MB at most | `KEN_MCP_GO_CACHE_MB` (0 = none) |
+| answer cache | 0.1 MB (a 497-line answer) to 0.5 MB (2,525 lines) | `CacheBytes`; an answer bigger than the whole cache is not stored |
+| resident gopls | 0.6 to 0.9 GB each after the first query, 0.9 to 1.4 GB after several; **2.7 to 3.1 GB for goinfer's three configurations, 3.3 to 4.2 GB after edits** | `MaxResident` and `IdleTimeout`; not a hard bound on a process's size: set `GOMEMLIMIT` in a configuration's `env` for a soft one (−18 % in one test) |
+
+Nothing here holds more than ½ GB by default. Resident gopls is far past it, and is off.
+
+### Results (goinfer, 3 configurations; ±20 % noise)
+| | before | after, nothing held | with `CacheBytes` | with `MaxResident` ≥ 3 |
+|---|--:|--:|--:|--:|
+| `Forward`, first | 37.4 s | 7.0 s | 7.0 s | 5.8 s |
+| `Forward`, repeat | 28.3 s | 7.0 s | **0.04 s** | 1.5 s |
+| `decoder.Options`, first | 263 s | 6.7 s | 6.9 s | |
+| `decoder.Options`, repeat | 257 s | 6.7 s | **0.04 s** | 0.8 s |
+| a different symbol, tree unchanged | | 6.7 s | 6.7 s | **0.6 to 0.8 s** |
+| after an edit | | 6.6 s | 6.6 s | 2.1 to 3.1 s |
+| peak RSS | 2.9 GB | 1.0 GB | 1.0 GB | 2.7 to 4.2 GB held |
+
+The goal "a repeat or second query on an unchanged tree in about a second" is met in two different ways at two different prices: an identical repeat for under a megabyte (cache), a different query for about 3 GB (resident). The first query is 5× to 40× cheaper than before at no cost in memory held.
+
+### Identical answers
+The ADR-059 regression table, re-run on the new default engine at `d22c2c0c4`: references 497 lines in 255 files and 2,525 in 979, hit for hit (file, line, configurations, enclosing function, text); implementations 64, of which 3 non-test; rename 59 files, no conflicts, mentions equal and the merged patch byte-identical; no `INCOMPLETE`. The `INCOMPLETE` behaviour is unchanged: a request that fails, or a declaration no configuration compiles, still sets it (tests with a fake server, and the existing fake-CLI tests). A server that dies mid-request is replaced once.
+
+### Staleness tests
+`internal/gotypes/lsp_test.go` drives a fake server that, like gopls, reads the tree at start and again only for files it is told about, so an unannounced edit gets the old answer. `engine/gotyped_test.go` drives a real gopls through a Workspace with its watcher running: query, repeat (from memory), edit and query at once (before the watcher can have flushed), edit and wait for the watcher's flush and observe the cache dropped by the watcher's hook, then query. Mutation-tested: making the cache ignore a fingerprint mismatch, not sending `didChangeWatchedFiles`, not dropping on the watcher's hook, and removing the 2 s window each fail a named test.
+
+### Rejected
+- **Answer in this process with `go/types` (candidate 2).** *(Reversed by ADR-061: Francis asked for it, and porting gopls's search instead of approximating it closed the gap.)* Fast (2.7 s per configuration, 420 to 460 MB peak, 285 to 340 MB if held) and exact on 4,257 of 4,257 sampled types, functions, fields, constants and variables. On 1,143 methods and interface methods it differed from gopls on 22 (gopls reports more), and on 1 of 28 implementation queries. gopls's notion of which methods "correspond" is a version-specific heuristic (fingerprint-based, workspace-wide, with a different rule inside the declaring package), so a re-derivation can be right on a sample and still not be gopls. The brief said identical.
+- **A resident gopls by default.** 2.7 to 3.1 GB for three configurations. Offered, off.
+- **A cap below the number of configurations** (1 or 2 residents for 3). Every query evicts and restarts: 6.0 s, the same as nothing held, with 0.9 to 1.9 GB sitting there. The documentation says to set the cap to the number of configurations or not at all.
+- **Skipping a configuration whose compiled files equal another's (candidate 4).** On goinfer no pair is equal for either symbol (20 to 30 of 106 packages differ). Left out; it costs a `go list` per configuration to find out.
+- **A cache keyed per configuration on the files that configuration compiles.** An edit forces a gopls round anyway, and per-configuration keys need the build constraints of every file (more reads than the scan costs). The whole-tree key is simple and sound; a finer one is a follow-up if edits between queries turn out common and configurations independent.
+- **Parallel configurations.** Memory would multiply (3 × 1 GB) for a 2× gain; not done.
+- **Tying the cache to the watcher alone.** A query a moment after an edit would precede the watcher's debounce.
+
+### Consequences
+- A typed query now starts a gopls per configuration and nothing else: 7 s for a merged answer on goinfer, 1.5 to 2 s per configuration, 1 GB at its peak.
+- A host that opts in holds memory and says how much in `status`; closing the Workspace or the host, or the idle timeout, gives it back.
+- The first answer of a pooled server under `wrap` takes the lock for its whole start and load; later requests take it for as long as they run.
+- gopls versions: the LSP requests used are the standard ones, and gopls answers them with the same server code as the command line (checked for v0.23.0). `ken go … --engine cli` is the way back if a future gopls diverges.
+- Not done: incremental per-package invalidation; sharing a resident gopls between Workspaces of different repositories beyond the global `MaxResident` cap; reporting a resident gopls's children (only the gopls process's RSS is counted; `go list` children come and go).
+
+---
+
+## ADR-061: References and implementations are answered in process with go/types, held to gopls by a differential
+
+**Status:** Accepted (amends ADR-060)
+**Date:** 2026-11-13
+**Decided by:** Francis, on reading ADR-060's comparison: "no hybrid, just go/types please ... let's make it 1) accurate, then 2) as fast as possible." The measurements are in [`results/gotyped-inprocess-2026-11-13.md`](results/gotyped-inprocess-2026-11-13.md).
+
+### Context
+ADR-060 rejected a go/types engine because its prototype agreed with gopls on 99.6 % of sampled declarations and the brief said identical. Every difference was a method: the prototype approximated which methods "correspond" through interfaces. gopls's rule is not a property of the language; it is an algorithm with an index behind it, and it can be read.
+
+### Decision
+1. **A third engine, `types`, and the default for references and implementations.** The go command lists the workspace (`go list -e -deps -test -compiled`, one record per package *and test variant*), the standard library's go/types checks every package from source, and the search is a port of gopls v0.23.0's, step for step:
+   - `internal/golang/references.go`: the declaring package's variants searched by type, with method correspondence in either direction; for an exported object with an object path, the importers (direct for a package-level object, transitive for a field or method), restricted to workspace packages; for a method, every workspace type whose method set is related to its receiver's, their methods as further targets and their importers as further scope;
+   - `internal/cache/xrefs`: what the cross-package index holds (exported identifiers that use another package's object, when that object has an object path);
+   - `internal/cache/methodsets` and `internal/util/fingerprint`: method sets compared by name and signature fingerprint, with unification where a signature has a type parameter or an anonymous interface;
+   - `go/types/objectpath`: which objects have a path (package-level ones, and what is reached from them without entering a function body);
+   - `implementation.go`: by type inside the declaring package (function-local types included), by name everywhere else;
+   - package variants as gopls keeps them: `p`, `p [p.test]`, `p_test [p.test]` searched; `q [p.test]` imported, never searched.
+   `internal/gotypes/tload.go`, `tmsets.go`, `trefs.go`. No gopls is needed for either query.
+2. **"Accurate" means the lines gopls returns, and then the uses gopls misses that are plainly the same declaration.** `Runner.GoplsExact` gives gopls's lines exactly; that mode is what the differential compares, so the port stays measured. The default adds one thing (Francis, 2026-11-13: "i'm ok if we can do a better job than gopls"): a field of a generic type used through an instantiation in another package (`c.Box[int]{Item: 1}`, `bx.Item`). The type checker gives an instantiated field its own object; gopls's cross-package index looks that object up, finds no path for it, and drops the use, though gopls's own rename edits those lines. Here it is mapped to the declared field. `TestTypesEngine_goesBeyondGoplsOnlyForGenericFields` and the differential both check that the default answer contains the exact one and adds lines for nothing but such fields. On goinfer it adds none (27,217 + 31,524 + 29,405 declarations, 0 extra lines): goinfer has no such use.
+   Not widened, because more is not plainly better there: **which methods count as the same through an interface.** gopls counts a call through a standard-library or dependency interface (`err.Error()`, `c.Close()`) as a use of a method that satisfies it only inside the method's own package, and through an anonymous interface or a function-local type not across packages at all. Counting them everywhere would put every `err.Error()` of the repository under every `Error` method; counting them nowhere would return less than gopls. Either is a change of what a "reference" means, not a repair of a miss, and is left as gopls has it. (Where gopls's matching is looser than the type system, two different anonymous interfaces in a signature count as equal, this engine is as loose.)
+   **And each hit says how it is one.** A references answer for a method mixes two things gopls does not tell apart: lines that name the queried declaration, and lines that name another method corresponding to it through an interface. The engine knows which is which as it searches, so `Hit.Through` carries the other method's name (`cuda.cudaResident.Forward`, `error.Error`), `Result.Direct` counts the rest, and `DirectOnly` (`direct_only`, `--direct`) drops the marked ones. For `ResidentForward.Forward` on goinfer: 497 lines, 177 through the interface itself, 320 on implementing types. The lines are unchanged; only the label is new. Answers from gopls (`lsp`, `cli`) are not labelled.
+3. **The gate is a differential, kept in the tree.** `TestDifferentialAgainstGopls` (off unless `KEN_GOTYPES_DIFF_REPO` is set) asks both engines about every declaration of a repository under every configuration; `TestTypesEngine_matchesGoplsOnTheTrickyModule` does the same on a module built from the awkward cases, whenever gopls is installed; `TestTypesEngine_answersWithoutGopls` pins those answers where it is not.
+4. **A rename plan stays gopls's** (over LSP, ADR-060). Its edits follow rules of their own, which are not ported. `go_rename_plan` is offered when gopls is on PATH; the other three tools need only `go`. *(Reversed by ADR-062: the rename is ported too, and checked.)*
+5. **Then speed, each step exact:**
+   - packages are checked on every processor, and a file is parsed once for all the variants that compile it;
+   - a plain package whose test variant exists is checked for declarations only: the variant holds every file of it and imports what it imports, so each identifier means the same there and everything computed from its types only grows; the union gopls takes of the two is the variant's answer. The exception is a test file that declares a method (it can change what a selector in a non-test file resolves to); then both are checked in full;
+   - as each package finishes, its syntax and `types.Info` are replaced by tables (declaring positions, uses by name, type declarations), which are a fraction of their size;
+   - the go command lists all configurations at once (a subprocess each); the type-checks run one configuration at a time unless `Parallel` says more, so one program is in memory;
+   - `FindDecls` and the hit annotation use every processor (they were two thirds of a resident query).
+6. **Resident programs, on unless turned off, refreshed after an edit.** Type-checked programs are kept between queries (`ProgramCache`: bounded by count, idle timeout, reported with their memory, dropped by the watcher's hook and by `Close`). Francis made this the default on 2026-11-13, having seen the figures (0.65 GB for goinfer's three configurations, against 0.1 to 0.2 s for any query on an unchanged tree): the zero `GoTypedOptions` keeps as many programs as the opened repositories have build configurations, up to 8, for 5 idle minutes; `MaxResident: -1`, or `KEN_MCP_GO_RESIDENT=0`, keeps none. `engine.OpenGoTyped` and the `ken go` command line, which ask once and exit, keep nothing. No gopls is kept unless `MaxResident` is set above zero with the lsp engine. Each use scans the tree first, as ADR-060's cache does. When the tree changed, the program is refreshed if no file appeared or disappeared, go.mod and go.work are untouched, and every changed file kept its package clause, build constraints and imports (then the go command's list cannot have changed): the packages compiling a changed file and their importers are checked again, the rest keep their types and tables, and the listing is reused. An unchanged file of a re-checked package is parsed again at its old position in the file set, so that positions other packages hold for its declarations stay true. Otherwise it is loaded afresh. `TestRefresh_equalsAFreshLoad` holds a refreshed program to a fresh load on every declaration after each of a chain of edits.
+7. **`wrap`.** The go command runs behind the wrap command, as before. The type-check and the refresh run in this process, so the lock is taken for them through the helper of ADR-060 (`wrap sh -c 'echo ready; exec cat'`), after the listing and never around it. A resident program holds memory and no lock.
+8. **Staleness, widened.** The tree scan behind every remembered answer, resident gopls and resident program now covers the whole workspace: the go.work modules found by walking up from the repository, and the directories go.mod and go.work replace modules with. ADR-060's scan stopped at the repository, so an edit in a sibling module of the same workspace was not seen; that was a bug in what shipped on the branch, fixed here.
+9. **Knobs.** `Runner.Engine` (`types`, `lsp`, `cli`) replaces `UseCLI`; `GoTypedOptions.Engine` and `Parallel`; `MaxResident` now counts per-configuration backends of either kind. `ken go --engine`, `--parallel`; `KEN_MCP_GO_ENGINE` (default `types`), `KEN_MCP_GO_PARALLEL` (default 1).
+
+### Results (goinfer, 3 configurations)
+Accuracy: every declaration of the default configuration (27,217 declarations, 33,574 questions) with the first port, a 1-in-17 sample of all three configurations (6,368 questions) with the speed work in, and the tricky module: no difference. Refresh against a fresh load: 22,020 comparisons, no difference. A full run of the final engine was started and stopped by hand before it finished, when the work moved to ADR-062: it had compared the first 6,356 declarations of `darwin-gpu` and 5,256 of `linux-cuda` (1,546 in order, then 3,710 of a 1-in-6 sample), with no difference. The final engine therefore has samples of all three configurations behind it and no full pass of any; the record says how to run one.
+
+| | first query | different symbol, tree unchanged | after an edit | held | peak |
+|---|--:|--:|--:|--:|--:|
+| gopls over LSP (ADR-060) | 8.3 s | 6.9 s | 6.6 s | 0 | 1.1 GB |
+| go/types, nothing held (`ken go`, `MaxResident: -1`) | 5.3 s | 4.8 s | 4.7 s | 0 | 0.8 GB |
+| go/types, 3 programs resident (the default for a Workspace and `ken-mcp`) | 6.4 s | 0.1 to 0.2 s | 1.9 s (hub file), 0.5 to 2.2 s (leaf, test) under heavy load | 0.65 GB | 1.4 GB |
+| gopls resident ×3 (ADR-060) | 5.8 s | 0.6 to 0.8 s | 2.1 to 3.1 s | 2.7 to 3.1 GB | |
+
+An identical repeat is 0.04 s from the answer cache under either engine. The machine was loaded while these were taken (see the record).
+
+### Consequences
+- The typed tier no longer needs gopls except for rename plans, and its default path is the fastest and the smallest measured.
+- Its answers are gopls v0.23.0's by rule, not by running gopls. A gopls that changes its rules would differ; `--engine lsp` and the differential test are how that is seen and what to fall back on.
+- A resident program is cheaper to hold than a resident gopls by a factor of four, and the one mode that makes a different second query take a fraction of a second. It is on by default: a long-lived host that has answered a typed query holds a few hundred megabytes for five idle minutes.
+- The default answer can hold lines gopls's does not (decision 2), so it can differ from an editor's "find references" and from `--engine lsp`; `GoplsExact` is the switch back.
+- The resident figures are of live heap at load. The Go runtime returns freed memory to the system late; the cache asks for it back after a load and shortly after a refresh.
+
+### Not done, and why
+- **Dependencies from export data** (`go list -export`): it would skip parsing and checking some 400 dependency packages, about a third of a load, but it compiles them first (tens of seconds once per configuration) and fails where a dependency does not compile.
+- **Bodies only for the packages a query can reach.** For a symbol with few importers most packages need no bodies; it would cut a cold load roughly in half for those, and a resident program would then need them anyway.
+- **Sharing packages between configurations** with the same GOOS and GOARCH (`default` and `darwin-gpu` compile the same files in 86 of 106 packages).
+- **A rename plan in process.** *(Done: ADR-062.)*
+- **A wider notion of method correspondence** than gopls's (decision 2).
+
+### Limits
+- One repository and one fixture. goinfer has no package of its own that imports "C"; such a package is checked from the go command's cgo-processed files, and that path has not been compared with gopls.
+- Windows has not been run.
+
+---
+
+## ADR-062: A rename plan is computed in process and checked by making it
+
+**Status:** Accepted (amends ADR-061)
+**Date:** 2026-11-13
+**Decided by:** Francis: "i would like to get go_rename_plan off of gopls", then "Yes, port rename", and of the check: "after computing a plan, apply it in memory and type-check again. If anything newly fails, or any identifier now resolves to something else, report a conflict. That is a stronger guarantee than gopls gives." The measurements are in [`results/gotyped-rename-2026-11-13.md`](results/gotyped-rename-2026-11-13.md).
+
+### Context
+ADR-061 left one tool asking gopls: `go_rename_plan`. A rename has two halves. One is *what to edit*: gopls's answer is a set of rules (which identifiers, which comments, what else must be renamed with the name asked for), and those can be ported and held to gopls by a differential, as the search was. The other is *whether the edit is safe*: gopls decides that before editing, by rules about scopes and selectors (`rename_check.go`). Rules of that kind are an approximation of a question that can be asked directly once the program is in this process: apply the edit, type-check again, and see whether anything but the name changed.
+
+### Decision
+1. **The edits are gopls's, ported** (`internal/gotypes/trename.go`, following `internal/golang/rename.go` of gopls v0.23.0): every identifier that defines or uses the object, an instantiation of it included; the old name as a word in each renamed declaration's doc comment; doc links (`[Name]`, `[pkg.Type.Method]`) in package and declaration comments; a type together with the embedded fields named after it; a method of an interface together with every method tied to it by an assignment of a type to an interface in the packages searched. Which methods are tied is found as gopls finds it, with `golang.org/x/tools/refactor/satisfy`, adapted into `tsatisfy.go`. A concrete method tied to an interface method is refused when the rename starts from it, with gopls's advice (rename the interface's method). The packages searched are gopls's: the widest package holding the declaration for a name no other package can use; for an exported one, every package compiling its file and their importers (direct for a package-level function, variable or constant; through every chain for a type, field or method), never a package recompiled for another package's test.
+2. **Seven departures, each where gopls's patch does not compile or is not what was asked.** The first three were found by the differential, the others by reading gopls's source; the differential now shows each on a fixture or on goinfer (decision 5), with gopls's patch failing the check of decision 3 where it has one.
+   - *Late consequences.* gopls visits the packages once, dependencies first; a method found to be tied to the renamed one in a late package is not renamed in the packages already visited ([golang/go#58461](https://go.dev/issue/58461), a TODO in gopls's source). Here the packages are revisited until nothing new is found, and the search widens to the importers of each newly found declaration.
+   - *Whose intention.* Renaming an interface's method is taken, by gopls and here, as the intention to rename the methods tied to it; renaming a concrete method that an interface requires is refused. gopls decides which case it is in package by package, by whether an interface method is among the targets *that package* sees. A rename started at `serveapp.modelHandle.M` reaches `(*decoder.Model).M`, and through it `engine.mediaModel.M`, in a package that cannot see `modelHandle`: there it looks like a rename of a concrete method. Here the intention is decided once, by where the rename started, and holds as far as the ties go.
+   - *Generic types.* gopls compares methods as objects, so a tie through an instantiation (`Box[int]` assigned to `Getter[int]`) is missed: the interface's method is renamed without the type's, or the type's is renamed where it should be refused. Here methods are compared as declarations.
+   - *Constraints.* A type argument has to have the methods of its type parameter's constraint, as a value assigned to an interface has to have the interface's. gopls's finder sees that when a value is passed to a generic function, and not when the function or type is only instantiated (`Zero[Heavy]()`, `Box[Heavy]`): it renames the constraint's method and leaves the type's, and the instantiation no longer compiles. Here an instantiation ties them.
+   - *Outside the workspace.* A rename that would have to rename a declaration the workspace does not own (an interface method tied to `(*os.File).Read`) is refused, naming it. gopls edits the workspace's calls to it.
+   - *Aliases.* An embedded field declared through an alias (`type A = B; struct{ A }`) takes the alias's name; gopls renames `B` along with `A`.
+   - *Type errors.* gopls refuses to rename a method when a package it looks at has a type error. Two of goinfer's three configurations always have some (a dependency that needs cgo, under `CGO_ENABLED=0`). Here the rename goes ahead, the configuration's run is marked `partial`, and the note says what that costs: an identifier inside code that does not type-check is not renamed, and a tie made only by such code is not seen.
+3. **Safety is decided by making the rename** (`tverify.go`). gopls's conflict rules are not ported. The merged patch is applied in memory, what it touches is type-checked again, and the program after is compared with the program before:
+   - nothing changed but identifiers and comments (the two sources scan to the same tokens);
+   - there is no type error that was not there (a name clash, an importer still spelling the old name, a type that no longer implements an interface it is assigned to, a name unexported under a user in another package, a conversion between two struct types that no longer have the same fields, a type argument that no longer satisfies its constraint). The last is one the type checker calls *soft*, with unused variables and imports, and the loader has always dropped soft errors; that kind is now kept, in every load;
+   - every identifier refers to the declaration it referred to (so nothing became shadowed or captured);
+   - every declared type has the fields and methods it had, each found by selection as before (none hidden behind the new name, merged with it, or made ambiguous by it: with no use of the lost member in sight, that changes no identifier and compiles). And no name the patch takes away comes to select another *method*: where a type's own method hid an embedded type's method of the same name, renaming the type's own would leave the embedded one answering wherever an interface asks for that name. It may come to select another *field* (goinfer has structs whose own field hides an embedded struct's field of the same name): every use of the name was a use of the declaration that hid it, so nothing written changes;
+   - every type assertion that could succeed still can (the one place a method rename can break interface satisfaction and leave the code compiling): the two methods each such assertion ties keep one name.
+
+   A difference is a conflict, listed with its file and line and the configurations it holds under. Two cases no comparison can show are refused by name: renaming a function to or from `init`, and `main` in package main (gopls renames both; the result type-checks and is a program without its entry point).
+4. **One patch, checked under every configuration.** Each configuration computes its rename; the edits are merged line by line as before (ADR-059); then the *merged* patch is what each configuration applies and checks, so an edit one configuration contributes to a file another also compiles is checked under both. `RenamePlan.Verified` is true only when every listed configuration that compiles a declaration renamed it and the check found nothing; a plan with an `INCOMPLETE` line is not called checked. When the rename is refused under any configuration, or the check finds a difference, `Refused` is set, `Conflicts` says why, and **the plan carries no patch**: a patch known to change the program is not handed to an agent to apply. `Files` still lists where it would have edited.
+5. **The gate is a differential, kept in the tree.** `TestRenameDifferentialAgainstGopls` (off unless `KEN_GOTYPES_RENAME_REPO` is set) renames every declaration a symbol can name to a fresh name, here and with gopls over LSP, and compares the files the two would produce. Every patch goes through the check of decision 3: the ones the two agree on, and both versions where they differ. A difference must fall in a class this ADR names (this engine's patch has every line of gopls's and more, passes the check, and gopls's fails it; one of the two refuses and the other's patch fares as that implies; the two agree on a patch the check refuses), and anything else fails the test. `TestTypesRename_matchesGoplsOnTheTrickyModule` and `…OnTheRenameModule` run it on fixtures whenever gopls is installed; `TestTypesRename_plansAndChecks`, `TestRenameCheck_findsWhatAWrongPatchChanges`, `TestTypesRename_mergesConfigurationsAndChecksThePatchUnderEach` and `TestTypesRename_refusesWhatOnlyTheTestBuildResolves` need only `go`.
+6. **It runs on the program a query uses, and checks by refreshing it.** The first version loaded a program of its own for each pass, with syntax and full type information for every package searched: two type-checks of the configuration, about 3.6 s each on goinfer. Francis asked for it to be faster. What it does now:
+   - *The edits come from the tables* a program loaded for searching already holds (ADR-061): which object each identifier uses, by name, and which each declares, by position. A file is read and parsed again only for its comments (the doc comment of a renamed declaration; a file that spells the end of a doc link). No package is type-checked to compute a rename, with one exception.
+   - *Ties are found on first use.* Which methods an assignment ties together needs the type of every expression, which the tables do not keep. Recording it while loading was measured: 40 % on every load (0.85 s to 1.20 s), for one kind of rename. So a package is type-checked once more, in full, against the dependencies the program already has, the first time a method's rename needs its ties (`tties.go`). A tie names its two methods by where they are declared, so it outlives the objects of that type-check; it is kept with the package until the package or something it imports changes, and carried across a refresh otherwise. One program finds ties at a time.
+   - *The check is a refresh.* The patched files' contents are handed to the refresh of ADR-061 in place of the files on disk: the packages that compile a patched file and the packages that import those are type-checked again, and nothing else. The result is compared with the program and thrown away; what it parsed into the shared file set is taken out again.
+   - *The comparison reads only the names the patch changes.* An identifier spelled with any other name resolves by declarations and members of that other name, none of which the patch renamed; it can come to mean something else only downstream of an identifier that is spelled with a changed name and already means something else, or of a new type error, and either is reported where it starts.
+   - *A patch that renames no field and no method is checked narrowly.* Such a patch can change what an identifier means only where one is spelled with the old or the new name: scopes hold names, and a selector or a composite literal names its member. So only the function bodies that spell one are type-checked (the others are emptied before parsing, at the places the held program remembers), and only the packages that spell one, with the packages between two of those in the import graph, are type-checked again. A field or a method is another matter: struct types are compared and converted by their fields' names, and interfaces satisfied by methods' names, in code that names neither (goinfer converts between two struct types with the same fields, and a rename of a field of one breaks that conversion in a function that does not mention the field). A type that is embedded somewhere renames a field too. Those patches are checked with every body of every package they reach, one configuration at a time unless `Parallel` says more. The fixtures and the differential check every patch both ways and require the same verdict (`KEN_GOTYPES_RENAME_BOTH=1`).
+   - *One rule of ADR-061 is tightened.* A plain package whose test variant holds its files was checked for declarations only unless a test file declares a method. It is now also checked in full when a test file declares, at package level, a name the universe scope has: non-test code that calls `min` then means the builtin when built and the test's function when tested, and a rename of that function edits the non-test file, which only the plain package's own check can show to be broken.
+   - *Configurations run side by side* when their programs are already held; a program that has to be loaded is loaded as `Parallel` says, and all are held until the check is done. The go command runs behind `wrap`; the type-checks (a load, a refresh, a method's ties) take its lock, and reading tables does not.
+7. **Surfaces.** `go_rename_plan` and `ken go rename-plan` need only `go`. The `lsp` and `cli` engines still ask gopls for a rename plan, and such a plan is not checked. `go_rename_plan` is withheld only when the host was configured with one of those engines and gopls is not on PATH. The summary says `checked: ...`, or `NOT SAFE as computed: no patch is given` above the `CONFLICT` lines; `PARTIAL` lines carry decision 2's note. Leftover mentions now include assembly files, where a Go function's name is spelled and no type checker reads it.
+8. **Attribution.** `tsatisfy.go` is an adapted copy of an x/tools file and keeps its copyright line; `tmsets.go`, `trefs.go` and `trename.go` port or follow gopls functions. `NOTICE` carries the Go Authors' license and names the four files. No module dependency is added.
+
+### Results (goinfer, 3 configurations)
+Against gopls, with every patch applied in memory and checked: 11,136 renames (the first 7,716 declarations of `default`, two 1-in-40 samples across it, and the first 1,129 and 929 of every third declaration of `darwin-gpu` and `linux-cuda`). 10,811 patches are the same and pass the check; 280 renames are refused by both (a concrete method an interface requires); 38 are a `main` or an `init`, which gopls renames; in 4 this engine's patch has more lines and passes while gopls's does not compile (an interface method with an implementation in a package gopls had already visited); 2 are the same patch from both, which the check refuses (a field of a struct that `decoder/sampling.go` converts to a struct with the same fields: the conversion stops compiling). None is unexplained. The narrow check and the full check gave the same verdict on every patch of the two fixtures and of two goinfer samples (681 renames to a clashing name, 681 to a fresh one).
+
+| plan | first version of this ADR's engine | now, programs held | now, command line | gopls engine, command line |
+|---|--:|--:|--:|--:|
+| `decoder.Options`, a type, 2,527 lines in 980 files | about 10 s | 0.6 s | 5.2 s | 8.0 s |
+| `decoder.NewModel`, a function, 14 lines in 9 files | about 10 s | 0.3 s | 4.0 s | 7.6 s |
+| `Options.Backend`, a field, 1,142 lines in 582 files | about 10 s | 1.6 to 1.7 s | 5.3 s | 7.3 s |
+| `ResidentForward.Forward`, an interface method, 518 lines in 264 files | about 11 s | 3.8 s the first time, 1.6 s after | 7.7 s | 7.6 s, for 86 lines: it refuses under two configurations |
+
+With the three programs held the process is 1.35 GB after loading them (0.65 GB live) and reached 2.3 GB over a session with two field and two method renames. From the command line a plan peaks at 1.4 to 2.0 GB.
+
+### Consequences
+- The Go typed tier needs no gopls for anything. gopls remains a cross-check (`--engine lsp`) and the other side of the differentials.
+- A plan marked checked is a stronger statement than gopls's: not "no rule objected" but "this patch was applied and the program is the same but for the name", under every listed configuration.
+- A rename that is refused gives no patch at all, where the gopls engines gave whatever the configurations that did not fail produced.
+- Edits outside the repository (a sibling module of a go.work workspace) cannot be in a patch relative to the repository root. They were dropped silently; now the plan says so, and the check then fails on the sibling's stale uses, so such a rename is refused.
+- The edits can differ from an editor's rename (gopls) in the seven ways of decision 2.
+- A rename on a host that holds its programs costs what an edit of the same files costs it, or less: under a second for a type, function, variable or constant, one to two seconds for a field or method on goinfer. While a field's or method's check runs the process holds about 0.7 GB more, one configuration at a time.
+- The loader now keeps one kind of error it used to drop (a type argument that does not satisfy its constraint), so a configuration with such an error counts it, and says so, in every answer.
+
+### Not done, and why
+- **gopls's conflict rules as a second opinion.** They would add refusals the check does not make only where gopls is more conservative than the language; the clash comparison in the record found none that was a real change.
+- **Renaming what a symbol argument cannot name**: local variables, parameters, labels, import names, package names. `FindDecls` names package-level declarations, methods, fields and interface methods.
+- **A full pass of the comparison.** It was started on every declaration of all three configurations and stopped by hand (Francis: "do we really need to test that many??"). It does not: what a comparison finds depends on the kinds of declaration it meets, and every class in the results was met within the first few hundred renames of a sample. The test is in the tree for whoever wants one.
+- **Renaming two struct types' fields together.** A conversion between two struct types ties their fields as an assignment to an interface ties methods; the rename could follow that tie as it follows the other. It refuses instead, and says which conversion breaks.
+- **A narrow check for fields and methods.** It would need every way the language compares types by member names to be found by the finder, and then the safety of the check would rest on that list being complete; the full check does not depend on it, and found the two the finder lacked (decision 2, constraints; decision 3, soft errors).
+- **Holding one program at a time from the command line.** `ken go rename-plan` keeps the three programs until the check is done, and peaks higher than before (1.4 to 2.0 GB on goinfer against 1.3 GB); a host that holds them anyway pays nothing for it.
+- **Warning when a method rename ends a satisfaction nothing in the program states**: a `String` method renamed stops the type being a `fmt.Stringer`, which only `fmt` knows at run time. The method-set index of ADR-061 could list the interfaces a type satisfies through the renamed method; not built.
+
+### Limits
+- The guarantee is about what a type checker sees. Reflection, struct tags, names in strings and comments (the plan lists the leftover mentions), assembly, `//go:linkname`, and interfaces satisfied only at run time are outside it.
+- The member comparison covers declared (named) types, not anonymous struct or interface types written in place.
+- A workspace package that imports "C" is type-checked from files the go command generates; an edit that would fall in one is left out and reported, and the check then refuses. That path has not been exercised on a real cgo package.
+- One repository, two fixtures, one gopls version. Windows has not been run.
+

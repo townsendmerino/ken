@@ -13,13 +13,14 @@ import (
 	"github.com/townsendmerino/ken/engine"
 )
 
-const goUsage = `Usage: ken go refs        <repo> <symbol> [--json] [--max N] [--group-by K] [--config F]
+const goUsage = `Usage: ken go refs        <repo> <symbol> [--json] [--max N] [--group-by K] [--direct] [--config F]
        ken go impls       <repo> <symbol> [--json] [--max N] [--group-by K]
        ken go uses        <repo> <importer> <imported> [--json] [--max N]
        ken go rename-plan <repo> <symbol> <new-name> [--json] [--patch FILE]
 
-Type-resolved answers for a Go repository, from gopls, merged over the build
-configurations listed in <repo>/` + engine.GoConfigFile + ` (without the file: the host default only).
+Type-resolved answers for a Go repository, merged over the build configurations
+listed in <repo>/` + engine.GoConfigFile + ` (without the file: the host default only).
+All four are answered in process with go/types: no gopls is needed.
 
   symbol       Name, Type.Member, pkg.Name, pkg.Type.Member, or dir/sub.Name
   refs         every line that refers to the symbol under any configuration
@@ -29,11 +30,25 @@ configurations listed in <repo>/` + engine.GoConfigFile + ` (without the file: t
                directory (backend/cuda), the tail of one, or a package name;
                <imported> may also be an import path. Runs go, not gopls
   rename-plan  what a rename would edit; writes nothing to the repository.
-               --patch FILE saves the merged diff for 'git apply'
+               --patch FILE saves the merged diff for 'git apply'. The patch is
+               applied in memory first and every configuration type-checked again:
+               a rename that would break the build or change what an identifier
+               refers to is reported as CONFLICT lines, with no patch
   --max N      cap the printed lines (default 200; 0 = all)
   --group-by K counts instead of lines, one row per K: package, dir or file,
                each split into non-test and test (_test.go) lines
+  --direct     refs only: leave out the lines that name another method which
+               corresponds to this one through an interface (a call through an
+               interface it satisfies, or on a type that implements it). Those lines
+               are marked "via" otherwise. Needs the types engine
   --config F   read the build configurations from F instead of the repository
+  --engine E   what answers refs, impls and rename-plan: types (default; in this
+               process with go/types, by gopls's own rules, no gopls needed), lsp
+               (gopls over its language-server protocol, one process per
+               configuration), or cli (the gopls command line, one process per
+               question: much slower). Only types checks a rename plan
+  --parallel N type-check N configurations at once with --engine types (default 1:
+               one program in memory at a time; more is faster and holds that many)
 
 Exit status: 0 complete, 3 the answer is a lower bound (see INCOMPLETE lines),
 1 on error, 2 on usage.
@@ -45,18 +60,23 @@ func cmdGo(args []string) int {
 		return 0
 	}
 	var (
-		pos     []string
-		jsonOut bool
-		patch   string
-		cfgFile string
-		groupBy string
-		maxN    = 200
+		pos        []string
+		jsonOut    bool
+		patch      string
+		cfgFile    string
+		groupBy    string
+		engineName string
+		directOnly bool
+		parallel   int
+		maxN       = 200
 	)
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--json":
 			jsonOut = true
-		case "--patch", "--max", "--config", "--group-by":
+		case "--direct":
+			directOnly = true
+		case "--patch", "--max", "--config", "--group-by", "--engine", "--parallel":
 			if i+1 >= len(args) {
 				fmt.Fprintf(os.Stderr, "ken go: %s needs a value\n", args[i])
 				return 2
@@ -67,6 +87,19 @@ func cmdGo(args []string) int {
 				cfgFile = args[i+1]
 			} else if args[i] == "--group-by" {
 				groupBy = args[i+1]
+			} else if args[i] == "--engine" {
+				if !slices.Contains(engine.GoEngines(), args[i+1]) {
+					fmt.Fprintf(os.Stderr, "ken go: --engine takes %s, not %q\n", strings.Join(engine.GoEngines(), ", "), args[i+1])
+					return 2
+				}
+				engineName = args[i+1]
+			} else if args[i] == "--parallel" {
+				n, err := strconv.Atoi(args[i+1])
+				if err != nil || n < 1 {
+					fmt.Fprintf(os.Stderr, "ken go: --parallel %q is not a count\n", args[i+1])
+					return 2
+				}
+				parallel = n
 			} else if n, err := strconv.Atoi(args[i+1]); err != nil || n < 0 {
 				fmt.Fprintf(os.Stderr, "ken go: --max %q is not a count\n", args[i+1])
 				return 2
@@ -83,6 +116,10 @@ func cmdGo(args []string) int {
 		fmt.Fprint(os.Stderr, goUsage)
 		return 2
 	}
+	if directOnly && args[0] != "refs" {
+		fmt.Fprintln(os.Stderr, "ken go: --direct goes with refs")
+		return 2
+	}
 	if groupBy != "" && (args[0] != "refs" && args[0] != "impls" || !slices.Contains(engine.GoGroupKeys(), groupBy)) {
 		fmt.Fprintf(os.Stderr, "ken go: --group-by takes %s, with refs or impls\n", strings.Join(engine.GoGroupKeys(), ", "))
 		return 2
@@ -92,12 +129,13 @@ func cmdGo(args []string) int {
 		fmt.Fprintf(os.Stderr, "ken go: %v\n", err)
 		return 1
 	}
-	if args[0] == "uses" {
-		if engine.GoPath() == "" {
-			fmt.Fprintln(os.Stderr, "ken go: go is not on PATH")
-			return 1
-		}
-	} else if engine.GoplsPath() == "" {
+	// gopls is needed only when it is the engine asked for; all need go.
+	needsGopls := args[0] != "uses" && engineName != "" && engineName != engine.GoEngines()[0]
+	if engine.GoPath() == "" {
+		fmt.Fprintln(os.Stderr, "ken go: go is not on PATH")
+		return 1
+	}
+	if needsGopls && engine.GoplsPath() == "" {
 		fmt.Fprintln(os.Stderr, "ken go: gopls is not on PATH (go install golang.org/x/tools/gopls@latest)")
 		return 1
 	}
@@ -106,6 +144,7 @@ func cmdGo(args []string) int {
 		fmt.Fprintf(os.Stderr, "ken go: %v\n", err)
 		return 1
 	}
+	gt.Engine, gt.Parallel = engineName, parallel
 	if !found {
 		fmt.Fprintf(os.Stderr, "ken go: no %s in %s: asking under the host's default build configuration only\n", engine.GoConfigFile, repo)
 	}
@@ -137,6 +176,12 @@ func cmdGo(args []string) int {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ken go: %v\n", err)
 			return 1
+		}
+		if directOnly {
+			if err := res.DirectOnly(); err != nil {
+				fmt.Fprintf(os.Stderr, "ken go: --direct: %v\n", err)
+				return 2
+			}
 		}
 		if groupBy != "" {
 			if err := res.GroupBy(groupBy); err != nil {

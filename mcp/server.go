@@ -93,6 +93,11 @@ type Config struct {
 	ServerName    string // default "ken"
 	ServerVersion string // default "0"
 
+	// GoTyped, when non-nil, is the host the go_* tools open the Go typed tier through: it keeps resident gopls
+	// processes and remembered answers between calls (ADR-060), as its engine.GoTypedOptions allow. nil (or a host
+	// built from zero options) keeps nothing: each call starts and stops the gopls processes it needs.
+	GoTyped *engine.GoTypedHost
+
 	// DB, when non-nil, registers the v0.8.0 reindex_db MCP tool
 	// (ADR-020 Part 2) and wires Tier-2 chunk integration via the
 	// caller's swap target (ADR-020 Part 3 addendum). nil = tool
@@ -356,9 +361,11 @@ func NewServer(cfg Config) *sdk.Server {
 		return handleStatus(ctx, &cfg, args)
 	})
 
-	// The Go typed tier (ADR-059) needs gopls; without it the tools are not offered.
-	if engine.GoplsPath() != "" {
-		registerGoTools(srv, &cfg)
+	// The Go typed tier (ADR-059, ADR-061, ADR-062) needs the go command, and gopls only when an engine that asks
+	// gopls was chosen: go_rename_plan is then offered only with gopls on PATH, so that no tool is offered that
+	// could only fail.
+	if engine.GoPath() != "" {
+		registerGoTools(srv, &cfg, !cfg.GoTyped.NeedsGopls() || engine.GoplsPath() != "")
 	}
 
 	return srv

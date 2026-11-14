@@ -49,6 +49,9 @@ type UsesResult struct {
 	// Incomplete is true when no listed configuration builds the importer, or a configuration failed to list or
 	// did not type-check cleanly: the uses are then a lower bound. A run's Hits counts (identifier, line) pairs.
 	Incomplete bool `json:"incomplete"`
+	// Cached and CacheAgeSeconds: see Result.
+	Cached          bool    `json:"cached,omitempty"`
+	CacheAgeSeconds float64 `json:"cache_age_seconds,omitempty"`
 }
 
 // listPkg is the part of `go list -json` output Uses reads.
@@ -500,6 +503,12 @@ type usePos struct {
 // Each configuration asks the go command for the files it builds (go list, behind the repository's wrap command) and
 // type-checks them from source in this process, with the standard library's go/types.
 func (r *Runner) Uses(ctx context.Context, importer, imported string) (*UsesResult, error) {
+	return cached(r, "uses", []string{importer, imported}, func() (*UsesResult, error) {
+		return r.uses(ctx, importer, imported)
+	})
+}
+
+func (r *Runner) uses(ctx context.Context, importer, imported string) (*UsesResult, error) {
 	dir, err := ResolvePackageDir(r.Repo, importer)
 	if err != nil {
 		return nil, err
@@ -664,6 +673,7 @@ func (u *UsesResult) Text(nConfigs, maxRows int) string {
 		what = "?"
 	}
 	fmt.Fprintf(&b, "uses of %s by %s: %d identifiers, %d lines in %d files\n", what, u.Importer, u.Total, u.Lines, u.Files)
+	rememberedLine(&b, u.Cached, u.CacheAgeSeconds)
 	if u.ImportedDir != "" || u.ImporterPath != "" {
 		fmt.Fprintf(&b, "import paths: %s <- %s\n", u.Imported, u.ImporterPath)
 	}

@@ -67,6 +67,7 @@ var importRules = map[string][]string{
 	"tools/build-subset":            {"internal/devtools"},
 	"tools/compare-binaries/runbin": {"mcp", "mcp/db"},
 	"tools/gen-licenses":            {"internal/devtools"},
+	"tools/gotypedbench":            {"engine"},
 	"tools/k8-structural":           {"engine", "internal/envcfg", "internal/structural"},
 	"tools/peakrss":                 {},
 	"tools/perf-startup-m2":         {"internal/devtools"},

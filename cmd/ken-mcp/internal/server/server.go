@@ -48,6 +48,10 @@ import (
 // in-flight request from hanging shutdown indefinitely.
 const defaultShutdownGrace = 5 * time.Second
 
+// defaultGoCacheMB is how much of the Go typed tier's merged answers ken-mcp remembers unless KEN_MCP_GO_CACHE_MB says
+// otherwise (ADR-060). Three answers on goinfer, one of them 2,525 lines, took 0.6 MB.
+const defaultGoCacheMB = 32
+
 // modelAvailable reports whether dir looks like a usable Model2Vec snapshot.
 func modelAvailable(dir string) bool {
 	if dir == "" {
@@ -271,6 +275,12 @@ type Config struct {
 	EmbedCacheMax     int  // KEN_MCP_EMBED_CACHE_MAX
 	MmapModel         bool // KEN_MCP_MMAP_MODEL
 
+	// GoTyped is what the Go typed tier (go_references, go_implementations, go_rename_plan, go_uses) keeps between
+	// calls: KEN_MCP_GO_RESIDENT gopls processes, each stopped after KEN_MCP_GO_IDLE, and KEN_MCP_GO_CACHE_MB of
+	// remembered answers. By default the programs are kept, sized to the configurations, and 32 MB of answers
+	// (ADR-060, ADR-061).
+	GoTyped engine.GoTypedOptions
+
 	// Index holds the index settings every repo is built with, and only
 	// those: the walk limits (KEN_MAX_FILE_BYTES, KEN_MAX_AVG_LINE_BYTES,
 	// KEN_MAX_FILES, KEN_SKIP_GENERATED), KEN_ENRICH, KEN_ANN and
@@ -393,6 +403,44 @@ func LoadConfig(logger *kenmcp.Logger) Config {
 	// filesystem where mmap misbehaves (e.g. some network mounts).
 	mmapModel := envcfg.EnvBool("KEN_MCP_MMAP_MODEL", true, logger)
 
+	// Go typed tier (ADR-060, ADR-061). The type-checked programs are kept by default (about 0.2 GB per build
+	// configuration on a repo the size of goinfer, dropped after KEN_MCP_GO_IDLE); the answer cache is small (32 MB at most, KEN_MCP_GO_CACHE_MB; 0 turns it off) and on by default, since a
+	// remembered answer is returned only while the files on disk are unchanged.
+	// KEN_MCP_GO_RESIDENT: unset keeps the type-checked programs loaded, as many as the repositories have
+	// configurations (GoTypedOptions.MaxResident 0); 0 keeps none; n keeps n.
+	const unset = -1 << 30
+	goResident := envcfg.EnvInt("KEN_MCP_GO_RESIDENT", unset, logger)
+	switch {
+	case goResident == unset:
+		goResident = 0
+	case goResident == 0:
+		goResident = -1
+	case goResident < 0:
+		logger.Logf(kenmcp.LogWarn, "KEN_MCP_GO_RESIDENT=%d: must not be negative — using the default (programs kept, sized to the configurations)", goResident)
+		goResident = 0
+	}
+	goTyped := engine.GoTypedOptions{
+		MaxResident: goResident,
+		IdleTimeout: envcfg.EnvDuration("KEN_MCP_GO_IDLE", 5*time.Minute, logger),
+		CacheBytes:  int64(envcfg.EnvInt("KEN_MCP_GO_CACHE_MB", defaultGoCacheMB, logger)) << 20,
+		Engine:      envcfg.EnvEnum("KEN_MCP_GO_ENGINE", engine.GoEngines(), engine.GoEngines()[0], logger),
+		Parallel:    envcfg.EnvInt("KEN_MCP_GO_PARALLEL", 1, logger),
+	}
+	if goTyped.CacheBytes < 0 {
+		logger.Logf(kenmcp.LogWarn, "KEN_MCP_GO_CACHE_MB must not be negative: remembering no answers")
+		goTyped.CacheBytes = 0
+	}
+	if goTyped.Enabled() {
+		resident := "programs kept, sized to the configurations"
+		if goTyped.MaxResident > 0 {
+			resident = fmt.Sprintf("up to %d configurations kept", goTyped.MaxResident)
+		} else if goTyped.MaxResident < 0 {
+			resident = "nothing kept loaded"
+		}
+		logger.Logf(kenmcp.LogInfo, "go typed tier (engine %s): %s (idle stop %s), %d MB of answers (KEN_MCP_GO_*)",
+			goTyped.Engine, resident, goTyped.IdleTimeout, goTyped.CacheBytes>>20)
+	}
+
 	// M5: neural reranker — opt-in (default off), loaded lazily on the
 	// first hybrid+rerank query so the ~491 ms encoder.Load stays off the
 	// cold-start path. The model is shared across every WatchedIndex (via
@@ -424,6 +472,7 @@ func LoadConfig(logger *kenmcp.Logger) Config {
 		EmbedCacheEnabled: embedCacheEnabled,
 		EmbedCacheMax:     embedCacheMax,
 		MmapModel:         mmapModel,
+		GoTyped:           goTyped,
 		Startup:           sm,
 
 		Index:                     loadIndexOptions(),
@@ -455,6 +504,10 @@ func Run(cfg Config, logger *kenmcp.Logger) {
 		lazyReranker, rl                  = cfg.lazyReranker, cfg.rerankerLoader
 		rerankerOptions, rerankEnabled    = cfg.rerankerOptions, cfg.rerankEnabled
 	)
+
+	// goHost is what the Go typed tier keeps between calls, for every repo this server serves. With zero options it is
+	// stateless. Every Workspace feeds it its watcher's changes, and the server closes it on shutdown.
+	goHost := engine.NewGoTypedHost(cfg.GoTyped)
 
 	// buildState is the live mode/model the cache Builder reads; the
 	// auto-fetch goroutine flips it bm25 → hybrid once the model arrives.
@@ -514,6 +567,7 @@ func Run(cfg Config, logger *kenmcp.Logger) {
 		lazyReranker:      lazyReranker,
 		rerankerOptions:   rerankerOptions,
 		index:             cfg.Index,
+		goTyped:           goHost,
 		dbDefaultKey:      dbDefaultKey,
 		dbExtras:          dbExtrasHolder,
 	}).Build
@@ -609,6 +663,7 @@ func Run(cfg Config, logger *kenmcp.Logger) {
 	}
 
 	srvCfg := kenmcp.Config{
+		GoTyped:             goHost,
 		Cache:               cache,
 		DefaultRepo:         defaultRepo,
 		Mode:                sm.mode,
@@ -670,6 +725,8 @@ func Run(cfg Config, logger *kenmcp.Logger) {
 		// Flush + close the cached usage-stats append handle (audit §19).
 		_ = usageRecorder.Close()
 		cache.Close()
+		goHost.Close() // stops any gopls the Go typed tier kept alive
+
 	}
 
 	// cleanup runs exactly once, from whichever shutdown path reaches it.
@@ -793,9 +850,10 @@ type repoBuilder struct {
 	mmapModel         bool
 	lazyReranker      *engine.LazyReranker
 	rerankerOptions   []engine.RerankerOption
-	index             engine.Options // the env-derived index settings (Config.Index)
-	dbDefaultKey      string         // normalized cache key the DB extras attach to ("" ⇒ none)
-	dbExtras          *dbExtras      // shared holder the Refresher publishes DB chunks into
+	index             engine.Options      // the env-derived index settings (Config.Index)
+	goTyped           *engine.GoTypedHost // shared by every repo's Workspace: its watcher feeds the typed tier's invalidation
+	dbDefaultKey      string              // normalized cache key the DB extras attach to ("" ⇒ none)
+	dbExtras          *dbExtras           // shared holder the Refresher publishes DB chunks into
 }
 
 // Build is the kenmcp.Builder: clone http(s) URLs to a temp dir; index local
@@ -869,6 +927,7 @@ func (rb *repoBuilder) Build(ctx context.Context, source string) (*kenmcp.RepoBu
 		// builds use (ADR-054; before it ken-mcp ignored both).
 		DisableEnrichment: rb.index.DisableEnrichment,
 		DenseRetriever:    rb.index.DenseRetriever,
+		GoTypedHost:       rb.goTyped,
 		// engine does not read the environment; the walk limits and the
 		// structural cap are the KEN_* values LoadConfig read.
 		MaxFileBytes:           rb.index.MaxFileBytes,

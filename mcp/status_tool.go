@@ -31,6 +31,12 @@ func handleStatus(ctx context.Context, cfg *Config, args StatusArgs) (*sdk.CallT
 		}
 	}
 
+	if cfg.GoTyped != nil {
+		if st := cfg.GoTyped.Status(); st.Enabled {
+			opts.GoTyped = goTypedInfo(st)
+		}
+	}
+
 	// If a repo is provided, resolve it via the same cache path
 	// search.go uses and populate the live IndexInfo + StructuralInfo.
 	if args.Repo != "" && cfg.Cache != nil {
@@ -119,4 +125,25 @@ func liveIndexInfo(repo string, st engine.IndexStatus) *status.IndexInfo {
 		EnrichedChunks: st.EnrichedChunks,
 		DenseRetriever: dense,
 	}
+}
+
+// goTypedInfo is the status report's view of what the Go typed tier holds between queries.
+func goTypedInfo(st engine.GoTypedStatus) *status.GoTypedInfo {
+	g := &status.GoTypedInfo{
+		MaxResident: st.Pool.MaxSessions, IdleSeconds: st.Pool.IdleSeconds, HeldBytes: st.HeldBytes,
+		CacheEntries: st.Cache.Entries, CacheBytes: st.Cache.Bytes, CacheMaxBytes: st.Cache.MaxBytes,
+		CacheHits: st.Cache.Hits, CacheMisses: st.Cache.Misses, CacheStale: st.Cache.Stale, CacheDropped: st.Cache.Dropped,
+		Starts: st.Pool.Starts, Reuses: st.Pool.Reuses,
+		ProgramLoads: st.Programs.Loads, ProgramRefreshes: st.Programs.Refreshes, ProgramReuses: st.Programs.Reuses, ProgramStale: st.Programs.Stale, ProgramDropped: st.Programs.Dropped,
+	}
+	if g.MaxResident == 0 {
+		g.MaxResident, g.IdleSeconds = st.Programs.MaxPrograms, st.Programs.IdleSeconds
+	}
+	for _, pr := range st.Programs.Programs {
+		g.Programs = append(g.Programs, status.GoTypedProgram{Repo: pr.Repo, Config: pr.Config, Bytes: pr.Bytes, Packages: pr.Packages, IdleSec: pr.IdleSec, Queries: pr.Queries})
+	}
+	for _, s := range st.Pool.Sessions {
+		g.Sessions = append(g.Sessions, status.GoTypedSession{Repo: s.Repo, Config: s.Config, PID: s.PID, RSSBytes: s.RSSBytes, IdleSec: s.IdleSec, Requests: s.Requests})
+	}
+	return g
 }

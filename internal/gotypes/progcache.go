@@ -1,0 +1,426 @@
+package gotypes
+
+import (
+	"context"
+	"crypto/sha256"
+	"os"
+	"runtime"
+	"runtime/debug"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+// ProgramCache keeps type-checked programs (one build configuration of one workspace each) between queries, so that
+// the next question about the same tree is a lookup and not a load: milliseconds against a second or two (ADR-061).
+// A program holds a few hundred megabytes (350 to 430 MB each on goinfer), so the cache is bounded twice, like Pool:
+// by the number of programs (the least recently used idle one is dropped to make room) and by how long one may sit
+// unused. It starts empty.
+//
+// A held program is used only while every Go and module file it was built from is unchanged: each use scans the
+// tree first (tree.go). On a difference the program is replaced, by a refresh of it when the edit allows one
+// (trefresh.go) and by a fresh load otherwise.
+type ProgramCache struct {
+	max  int
+	auto bool // sized by Fit
+	idle time.Duration
+
+	mu        sync.Mutex
+	held      map[string]*heldProgram
+	closed    bool
+	loads     int64
+	refreshes int64
+	reuses    int64
+	stale     int64
+	evicts    int64
+	reaped    int64
+	dropped   int64
+	reapT     *time.Timer
+	freeT     *time.Timer
+}
+
+type heldProgram struct {
+	key, repo, config string
+	prog              *program
+	fp                [sha256.Size]byte
+	asOf              time.Time
+	lastUsed          time.Time
+	bytes             int64
+	uses              int
+	busy              int
+	stats             map[string]fileStat // the scan it was built from, to tell what changed
+	ready             chan struct{}       // closed when the load finished
+}
+
+// NewProgramCache returns a cache of at most max programs (>= 1), each dropped after idle without a query (<= 0 means
+// 5 minutes). max < 1 returns nil, which every method accepts: nothing is kept.
+func NewProgramCache(max int, idle time.Duration) *ProgramCache {
+	if max < 1 {
+		return nil
+	}
+	if idle <= 0 {
+		idle = 5 * time.Minute
+	}
+	return &ProgramCache{max: max, idle: idle, held: map[string]*heldProgram{}}
+}
+
+// AutoProgramCeiling is the most programs a cache sized by Fit will keep.
+const AutoProgramCeiling = 8
+
+// NewAutoProgramCache returns a cache that sizes itself: it starts with room for one program, and Fit grows it to the
+// number of build configurations of the repositories it is used for, up to AutoProgramCeiling. A cache with fewer
+// slots than a repository has configurations reloads on every query, so the useful size is the configuration count,
+// which is not known until a repository is opened.
+func NewAutoProgramCache(idle time.Duration) *ProgramCache {
+	c := NewProgramCache(1, idle)
+	c.auto = true
+	return c
+}
+
+// Fit makes room for n programs in a cache that sizes itself. It never shrinks, and does nothing to a cache given a
+// fixed size.
+func (c *ProgramCache) Fit(n int) {
+	if c == nil || !c.auto {
+		return
+	}
+	c.mu.Lock()
+	c.max = max(c.max, min(n, AutoProgramCeiling))
+	c.mu.Unlock()
+}
+
+// ProgramStatus describes one held program.
+type ProgramStatus struct {
+	Repo     string  `json:"repo"`
+	Config   string  `json:"config"`
+	Bytes    int64   `json:"bytes"` // about what the program holds: the heap's growth across its load, as measured then
+	Packages int     `json:"packages"`
+	IdleSec  float64 `json:"idle_seconds"`
+	Queries  int     `json:"queries"`
+}
+
+// ProgramCacheStatus is the cache's configuration, contents and memory.
+type ProgramCacheStatus struct {
+	MaxPrograms int             `json:"max_programs"`
+	IdleSeconds float64         `json:"idle_timeout_seconds"`
+	Programs    []ProgramStatus `json:"programs"`
+	Bytes       int64           `json:"bytes"`
+	Loads       int64           `json:"loads"`     // programs loaded from scratch
+	Refreshes   int64           `json:"refreshes"` // programs brought up to date after an edit without a full load
+	Reuses      int64           `json:"reuses"`
+	Stale       int64           `json:"stale"`   // uses that found the tree changed
+	Dropped     int64           `json:"dropped"` // programs dropped because a watcher said the tree changed
+	Evictions   int64           `json:"evictions"`
+	IdleStops   int64           `json:"idle_stops"`
+}
+
+// Status reports the cache. Safe on a nil cache.
+func (c *ProgramCache) Status() ProgramCacheStatus {
+	if c == nil {
+		return ProgramCacheStatus{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := ProgramCacheStatus{MaxPrograms: c.max, IdleSeconds: c.idle.Seconds(), Loads: c.loads, Refreshes: c.refreshes, Reuses: c.reuses,
+		Stale: c.stale, Dropped: c.dropped, Evictions: c.evicts, IdleStops: c.reaped}
+	now := time.Now()
+	for _, h := range c.held {
+		if h.prog == nil {
+			continue
+		}
+		st.Programs = append(st.Programs, ProgramStatus{Repo: h.repo, Config: h.config, Bytes: h.bytes,
+			Packages: len(h.prog.order), IdleSec: now.Sub(h.lastUsed).Seconds(), Queries: h.uses})
+		st.Bytes += h.bytes
+	}
+	sort.Slice(st.Programs, func(i, j int) bool {
+		if st.Programs[i].Repo != st.Programs[j].Repo {
+			return st.Programs[i].Repo < st.Programs[j].Repo
+		}
+		return st.Programs[i].Config < st.Programs[j].Config
+	})
+	return st
+}
+
+func programKey(r *Runner, bc BuildConfig, dir string) string {
+	base := r.Environ
+	if base == nil {
+		base = os.Environ()
+	}
+	var env []string
+	for _, kv := range bc.environ(base) {
+		if strings.HasPrefix(kv, "GO") || strings.HasPrefix(kv, "CGO_") {
+			env = append(env, kv)
+		}
+	}
+	sort.Strings(env)
+	return r.Repo + "\x00" + bc.Name + "\x00" + sha256Hex(strings.Join(env, "\x00")+"\x01"+r.goPath()) + "\x00" + dir
+}
+
+// treeScan is one scan of a repository's tree, shared by the configurations of one query.
+type treeScan struct {
+	stats map[string]fileStat
+	at    time.Time
+	err   error
+}
+
+func (r *Runner) scanNow() *treeScan {
+	stats, err := scanTree(r.realRepo())
+	return &treeScan{stats, time.Now(), err}
+}
+
+// holds reports whether a program for dir under bc is held, current or not.
+func (c *ProgramCache) holds(r *Runner, bc BuildConfig, dir string) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	h := c.held[programKey(r, bc, dir)]
+	return h != nil && h.prog != nil
+}
+
+// heapNow returns the live heap after a collection, and gives the pages the collection freed back to the operating
+// system. It is called only around a load that is about to be kept, to say what the kept program costs and so that
+// the process's resident size comes down to it, not minutes later when the runtime would have got round to it.
+func heapNow() int64 {
+	debug.FreeOSMemory()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return int64(m.HeapAlloc)
+}
+
+// get returns the program for dir under bc and a function to call when done with it. A held program is returned when
+// the tree is the one it was built from. When the tree has changed, the held program is refreshed (only what the edit
+// can affect is checked again) if that is possible, and otherwise load runs; either way the result replaces it.
+// Callers asking for the same program at once share one load.
+func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir string, scan *treeScan, load func() (*program, error)) (*program, func(), error) {
+	key := programKey(r, bc, dir)
+	stats, scanned, serr := scan.stats, scan.at, scan.err
+	for {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			p, err := load()
+			return p, func() {}, err
+		}
+		var stale *heldProgram
+		if h, ok := c.held[key]; ok {
+			if h.prog == nil { // being loaded by another caller
+				c.mu.Unlock()
+				select {
+				case <-h.ready:
+				case <-ctx.Done():
+					return nil, nil, ctx.Err()
+				}
+				continue
+			}
+			if serr == nil && fingerprint(stats, h.asOf) == h.fp {
+				h.busy++
+				h.uses++
+				c.reuses++
+				p := h.prog
+				c.mu.Unlock()
+				return p, func() { c.release(h) }, nil
+			}
+			delete(c.held, key)
+			c.stale++
+			stale = h
+		}
+		// make room, then reserve the slot while loading
+		for len(c.held) >= c.max {
+			var victim *heldProgram
+			for _, h := range c.held {
+				if h.prog != nil && h.busy == 0 && (victim == nil || h.lastUsed.Before(victim.lastUsed)) {
+					victim = h
+				}
+			}
+			if victim == nil {
+				break // everything is in use: this load is not kept
+			}
+			delete(c.held, victim.key)
+			c.evicts++
+		}
+		if len(c.held) >= c.max {
+			c.mu.Unlock()
+			p, err := load()
+			return p, func() {}, err
+		}
+		h := &heldProgram{key: key, repo: r.Repo, config: bc.Name, ready: make(chan struct{})}
+		c.held[key] = h
+		c.mu.Unlock()
+
+		// The heap is measured around a load, to say what the kept program costs. A refresh replaces a program by
+		// one of about the same size and keeps its figure: no measurement, and so no forced collection, on the path
+		// an edit loop takes.
+		var before int64
+		if stale == nil {
+			before = heapNow()
+		}
+		var p *program
+		var err error
+		refreshed := false
+		if stale != nil && serr == nil {
+			tw := &treeWatch{stats: stale.stats, at: stale.asOf}
+			var changed []string
+			createdOrDeleted := false
+			for _, ch := range tw.diff(stats) {
+				if ch.kind != 2 {
+					createdOrDeleted = true
+				}
+				changed = append(changed, ch.path)
+			}
+			if release, herr := r.holdForWork(ctx); herr == nil {
+				p, refreshed = stale.prog.refresh(changed, createdOrDeleted)
+				release()
+			}
+		}
+		if !refreshed {
+			p, err = load()
+		}
+		c.mu.Lock()
+		if err != nil || serr != nil {
+			delete(c.held, key)
+			close(h.ready)
+			c.mu.Unlock()
+			return p, func() {}, err
+		}
+		// An edit during the load could leave a program built from a mixture of two trees: keep it only if the
+		// tree is still the one scanned before the load.
+		fp := fingerprint(stats, scanned)
+		c.mu.Unlock()
+		again, aerr := scanTree(r.realRepo())
+		c.mu.Lock()
+		if aerr != nil || fingerprint(again, scanned) != fp {
+			delete(c.held, key)
+			close(h.ready)
+			c.mu.Unlock()
+			return p, func() {}, nil
+		}
+		h.prog, h.fp, h.asOf, h.stats, h.lastUsed = p, fp, scanned, stats, time.Now()
+		// The heap's growth across the load is the measure. Other work in the process moves the heap too, so it is
+		// an estimate, and never reported below what the program's own tables are known to take. A refreshed program
+		// replaces one of about the same size, so it keeps that one's figure.
+		if refreshed {
+			h.bytes = max(stale.bytes, p.tableBytes())
+			c.refreshes++
+			c.freeSoon()
+		} else {
+			c.mu.Unlock()
+			if stale != nil {
+				before = heapNow() - stale.bytes // the replaced program is garbage by now, or soon
+			}
+			grown := heapNow() - before
+			c.mu.Lock()
+			h.bytes = max(grown, p.tableBytes())
+			c.loads++
+		}
+		h.busy, h.uses = 1, 1
+		close(h.ready)
+		c.mu.Unlock()
+		return p, func() { c.release(h) }, nil
+	}
+}
+
+// freeSoon gives the memory of replaced programs back to the operating system shortly after the last replacement,
+// off the path of any query: the runtime would otherwise keep those pages for minutes, and a process that holds
+// programs should not also hold what they replaced. c.mu is held.
+func (c *ProgramCache) freeSoon() {
+	if c.freeT != nil {
+		c.freeT.Stop()
+	}
+	c.freeT = time.AfterFunc(2*time.Second, debug.FreeOSMemory)
+}
+
+// trim gives back to the operating system, shortly, what a piece of work on the held programs left behind: a
+// rename's check type-checks packages again and throws the result away.
+func (c *ProgramCache) trim() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.freeSoon()
+	c.mu.Unlock()
+}
+
+func (c *ProgramCache) release(h *heldProgram) {
+	c.mu.Lock()
+	h.busy--
+	h.lastUsed = time.Now()
+	c.armReaper()
+	c.mu.Unlock()
+}
+
+// armReaper schedules the next idle sweep. c.mu is held.
+func (c *ProgramCache) armReaper() {
+	if c.reapT != nil {
+		c.reapT.Stop()
+	}
+	if len(c.held) == 0 || c.closed {
+		return
+	}
+	c.reapT = time.AfterFunc(c.idle/4+time.Millisecond, c.reap)
+}
+
+func (c *ProgramCache) reap() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	now := time.Now()
+	for k, h := range c.held {
+		if h.prog != nil && h.busy == 0 && now.Sub(h.lastUsed) >= c.idle {
+			delete(c.held, k)
+			c.reaped++
+		}
+	}
+	c.armReaper()
+}
+
+// Invalidate drops every program of repo that is not in use. The watcher calls it when files change; a scan would have
+// caught the change at the next use, so this only frees the memory sooner.
+func (c *ProgramCache) Invalidate(repo string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, h := range c.held {
+		if h.repo == repo && h.prog != nil && h.busy == 0 {
+			delete(c.held, k)
+			c.dropped++
+		}
+	}
+}
+
+// Close drops every program and keeps none afterward.
+func (c *ProgramCache) Close() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	if c.reapT != nil {
+		c.reapT.Stop()
+	}
+	if c.freeT != nil {
+		c.freeT.Stop()
+	}
+	for k := range c.held {
+		delete(c.held, k)
+	}
+}
+
+// tableBytes is a lower bound on a program's memory: its lookup tables, at their known entry sizes. The types
+// themselves, which are most of it, are not counted.
+func (p *program) tableBytes() int64 {
+	var n int64
+	for _, tp := range p.order {
+		n += int64(len(tp.defs))*32 + int64(len(tp.typeSpecs))*24 + 512
+		for name, recs := range tp.uses {
+			n += int64(len(name)) + 48 + int64(len(recs))*24
+		}
+	}
+	return n
+}
