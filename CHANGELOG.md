@@ -31,6 +31,7 @@ Five things to check before upgrading. No tool of the typed tier needs `gopls` a
 - **The go_* tools are offered when `go` is on PATH**, all four. `go_rename_plan` is withheld only on a server configured with a gopls engine and no gopls.
 - **The loader keeps one error it used to drop.** Go's type checker calls a type argument that does not satisfy its constraint a *soft* error, like an unused variable, and soft errors were skipped. That one is a compile error a rename can cause, and is now counted in every load.
 - **A data race in the refresh of a held program is fixed** (found with the race detector while testing the rename): a file's remembered facts were rewritten while another goroutine read them to decide how a package is checked.
+- **Dependency bumps** (dependabot): `gotreesitter` 0.56.0 → 0.57.0, `modernc.org/sqlite` 1.61.1 → 1.62.0 (`modernc.org/libc` follows to 1.80.1), `golang.org/x/sync` 0.24.0 → 0.25.0.
 
 ### Added
 
