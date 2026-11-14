@@ -46,12 +46,18 @@ func nativeTSC() string {
 func TestServer_TSToolFollowsTheDefaultRepo(t *testing.T) {
 	with := writeTSRepo(t, map[string]string{nativeTSC(): "", "a.ts": ""})
 	older := writeTSRepo(t, map[string]string{"node_modules/typescript/package.json": `{"version":"5.9.3"}`, "a.ts": ""})
+	nested := writeTSRepo(t, map[string]string{"apps/web/" + nativeTSC(): "", "apps/web/a.ts": "", "backend/main.py": ""})
+	tooDeep := writeTSRepo(t, map[string]string{"a/b/c/" + nativeTSC(): "", "a/b/c/a.ts": ""})
+	inDeps := writeTSRepo(t, map[string]string{"vendor/x/" + nativeTSC(): "", "a.ts": ""})
 	for _, tc := range []struct {
 		name, repo string
 		want       bool
 	}{
 		{"a repo with TypeScript 7", with, true},
 		{"a repo with TypeScript 5", older, false},
+		{"a project two levels down", nested, true},
+		{"a project three levels down", tooDeep, false},
+		{"a compiler inside vendored dependencies", inDeps, false},
 		{"no default repo", "", false},
 		{"a URL", "https://example.com/x/y", false},
 	} {

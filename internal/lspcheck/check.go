@@ -510,3 +510,40 @@ func (c *EditCheck) Text(maxFindings int) string {
 	}
 	return b.String()
 }
+
+// ProjectDirs returns root and the directories below it, to the given depth, where a project of a repository that
+// holds several may have its tools installed (frontend/, services/api/). Hidden directories, and those that hold
+// dependencies or build output, are not entered. At most 2,000 directories are returned: this decides whether a
+// tool is offered, and must stay cheap on a large tree.
+func ProjectDirs(root string, depth int) []string {
+	const limit = 2000
+	dirs := []string{root}
+	level := []string{root}
+	for ; depth > 0 && len(level) > 0; depth-- {
+		var next []string
+		for _, d := range level {
+			entries, err := os.ReadDir(d)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				name := e.Name()
+				if !e.IsDir() || strings.HasPrefix(name, ".") || notAProject[name] {
+					continue
+				}
+				if len(dirs) >= limit {
+					return dirs
+				}
+				sub := filepath.Join(d, name)
+				dirs = append(dirs, sub)
+				next = append(next, sub)
+			}
+		}
+		level = next
+	}
+	return dirs
+}
+
+// notAProject are directory names that hold dependencies or build output, never a project of their own.
+var notAProject = map[string]bool{"node_modules": true, "vendor": true, "venv": true, "dist": true, "build": true,
+	"target": true, "out": true, "__pycache__": true, "site-packages": true}

@@ -126,6 +126,18 @@ func FindChecker(repo, dir string) (Checker, error) {
 	return Checker{}, fmt.Errorf("%w: %s", ErrNoChecker, msg)
 }
 
+// Installed returns the checker of the first project of repo that has one: the repository root, or a directory up
+// to two levels below it (backend/, services/api/). The zero Checker when none has. It decides whether a check is
+// worth offering; a check itself looks from the edited file upward (FindChecker).
+func Installed(repo string) Checker {
+	for _, d := range lspcheck.ProjectDirs(repo, 2) {
+		if c, err := FindChecker(d, d); err == nil {
+			return c
+		}
+	}
+	return Checker{}
+}
+
 // configures reports whether a directory from d up to repo has the named configuration file, or a pyproject.toml
 // with the table.
 func configures(d, repo, file, table string) bool {

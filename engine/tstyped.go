@@ -27,15 +27,9 @@ var ErrNoTSCompiler = tstypes.ErrNoCompiler
 // Running a check runs that program, which the repository chose. Open a repository you would run `npm test` in.
 func OpenTSTyped(repo string) *TSTyped { return &tstypes.Runner{Repo: repo} }
 
-// TSCompilerPath returns the native TypeScript compiler installed at the root of the repository at repo, or "" when
-// there is none.
-func TSCompilerPath(repo string) string {
-	p, err := tstypes.FindCompiler(repo, repo)
-	if err != nil {
-		return ""
-	}
-	return p
-}
+// TSCompilerPath returns the native TypeScript compiler installed in the repository at repo: at its root, or in a
+// project directory up to two levels below it (frontend/, packages/web/). "" when there is none.
+func TSCompilerPath(repo string) string { return tstypes.Installed(repo) }
 
 // IsTSSource reports whether name is a file the TypeScript compiler checks (.ts, .tsx, .js, .jsx and the module
 // variants).

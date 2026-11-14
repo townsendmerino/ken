@@ -28,13 +28,10 @@ var ErrNoPyChecker = pytypes.ErrNoChecker
 // Running a check runs that program, which the repository chose. Open a repository you would run its tests in.
 func OpenPyTyped(repo string) *PyTyped { return &pytypes.Runner{Repo: repo} }
 
-// PyCheckerPath returns the type checker installed at the root of the repository at repo and which one it is ("ty"
-// or "pyright"), or two empty strings when there is none.
+// PyCheckerPath returns the type checker installed in the repository at repo and which one it is: at its root, or
+// in a project directory up to two levels below it (backend/, services/api/). Two empty strings when there is none.
 func PyCheckerPath(repo string) (path, kind string) {
-	c, err := pytypes.FindChecker(repo, repo)
-	if err != nil {
-		return "", ""
-	}
+	c := pytypes.Installed(repo)
 	return c.Path, c.Kind
 }
 

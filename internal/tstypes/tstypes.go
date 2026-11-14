@@ -102,6 +102,18 @@ func FindCompiler(repo, dir string) (string, error) {
 	return "", fmt.Errorf("%w in node_modules (looked from %s up to the repository root): install the project's dependencies, with typescript 7.0 or later", ErrNoCompiler, dir)
 }
 
+// Installed returns the native compiler of the first project of repo that has one: the repository root, or a
+// directory up to two levels below it (frontend/, packages/web/). "" when none has. It decides whether a check is
+// worth offering; a check itself looks from the edited file upward (FindCompiler).
+func Installed(repo string) string {
+	for _, d := range lspcheck.ProjectDirs(repo, 2) {
+		if p, err := FindCompiler(d, d); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
 // The edit and its answer are the shared check's.
 type (
 	FileEdit    = lspcheck.FileEdit
