@@ -129,7 +129,7 @@ func (r *Runner) checkMypy(ctx context.Context, c Checker, p *lspcheck.Patch) (*
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 
 	version := ""
 	if out, _, _, verr := run(ctx, dir, env, []string{c.Path, "--version"}); verr == nil {

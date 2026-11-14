@@ -15,6 +15,26 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Added
+
+- **`ken hook check-edit`: a Claude Code hook that checks every edit before it is made.** Registered on `PreToolUse` for `Edit` and `Write`, it runs the edit the agent is about to make to a Go, TypeScript, JavaScript or Python file through the same check as `go_check_edit`, `ts_check_edit` and `py_check_edit`. An edit that would add errors still goes ahead, and the errors are handed to the agent as context; the hook decides nothing about the tool call and always exits 0. A clean edit, a file of another kind, a project with no tool to ask and a check that runs out of time (20 s by default) are silent; `--why` says which on standard error. Each check starts from nothing, so a large Go repository will not finish in that time: asking a running server is not built.
+- **`ts_rename_plan` and `py_rename_plan` (`ken ts rename-plan`, `ken py rename-plan`): a rename computed by the project's own tool and checked before it is given (ADR-066).** The symbol is named by a place it appears (file, line, name). The project's compiler or type checker computes the edits; ken applies them as unsaved contents and runs the edit check over the result. A plan that would add an error, or that edits a dependency or a file git ignores, is refused and carries no patch. The lines that still spell the old name are listed. Measured on ty 0.0.104, pyright 1.1.414 and basedpyright 1.40.2: none renames a method together with the protocol member it satisfies, and the check reports the class such a plan would break. Not checked: whether a name the rename does not touch now refers to something else.
+- **`py_check_edit` asks mypy and basedpyright (ADR-066).** basedpyright is found in the project's virtual environment and asked as pyright is; its pip package carries its own Node. mypy has no language server, so it is run twice from the project directory, as the project is and with each edited file replaced through `--shadow-file`; its cache is kept under the user's cache directory and nothing is written to the repository. mypy cannot be given a file that is not on disk: a file the edit creates is listed as not checked, and the answer is then incomplete. Where a project has several checkers, the one it configures is asked. mypy cannot compute a rename, so `py_rename_plan` is not offered for a project with mypy alone.
+- **An edit can delete or move a file.** `{file, delete: true}` and `{file, move_to}` join the two shapes an edit already had, in all three check tools. For Go the file is gone from the build. A language server cannot be told a file on disk is gone, so for TypeScript and Python a file that goes is checked as an empty file: the same lines break, with different wording.
+- **`tests_for`, and an edit check that names the tests to run.** `tests_for` lists the tests that reach a symbol through the call graph, with the command that runs them (`go test -run '^(A|B)$' ./dir`, `pytest file::test`). `go_check_edit` and `py_check_edit` append the same for the symbols an edit touches. The call graph is resolved by name, so the list can include a test of another symbol with the same name.
+- **`go_check_edit` puts an edit that compiles to `go vet`.** The go command runs with the edit as an overlay, and findings that are not there now are listed as `VET` lines: `go test` runs a subset of these checks first and does not run a package's tests when one fails. `--no-vet` (`no_vet`) skips it.
+- **`ken savings` counts edit checks**: how many were run per tool, how many found an edit that would break something, and how many could not be answered. `~/.ken/savings.jsonl` gains an `outcome` field on those rows; no file name or source text is recorded.
+- `ts_check_edit` and `py_check_edit` are offered when the compiler or checker is in a project up to two levels below the repository root (`web/node_modules`, `services/api/.venv`), not only at the root.
+- The server's instructions name the typed tools it offers (`go_*`, the edit checks, the rename plans) and say when to call them. They name none that the server does not offer.
+
+### Fixed
+
+- `py_check_edit` reported "cannot resolve import" for an import of a module the same edit creates: ty and pyright resolve imports on disk. Such errors are now set aside and counted, and the answer says it is incomplete.
+
+### Measured, nothing changed
+
+- `potion-retrieval-32M` against the shipped `potion-code-16M` on semble's 63 repos: hybrid NDCG@10 0.8201 against 0.8436, semantic 0.5734 against 0.6402. The shipped model stays ([`docs/internal/results/embedder-comparison-2026-11.md`](docs/internal/results/embedder-comparison-2026-11.md)).
+
 ## [1.18.0] — 2026-11-14 — check an edit before making it, in Go, TypeScript and Python
 
 Three tools answer one question before a file is written: would this edit break the build? `go_check_edit` applies the edit in memory and type-checks every package it reaches, in ken's own process, under every build configuration (ADR-063). `ts_check_edit` and `py_check_edit` open the edit as unsaved contents in the checker the project itself installed (TypeScript 7; ty or pyright) and ask every source file for its errors, before and after (ADR-064, ADR-065). Each reply lists the errors the edit would cause, wherever they land, and counts the ones it fixes. Nothing is written.

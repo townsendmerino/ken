@@ -73,6 +73,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-063](#adr-063-an-edit-the-caller-wrote-is-checked-the-way-a-rename-plan-is) | An edit the caller wrote is checked the way a rename plan is | Accepted |
 | [ADR-064](#adr-064-a-typed-tier-for-typescript-asks-the-projects-own-compiler-over-lsp-starting-with-a-check-for-an-edit) | A typed tier for TypeScript asks the project's own compiler over LSP, starting with a check for an edit | Accepted |
 | [ADR-065](#adr-065-the-python-edit-check-asks-the-checker-the-project-installed-ty-or-pyright) | The Python edit check asks the checker the project installed, ty or pyright | Accepted |
+| [ADR-066](#adr-066-after-118-the-edit-check-reaches-further-more-checkers-renames-a-hook-and-files-that-go) | After 1.18 the edit check reaches further: more checkers, renames, a hook, and files that go | Accepted |
 
 ---
 
@@ -3543,3 +3544,46 @@ M1 Pro, Python 3.12.10, a seven-file fixture with no third-party imports.
 - pyright needs `node` on PATH. Its diagnostics are pulled for open files, which the server does not advertise in its handshake; the oracle test is what holds that this works.
 - The limits of ADR-064 apply unchanged: one server per check, every file asked about twice, 20,000 files at most, no deletion.
 - The MCP tool's verdict line for an edit that breaks something is `WOULD NOT TYPE-CHECK`, where the TypeScript tool says `WOULD NOT COMPILE`.
+
+## ADR-066: After 1.18 the edit check reaches further: more checkers, renames, a hook, and files that go
+
+**Status:** Accepted
+**Date:** 2026-11-14
+**Decided by:** Francis: "do all 10", to a list of ten ways to make the 1.18 tools more useful. Nine are changes; the tenth was a measurement. No ranking constant changes.
+
+### Context
+
+1.18 shipped three edit checks (ADR-063 to ADR-065). Using them showed where they stop short: an agent has to remember to call them; a Python project on mypy or basedpyright is not served; an edit could not delete or move a file; a rename in TypeScript or Python had no checked plan; a clean check said nothing about which tests to run; and nobody could see whether the checks were being used.
+
+### Decision
+
+1. **mypy is run, not asked.** mypy has no language server, but it has `--shadow-file SOURCE SHADOW`, made for tools: SOURCE is read from SHADOW and errors are still reported against SOURCE. A check is two runs of the project's mypy from the project directory, with and without the shadows, compared by the comparison the language-server checks use (`lspcheck.EditCheck.Compare`, moved out of `lspcheck.Run`). The cache goes under the user's cache directory, keyed by project, so nothing is written to the repository. dmypy was not used: it would be a daemon ken leaves behind.
+2. **basedpyright is a third language server**, found in the virtual environment. Its pip package depends on a wheel that carries Node, so the rule that keeps pip pyright from being run (it downloads Node when started) does not apply to it.
+3. **Where a project has several checkers, the one it configures is asked**, when it configures exactly one; otherwise the first of ty, pyright, basedpyright, mypy. This generalizes ADR-065's rule for ty and pyright.
+4. **A rename in TypeScript or Python is the server's plan put to the edit check** (`lspcheck.Rename`). The server computes the edits; ken refuses the plan if the check finds a new error, or if an edit lands in a file that is not one of the repository's own source files as the index walks them (a dependency, a file git ignores). The symbol is named by file, line and name, because these servers take positions and ken has no type-resolved name lookup for these languages.
+5. **The meaning check of the TypeScript Phase 0 is not built.** That record proposed asking `textDocument/definition` for every identifier spelled with the old or new name, before and after. It is one request per identifier and was not measured. The plan's reply says what is not checked.
+6. **A file that is deleted or moved away is checked as an empty file by the language-server checks.** LSP has no way to tell a server that a file on disk is gone short of writing to disk, and the check writes nothing. The Go check removes the file from the build (an overlay entry with an empty replacement).
+7. **An error on a line that imports a file the edit creates is set aside, and the answer is incomplete.** ty, pyright, basedpyright and mypy resolve imports on disk; reporting their "cannot resolve" as the edit's fault was a false error in 1.18.0. TypeScript 7 resolves unsaved new files and is not treated this way.
+8. **The Go check runs `go vet` on an edit that compiles**, through the go command with the edit as an overlay, and reports the findings that are new. It runs the go command's default vet set, not only the subset `go test` runs.
+9. **The hook is advisory.** `ken hook check-edit` on `PreToolUse` returns `hookSpecificOutput.additionalContext` and no permission decision, and exits 0 whatever happens. Blocking was rejected: a refactor routinely breaks callers in one edit and fixes them in the next, and a hook that refused the first edit would stop it.
+10. **The check tools that run a program the repository supplies keep the rule of ADR-064**: offered for the default repository, a `repo` argument refused on a server without allowed roots. The rename tools and mypy fall under it unchanged.
+
+### What was measured
+
+M1 Pro, 2026-11-14. The real-tool tests are gated by `KEN_TEST_TSC`, `KEN_TEST_TY`, `KEN_TEST_PYRIGHT`, `KEN_TEST_BASEDPYRIGHT` and `KEN_TEST_MYPY`; CI runs none of them.
+
+- mypy 2.4.1 and basedpyright 1.40.2 pass the seven edits of ADR-065's oracle test (each answer held to the checker's own command line on a real edited copy), with two stated differences for mypy: a new file's own error is not reported, and a syntax error stops the run. A mypy check of the seven-file fixture takes 0.6 to 0.7 s.
+- Rename plans: TypeScript 7.0.2 renames a function across two projects and an interface member with its implementation; the patch applies with `git apply` and the build is unchanged. A rename onto a name the module has is refused on six compiler errors.
+- ty 0.0.104, pyright 1.1.414 and basedpyright 1.40.2 each rename a protocol's `area` without `Square.area`, which satisfies it. Each plan is refused on the one error it causes.
+- The embedder comparison: [`results/embedder-comparison-2026-11.md`](results/embedder-comparison-2026-11.md). potion-retrieval-32M is worse than the shipped model (hybrid 0.8201 against 0.8436); nothing changes.
+
+**Not measured:** any of this on a large TypeScript or Python repository, or on a Python project with third-party packages installed; mypy on a project with plugins; the hook inside a real Claude Code session (its input and output follow the hooks reference, and it was run by hand on payloads of that shape).
+
+### Consequences and what is not done
+
+- The hook starts every check from nothing. A large Go repository will not finish in its 20 seconds, and the hook is then silent. Asking a running `ken-mcp`, which answers in under 0.1 s, needs a way for a command to reach a stdio server and is not built.
+- mypy cannot check a file the edit creates, and cannot compute a rename.
+- A TypeScript or Python rename that changes what another name refers to passes the check. `go_rename_plan` remains the only plan that verifies meaning.
+- `tests_for` and the tests an edit check names come from the name-resolved call graph: a test of another symbol with the same name can be listed, and a test that reaches the symbol only through an interface or a callback can be missed.
+- Two servers are started for a rename plan (one to compute it, one to check it), as one is for every check.
+

@@ -320,7 +320,7 @@ backend/cuda/a13_multimodel_test.go
   Before it answers, the merged patch is applied in memory and every configuration is type-checked again. The plan says `checked` when nothing changed but the name: no new type error, every identifier still refers to the declaration it referred to (nothing shadowed or captured), every type has the fields and methods it had (nothing hidden, merged or made ambiguous), and every type assertion that could succeed still can. Otherwise it lists each difference as a `CONFLICT` line and gives **no patch**. A plan with an `INCOMPLETE` line (a declaration no listed configuration compiles) is a lower bound and is not called checked. A `PARTIAL` line means a configuration has type errors of its own: identifiers inside code that does not type-check are not renamed.
 
   What the check cannot see: reflection, struct tags, names inside strings, and a type that stops (or starts) satisfying an interface it is only ever converted to at run time, such as `fmt.Stringer`.
-- **`go_check_edit` checks an edit before it is made.** Give it the edit as you would make it, `{file, old_string, new_string}` or `{file, content}` for a whole (or new) file, several at once if they belong together. It writes nothing: the edit is applied in memory and every package it reaches is type-checked again, under every configuration. On the command line: `ken go check-edit <repo> <file> <new-contents-file>`, or `--edits FILE` with the same JSON list.
+- **`go_check_edit` checks an edit before it is made.** Give it the edit as you would make it, `{file, old_string, new_string}` or `{file, content}` for a whole (or new) file, several at once if they belong together. It writes nothing: the edit is applied in memory and every package it reaches is type-checked again, under every configuration. On the command line: `ken go check-edit <repo> <file> <new-contents-file>`, or `--edits FILE` with the same JSON list. An edit that compiles is also put to `go vet`, with the edit as an overlay: findings that are not there now are `VET` lines, because `go test` runs some of those checks first and will not run a package's tests when one fails (`--no-vet` or `no_vet` skips this).
 
 ### TypeScript and JavaScript: `ts_check_edit`
 
@@ -339,7 +339,7 @@ The edit is opened as unsaved contents in the compiler; nothing is written. Erro
 
 ### Python: `py_check_edit`
 
-`py_check_edit` (`ken py check-edit <repo> <file> <new-contents-file>`, or `--edits FILE`) does the same for Python, where it matters more: there is no compile step to catch a caller an edit broke. It asks the type checker the project itself installed and no other: **ty** in the project's virtual environment (`.venv/bin/ty` or `venv/bin/ty`), or **pyright** in its `node_modules` (which needs `node` on PATH). `--checker PATH` names one. ken installs neither. A project with neither is told what to install; a project on mypy cannot be served, because mypy has no language server, and pyright installed from pip is not run, because that package downloads Node when first started.
+`py_check_edit` (`ken py check-edit <repo> <file> <new-contents-file>`, or `--edits FILE`) does the same for Python, where it matters more: there is no compile step to catch a caller an edit broke. It asks the type checker the project itself installed and no other: **ty**, **basedpyright** or **mypy** in the project's virtual environment (`.venv` or `venv`), or **pyright** in its `node_modules` (which needs `node` on PATH). `--checker PATH` names one. ken installs none. A project with none is told what to install. pyright installed from pip is not run, because that package downloads Node when first started; basedpyright from pip carries its own and is.
 
 ```
 $ ken py check-edit . --edits edits.json
@@ -350,6 +350,44 @@ WOULD NOT TYPE-CHECK: 1 new errors
 ```
 
 What counts as an error is that checker's opinion under the project's configuration; errors it already reports are not listed. The limits are those of `ts_check_edit`. It has been measured on a seven-file fixture only, not on a project with installed dependencies.
+
+**Which checker.** ty, basedpyright and mypy are looked for in the project's virtual environment (`.venv` or `venv`), pyright in `node_modules`. Where a project has several, the one it configures is asked (`ty.toml` or `[tool.ty]`; `pyrightconfig.json` or `[tool.pyright]`; `[tool.basedpyright]`; `mypy.ini`, `[tool.mypy]` or `[mypy]` in `setup.cfg`); with none or several configured, the first of ty, pyright, basedpyright, mypy.
+
+**mypy is run, not asked.** It has no language server, so the check runs the project's mypy twice from the project directory: as the project is, and with each edited file replaced by a temporary copy (`--shadow-file`). Its cache goes under your user cache directory, not into the repository. Two limits follow. A file the edit creates is not on disk and mypy cannot be given it, so its contents are not checked and the reply says `INCOMPLETE`. And mypy stops at a syntax error, so an edit with one lists that error and nothing else.
+
+### Deleting and moving files
+
+All three checks take two more shapes of edit: `{"file": "a.py", "delete": true}` and `{"file": "a.py", "move_to": "b.py"}`. Later edits in the same list may change the file under its new name. For Go the file leaves the build. For TypeScript and Python a file that goes is checked as an empty file, because a language server cannot be told that a file on disk is gone: the lines that break are the ones a real deletion breaks, worded differently. ty, pyright, basedpyright and mypy resolve imports on disk, so an import of a file the edit creates (a move creates one) cannot be followed: those are counted on an `INCOMPLETE` line, not reported as errors.
+
+### Renames in TypeScript and Python: `ts_rename_plan`, `py_rename_plan`
+
+```
+$ ken ts rename-plan . src/price.ts:1 total sum --patch rename.patch
+rename total -> sum (src/price.ts:1): 3 lines in 2 files, computed by TypeScript 7.0.2 in 0.12s
+checked: the plan was applied as unsaved contents and TypeScript asked about every source file again; no new error. Not checked: whether a name the rename does not touch now refers to another declaration (renaming onto a name already in scope can do that with no error)
+  src/main.ts (2)
+  src/price.ts (1)
+patch written to rename.patch
+```
+
+The symbol is named by a place it appears: `<file>:<line>` and the name as that line spells it. The project's own compiler or checker computes the edits (ty, pyright or basedpyright for Python; mypy cannot). ken then applies them as unsaved contents and runs the edit check. A plan that would add an error is refused: the errors are `CONFLICT` lines and there is no patch. So is a plan that would edit a dependency or a file git ignores. Lines that still spell the old name (a comment, a string, a name looked up at run time) are listed for you to judge.
+
+Two things to know. The Python checkers do not rename a method together with the protocol member it satisfies; the check catches the class left behind and refuses the plan. And unlike `go_rename_plan`, nothing verifies that every other name still refers to what it did: renaming a parameter onto a module-level name its function reads gives valid code that means something else, with no error.
+
+### Which tests to run: `tests_for`
+
+`tests_for` takes a symbol and lists the tests that reach it through the call graph, with a command: `go test -run '^(TestA|TestB)$' ./pkg` or `pytest tests/test_x.py::test_a`. `go_check_edit` and `py_check_edit` end their reply with the same list for the symbols the edit touches. The call graph matches by name, so a test of another symbol with the same name can appear; the list is where to start, not proof of coverage.
+
+### Checking every edit: the Claude Code hook
+
+`ken hook check-edit` runs these checks on every edit an agent is about to make, without the agent having to call a tool. In `.claude/settings.json`:
+
+```json
+{"hooks": {"PreToolUse": [{"matcher": "Edit|Write",
+  "hooks": [{"type": "command", "command": "ken hook check-edit", "timeout": 30}]}]}}
+```
+
+It never blocks. When an edit would cause errors that are not there now, the edit goes ahead and the agent is given the errors; a refactor often breaks its callers in one edit and mends them in the next. When the edit is clean, the file is not Go, TypeScript, JavaScript or Python, the project has no compiler or checker ken can ask, or the check does not finish in 20 seconds (`--timeout`), the hook says nothing. `--why` prints the reason on standard error when you try it by hand. Each check starts from nothing: fine for TypeScript and Python projects of the sizes measured and for small Go modules, too slow for a large Go repository, where the MCP tool on a running `ken-mcp` (0.04 to 0.09 s) is the one to use.
 
   The reply has three kinds of line. `ERROR` is a compile error that is not there now, in the edited files or in any package that depends on them, with the configurations it holds under when that is not all of them: change a function's parameters and every caller is listed, the one in `x_windows.go` included. Unused variables and imports count, as they do for the compiler. `MOVED` is an identifier on a line the edit does not touch that would refer to another declaration: a variable the edit shadows, a builtin a new function captures. That code compiles and means something else, so check each is intended. `API` is an exported declaration of an edited package that the edit removes or changes: what code outside the repository would see, which nothing here can check. Errors that are already there are not reported, and the reply says how many of them the edit fixes.
 
@@ -454,7 +492,9 @@ The `status` tool's "Token savings" section reports it. Daily /
 7-day / all-time bucketed, with a `~tokens` estimate (chars ÷ 4).
 Stored at `~/.ken/savings.jsonl` — no query text, just counts;
 opt out with `KEN_NO_USAGE_STATS=1`. CLI variant:
-`ken savings --verbose`.
+`ken savings --verbose`. It also counts edit checks per tool: how
+many ran, how many found an edit that would break something, and
+how many could not be answered.
 
 ## Where to next
 

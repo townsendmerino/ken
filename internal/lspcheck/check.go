@@ -406,7 +406,8 @@ func NewCheck(p *Patch, srv Server, version string) *EditCheck {
 // Compare fills in what the edit changes from a checker's errors for every file (absolute paths) before the edit
 // and after it: the new errors, how many are fixed, and whether the answer is complete. importsNew is
 // Server.ImportsNewFile.
-func (res *EditCheck) Compare(p *Patch, all []string, before, after map[string][]Diag, importsNew func(line, created string) bool) {
+func (c *EditCheck) Compare(p *Patch, all []string, before, after map[string][]Diag, importsNew func(line, created string) bool) {
+	res := c
 	root := p.Root
 	edited := map[string]bool{}
 	for _, abs := range p.Order {
