@@ -101,15 +101,13 @@ func TestServer_ListsRegisteredTools(t *testing.T) {
 		"status":           true,
 		"recently_changed": true,
 	}
-	// The Go typed tier's tools are offered when what they need is on
-	// PATH (ADR-059, ADR-061): go for the three answered in process, gopls
-	// as well for the rename plan. TestServer_GoToolsFollowPath pins the cases.
+	// The Go typed tier's four tools are offered when go is on PATH: all
+	// are answered in process, the rename plan included (ADR-062), so gopls
+	// being installed or not makes no difference to this server.
+	// TestServer_GoToolsFollowPath pins the cases.
 	if engine.GoPath() != "" {
-		for _, n := range []string{"go_references", "go_implementations", "go_uses"} {
+		for _, n := range []string{"go_references", "go_implementations", "go_uses", "go_rename_plan"} {
 			wantNames[n] = true
-		}
-		if engine.GoplsPath() != "" {
-			wantNames["go_rename_plan"] = true
 		}
 	}
 	if len(res.Tools) != len(wantNames) {
