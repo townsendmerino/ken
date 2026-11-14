@@ -438,3 +438,76 @@ func TestProgramCache_oneProgramServesEveryDirectory(t *testing.T) {
 		t.Errorf("four questions in two directories under two configurations: %d loads, %d evictions, %d programs held; want 2, 0, 2", st.Loads, st.Evictions, len(st.Programs))
 	}
 }
+
+// An edit that compiles is put to go vet: what vet would newly report is listed, what it reports already is not,
+// and the finding is placed in the file the edit names, not in the copy the go command read.
+func TestCheckEdit_vet(t *testing.T) {
+	needGo(t)
+	root := writeTree(t, map[string]string{
+		"go.mod": "module example.com/vt\n\ngo 1.21\n",
+		"a/a.go": `package a
+
+import "fmt"
+
+func Old(n float64) string { return fmt.Sprintf("%d", n) }
+
+func Show(n float64) string {
+	return fmt.Sprint(n)
+}
+`,
+		"a/a_test.go": "package a\n\nimport \"testing\"\n\nfunc TestShow(t *testing.T) { _ = Show(1) }\n",
+	})
+	cfg := Config{Configs: []BuildConfig{{Name: "host", Env: map[string]string{"GOWORK": "off", "GOFLAGS": "-mod=mod", "GOPROXY": "off"}}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	r := &Runner{Repo: root, Config: cfg}
+	bad := []FileEdit{{File: "a/a.go", OldString: "return fmt.Sprint(n)", NewString: "return fmt.Sprintf(\"%s\", n)"}}
+
+	got, err := r.CheckEdit(ctx, bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := got.Text(1, 0)
+	if len(got.Errors) != 0 || got.Clean || !got.Vetted || len(got.Vet) != 1 {
+		t.Fatalf("want one vet finding and no compile error:\n%s", text)
+	}
+	if f := got.Vet[0]; f.File != "a/a.go" || f.Line != 8 || !strings.HasPrefix(f.Message, "printf: ") || !strings.Contains(f.Message, "%s") {
+		t.Errorf("vet finding = %+v", f)
+	}
+	for _, want := range []string{"VET: a/a.go:8: printf: ", "COMPILES, BUT go vet WOULD REPORT 1 new problems"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text lacks %q:\n%s", want, text)
+		}
+	}
+	// the same edit again: the go command answers from its cache, with the position of the earlier run's copy
+	if again, err := r.CheckEdit(ctx, bad); err != nil || len(again.Vet) != 1 || again.Vet[0].File != "a/a.go" {
+		t.Errorf("the second check of the same edit: %v %+v", err, again)
+	}
+
+	// an edit elsewhere in a file that vet already complains about reports nothing, though the complaint moved
+	fine, err := r.CheckEdit(ctx, []FileEdit{{File: "a/a.go", OldString: "import \"fmt\"\n", NewString: "import \"fmt\"\n\n// Old formats n.\n"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fine.Clean || !fine.Vetted || len(fine.Vet) != 0 {
+		t.Errorf("an edit beside a vet finding that is already there:\n%s", fine.Text(1, 0))
+	}
+	if !strings.Contains(fine.Text(1, 0), "go vet reports nothing new in the edited packages") {
+		t.Errorf("a clean check does not say vet was asked:\n%s", fine.Text(1, 0))
+	}
+
+	// vet's "tests" check reads the file's name: a malformed test name in a new _test.go file is found
+	named, err := r.CheckEdit(ctx, []FileEdit{{File: "a/b_test.go", Content: str("package a\n\nimport \"testing\"\n\nfunc Testshow(t *testing.T) {}\n")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(named.Vet) != 1 || named.Vet[0].File != "a/b_test.go" || !strings.HasPrefix(named.Vet[0].Message, "tests: ") {
+		t.Errorf("a malformed test name in a new file:\n%s", named.Text(1, 0))
+	}
+
+	// SkipVet is the type check alone
+	r.SkipVet = true
+	if skipped, err := r.CheckEdit(ctx, bad); err != nil || !skipped.Clean || skipped.Vetted {
+		t.Errorf("SkipVet: %v %+v", err, skipped)
+	}
+}

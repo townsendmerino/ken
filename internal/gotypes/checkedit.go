@@ -66,8 +66,16 @@ type EditCheck struct {
 	// Packages is how many packages were type-checked again, under the configuration with the most.
 	Packages int         `json:"packages"`
 	Runs     []ConfigRun `json:"runs"`
-	// Clean is true when every listed configuration that compiles an edited file was checked and found no new error
-	// and no moved identifier.
+	// Vet are the problems `go vet` would report in the edited packages that it does not report now: the edit
+	// compiles, and `go test` would refuse to run a package with one of the checks it runs first (printf among
+	// them). Each message starts with the name of vet's check. Vet is asked only about an edit that compiles.
+	Vet []EditFinding `json:"vet,omitempty"`
+	// Vetted is true when go vet was asked about the edited packages under every configuration checked. VetNote
+	// says why when it could not be.
+	Vetted  bool   `json:"vetted"`
+	VetNote string `json:"vet_note,omitempty"`
+	// Clean is true when every listed configuration that compiles an edited file was checked and found no new error,
+	// no moved identifier and no new vet finding.
 	Clean bool `json:"clean"`
 	// Incomplete is true when a configuration could not be checked, or none compiles the edited files.
 	Incomplete bool `json:"incomplete"`
@@ -387,7 +395,53 @@ func (r *Runner) CheckEdit(ctx context.Context, edits []FileEdit) (*EditCheck, e
 	}
 	sort.Strings(res.API)
 	res.Incomplete = failed || !checkedAny
-	res.Clean = !res.Incomplete && len(res.Errors) == 0 && len(res.Moved) == 0
+
+	// An edit that compiles is put to go vet, by the go command itself with the edit as an overlay (vetedit.go).
+	if checkedAny && len(res.Errors) == 0 && !r.SkipVet && r.Run == nil {
+		type vkey struct {
+			file string
+			line int
+			msg  string
+		}
+		under := map[vkey][]string{}
+		var order []vkey
+		res.Vetted = true
+		for _, j := range jobs {
+			if j.err != nil || len(j.diffs) == 0 {
+				continue
+			}
+			bc := r.Config.Configs[j.ci]
+			fs, err := r.vetEdit(ctx, bc, patch, old)
+			if err != nil {
+				res.Vetted = false
+				if res.VetNote == "" {
+					res.VetNote = firstLine(err.Error())
+				}
+				continue
+			}
+			for _, f := range fs {
+				rel, inRepo := r.rel(f.file)
+				if !inRepo {
+					rel = f.file
+				}
+				k := vkey{rel, f.line, f.analyzer + ": " + f.msg}
+				if under[k] == nil {
+					order = append(order, k)
+				}
+				under[k] = append(under[k], bc.Name)
+			}
+		}
+		sort.SliceStable(order, func(a, b int) bool {
+			if order[a].file != order[b].file {
+				return order[a].file < order[b].file
+			}
+			return order[a].line < order[b].line
+		})
+		for _, k := range order {
+			res.Vet = append(res.Vet, EditFinding{File: k.file, Line: k.line, Message: k.msg, Configs: under[k]})
+		}
+	}
+	res.Clean = !res.Incomplete && len(res.Errors) == 0 && len(res.Moved) == 0 && len(res.Vet) == 0
 	return res, nil
 }
 
@@ -449,6 +503,10 @@ func (c *EditCheck) Text(nConfigs, maxFindings int) string {
 	}
 	list("ERROR", c.Errors)
 	list("MOVED", c.Moved)
+	list("VET", c.Vet)
+	if c.VetNote != "" {
+		fmt.Fprintf(&b, "go vet was not asked: %s\n", c.VetNote)
+	}
 	for _, a := range c.API {
 		fmt.Fprintf(&b, "API: %s\n", a)
 	}
@@ -457,11 +515,20 @@ func (c *EditCheck) Text(nConfigs, maxFindings int) string {
 	}
 	switch {
 	case c.Clean:
-		b.WriteString("checked: the edit was applied in memory and what it reaches type-checked again; no new compile error, and every identifier on a line it does not touch still refers to the declaration it referred to\n")
+		b.WriteString("checked: the edit was applied in memory and what it reaches type-checked again; no new compile error, and every identifier on a line it does not touch still refers to the declaration it referred to")
+		if c.Vetted {
+			b.WriteString("; go vet reports nothing new in the edited packages")
+		}
+		b.WriteByte('\n')
 	case len(c.Errors) > 0:
 		fmt.Fprintf(&b, "WOULD NOT COMPILE: %d new errors\n", len(c.Errors))
 	case len(c.Moved) > 0:
 		fmt.Fprintf(&b, "COMPILES, BUT MEANS SOMETHING ELSE in %d places the edit does not touch (MOVED lines): check each is intended\n", len(c.Moved))
+		if len(c.Vet) > 0 {
+			fmt.Fprintf(&b, "and go vet would report %d new problems (VET lines)\n", len(c.Vet))
+		}
+	case len(c.Vet) > 0:
+		fmt.Fprintf(&b, "COMPILES, BUT go vet WOULD REPORT %d new problems (VET lines): go test runs these checks first and does not run a package's tests when one fails\n", len(c.Vet))
 	default:
 		b.WriteString("NOT CHECKED: no listed configuration could check the edit\n")
 	}
