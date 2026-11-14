@@ -70,6 +70,8 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-060](#adr-060-the-go-typed-tier-asks-gopls-over-lsp-and-keeps-nothing-unless-told-to) | The Go typed tier asks gopls over LSP and keeps nothing unless told to (amends ADR-059) | Accepted |
 | [ADR-061](#adr-061-references-and-implementations-are-answered-in-process-with-gotypes-held-to-gopls-by-a-differential) | References and implementations are answered in process with go/types, held to gopls by a differential (amends ADR-060) | Accepted |
 | [ADR-062](#adr-062-a-rename-plan-is-computed-in-process-and-checked-by-making-it) | A rename plan is computed in process and checked by making it (amends ADR-061) | Accepted |
+| [ADR-063](#adr-063-an-edit-the-caller-wrote-is-checked-the-way-a-rename-plan-is) | An edit the caller wrote is checked the way a rename plan is | Accepted |
+| [ADR-064](#adr-064-a-typed-tier-for-typescript-asks-the-projects-own-compiler-over-lsp-starting-with-a-check-for-an-edit) | A typed tier for TypeScript asks the project's own compiler over LSP, starting with a check for an edit | Accepted |
 
 ---
 
@@ -3417,3 +3419,88 @@ With the three programs held the process is 1.35 GB after loading them (0.65 GB 
 - A workspace package that imports "C" is type-checked from files the go command generates; an edit that would fall in one is left out and reported, and the check then refuses. That path has not been exercised on a real cgo package.
 - One repository, two fixtures, one gopls version. Windows has not been run.
 
+---
+
+## ADR-063: An edit the caller wrote is checked the way a rename plan is
+
+**Status:** Accepted
+**Date:** 2026-11-14
+**Decided by:** Francis: "could build another tool for go code, like go_rename, where the agent sends a file-edit and we apply it and then check like we do for rename".
+
+### Context
+
+ADR-062 checks a rename plan by making it: the patch is applied in memory to the held program, what it touches is type-checked again, and the two programs are compared. Nothing in that depends on ken having computed the patch. An agent edits far more often than it renames, and what it does today to learn whether an edit compiles is to write the file and run `go build`, which covers one build configuration and has already changed the tree.
+
+### Decision
+
+1. **`go_check_edit` (`ken go check-edit`, `GoTyped.CheckEdit`) takes edits and writes nothing.** An edit is `{file, old_string, new_string}` with an editor's rule (the old text occurs once, or `replace_all`), or `{file, content}` for a whole file, which may be new. Several are checked together.
+2. **The program of the edit is the held program refreshed with the edited files in place of the files on disk** (`refreshWith`, as for a rename), with two differences. Every function body of every package the edit reaches is checked: an edit can change anything, so the narrow check of a rename does not apply. And when the edit changes what the go command lists (an import, a package clause, a build constraint, a new file) the configuration is listed again with `go list -overlay` and type-checked whole.
+3. **Three things are reported**, each merged over the configurations with the ones it holds under:
+   - **new compile errors**, in every package checked again. An error is new when no error was at that place before; inside a line the edit rewrote, when no error there said the same. The errors `go/types` calls soft (an unused variable or import) are compile errors and are reported; every program now keeps them (`tPackage.soft`) so that the ones already there are not;
+   - **moved identifiers**: on every line the edit leaves alone, an identifier that refers to a different declaration. Lines are matched by a diff of the old and new contents (`lineMap`). A declaration on a line the edit rewrote counts as the same declaration when the edit wrote one of that name and kind in that package, so moving a function is not reported and shadowing a variable is;
+   - **exported declarations removed or changed** in the packages the edit writes in, described as code outside the package sees them. Code outside the repository cannot be checked; this is what it would see.
+4. **The verdict.** `checked` when there is no new error and no moved identifier under every configuration that compiles an edited file. An API line does not change the verdict. A file that does not parse is reported as that and nothing is type-checked.
+5. **It always runs in process**, whatever engine the host chose, and is offered whenever `go` is on PATH.
+
+### What it rests on
+
+- `TestCheckEdit`: fifteen edits of a fixture, each checked by a runner that refreshes held programs and by one that loads afresh with the edit in place, which must agree; and each applied to a copy of the tree and given to `go vet ./...` under both configurations, which must fail exactly when the check reports an error, at no line the check does not report.
+- On ken's own source (449 Go files, one configuration, M1 Pro): 0.04 to 0.09 s held and 1.1 to 1.9 s from the command line for an edit that leaves imports alone; about 1.1 s held (2.2 s the first time) for one that changes them, which type-checks all 634 packages again. No larger repository and no three-configuration run has been measured.
+
+### Found on the way
+
+A held program was keyed by the directory of the declaration asked about. A question about a symbol in another directory loaded the repository again, and under the default size evicted the first. `ProgramCache.keyFor` now finds the held program whose workspace has a package in the directory. The figures ADR-061 gives for a loaded repository were measured with questions in one directory.
+
+A listing whose packages import each other in a circle would have made the loader wait for itself; an edit that adds an import makes that likely. `buildWith` now returns the cycle as an error, and the check reports it.
+
+### Limits
+
+- A file cannot be deleted, and only `.go` files can be edited.
+- `go vet`'s checks are not run. Behaviour is not checked at all.
+- A new import costs a full listing and type-check. Reusing the held program when every new import is a package already listed would avoid it; not done.
+- The moved-identifier rule for a declaration on a rewritten line goes by name, kind and package. Two declarations of one name swapped by a single edit would be taken for each other.
+- Soft errors are kept for every package of every program. A repository that compiles has none.
+
+## ADR-064: A typed tier for TypeScript asks the project's own compiler over LSP, starting with a check for an edit
+
+**Status:** Accepted
+**Date:** 2026-11-14
+**Decided by:** Francis: "i think this approach is best -- Client of `tsc --lsp` (recommended) ... using lsp will open that up for other languages i think", and "Yes, build it" to `ts_check_edit` as its own tool, TypeScript 7 only and read-only.
+
+### Context
+
+The Go typed tier answers in ken's process because Go's type checker is a library ken can link. No other popular language offers that under the pure-Go rule except TypeScript, whose compiler is a Go program since 7.0, and all of its packages are under `internal/`: another module cannot import them. Three routes were compared in [`typescript-typed-tier-plan-2026-11.md`](typescript-typed-tier-plan-2026-11.md): a client of the compiler's language server, a client of its msgpack API, and a copy of its source inside ken.
+
+A copy would answer with ken's compiler version. TypeScript changes what type-checks between minor versions on purpose, so the right compiler for a repository is the one in its `node_modules`.
+
+Phase 0 measured the language server ([`results/typescript-lsp-phase0-2026-11.md`](results/typescript-lsp-phase0-2026-11.md)): answers cross `tsconfig` projects, diagnostics are pulled per file and follow an unsaved change into files never opened, and a request sent at once waits for the load. Its rename hands out plans that do not compile.
+
+### Decision
+
+1. **The TypeScript tier is a client of `tsc --lsp --stdio`, the native program in the project's `node_modules`** (`node_modules/@typescript/typescript-<os>-<arch>/lib/tsc`, found by walking up from the edited file to the repository root). ken links no TypeScript code, downloads nothing and runs no Node. A project on TypeScript 5 or 6 has no such program; the error names the installed version.
+2. **The client is `internal/lsp`, which knows no language.** It was moved out of `internal/gotypes`, which keeps what only gopls needs. `internal/tstypes` is the TypeScript side. A tier for another language with a language server is a third such package.
+3. **`ts_check_edit` (`ken ts check-edit`, `TSTyped.CheckEdit`) is the first tool.** It takes edits in the shape `go_check_edit` takes and writes nothing. Every source file of the repository (the index's walk, so `.gitignore` is honored) is asked for its errors; the edited files are opened with their new contents (`didOpen`, which also carries a file that does not exist yet); every file is asked again. Reported: the errors that are new (severity error only), with file, line and `TS` code, and a count of the errors that went away. In a file the edit rewrote an error is matched by line and message first and by message alone after; elsewhere by line and message.
+4. **One server per check.** It is started, asked and stopped. Nothing is held between checks.
+5. **The tool is offered when the server's default repository has the compiler at its root**, so that it is not listed where it can only fail. Running the check runs a program the repository chose. That is honored for the default repository and on a server confined to allowed roots (the rule the Go tier's wrap command follows), and refused for a `repo` argument on an unconfined server.
+6. **Separate from `go_check_edit`.** The two report different things (Go adds moved identifiers, API changes and build configurations) and have different requirements.
+
+### What was measured
+
+M1 Pro, TypeScript 7.0.2.
+
+- A test builds a two-project fixture, runs six edits through the check (a body change, a new parameter, a new interface member, a syntax error, a fix, a new file) and holds each answer to the compiler itself: the edit is written to a copy, `tsc -b` builds the copy and the original, and the errors the build gains must be the errors the check reported, by file and code. All six agree. It runs only where `KEN_TEST_TSC` names a compiler; CI does not have one, and there the logic is tested against a fake server.
+- Wall time for a whole check from the command line: 0.11 s on the fixture (10 files), 0.24 s on a 58-file project with one `tsconfig`, where adding a parameter to an exported function reported both callers.
+
+**Not measured: a repository of realistic size.** Each check asks about every source file twice, so its cost should be near two full type-checks. Nothing above says what that is at 5,000 files.
+
+### Consequences and what is not done
+
+- **No check that a name still means what it meant.** An edit can compile and change which declaration an untouched line refers to (Phase 0 found a rename that does). `go_check_edit` reports those as MOVED; this tool does not, and its verdict line says so.
+- No report of changed exports, and no build configurations: a `tsconfig` project is the unit and the server covers all of them in one session.
+- Every file is asked about, not only those that depend on the edit. The server has no workspace-wide request and ken has no import graph for TypeScript it would trust for this. A held session with the baseline remembered would halve the cost; not built.
+- More than 20,000 source files is refused, not sampled.
+- A file cannot be deleted, and only TypeScript and JavaScript source files can be edited (not `tsconfig.json` or `package.json`).
+- JavaScript is checked as far as the project's options check it (`checkJs`). Without them an edit to a `.js` file reports nothing.
+- A monorepo that installs the compiler only in a nested package is found at check time, but the tool is not offered for it, because the offer looks at the root.
+- References, implementations and a checked rename for TypeScript are the plan's next phases. The pool, answer cache and tree fingerprint of the Go tier are still in `internal/gotypes`.
+- The `exit` notification is now sent without a `params` field. TypeScript's server rejects `"params": null`; gopls accepts either.

@@ -261,7 +261,7 @@ go-git on the local working tree).
 
 ## Go: type-resolved answers across build configurations
 
-`references` and `callers` match by name. For Go, four more tools answer from a type checker, in ken's own process: `go_references`, `go_implementations`, `go_uses` and `go_rename_plan` (`ken go refs|impls|uses|rename-plan` on the command line). They need the `go` command on PATH and nothing else (no gopls), and they work on local checkouts. `go_references` and `go_implementations` return the lines gopls would (that is tested, declaration by declaration, against gopls itself) and one kind gopls leaves out: uses of a generic type's field through an instantiation in another package.
+`references` and `callers` match by name. For Go, five more tools answer from a type checker, in ken's own process: `go_references`, `go_implementations`, `go_uses`, `go_rename_plan` and `go_check_edit` (`ken go refs|impls|uses|rename-plan|check-edit` on the command line). They need the `go` command on PATH and nothing else (no gopls), and they work on local checkouts. `go_references` and `go_implementations` return the lines gopls would (that is tested, declaration by declaration, against gopls itself) and one kind gopls leaves out: uses of a generic type's field through an instantiation in another package.
 
 A type checker sees one build configuration at a time, so code behind a build tag or another GOOS is invisible from the default one. List the repository's configurations once, in `.ken-go.json` at its root:
 
@@ -320,6 +320,26 @@ backend/cuda/a13_multimodel_test.go
   Before it answers, the merged patch is applied in memory and every configuration is type-checked again. The plan says `checked` when nothing changed but the name: no new type error, every identifier still refers to the declaration it referred to (nothing shadowed or captured), every type has the fields and methods it had (nothing hidden, merged or made ambiguous), and every type assertion that could succeed still can. Otherwise it lists each difference as a `CONFLICT` line and gives **no patch**. A plan with an `INCOMPLETE` line (a declaration no listed configuration compiles) is a lower bound and is not called checked. A `PARTIAL` line means a configuration has type errors of its own: identifiers inside code that does not type-check are not renamed.
 
   What the check cannot see: reflection, struct tags, names inside strings, and a type that stops (or starts) satisfying an interface it is only ever converted to at run time, such as `fmt.Stringer`.
+- **`go_check_edit` checks an edit before it is made.** Give it the edit as you would make it, `{file, old_string, new_string}` or `{file, content}` for a whole (or new) file, several at once if they belong together. It writes nothing: the edit is applied in memory and every package it reaches is type-checked again, under every configuration. On the command line: `ken go check-edit <repo> <file> <new-contents-file>`, or `--edits FILE` with the same JSON list.
+
+### TypeScript and JavaScript: `ts_check_edit`
+
+`ts_check_edit` (`ken ts check-edit <repo> <file> <new-contents-file>`, or `--edits FILE`) answers the same question for TypeScript and JavaScript: what would this edit do to the build. It asks the project's own compiler, so it needs TypeScript 7.0 or later installed in the repository (`npm install` done; the native compiler is `node_modules/@typescript/typescript-<os>-<arch>/lib/tsc`, and `--tsc PATH` names another). ken runs no Node. On TypeScript 5 or 6 it says which version it found and stops.
+
+```
+$ ken ts check-edit . --edits edits.json
+check edit: 1 files edited; 58 source files checked with TypeScript 7.0.2 in 0.24s
+  src/core/tvm.ts
+ERROR: src/core/lightcards.test.ts:9: TS2554: Expected 2 arguments, but got 1.
+ERROR: src/react/TvmCard.tsx:23: TS2554: Expected 2 arguments, but got 1.
+WOULD NOT COMPILE: 2 new errors
+```
+
+The edit is opened as unsaved contents in the compiler; nothing is written. Errors that are there already are not listed, and errors the edit removes are counted. It covers every `tsconfig` project of the repository in one run. What it does not do, and `go_check_edit` does: report a name on an untouched line that now refers to another declaration, or list changed exports. Each call starts the compiler and asks about every source file twice; that took 0.24 s on the 58-file project above and has not been measured on a large one. The MCP tool appears when the server's default repository has the compiler at its root, and on a server without `KEN_MCP_ALLOWED_REPO_ROOTS` it checks that repository only, because the check runs a program the repository supplies.
+
+  The reply has three kinds of line. `ERROR` is a compile error that is not there now, in the edited files or in any package that depends on them, with the configurations it holds under when that is not all of them: change a function's parameters and every caller is listed, the one in `x_windows.go` included. Unused variables and imports count, as they do for the compiler. `MOVED` is an identifier on a line the edit does not touch that would refer to another declaration: a variable the edit shadows, a builtin a new function captures. That code compiles and means something else, so check each is intended. `API` is an exported declaration of an edited package that the edit removes or changes: what code outside the repository would see, which nothing here can check. Errors that are already there are not reported, and the reply says how many of them the edit fixes.
+
+  With no such line the reply says `checked`. That is a statement about types, not behaviour: tests still have to run. An edit that leaves a file's imports alone costs what a query after an edit costs (a fraction of a second on a server that holds the repository); one that changes them, or adds a file, has the go command list the packages again and takes a second or more per configuration. An edited file that does not parse is reported as that and nothing is type-checked. Only `.go` files can be edited, a file cannot be deleted, and `go vet`'s checks are not run.
 
   It will also refuse some renames an editor makes: `main` in package main and `init` (the result compiles and is a different program); a field of a struct that the code converts to or from another struct with the same fields (the conversion would stop compiling: rename both, or neither); a method of a type whose own method hides an embedded type's method of the same name (the embedded one would take its place wherever an interface asks for that name).
 

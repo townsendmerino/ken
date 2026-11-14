@@ -368,6 +368,12 @@ func NewServer(cfg Config) *sdk.Server {
 		registerGoTools(srv, &cfg, !cfg.GoTyped.NeedsGopls() || engine.GoplsPath() != "")
 	}
 
+	// The TypeScript typed tier (ADR-064) asks the compiler installed in the repository, so its tool is offered when
+	// the default repository has one.
+	if tsToolsAvailable(&cfg) {
+		registerTSTools(srv, &cfg)
+	}
+
 	return srv
 }
 

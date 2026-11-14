@@ -13,7 +13,7 @@ import (
 
 // The Go typed tier's tools (ADR-059, ADR-061, ADR-062). They answer from a type checker, merged over the
 // repository's build configurations, where definition / references / callers answer from the tree-sitter index by
-// name. All four run in this process with go/types and need only the go command, unless the host was configured
+// name. All run in this process with go/types and need only the go command, unless the host was configured
 // with an engine that asks gopls: go_rename_plan is then registered only with gopls on PATH, so tools/list never
 // offers a tool that can only fail.
 
@@ -45,6 +45,23 @@ type GoRenameArgs struct {
 	repoArg
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json'."`
 	Patch  bool   `json:"patch,omitempty" jsonschema:"Include the merged unified diff (apply with 'git apply'). Off by default: the summary lists the files, and the diff of a wide rename is large."`
+}
+
+// GoEditArg is one edit of go_check_edit: the shape of an editor's replace, or a whole file.
+type GoEditArg struct {
+	File       string  `json:"file" jsonschema:"The .go file, relative to the repo root."`
+	OldString  string  `json:"old_string,omitempty" jsonschema:"Text the file holds now. It must occur exactly once unless replace_all is set."`
+	NewString  string  `json:"new_string,omitempty" jsonschema:"What replaces old_string (empty deletes it)."`
+	ReplaceAll bool    `json:"replace_all,omitempty" jsonschema:"Replace every occurrence of old_string."`
+	Content    *string `json:"content,omitempty" jsonschema:"The file's whole new contents, in place of old_string and new_string. The file need not exist yet."`
+}
+
+// GoCheckEditArgs is the argument schema for go_check_edit.
+type GoCheckEditArgs struct {
+	Edits []GoEditArg `json:"edits" jsonschema:"The edits to check together, as you would make them. Several edits to one file apply in order."`
+	repoArg
+	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json'."`
+	Max    int    `json:"max,omitempty" jsonschema:"Cap on the lines shown of each kind (default 40; the verdict always carries the totals)."`
 }
 
 const goTierNote = "Type-resolved (by Go's own type checker, following gopls's rules for what counts) and merged over every build configuration the repo lists in " +
@@ -91,6 +108,25 @@ func registerGoTools(srv *sdk.Server, cfg *Config, canRename bool) {
 		stop := startProgressHeartbeat(ctx, req, "ken go_uses")
 		defer stop()
 		return handleGoUses(ctx, cfg, args)
+	})
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: "go_check_edit",
+		Description: "Check an edit to Go files before making it. The edit is applied in memory (nothing is written) and " +
+			"every package it reaches is type-checked again under every build configuration. The reply lists the compile " +
+			"errors the edit would cause that are not there now, in the edited files and in every package that depends " +
+			"on them (ERROR, with file and line); the identifiers on lines the edit does not touch that would come to " +
+			"refer to another declaration, such as a name the edit shadows (MOVED: it compiles and means something " +
+			"else); and the exported declarations it removes or changes (API). Use it before a change to a signature, a " +
+			"type or an interface, to see every caller that breaks, including code behind another GOOS or build tag " +
+			"that a local `go build` does not compile. It says nothing about behaviour: tests still have to run. " +
+			"Edits take the shape of an editor's replace (file, old_string, new_string) or a whole file (file, " +
+			"content), and several are checked together. Merged over the build configurations in " + engine.GoConfigFile +
+			" (without that file: the host's default only). A change to a file's imports costs a few seconds more " +
+			"(the go command lists the packages again). Local Go repositories only.",
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args GoCheckEditArgs) (*sdk.CallToolResult, any, error) {
+		stop := startProgressHeartbeat(ctx, req, "ken go_check_edit")
+		defer stop()
+		return handleGoCheckEdit(ctx, cfg, args)
 	})
 	if !canRename {
 		return
@@ -242,4 +278,27 @@ func handleGoRename(ctx context.Context, cfg *Config, args GoRenameArgs) (*sdk.C
 		plan.Patch = ""
 	}
 	return dispatchOutput(args.Output, plan, md)
+}
+
+func handleGoCheckEdit(ctx context.Context, cfg *Config, args GoCheckEditArgs) (*sdk.CallToolResult, any, error) {
+	if len(args.Edits) == 0 {
+		return errorResult(args.Output, "edits is required: at least one {file, old_string, new_string} or {file, content}"), nil, nil
+	}
+	gt, note, errResult := openGoTyped(cfg, args.Repo, args.Output)
+	if errResult != nil {
+		return errResult, nil, nil
+	}
+	edits := make([]engine.GoFileEdit, len(args.Edits))
+	for i, e := range args.Edits {
+		edits[i] = engine.GoFileEdit{File: e.File, OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll, Content: e.Content}
+	}
+	res, err := gt.CheckEdit(ctx, edits)
+	if err != nil {
+		return errorResult(args.Output, err.Error()), nil, nil
+	}
+	limit := args.Max
+	if limit <= 0 {
+		limit = 40
+	}
+	return dispatchOutput(args.Output, res, note+res.Text(len(gt.Config.Configs), limit))
 }

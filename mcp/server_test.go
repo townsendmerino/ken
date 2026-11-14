@@ -101,12 +101,12 @@ func TestServer_ListsRegisteredTools(t *testing.T) {
 		"status":           true,
 		"recently_changed": true,
 	}
-	// The Go typed tier's four tools are offered when go is on PATH: all
+	// The Go typed tier's five tools are offered when go is on PATH: all
 	// are answered in process, the rename plan included (ADR-062), so gopls
 	// being installed or not makes no difference to this server.
 	// TestServer_GoToolsFollowPath pins the cases.
 	if engine.GoPath() != "" {
-		for _, n := range []string{"go_references", "go_implementations", "go_uses", "go_rename_plan"} {
+		for _, n := range []string{"go_references", "go_implementations", "go_uses", "go_rename_plan", "go_check_edit"} {
 			wantNames[n] = true
 		}
 	}
@@ -151,7 +151,7 @@ func TestServer_GoToolsFollowPath(t *testing.T) {
 	}
 	empty := t.TempDir()
 	t.Setenv("PATH", empty)
-	if got := list(); got["go_references"] || got["go_implementations"] || got["go_uses"] || got["go_rename_plan"] {
+	if got := list(); got["go_references"] || got["go_implementations"] || got["go_uses"] || got["go_rename_plan"] || got["go_check_edit"] {
 		t.Errorf("neither go nor gopls on PATH, yet go_* tools are listed: %v", got)
 	}
 	fake := func(name string) {
@@ -168,17 +168,17 @@ func TestServer_GoToolsFollowPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake("go")
-	if got := list(); !got["go_references"] || !got["go_implementations"] || !got["go_uses"] || !got["go_rename_plan"] {
-		t.Errorf("go without gopls: want all four go_* tools (none needs gopls), got %v", got)
+	if got := list(); !got["go_references"] || !got["go_implementations"] || !got["go_uses"] || !got["go_rename_plan"] || !got["go_check_edit"] {
+		t.Errorf("go without gopls: want all five go_* tools (none needs gopls), got %v", got)
 	}
 	// a server told to ask gopls, with no gopls: no rename plan
 	host = engine.NewGoTypedHost(engine.GoTypedOptions{Engine: "lsp", MaxResident: -1})
 	defer host.Close()
-	if got := list(); !got["go_references"] || got["go_rename_plan"] {
-		t.Errorf("the lsp engine without gopls: want no rename plan, got %v", got)
+	if got := list(); !got["go_references"] || !got["go_check_edit"] || got["go_rename_plan"] {
+		t.Errorf("the lsp engine without gopls: want no rename plan, and the edit check (which never asks gopls), got %v", got)
 	}
 	fake("gopls")
-	if got := list(); !got["go_references"] || !got["go_implementations"] || !got["go_uses"] || !got["go_rename_plan"] {
+	if got := list(); !got["go_references"] || !got["go_implementations"] || !got["go_uses"] || !got["go_rename_plan"] || !got["go_check_edit"] {
 		t.Errorf("go and gopls on PATH, yet the go_* tools are not all listed: %v", got)
 	}
 }

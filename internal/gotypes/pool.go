@@ -104,7 +104,7 @@ func (p *Pool) Status() PoolStatus {
 		if pc.s == nil {
 			continue // still starting
 		}
-		pid := pc.s.proc.Pid()
+		pid := pc.s.Pid()
 		st.Sessions = append(st.Sessions, SessionStatus{Repo: pc.repo, Config: pc.s.bc.Name, PID: pid,
 			IdleSec: now.Sub(pc.s.lastUsed).Seconds(), AgeSec: now.Sub(pc.s.started).Seconds(), Requests: pc.s.requests})
 		pids = append(pids, pid)
@@ -341,7 +341,7 @@ func (s *lspSession) syncTree() error {
 	for _, c := range changes {
 		evs = append(evs, map[string]any{"uri": pathToURI(c.path), "type": c.kind})
 	}
-	s.notify("workspace/didChangeWatchedFiles", map[string]any{"changes": evs})
+	s.Notify("workspace/didChangeWatchedFiles", map[string]any{"changes": evs})
 	return nil
 }
 

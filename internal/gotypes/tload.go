@@ -67,6 +67,9 @@ type tPackage struct {
 	typeSpecs []typeSpecRec              // every type declaration, function-local ones included
 	syntax    []*ast.File                // kept only when the program is loaded with keepSyntax
 	errs      []typeErr                  // its hard type errors
+	// soft holds the errors the checker calls soft and errs leaves out (an unused variable or import, an unused
+	// label). The compiler rejects them all the same, which is what the check of an edit has to say (tcheckedit.go).
+	soft []typeErr
 
 	// The methods tied together by this package's assignments of types to interfaces, which a method's rename has to
 	// know (tties.go). They need more of a type-check than the tables keep, so they are found on first use.
@@ -261,12 +264,46 @@ type listing struct {
 // listWorkspace asks the go command for every package of the workspace containing dir under bc, with dependencies and test
 // variants. It runs go behind the repository's wrap command, and is the only part of a load that leaves this process.
 func (r *Runner) listWorkspace(ctx context.Context, bc BuildConfig, dir string) (*listing, error) {
+	return r.listWorkspaceWith(ctx, bc, dir, nil)
+}
+
+// listWorkspaceWith is listWorkspace with overlay standing in for the files on disk (a file overlay names need
+// not exist): the go command reads the package clause, constraints and imports of each from the overlay, so the
+// list is the one the tree would have with those contents. The contents go to a temporary directory for the
+// length of the run, which is how the go command takes an overlay.
+func (r *Runner) listWorkspaceWith(ctx context.Context, bc BuildConfig, dir string, overlay map[string][]byte) (*listing, error) {
 	t0 := nowSeconds()
 	mods, err := r.workspaceOf(ctx, bc, dir)
 	if err != nil {
 		return nil, err
 	}
 	args := []string{"-C", mods[0], "list", "-e", "-deps", "-test", "-compiled", "-json=" + tListFields}
+	if len(overlay) > 0 {
+		tmp, err := os.MkdirTemp("", "ken-overlay-")
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = os.RemoveAll(tmp) }()
+		files := make([]string, 0, len(overlay))
+		for f := range overlay {
+			files = append(files, f)
+		}
+		sort.Strings(files)
+		replace := map[string]string{}
+		for i, f := range files {
+			to := filepath.Join(tmp, fmt.Sprintf("%d.go", i))
+			if err := os.WriteFile(to, overlay[f], 0o600); err != nil {
+				return nil, err
+			}
+			replace[f] = to
+		}
+		doc, _ := json.Marshal(map[string]any{"Replace": replace})
+		js := filepath.Join(tmp, "overlay.json")
+		if err := os.WriteFile(js, doc, 0o600); err != nil {
+			return nil, err
+		}
+		args = append(args, "-overlay", js)
+	}
 	for _, m := range mods {
 		args = append(args, m+string(filepath.Separator)+"...")
 	}
@@ -380,6 +417,10 @@ func (l *listing) buildWith(opts buildOpts) (*program, error) {
 			pf.users.Add(1)
 		}
 	}
+	if cycle := importCycle(p); cycle != "" {
+		// Each package is checked once and waits for what it imports: a cycle would wait for itself.
+		return nil, &cycleError{cycle}
+	}
 	p.listSeconds = l.seconds
 	p.mods = mods
 	p.overlay, p.forceBodies, p.bodyNames, p.leanNames, p.read = opts.overlay, opts.forceBodies, opts.bodyNames, opts.leanNames, opts.read
@@ -387,6 +428,53 @@ func (l *listing) buildWith(opts buildOpts) (*program, error) {
 	p.checkAll()
 	p.checkSeconds = nowSeconds() - t1
 	return p, nil
+}
+
+// cycleError is a listing whose packages import each other in a circle: nothing can be type-checked.
+type cycleError struct{ cycle string }
+
+func (e *cycleError) Error() string { return "import cycle not allowed: " + e.cycle }
+
+// importCycle returns one import cycle among the program's packages ("a -> b -> a"), or "".
+func importCycle(p *program) string {
+	const (
+		visiting = 1
+		done     = 2
+	)
+	state := map[string]int{}
+	var stack []string
+	var visit func(id string) string
+	visit = func(id string) string {
+		switch state[id] {
+		case done:
+			return ""
+		case visiting:
+			for i, s := range stack {
+				if s == id {
+					return strings.Join(append(append([]string{}, stack[i:]...), id), " -> ")
+				}
+			}
+			return id + " -> " + id
+		}
+		state[id] = visiting
+		stack = append(stack, id)
+		if tp := p.pkgs[id]; tp != nil {
+			for _, d := range tp.deps {
+				if c := visit(d); c != "" {
+					return c
+				}
+			}
+		}
+		stack = stack[:len(stack)-1]
+		state[id] = done
+		return ""
+	}
+	for _, tp := range p.order {
+		if c := visit(tp.ID); c != "" {
+			return c
+		}
+	}
+	return ""
 }
 
 // parse returns the syntax of file, parsed once however many packages compile it.
@@ -754,6 +842,7 @@ func (p *program) check(tp *tPackage) {
 					// argument that does not satisfy its type parameter's constraint ("T does not satisfy C") is
 					// soft too, and is exactly what a method's rename can newly cause, in a place that names
 					// neither the method nor the interface.
+					tp.soft = append(tp.soft, typeErr{te.Pos, te.Msg})
 					return
 				}
 				tp.nerr++
