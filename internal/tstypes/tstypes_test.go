@@ -283,7 +283,7 @@ func TestCheckEdit_aRefusedFileMakesTheAnswerIncomplete(t *testing.T) {
 	if res.Clean || !res.Incomplete || strings.Join(res.Unasked, ",") != "refuse.ts" || res.UnaskedWhy != "no project for this file" {
 		t.Errorf("%+v", res)
 	}
-	if text := res.Text(0); !strings.Contains(text, "INCOMPLETE: the compiler did not answer for 1 files (refuse.ts: no project for this file)") ||
+	if text := res.Text(0); !strings.Contains(text, "INCOMPLETE: no answer for 1 files (refuse.ts: no project for this file)") ||
 		!strings.Contains(text, "NO NEW ERROR FOUND, but not every file was checked") {
 		t.Error(text)
 	}
@@ -312,12 +312,10 @@ func TestCheckEdit_refusals(t *testing.T) {
 			t.Errorf("%+v: err = %v, want %q", tc.edits, err, tc.want)
 		}
 	}
-	if _, err := (&Runner{Repo: root, MaxFiles: -1}).sources(root); err != nil {
-		t.Error(err)
-	}
-	r := &Runner{Repo: root, MaxFiles: 1}
 	_ = os.WriteFile(filepath.Join(root, "b.ts"), nil, 0o644)
-	if _, err := r.sources(root); err == nil || !strings.Contains(err.Error(), "more than the 1") {
+	r, _ := fakeRunner(t, root)
+	r.MaxFiles = 1
+	if _, err := r.CheckEdit(context.Background(), []FileEdit{{File: "a.ts", Content: str("y\n")}}); err == nil || !strings.Contains(err.Error(), "more than the 1") {
 		t.Errorf("over the cap: %v", err)
 	}
 }

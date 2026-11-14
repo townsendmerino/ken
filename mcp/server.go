@@ -373,6 +373,10 @@ func NewServer(cfg Config) *sdk.Server {
 	if tsToolsAvailable(&cfg) {
 		registerTSTools(srv, &cfg)
 	}
+	// The Python typed tier (ADR-065) asks the type checker the repository installed, by the same rule.
+	if pyToolsAvailable(&cfg) {
+		registerPyTools(srv, &cfg)
+	}
 
 	return srv
 }

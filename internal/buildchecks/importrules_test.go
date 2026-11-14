@@ -75,7 +75,7 @@ var importRules = map[string][]string{
 	"tools/subset-tags":             {"internal/devtools"},
 
 	// Public library packages.
-	"engine": {"internal/gotypes", "internal/repo", "internal/search", "internal/structural", "internal/tstypes"},
+	"engine": {"internal/gotypes", "internal/repo", "internal/search", "internal/pytypes", "internal/structural", "internal/tstypes"},
 	"mcp":    {"engine", "internal/envcfg", "internal/mcplog", "internal/status"},
 	"mcp/db": {"internal/db", "mcp"},
 
@@ -89,16 +89,18 @@ var importRules = map[string][]string{
 	"internal/envcfg":      {"internal/bytesize", "internal/mcplog", "internal/repo"},
 	"internal/gotypes":     {"internal/lsp"},
 	"internal/lsp":         {},
+	"internal/lspcheck":    {"internal/lsp", "internal/repo"},
 	"internal/mcplog":      {},
 	"internal/modelfetch":  {},
 	"internal/perf":        {},
+	"internal/pytypes":     {"internal/lsp", "internal/lspcheck"},
 	"internal/repo":        {},
 	"internal/search":      {"internal/binfmt", "internal/repo", "internal/sql", "internal/structural"},
 	"internal/sql":         {},
 	"internal/status":      {"internal/usage"},
 	"internal/structural":  {"internal/repo"},
 	"internal/testenv":     {},
-	"internal/tstypes":     {"internal/lsp", "internal/repo"},
+	"internal/tstypes":     {"internal/lsp", "internal/lspcheck"},
 	"internal/usage":       {},
 }
 
