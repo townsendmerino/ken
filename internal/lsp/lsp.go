@@ -168,6 +168,7 @@ type Session struct {
 	name string
 	root string
 	proc Proc
+	init json.RawMessage // the server's reply to initialize
 
 	wmu     sync.Mutex // serializes writes
 	mu      sync.Mutex // guards the fields below
@@ -242,7 +243,7 @@ func Start(ctx context.Context, o Options) (*Session, error) {
 	uri := PathToURI(o.Root)
 	ictx, cancel := context.WithTimeout(ctx, o.Timeout)
 	defer cancel()
-	_, err = s.Call(ictx, "initialize", map[string]any{
+	s.init, err = s.Call(ictx, "initialize", map[string]any{
 		"processId":        os.Getpid(),
 		"rootUri":          uri,
 		"workspaceFolders": []any{map[string]string{"uri": uri, "name": filepath.Base(o.Root)}},
@@ -258,6 +259,15 @@ func Start(ctx context.Context, o Options) (*Session, error) {
 
 // Root is the workspace folder the server was started for.
 func (s *Session) Root() string { return s.root }
+
+// ServerInfo is the name and version the server gave for itself in the handshake, either of which may be empty.
+func (s *Session) ServerInfo() (name, version string) {
+	var r struct {
+		ServerInfo struct{ Name, Version string } `json:"serverInfo"`
+	}
+	_ = json.Unmarshal(s.init, &r)
+	return r.ServerInfo.Name, r.ServerInfo.Version
+}
 
 // Pid is the server's process id, or 0 for a test double.
 func (s *Session) Pid() int { return s.proc.Pid() }

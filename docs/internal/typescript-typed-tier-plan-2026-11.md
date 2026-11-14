@@ -40,6 +40,8 @@ writer in the copy audited against the stdout contract of `ken-mcp`.
 What A gives up is the 1.17.0 headline. The tools would appear only where TypeScript 7 is installed, and ken would not
 be faster than the server it asks. Nothing like "37 s to 0.1 s" should be expected or promised.
 
+**Status on 2026-11-14:** Phase 0 is measured ([`results/typescript-lsp-phase0-2026-11.md`](results/typescript-lsp-phase0-2026-11.md)), the shared client is `internal/lsp`, and `ts_check_edit` is built (ADR-064; this plan's "063" below was written before `go_check_edit` took that number). Phases 1 and 2 are not started.
+
 ## Phase 0: measure before deciding (no ken code)
 
 One medium TypeScript repository with several `tsconfig` files, and `tsc --lsp` driven by a throwaway client.
