@@ -9,10 +9,12 @@ import (
 	"github.com/townsendmerino/ken/internal/gotypes"
 )
 
-// The Go typed tier (ADR-059, ADR-060, ADR-061): type-resolved references, implementations and rename plans for a Go
-// repository, merged over the build configurations the repository lists in GoConfigFile. References and
-// implementations are answered in this process with go/types (the go command lists the packages); a rename plan runs
-// gopls as a subprocess. It is independent of the search index: no Workspace is needed.
+// The Go typed tier (ADR-059 to ADR-062): type-resolved references, implementations and rename plans for a Go
+// repository, merged over the build configurations the repository lists in GoConfigFile. All three are answered in
+// this process with go/types (the go command lists the packages), and a rename plan is checked before it is
+// returned: its patch is applied in memory and what it touches type-checked again (GoRenamePlan.Verified). gopls
+// is run only when one of the gopls engines is chosen. The tier is independent of the search index: no Workspace
+// is needed.
 //
 // GoResult.GroupBy turns a references or implementations answer into counts per package, directory or file.
 // GoTyped.Uses is the reverse question (which identifiers of one package another names); it runs the go command and
@@ -42,7 +44,7 @@ var (
 
 // GoEngines are the values GoTyped.Engine takes, the default first: "types" (in this process with go/types, following
 // gopls's search rules; no gopls needed), "lsp" (gopls over its language-server protocol) and "cli" (the gopls command
-// line). A rename plan is gopls's under every engine.
+// line). The default engine also computes rename plans, and checks each by applying it in memory (ADR-062).
 func GoEngines() []string { return append([]string(nil), gotypes.Engines...) }
 
 // GoGroupKeys are the values GoResult.GroupBy takes.
@@ -117,8 +119,8 @@ type GoTypedOptions struct {
 	// dropped first. A remembered answer is returned only while no Go file or module file of the repository has
 	// changed since it was made. 0 keeps none.
 	CacheBytes int64
-	// Engine chooses what answers references and implementations for every GoTyped the host opens: one of
-	// GoEngines(). "" is the default engine. A GoTyped's own Engine field can still be set after Open.
+	// Engine chooses what answers references, implementations and rename plans for every GoTyped the host opens:
+	// one of GoEngines(). "" is the default engine. A GoTyped's own Engine field can still be set after Open.
 	Engine string
 	// Parallel is how many build configurations the in-process engine type-checks at once. 0 or 1 is one at a time,
 	// which keeps one program (about 0.7 GB at its peak on goinfer) in memory while a query runs; more is faster
@@ -134,7 +136,7 @@ func (o GoTypedOptions) Enabled() bool { return o.MaxResident >= 0 || o.CacheByt
 // cache.
 type GoTypedStatus struct {
 	Enabled  bool                       `json:"enabled"`
-	Pool     gotypes.PoolStatus         `json:"pool"`     // resident gopls processes (the lsp engine, and rename plans)
+	Pool     gotypes.PoolStatus         `json:"pool"`     // resident gopls processes (the lsp engine)
 	Programs gotypes.ProgramCacheStatus `json:"programs"` // resident type-checked programs (the types engine)
 	Cache    gotypes.CacheStatus        `json:"cache"`
 	// HeldBytes is the memory the host holds between queries: the resident gopls processes' RSS, the resident
@@ -243,4 +245,10 @@ func (w *Workspace) GoTyped(configFile string) (*GoTyped, bool, error) {
 		return OpenGoTyped(w.root, configFile)
 	}
 	return w.goHost.Open(w.root, configFile)
+}
+
+// NeedsGopls reports whether the typed tier this host opens asks gopls: true for every engine but the default. A nil
+// host opens the default engine.
+func (h *GoTypedHost) NeedsGopls() bool {
+	return h != nil && h.opts.Engine != "" && h.opts.Engine != gotypes.EngineTypes
 }

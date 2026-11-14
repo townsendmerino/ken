@@ -11,10 +11,11 @@ import (
 	"github.com/townsendmerino/ken/engine"
 )
 
-// The Go typed tier's tools (ADR-059, ADR-061). They answer from a type checker, merged over the repository's build
-// configurations, where definition / references / callers answer from the tree-sitter index by name. go_references,
-// go_implementations and go_uses run in this process with go/types and need the go command; go_rename_plan asks
-// gopls. Each is registered only when what it needs is on PATH, so tools/list never offers a tool that can only fail.
+// The Go typed tier's tools (ADR-059, ADR-061, ADR-062). They answer from a type checker, merged over the
+// repository's build configurations, where definition / references / callers answer from the tree-sitter index by
+// name. All four run in this process with go/types and need only the go command, unless the host was configured
+// with an engine that asks gopls: go_rename_plan is then registered only with gopls on PATH, so tools/list never
+// offers a tool that can only fail.
 
 // GoSymbolArgs is the argument schema for go_references and go_implementations.
 type GoSymbolArgs struct {
@@ -57,7 +58,7 @@ const goUsesNote = "merged over every build configuration the repo lists in " + 
 	" (without that file: the host's default only), each row naming the configurations that saw it when not all did. " +
 	"A reply with an INCOMPLETE line is a lower bound. Local Go repositories only."
 
-func registerGoTools(srv *sdk.Server, cfg *Config, haveGopls bool) {
+func registerGoTools(srv *sdk.Server, cfg *Config, canRename bool) {
 	sdk.AddTool(srv, &sdk.Tool{
 		Name: "go_references",
 		Description: "Find every line that refers to a Go symbol: compiler-grade, unlike `references` and `callers`, " +
@@ -91,7 +92,7 @@ func registerGoTools(srv *sdk.Server, cfg *Config, haveGopls bool) {
 		defer stop()
 		return handleGoUses(ctx, cfg, args)
 	})
-	if !haveGopls {
+	if !canRename {
 		return
 	}
 	sdk.AddTool(srv, &sdk.Tool{
@@ -99,7 +100,11 @@ func registerGoTools(srv *sdk.Server, cfg *Config, haveGopls bool) {
 		Description: "Plan a rename of a Go symbol: the files and lines it would edit under every build configuration, " +
 			"the lines that still spell the old name in comments or prose, and (with `patch`) one merged diff. " +
 			"It writes nothing. A rename computed under one configuration leaves the files only another " +
-			"configuration compiles stale; this asks each and merges. " + goTierNote,
+			"configuration compiles stale; this computes each and merges. Renaming an interface method renames the " +
+			"methods of the types used as that interface; a concrete method tied to an interface is refused (rename " +
+			"the interface's). Before it answers, the patch is applied in memory and every configuration is " +
+			"type-checked again: a rename that would break the build, or make any identifier refer to a different " +
+			"declaration (a clash, a shadowed name), comes back with CONFLICT lines and no patch. " + goTierNote,
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args GoRenameArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken go_rename_plan")
 		defer stop()

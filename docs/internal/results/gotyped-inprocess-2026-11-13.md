@@ -13,7 +13,8 @@ Measured 2026-11-13 on goinfer (a snapshot of its Go and module files at `5c8b3b
 | every declaration | first port | default | 27,217 | 33,574 | **0** |
 | 1 in 23 | first port | default | 1,184 | 1,459 | **0** |
 | 1 in 17 | with the speed work (tables, parallel check, plain-package rule) | default, darwin-gpu, linux-cuda | 5,186 | 6,368 | **0** |
-| every declaration | final | darwin-gpu, linux-cuda, then default | 31,524 + 29,405 + 27,217 | | *running when this was written; see the end* |
+| in order, until stopped (see the end) | final | darwin-gpu: the first 6,356 of 31,524 | 6,356 | | **0** |
+| 1 in 6, until stopped | final | linux-cuda: 3,710 of the 4,901 sampled | 3,710 | | **0** |
 | the tricky module (`types_test.go`), every declaration | final | its 2 configurations | | 111 + 119 | **0** |
 
 By kind, in the 1-in-17 run across the three configurations: references of 332 constants, 1,732 fields, 1,741 functions, 83 interface methods, 766 methods, 333 types, 199 variables; implementations of 83 interface methods, 766 methods, 333 types. All equal.
@@ -69,7 +70,7 @@ Not re-measured on a quiet machine yet: the resident and after-edit rows are fro
 
 - **One repository and the fixture.** goinfer has no cgo package of its own (cgo appears only in dependencies); a workspace package that imports "C" is type-checked from the go command's cgo-processed files, and that path has not been compared with gopls.
 - **One gopls version.** The rules reproduced are v0.23.0's. A later gopls that changes them would differ from this engine; the differential test is how that shows.
-- **Rename.** A rename plan is still gopls's (over LSP): its edit rules are not ported.
+- **Rename.** Not in this record: a rename plan was still gopls's when it was written. ADR-062 ported it; see [`gotyped-rename-2026-11-13.md`](gotyped-rename-2026-11-13.md).
 - Windows. Parallel configurations beyond the timing above.
 
 ## Reproducing
@@ -90,4 +91,10 @@ go build -o /tmp/gotypedbench ./tools/gotypedbench
 
 ## The full run of the final engine
 
-Started 14:19 on the snapshot, `darwin-gpu` and `linux-cuda` side by side, `default` after. gopls answers about one question in 0.2 to 0.3 s under those configurations, so each takes hours. At the time of writing: `darwin-gpu` 4,592 of 31,524 declarations, `linux-cuda` 1,223 of 29,405, **0 differences**. The result is appended to ADR-061 when it finishes.
+Started 14:19 on the snapshot and stopped by hand the same afternoon, when the work moved on to the rename (ADR-062): gopls answers about one question in 0.2 to 0.3 s under the two tagged configurations, so a full pass of each is hours. What had been compared when it stopped, all with **0 differences**:
+
+- `darwin-gpu`, every declaration in file order: 6,356 of 31,524;
+- `linux-cuda`, every declaration in file order: 1,546 of 29,405, then restarted as a 1-in-6 sample: 3,710 of 4,901;
+- `default` was not reached by this run. Its every-declaration comparison (27,217) is the first port's, in the table above; the final engine was compared on it in the 1-in-17 sample.
+
+So the final engine has no full pass of any configuration on record. What stands behind it is the full pass of the first port on `default`, the samples above on all three, and the fixture on every declaration. Running the reproduction commands below to completion is how to get one.

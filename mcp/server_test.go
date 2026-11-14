@@ -26,6 +26,12 @@ import (
 // Index — exercise of the cache is in cache_test.go.
 func newInMemoryServerClient(t *testing.T) (context.Context, *sdk.ClientSession, func()) {
 	t.Helper()
+	return newInMemoryServerClientWith(t, nil)
+}
+
+// newInMemoryServerClientWith is newInMemoryServerClient with the server's Config adjusted by adjust first.
+func newInMemoryServerClientWith(t *testing.T, adjust func(*Config)) (context.Context, *sdk.ClientSession, func()) {
+	t.Helper()
 	ix, err := search.NewWatchedIndex("../testdata/repo", search.ModeBM25, "regex", "", false)
 	if err != nil {
 		t.Fatalf("NewWatchedIndex: %v", err)
@@ -42,7 +48,11 @@ func newInMemoryServerClient(t *testing.T) (context.Context, *sdk.ClientSession,
 	cache := NewCache(4, func(context.Context, string) (*RepoBundle, func(), error) {
 		return &RepoBundle{Index: ix, StructuralBuilder: func(context.Context) (*structural.Index, error) { return sx, nil }}, nil, nil
 	})
-	srv := NewServer(Config{Cache: cache, DefaultRepo: "../testdata/repo"})
+	cfg := Config{Cache: cache, DefaultRepo: "../testdata/repo"}
+	if adjust != nil {
+		adjust(&cfg)
+	}
+	srv := NewServer(cfg)
 
 	clientT, serverT := sdk.NewInMemoryTransports()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -120,15 +130,16 @@ func TestServer_ListsRegisteredTools(t *testing.T) {
 	}
 }
 
-// TestServer_GoToolsFollowPath: tools/list offers go_references, go_implementations and go_uses when a go binary
-// is on PATH (they are answered in process, from the go command's package lists), and go_rename_plan only when
-// gopls is there too, so it never lists a tool that can only fail.
+// TestServer_GoToolsFollowPath: tools/list offers the four go_* tools when a go binary is on PATH (they are answered
+// in process, from the go command's package lists; no gopls is needed), and none without it. A server configured to
+// ask gopls offers go_rename_plan only when gopls is there too, so it never lists a tool that can only fail.
 func TestServer_GoToolsFollowPath(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fake binaries are shell scripts")
 	}
+	var host *engine.GoTypedHost
 	list := func() map[string]bool {
-		ctx, sess, cleanup := newInMemoryServerClient(t)
+		ctx, sess, cleanup := newInMemoryServerClientWith(t, func(c *Config) { c.GoTyped = host })
 		defer cleanup()
 		res, err := sess.ListTools(ctx, nil)
 		if err != nil {
@@ -159,8 +170,14 @@ func TestServer_GoToolsFollowPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake("go")
-	if got := list(); !got["go_references"] || !got["go_implementations"] || !got["go_uses"] || got["go_rename_plan"] {
-		t.Errorf("go without gopls: want the three in-process tools and no rename plan, got %v", got)
+	if got := list(); !got["go_references"] || !got["go_implementations"] || !got["go_uses"] || !got["go_rename_plan"] {
+		t.Errorf("go without gopls: want all four go_* tools (none needs gopls), got %v", got)
+	}
+	// a server told to ask gopls, with no gopls: no rename plan
+	host = engine.NewGoTypedHost(engine.GoTypedOptions{Engine: "lsp", MaxResident: -1})
+	defer host.Close()
+	if got := list(); !got["go_references"] || got["go_rename_plan"] {
+		t.Errorf("the lsp engine without gopls: want no rename plan, got %v", got)
 	}
 	fake("gopls")
 	if got := list(); !got["go_references"] || !got["go_implementations"] || !got["go_uses"] || !got["go_rename_plan"] {

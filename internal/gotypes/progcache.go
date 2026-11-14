@@ -331,6 +331,17 @@ func (c *ProgramCache) freeSoon() {
 	c.freeT = time.AfterFunc(2*time.Second, debug.FreeOSMemory)
 }
 
+// trim gives back to the operating system, shortly, what a piece of work on the held programs left behind: a
+// rename's check type-checks packages again and throws the result away.
+func (c *ProgramCache) trim() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.freeSoon()
+	c.mu.Unlock()
+}
+
 func (c *ProgramCache) release(h *heldProgram) {
 	c.mu.Lock()
 	h.busy--

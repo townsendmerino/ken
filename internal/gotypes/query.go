@@ -33,11 +33,11 @@ type Runner struct {
 	Environ []string      // base environment for gopls and go; nil means the process's
 	Timeout time.Duration // per gopls or go run; 0 means 5 minutes
 
-	// Engine chooses what answers references and implementations: EngineTypes (the default, also "") answers in this
-	// process with go/types, following gopls's own search rules (ADR-061); EngineLSP asks gopls over the
-	// language-server protocol (ADR-060); EngineCLI runs the gopls command line, one process per question, as ADR-059
-	// did. A rename plan is always gopls's: over LSP, or the command line under EngineCLI. A Runner with Run set
-	// takes the command-line route, since Run replaces the command-line subprocess.
+	// Engine chooses what answers references, implementations and rename plans: EngineTypes (the default, also "")
+	// answers in this process with go/types, following gopls's own rules (ADR-061, ADR-062), and checks a rename
+	// plan by applying it in memory; EngineLSP asks gopls over the language-server protocol (ADR-060); EngineCLI
+	// runs the gopls command line, one process per question, as ADR-059 did. A Runner with Run set takes the
+	// command-line route, since Run replaces the command-line subprocess.
 	Engine string
 	// GoplsExact makes EngineTypes return exactly the lines gopls returns. By default it returns those and the uses
 	// gopls misses that are plainly uses of the same declaration: a field of a generic type reached through an
@@ -91,7 +91,7 @@ func (r *Runner) useLSP() bool { return r.Engine != EngineCLI && r.Run == nil }
 
 // useTypes reports whether kind is answered in this process.
 func (r *Runner) useTypes(kind reqKind) bool {
-	return (r.Engine == EngineTypes || r.Engine == "") && r.Run == nil && kind != askRename
+	return (r.Engine == EngineTypes || r.Engine == "") && r.Run == nil
 }
 
 // ConfigRun records one gopls run, or why a configuration was not asked.
@@ -315,8 +315,7 @@ func (r *Runner) ask(ctx context.Context, bc BuildConfig, kind reqKind, d Decl, 
 		text, err := s.ask(ctx, kind.lspMethod(), abs, d.Line, d.Col)
 		return reply{text: text}, err
 	}
-	// Servers are kept resident only for the engine that answers from them: a rename plan under the in-process
-	// engine starts its gopls and stops it, and leaves nothing behind.
+	// Servers are kept resident only for the engine that answers from them.
 	if r.Pool != nil && r.Engine == EngineLSP {
 		rp, err := r.askPooled(ctx, bc, do)
 		if !errors.Is(err, errPoolFull) && !errors.Is(err, errNoLockHolder) {
@@ -385,8 +384,8 @@ func (r *Runner) askPooled(ctx context.Context, bc BuildConfig, do func(*lspSess
 func (r *Runner) each(ctx context.Context, decls []Decl, kind reqKind, newName string,
 	got func(bc BuildConfig, d Decl, rp reply) int) (runs []ConfigRun, incomplete bool) {
 	shots := map[string]*lspSession{}
-	var typed [][]typedCell // [declaration][configuration], when answered in this process
-	if r.useTypes(kind) {
+	var typed [][]typedCell                    // [declaration][configuration], when answered in this process
+	if r.useTypes(kind) && kind != askRename { // (a rename in this process does not come through here)
 		typed = r.askAllTyped(ctx, decls, kind)
 	}
 	defer func() {

@@ -20,7 +20,7 @@ const goUsage = `Usage: ken go refs        <repo> <symbol> [--json] [--max N] [-
 
 Type-resolved answers for a Go repository, merged over the build configurations
 listed in <repo>/` + engine.GoConfigFile + ` (without the file: the host default only).
-refs, impls and uses are answered in process with go/types; rename-plan asks gopls.
+All four are answered in process with go/types: no gopls is needed.
 
   symbol       Name, Type.Member, pkg.Name, pkg.Type.Member, or dir/sub.Name
   refs         every line that refers to the symbol under any configuration
@@ -30,7 +30,10 @@ refs, impls and uses are answered in process with go/types; rename-plan asks gop
                directory (backend/cuda), the tail of one, or a package name;
                <imported> may also be an import path. Runs go, not gopls
   rename-plan  what a rename would edit; writes nothing to the repository.
-               --patch FILE saves the merged diff for 'git apply'
+               --patch FILE saves the merged diff for 'git apply'. The patch is
+               applied in memory first and every configuration type-checked again:
+               a rename that would break the build or change what an identifier
+               refers to is reported as CONFLICT lines, with no patch
   --max N      cap the printed lines (default 200; 0 = all)
   --group-by K counts instead of lines, one row per K: package, dir or file,
                each split into non-test and test (_test.go) lines
@@ -39,11 +42,11 @@ refs, impls and uses are answered in process with go/types; rename-plan asks gop
                interface it satisfies, or on a type that implements it). Those lines
                are marked "via" otherwise. Needs the types engine
   --config F   read the build configurations from F instead of the repository
-  --engine E   what answers refs and impls: types (default; in this process with
-               go/types, by gopls's own rules, no gopls needed), lsp (gopls over its
-               language-server protocol, one process per configuration), or cli (the
-               gopls command line, one process per question: the same answers, much
-               slower). A rename plan is always gopls's
+  --engine E   what answers refs, impls and rename-plan: types (default; in this
+               process with go/types, by gopls's own rules, no gopls needed), lsp
+               (gopls over its language-server protocol, one process per
+               configuration), or cli (the gopls command line, one process per
+               question: much slower). Only types checks a rename plan
   --parallel N type-check N configurations at once with --engine types (default 1:
                one program in memory at a time; more is faster and holds that many)
 
@@ -126,8 +129,8 @@ func cmdGo(args []string) int {
 		fmt.Fprintf(os.Stderr, "ken go: %v\n", err)
 		return 1
 	}
-	// refs and impls need gopls only when it is the engine asked for; a rename plan always does; all need go.
-	needsGopls := args[0] == "rename-plan" || (args[0] != "uses" && engineName != "" && engineName != engine.GoEngines()[0])
+	// gopls is needed only when it is the engine asked for; all need go.
+	needsGopls := args[0] != "uses" && engineName != "" && engineName != engine.GoEngines()[0]
 	if engine.GoPath() == "" {
 		fmt.Fprintln(os.Stderr, "ken go: go is not on PATH")
 		return 1

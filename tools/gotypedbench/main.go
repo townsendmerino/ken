@@ -94,6 +94,12 @@ func main() {
 			plan, err = gt.RenamePlan(ctx, sym, "KenBenchRenamed")
 			if err == nil {
 				lines, cached, incomplete = len(plan.Files), plan.Cached, plan.Incomplete
+				for _, r := range plan.Runs {
+					if r.Skipped == "" {
+						perCfg = append(perCfg, fmt.Sprintf("%s %.1fs", r.Config, r.Seconds))
+					}
+				}
+				perCfg = append(perCfg, fmt.Sprintf("checked=%v refused=%v", plan.Verified, plan.Refused))
 			}
 		default:
 			err = fmt.Errorf("unknown kind %q", kind)

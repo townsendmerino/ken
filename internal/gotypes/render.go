@@ -135,8 +135,34 @@ func (p *RenamePlan) Text(nConfigs, maxMentions int) string {
 	declLines(&b, p.Decls)
 	fmt.Fprintf(&b, "per configuration (new edits each added): %s\n", runsLine(p.Runs))
 	incompleteLines(&b, p.Decls, p.Runs)
+	var partial []string // each reason once, with the configurations it holds under
+	under := map[string][]string{}
+	for _, cr := range p.Runs {
+		if cr.Partial == "" {
+			continue
+		}
+		if under[cr.Partial] == nil {
+			partial = append(partial, cr.Partial)
+		}
+		if cfgs := under[cr.Partial]; len(cfgs) == 0 || cfgs[len(cfgs)-1] != cr.Config {
+			under[cr.Partial] = append(cfgs, cr.Config)
+		}
+	}
+	for _, reason := range partial {
+		fmt.Fprintf(&b, "PARTIAL [%s]: %s\n", strings.Join(under[reason], ","), reason)
+	}
 	for _, c := range p.Conflicts {
 		fmt.Fprintf(&b, "CONFLICT: %s\n", c)
+	}
+	switch {
+	case p.Verified:
+		b.WriteString("checked: the patch was applied in memory and every configuration type-checked again; no new type error, and every identifier still refers to the declaration it referred to\n")
+	case p.Refused:
+		b.WriteString("NOT SAFE as computed: no patch is given")
+		if len(p.Files) > 0 {
+			b.WriteString(". The files below are where it would have edited")
+		}
+		b.WriteByte('\n')
 	}
 	for _, f := range p.Files {
 		fmt.Fprintf(&b, "  %s (%d)", f.File, len(f.Lines))
@@ -150,7 +176,7 @@ func (p *RenamePlan) Text(nConfigs, maxMentions int) string {
 		for _, m := range p.Mentions {
 			n += len(m.Lines)
 		}
-		fmt.Fprintf(&b, "not edited: %d lines in %d files still spell the old name in comments, strings or prose\n", n, len(p.Mentions))
+		fmt.Fprintf(&b, "not edited: %d lines in %d files still spell the old name in comments, strings, prose or assembly\n", n, len(p.Mentions))
 		for i, m := range p.Mentions {
 			if maxMentions > 0 && i == maxMentions {
 				fmt.Fprintf(&b, "  … %d more files\n", len(p.Mentions)-maxMentions)

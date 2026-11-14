@@ -232,3 +232,63 @@ func TestGoTyped_KeepsProgramsByDefaultAndNothingWhenOptedOut(t *testing.T) {
 		t.Errorf("an opted-out host reports %+v", st)
 	}
 }
+
+// A rename plan through a Workspace: computed and checked in this process, with no gopls anywhere; remembered while
+// the tree stands; and never answered from a tree that has moved on (ADR-062).
+func TestGoTyped_RenamePlanIsCheckedAndFollowsEdits(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go not on PATH")
+	}
+	if testing.Short() {
+		t.Skip("runs go list: skipped under -short")
+	}
+	root := t.TempDir()
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		root = r
+	}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module example.com/m\n\ngo 1.21\n")
+	write("a.go", "package m\n\n// Hello greets.\nfunc Hello() string { return \"hi\" }\n")
+	write("b.go", "package m\n\nfunc Greet() string { return Hello() }\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	ws, err := engine.Open(ctx, root, engine.Options{Mode: "bm25", Watch: true, GoTyped: engine.GoTypedOptions{CacheBytes: 1 << 20}})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = ws.Close() }()
+	gt, _, err := ws.GoTyped("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gt.Gopls = filepath.Join(root, "no-such-gopls")
+	plan, err := gt.RenamePlan(ctx, "Hello", "Hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files []string
+	for _, f := range plan.Files {
+		files = append(files, fmt.Sprintf("%s %v", f.File, f.Lines))
+	}
+	if want := []string{"a.go [3 4]", "b.go [3]"}; !slices.Equal(files, want) || !plan.Verified || plan.Cached || plan.Incomplete {
+		t.Fatalf("first plan: files %v verified %v cached %v incomplete %v, want %v checked and fresh\n%s", files, plan.Verified, plan.Cached, plan.Incomplete, want, plan.Text(1, 0))
+	}
+	if again, err := gt.RenamePlan(ctx, "Hello", "Hi"); err != nil || !again.Cached || !again.Verified {
+		t.Errorf("repeat on an unchanged tree: cached %v verified %v err %v, want the remembered, checked plan", again != nil && again.Cached, again != nil && again.Verified, err)
+	}
+	// Another file takes the new name. Asked at once: the remembered plan must not be the answer, and the new one
+	// must refuse.
+	write("c.go", "package m\n\nfunc Hi() string { return \"\" }\n")
+	clash, err := gt.RenamePlan(ctx, "Hello", "Hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clash.Cached || clash.Verified || !clash.Refused || clash.Patch != "" || len(clash.Conflicts) == 0 {
+		t.Errorf("after an edit that takes the new name: cached %v verified %v refused %v conflicts %q, want a fresh refusal with no patch", clash.Cached, clash.Verified, clash.Refused, clash.Conflicts)
+	}
+}

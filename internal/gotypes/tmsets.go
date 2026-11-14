@@ -9,6 +9,10 @@ import (
 	"text/scanner"
 )
 
+// The functions of this file are ports of gopls v0.23.0's (golang.org/x/tools/gopls: internal/util/fingerprint,
+// internal/cache/methodsets, internal/golang/implementation.go), Copyright The Go Authors, under the BSD-style
+// license reproduced in the NOTICE file at the root of this repository.
+//
 // Which methods "correspond" through interface satisfaction is decided twice in gopls, and both ways are followed
 // here because the answers are held to gopls's (ADR-061):
 //

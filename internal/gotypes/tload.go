@@ -66,6 +66,20 @@ type tPackage struct {
 	uses      map[string][]useRec        // every identifier that uses an object, by the identifier's name
 	typeSpecs []typeSpecRec              // every type declaration, function-local ones included
 	syntax    []*ast.File                // kept only when the program is loaded with keepSyntax
+	errs      []typeErr                  // its hard type errors
+
+	// The methods tied together by this package's assignments of types to interfaces, which a method's rename has to
+	// know (tties.go). They need more of a type-check than the tables keep, so they are found on first use.
+	tiesMu sync.Mutex
+	ties   atomic.Pointer[pkgTies]
+	// defNames: the names its identifiers declare, listed on first use (see spells).
+	defNames atomic.Pointer[map[string]bool]
+}
+
+// typeErr is one hard type error.
+type typeErr struct {
+	pos token.Pos
+	msg string
 }
 
 // useRec is one identifier that uses obj.
@@ -102,6 +116,26 @@ type program struct {
 	tfiles  map[string]*token.File // by file name, for turning line:col into a position
 
 	keepSyntax bool // the differential test walks declarations
+	// overlay holds file contents that stand in for the files on disk: a patch being checked (tverify.go).
+	overlay map[string][]byte
+	// forceBodies names packages (by ID) that are checked with function bodies whatever needsBodies says: the ones
+	// that were, in the program a patch is checked against.
+	forceBodies map[string]bool
+	// bodyNames, when not nil, makes the program check only the function bodies that spell one of these names:
+	// see stripBodies. Only a program made to check a patch has it.
+	bodyNames [][]byte
+	// leanNames, when not nil, makes the program keep, of each package it checks, only what a patch's check reads:
+	// the uses of these names, the type declarations and the errors.
+	leanNames map[string]bool
+	// read, when not nil, reads a file that overlay does not hold: the configurations of one rename plan read
+	// mostly the same files, once between them.
+	read func(file string) ([]byte, error)
+	// added lists the files a program made to check a patch parsed afresh into the file set. It shares that file
+	// set with the program it was refreshed from, and takes them out again when it is done (discard).
+	added []*token.File
+	// rechecked names (by ID) the packages a refresh type-checked again; nil in a program loaded afresh, where
+	// every package was.
+	rechecked map[string]bool
 
 	refreshBroken atomic.Bool // a refresh found a file it took for unchanged to be different: its result is discarded
 
@@ -114,6 +148,8 @@ type program struct {
 	reach     map[*types.Package]map[types.Object]bool
 	rdepsMu   sync.Mutex
 	rdepsMemo map[rdepsKey]map[*tPackage]bool
+	byPosMu   sync.Mutex
+	byPos     map[*tPackage]map[token.Pos]types.Object // see objAt
 
 	mods                      []string
 	listSeconds, checkSeconds float64
@@ -127,11 +163,18 @@ type parsedFile struct {
 	users atomic.Int32 // packages that compile it and have not been checked yet
 
 	// What is kept about the file after its syntax is dropped. metaOK says these are known: set by a parse, or
-	// carried over from the program this one was refreshed from.
+	// carried over from the program this one was refreshed from. carried says the latter: the file is unchanged, so
+	// they are final from the start and no parse writes them again, which is what lets needsBodies read them while
+	// another goroutine parses the file.
+	carried   bool
 	metaOK    bool
 	parsedOK  bool
 	hasMethod bool   // declares a method (see needsBodies)
+	universe  bool   // declares, at package level, a name the universe scope also has (see needsBodies)
 	header    uint64 // headerSig of its source: what the go command's package list depends on
+	// bodies holds where each function body of the file is: the offsets of its braces, in pairs. A program made to
+	// check a patch blanks the ones it will not check before it parses (see blankBodies).
+	bodies []int32
 	// base, when not 0, is where an unchanged file sat in the file set of the program this one was refreshed from:
 	// it is parsed again at the same place, so that every position in it is the position it had.
 	base int
@@ -249,7 +292,25 @@ func (r *Runner) loadWith(ctx context.Context, bc BuildConfig, dir string, keepS
 
 // build type-checks a listing.
 func (l *listing) build(keepSyntax bool) (*program, error) {
+	return l.buildWith(buildOpts{keepSyntax: keepSyntax})
+}
+
+// buildOpts are the ways a listing can be type-checked.
+type buildOpts struct {
+	keepSyntax bool
+	// overlay gives file contents that replace the files on disk.
+	overlay map[string][]byte
+	// forceBodies: see program.forceBodies.
+	forceBodies map[string]bool
+	// bodyNames, leanNames, read: see program.
+	bodyNames [][]byte
+	leanNames map[string]bool
+	read      func(file string) ([]byte, error)
+}
+
+func (l *listing) buildWith(opts buildOpts) (*program, error) {
 	bc, mods, stdout := l.bc, l.mods, l.stdout
+	keepSyntax := opts.keepSyntax
 	p := &program{bc: bc, fset: token.NewFileSet(), pkgs: map[string]*tPackage{}, byFile: map[string][]*tPackage{},
 		sizes: types.SizesFor("gc", bc.goarch()), parsed: map[string]*parsedFile{}, tfiles: map[string]*token.File{},
 		keepSyntax: keepSyntax}
@@ -321,6 +382,7 @@ func (l *listing) build(keepSyntax bool) (*program, error) {
 	}
 	p.listSeconds = l.seconds
 	p.mods = mods
+	p.overlay, p.forceBodies, p.bodyNames, p.leanNames, p.read = opts.overlay, opts.forceBodies, opts.bodyNames, opts.leanNames, opts.read
 	t1 := nowSeconds()
 	p.checkAll()
 	p.checkSeconds = nowSeconds() - t1
@@ -337,10 +399,26 @@ func (p *program) parse(file string) *ast.File {
 	}
 	p.parseMu.Unlock()
 	pf.once.Do(func() {
-		src, err := os.ReadFile(file)
-		if err != nil {
-			pf.metaOK = true
-			return
+		src, ok := p.overlay[file]
+		if !ok {
+			read := p.read
+			if read == nil {
+				read = os.ReadFile
+			}
+			var err error
+			if src, err = read(file); err != nil {
+				if !pf.carried {
+					pf.metaOK = true
+				}
+				return
+			}
+		}
+		mode := parser.SkipObjectResolution
+		// A program that checks only the bodies spelling certain names does not parse the others, where it knows
+		// from the program it was refreshed from where they are.
+		var blanked map[int]bool
+		if p.bodyNames != nil && pf.bodies != nil {
+			src, blanked = blankBodies(src, pf.bodies, p.bodyNames)
 		}
 		fset := p.fset
 		if pf.base > 0 {
@@ -348,7 +426,9 @@ func (p *program) parse(file string) *ast.File {
 			// positions in the syntax are then the old ones, which the program's file set still resolves.
 			if pf.tfile == nil || pf.tfile.Size() != len(src) {
 				p.refreshBroken.Store(true) // not the file it was: the refresh is abandoned
-				pf.metaOK = true
+				if !pf.carried {
+					pf.metaOK = true
+				}
 				return
 			}
 			fset = token.NewFileSet()
@@ -357,28 +437,178 @@ func (p *program) parse(file string) *ast.File {
 			}
 		}
 		// A file with syntax errors still yields what parsed before them.
-		pf.file, _ = parser.ParseFile(fset, file, src, parser.SkipObjectResolution)
-		pf.parsedOK, pf.hasMethod, pf.header = false, false, headerSig(src, pf.file)
+		pf.file, _ = parser.ParseFile(fset, file, src, mode)
+		if !pf.carried {
+			pf.parsedOK, pf.hasMethod, pf.universe, pf.header = false, false, false, headerSig(src, pf.file)
+		}
 		if pf.file != nil {
-			pf.parsedOK = true
-			for _, d := range pf.file.Decls {
-				if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv != nil {
-					pf.hasMethod = true
-					break
+			if !pf.carried {
+				pf.parsedOK = true
+				pf.hasMethod, pf.universe = declares(pf.file)
+			}
+			switch {
+			case blanked != nil:
+				base := int(pf.file.FileStart)
+				for _, d := range pf.file.Decls {
+					if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil && blanked[int(fd.Body.Lbrace)-base] {
+						fd.Body = nil
+					}
 				}
+			case p.bodyNames != nil:
+				stripBodies(pf.file, src, p.bodyNames)
+			case !pf.carried || pf.bodies == nil:
+				pf.bodies = bodyExtents(pf.file)
 			}
 			if pf.base == 0 {
 				pf.tfile = p.fset.File(pf.file.Pos())
 				p.parseMu.Lock()
 				p.tfiles[file] = pf.tfile
+				if p.overlay != nil {
+					p.added = append(p.added, pf.tfile)
+				}
 				p.parseMu.Unlock()
 			} else if fset.File(pf.file.Pos()).Base() != pf.base {
 				p.refreshBroken.Store(true)
 			}
 		}
-		pf.metaOK = true
+		if !pf.carried {
+			pf.metaOK = true
+		}
 	})
 	return pf.file
+}
+
+// declares reports whether a file declares a method, and whether it declares at package level a name the universe
+// scope also has.
+func declares(f *ast.File) (method, universe bool) {
+	inUniverse := func(id *ast.Ident) bool { return id != nil && types.Universe.Lookup(id.Name) != nil }
+	for _, d := range f.Decls {
+		switch d := d.(type) {
+		case *ast.FuncDecl:
+			if d.Recv != nil {
+				method = true
+			} else if inUniverse(d.Name) {
+				universe = true
+			}
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				switch spec := spec.(type) {
+				case *ast.TypeSpec:
+					universe = universe || inUniverse(spec.Name)
+				case *ast.ValueSpec:
+					for _, n := range spec.Names {
+						universe = universe || inUniverse(n)
+					}
+				}
+			}
+		}
+	}
+	return method, universe
+}
+
+// stripBodies removes from f, parsed from src, the body of every function that does not spell one of names.
+//
+// It is how a patch that renames a type, a function, a variable or a constant is checked without type-checking
+// everything again (tverify.go). Such a rename changes what an identifier means only where one is spelled with the
+// old or the new name: scopes hold names, and a selector or a composite literal names its member. A body that
+// spells neither means after the patch what it meant before, so it is not checked again, and neither side of the
+// comparison reads it. (A field or a method is another matter: struct types are compared and converted by their
+// fields' names, and interfaces satisfied by methods' names, in code that names neither. Their patches are checked
+// with every body.) A name is looked for as text, so a body that only mentions one in a comment or as part of a
+// longer word is kept too: more than needed, never less.
+func stripBodies(f *ast.File, src []byte, names [][]byte) {
+	hits := nameHits(src, names)
+	base := int(f.FileStart)
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Body == nil {
+			continue
+		}
+		lo, hi := int(fd.Body.Pos())-base, int(fd.Body.End())-base
+		if i := sort.SearchInts(hits, lo); i == len(hits) || hits[i] >= hi {
+			fd.Body = nil
+		}
+	}
+}
+
+// nameHits returns, sorted, every offset of src at which one of names starts.
+func nameHits(src []byte, names [][]byte) []int {
+	var hits []int
+	for _, name := range names {
+		for at := 0; len(name) > 0; {
+			i := bytes.Index(src[at:], name)
+			if i < 0 {
+				break
+			}
+			hits = append(hits, at+i)
+			at += i + len(name)
+		}
+	}
+	sort.Ints(hits)
+	return hits
+}
+
+// bodyExtents returns where each function body of f is: the offsets of its braces, in pairs.
+func bodyExtents(f *ast.File) []int32 {
+	base := int(f.FileStart)
+	out := []int32{}
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil && fd.Body.Rbrace.IsValid() {
+			out = append(out, int32(int(fd.Body.Lbrace)-base), int32(int(fd.Body.Rbrace)-base))
+		}
+	}
+	return out
+}
+
+// blankBodies returns a copy of src in which every function body that does not spell one of names is emptied (its
+// text turned to spaces, the line breaks kept, so that every offset and line outside it stands), and the set of the
+// opening-brace offsets of the bodies it emptied. It is stripBodies done before parsing, where the bodies' places
+// are known: the parser then spends nothing on them. extents (see parsedFile.bodies) must be of this very source;
+// if a brace is not where they say, nothing is blanked.
+func blankBodies(src []byte, extents []int32, names [][]byte) ([]byte, map[int]bool) {
+	hits := nameHits(src, names)
+	blanked := map[int]bool{}
+	var out []byte
+	for i := 0; i+1 < len(extents); i += 2 {
+		lo, hi := int(extents[i]), int(extents[i+1])
+		if lo < 0 || hi >= len(src) || lo >= hi || src[lo] != '{' || src[hi] != '}' {
+			return src, nil
+		}
+		if j := sort.SearchInts(hits, lo); j < len(hits) && hits[j] < hi {
+			continue // it spells one of the names: checked
+		}
+		if out == nil {
+			out = bytes.Clone(src)
+		}
+		for k := lo + 1; k < hi; k++ {
+			if out[k] != '\n' {
+				out[k] = ' '
+			}
+		}
+		blanked[lo] = true
+	}
+	if out == nil {
+		return src, blanked
+	}
+	return out, blanked
+}
+
+// reparse parses src, the unchanged source of a file the program's file set already holds as tf, so that every
+// position in the syntax is the position it has in the program. It returns nil when src is not the size the file
+// was, or does not parse.
+func reparse(tf *token.File, file string, src []byte, mode parser.Mode) *ast.File {
+	if tf == nil || tf.Size() != len(src) {
+		return nil
+	}
+	fset := token.NewFileSet()
+	if base := tf.Base(); base > 1 {
+		fset.AddFile("", 1, base-2)
+	}
+	f, _ := parser.ParseFile(fset, file, src, mode)
+	if f == nil || fset.File(f.Pos()).Base() != tf.Base() {
+		return nil
+	}
+	return f
 }
 
 // parseAll parses files, several at a time when there are many, and returns the ones that parsed, in order.
@@ -464,10 +694,16 @@ func (p *program) testVariant(tp *tPackage) *tPackage {
 // types (which types have which methods) only grows in the variant. The union is then the variant's answer alone, and
 // p is checked for its declarations only. The exception is a test file that declares a method: a method added to a
 // type can change what a selector in a non-test file resolves to (it can shadow a promoted method or field), so the
-// two answers can differ and p is searched too.
+// two answers can differ and p is searched too. And a test file that declares, at package level, a name the universe
+// scope has (a function called min): an identifier of a non-test file then means the builtin in p and that
+// declaration in the variant. No search asks about a builtin, but a rename of that declaration edits the non-test
+// file, and only p's own check shows what that does to p (ADR-062).
 func (p *program) needsBodies(tp *tPackage, files []*ast.File) bool {
 	if !tp.full() {
 		return false
+	}
+	if p.forceBodies[tp.ID] {
+		return true
 	}
 	tv := p.testVariant(tp)
 	if tv == nil {
@@ -484,14 +720,15 @@ func (p *program) needsBodies(tp *tPackage, files []*ast.File) bool {
 		p.parseMu.Lock()
 		pf := p.parsed[f]
 		p.parseMu.Unlock()
-		if pf == nil || !pf.metaOK {
+		if pf == nil || !pf.carried {
+			// (parse runs once, and returning from it is what makes its findings safe to read here)
 			p.parse(f)
 			p.parseMu.Lock()
 			pf = p.parsed[f]
 			p.parseMu.Unlock()
 		}
-		if pf == nil || !pf.parsedOK || pf.hasMethod {
-			return true // a method in a test file, or a file that did not parse: search both
+		if pf == nil || !pf.parsedOK || pf.hasMethod || pf.universe {
+			return true // a method or a universe name in a test file, or a file that did not parse: search both
 		}
 	}
 	return false
@@ -510,10 +747,19 @@ func (p *program) check(tp *tPackage) {
 			IgnoreFuncBodies: !tp.bodies,
 			FakeImportC:      true,
 			Error: func(err error) {
-				if te, ok := err.(types.Error); ok && te.Soft {
+				te, ok := err.(types.Error)
+				if ok && te.Soft && !strings.Contains(te.Msg, "satisfy") {
+					// An error the checker calls soft leaves the types it computed standing: an unused variable or
+					// import, a label nobody jumps to. Those are left out, as before. One kind is not: a type
+					// argument that does not satisfy its type parameter's constraint ("T does not satisfy C") is
+					// soft too, and is exactly what a method's rename can newly cause, in a place that names
+					// neither the method nor the interface.
 					return
 				}
 				tp.nerr++
+				if ok {
+					tp.errs = append(tp.errs, typeErr{te.Pos, te.Msg})
+				}
 			},
 		}
 		if tp.GoVersion != "" {
@@ -529,7 +775,7 @@ func (p *program) check(tp *tPackage) {
 		t1 := nowSeconds()
 		tp.types, _ = conf.Check(tp.PkgPath, p.fset, files, info)
 		if info != nil {
-			tp.tabulate(info, files)
+			tp.tabulate(info, files, p.leanNames)
 		}
 		tp.checkSeconds = nowSeconds() - t1
 		if p.keepSyntax {
@@ -542,11 +788,14 @@ func (p *program) check(tp *tPackage) {
 }
 
 // tabulate keeps what the searches read from a checked package, so its syntax and types.Info can go.
-func (tp *tPackage) tabulate(info *types.Info, files []*ast.File) {
-	tp.defs = make(map[token.Pos]types.Object, len(info.Defs))
-	for id, obj := range info.Defs {
-		if obj != nil {
-			tp.defs[id.Pos()] = obj
+// lean, when not nil, keeps only what the check of a patch reads: the uses of those names, and the type declarations.
+func (tp *tPackage) tabulate(info *types.Info, files []*ast.File, lean map[string]bool) {
+	if lean == nil {
+		tp.defs = make(map[token.Pos]types.Object, len(info.Defs))
+		for id, obj := range info.Defs {
+			if obj != nil {
+				tp.defs[id.Pos()] = obj
+			}
 		}
 	}
 	if info.Uses == nil {
@@ -554,6 +803,12 @@ func (tp *tPackage) tabulate(info *types.Info, files []*ast.File) {
 	}
 	tp.uses = map[string][]useRec{}
 	for id, obj := range info.Uses {
+		if lean != nil {
+			if lean[id.Name] {
+				tp.uses[id.Name] = append(tp.uses[id.Name], useRec{id.Pos(), obj})
+			}
+			continue
+		}
 		tp.uses[id.Name] = append(tp.uses[id.Name], useRec{id.Pos(), obj})
 		if _, declares := tp.defs[id.Pos()]; declares {
 			if tp.useAtDecl == nil {

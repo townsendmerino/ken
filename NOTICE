@@ -36,6 +36,54 @@ A copy of the Apache License, Version 2.0, may be obtained at:
     http://www.apache.org/licenses/LICENSE-2.0
 
 ──────────────────────────────────────────────────────────────────────────────
+Source adapted from golang.org/x/tools
+──────────────────────────────────────────────────────────────────────────────
+
+ken's Go typed tier (internal/gotypes) answers references, implementations
+and renames by gopls's own rules, without running gopls. To do that it
+contains source adapted from golang.org/x/tools and its gopls module
+(gopls v0.23.0):
+
+    internal/gotypes/tsatisfy.go   adapted from refactor/satisfy/find.go
+    internal/gotypes/tmsets.go     ports gopls/internal/util/fingerprint and
+                                   gopls/internal/cache/methodsets, and the
+                                   type matching of
+                                   gopls/internal/golang/implementation.go
+    internal/gotypes/trefs.go      follows gopls/internal/golang/references.go,
+                                   gopls/internal/cache/xrefs and
+                                   go/types/objectpath
+    internal/gotypes/trename.go    follows gopls/internal/golang/rename.go and
+                                   rename_check.go
+
+    Copyright 2009 The Go Authors.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions are
+    met:
+
+       * Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+       * Redistributions in binary form must reproduce the above
+    copyright notice, this list of conditions and the following disclaimer
+    in the documentation and/or other materials provided with the
+    distribution.
+       * Neither the name of Google LLC nor the names of its
+    contributors may be used to endorse or promote products derived from
+    this software without specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+──────────────────────────────────────────────────────────────────────────────
 
 For a generated listing of Go-module dependencies and their licenses, see
 THIRD_PARTY_LICENSES.md (produced by `go-licenses report`).

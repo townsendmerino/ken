@@ -361,10 +361,11 @@ func NewServer(cfg Config) *sdk.Server {
 		return handleStatus(ctx, &cfg, args)
 	})
 
-	// The Go typed tier (ADR-059, ADR-061) needs the go command, and go_rename_plan needs gopls too; a tool that
-	// could only fail is not offered.
+	// The Go typed tier (ADR-059, ADR-061, ADR-062) needs the go command, and gopls only when an engine that asks
+	// gopls was chosen: go_rename_plan is then offered only with gopls on PATH, so that no tool is offered that
+	// could only fail.
 	if engine.GoPath() != "" {
-		registerGoTools(srv, &cfg, engine.GoplsPath() != "")
+		registerGoTools(srv, &cfg, !cfg.GoTyped.NeedsGopls() || engine.GoplsPath() != "")
 	}
 
 	return srv

@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// The searches of this file follow gopls v0.23.0's (golang.org/x/tools/gopls: internal/golang/references.go and
+// implementation.go, internal/cache/xrefs; golang.org/x/tools/go/types/objectpath), Copyright The Go Authors, under
+// the BSD-style license reproduced in the NOTICE file at the root of this repository.
+//
 // References and implementations over a type-checked program, following gopls's own search step for step, because
 // the answers are held to gopls's (ADR-061). The steps, and the gopls source each follows, are named where they
 // happen. Positions are token.Pos in the program's one file set; a declaration is the same Pos in every package

@@ -39,7 +39,7 @@ graph LR
         status["status — doctor/status report"]
         envcfg["envcfg — every KEN_* env read + parsing"]
         mcplog["mcplog — stderr logger"]
-        gotypes["gotypes — Go typed tier<br/>(go/types in process, gopls for rename; ADR-059–061)"]
+        gotypes["gotypes — Go typed tier<br/>(go/types in process; ADR-059–062)"]
         small["leaves: binfmt · bytesize · usage ·<br/>modelfetch · embedcache · perf"]
     end
     ken --> engine & status & envcfg
@@ -95,7 +95,7 @@ flowchart TD
 
 \* `reindex_db` registers only when a DB is wired, so `tools/list` stays honest.
 
-† The Go typed tier (`go_references`, `go_implementations`, `go_uses`, `go_rename_plan`; ADR-059, ADR-060, ADR-061) does not use the index. `go_references` and `go_implementations` register when `go` is on PATH: each call lists the repository's packages with the go command once per build configuration in `.ken-go.json`, type-checks them in process with `go/types`, searches by gopls's own rules (a differential test holds the answers to gopls's), and merges. `go_rename_plan` registers when `gopls` is on PATH too, and asks it over its language-server protocol. A `GoTypedHost` can keep answers and type-checked programs between calls when asked to (`engine.GoTypedOptions`, `KEN_MCP_GO_*`; `ken-mcp` remembers answers by default); it checks the files on disk before every use, refreshes a program after an edit, and the Workspace's watcher lets it release sooner. `go_uses` type-checks one importer per configuration the same way.
+† The Go typed tier (`go_references`, `go_implementations`, `go_uses`, `go_rename_plan`; ADR-059 to ADR-062) does not use the index. All four register when `go` is on PATH; `go_references` and `go_implementations` work like this: each call lists the repository's packages with the go command once per build configuration in `.ken-go.json`, type-checks them in process with `go/types`, searches by gopls's own rules (a differential test holds the answers to gopls's), and merges. `go_rename_plan` reads each configuration's edits off the same type-checked program (by gopls's rename rules), merges them, then checks the patch under every configuration by refreshing that program with the patched files in memory, so that only what the patch touches is type-checked again, and refuses a patch that changes anything but the name (ADR-062). gopls itself is asked only under the `lsp` and `cli` engines. A `GoTypedHost` can keep answers and type-checked programs between calls when asked to (`engine.GoTypedOptions`, `KEN_MCP_GO_*`; `ken-mcp` remembers answers by default); it checks the files on disk before every use, refreshes a program after an edit, and the Workspace's watcher lets it release sooner. `go_uses` type-checks one importer per configuration the same way.
 
 Long-lived goroutines and who owns them: the SDK stdio loop (process lifetime); one fsnotify + one debouncer goroutine per `WatchedIndex` (owned by the Cache, shut down on eviction/close — goleak-tested); the one-shot model auto-fetch ([`cmd/ken-mcp/internal/server/server.go`](cmd/ken-mcp/internal/server/server.go)); the DB refresher ([`mcp/db`](mcp/db/)). The same snapshot-swap pattern recurs at the `mcp.Run` layer for DB extras: `baseIx.WithExtraChunks(extras)` rebuilds against the *original* snapshot (extras replace, never accumulate — [`mcp/run.go`](mcp/run.go)).
 
@@ -154,7 +154,7 @@ Every constant and the pipeline order are pinned to semble's Python — see DESI
 | Watch mode | [`internal/search/watch.go`](internal/search/watch.go) (ADR-012) |
 | Cold start: snapshots, serve-before-warm, parse budget, GC | [`engine/snapshot.go`](engine/snapshot.go) (ADR-039); [`cmd/ken-mcp/internal/server/`](cmd/ken-mcp/internal/server/) (`enrich_budget.go`, `gc.go`); env: `KEN_MCP_SNAPSHOT` / `KEN_MCP_STAGED` / `KEN_MCP_LAZY_ENRICH` / `KEN_MCP_EMBED_CACHE` |
 | Walker / gitignore | [`internal/repo/`](internal/repo/) |
-| Go typed tier: references, implementations and package-to-package uses from go/types in process (optionally resident and cached), rename plans from gopls over LSP, merged over build configurations (ADR-059, ADR-060, ADR-061) | [`internal/gotypes/`](internal/gotypes/), [`engine/gotyped.go`](engine/gotyped.go), [`mcp/go_tools.go`](mcp/go_tools.go), [`cmd/ken/go.go`](cmd/ken/go.go) |
+| Go typed tier: references, implementations, package-to-package uses and checked rename plans from go/types in process (optionally resident and cached), merged over build configurations (ADR-059 to ADR-062) | [`internal/gotypes/`](internal/gotypes/), [`engine/gotyped.go`](engine/gotyped.go), [`mcp/go_tools.go`](mcp/go_tools.go), [`cmd/ken/go.go`](cmd/ken/go.go) |
 | Structural extraction + enrichment + structural MCP tools | [`internal/structural/`](internal/structural/), [`mcp/structural_tools.go`](mcp/structural_tools.go) |
 | DB indexing (static SQL / live introspection; Postgres · MySQL · MariaDB · SQLite) | [`internal/sql/`](internal/sql/), [`internal/db/`](internal/db/), [`mcp/db/`](mcp/db/), [docs/db-indexing.md](docs/db-indexing.md) |
 | MCP server, cache, clone, SSRF guard | [`mcp/`](mcp/) (`server.go`, `cache.go`, `clone.go`, `run.go`) |
