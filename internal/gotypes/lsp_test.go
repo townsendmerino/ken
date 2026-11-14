@@ -225,7 +225,7 @@ func (f *lspFake) serve(root string, in io.ReadCloser, out io.WriteCloser) {
 				for _, path := range paths {
 					for i, l := range strings.Split(view(path), "\n") {
 						if loc := re.FindStringIndex(l); loc != nil && !(path == reqPath && i == p.Position.Line) {
-							locs = append(locs, map[string]any{"uri": pathToURI(path), "range": map[string]any{"start": lspPos{i, loc[0]}, "end": lspPos{i, loc[1]}}})
+							locs = append(locs, map[string]any{"uri": pathToURI(path), "range": map[string]any{"start": at(i, loc[0]), "end": at(i, loc[1])}})
 						}
 					}
 				}
@@ -235,7 +235,7 @@ func (f *lspFake) serve(root string, in io.ReadCloser, out io.WriteCloser) {
 				for _, path := range paths {
 					for i, l := range strings.Split(view(path), "\n") {
 						if strings.Contains(l, "implements "+word) {
-							locs = append(locs, map[string]any{"uri": pathToURI(path), "range": map[string]any{"start": lspPos{i, 0}, "end": lspPos{i, 1}}})
+							locs = append(locs, map[string]any{"uri": pathToURI(path), "range": map[string]any{"start": at(i, 0), "end": at(i, 1)}})
 						}
 					}
 				}
@@ -245,7 +245,7 @@ func (f *lspFake) serve(root string, in io.ReadCloser, out io.WriteCloser) {
 				for _, path := range paths {
 					for i, l := range strings.Split(view(path), "\n") {
 						for _, loc := range re.FindAllStringIndex(l, -1) {
-							changes[pathToURI(path)] = append(changes[pathToURI(path)], lspTextEdit{Range: lspRange{lspPos{i, loc[0]}, lspPos{i, loc[1]}}, NewText: p.NewName})
+							changes[pathToURI(path)] = append(changes[pathToURI(path)], lspTextEdit{Range: lspRange{Start: at(i, loc[0]), End: at(i, loc[1])}, NewText: p.NewName})
 						}
 					}
 				}
@@ -728,32 +728,6 @@ func TestCache_invalidateDropsARepo(t *testing.T) {
 	}
 }
 
-func TestUTF16ColAndTextEdits(t *testing.T) {
-	// "é" is two bytes and one UTF-16 unit; "😀" is four bytes and two units
-	line := "x := é + 😀 + Name"
-	byteCol := strings.Index(line, "Name") + 1
-	if got, want := utf16Col(line, byteCol), len([]rune("x := é + "))+2+len(" + "); got != want {
-		t.Errorf("utf16Col = %d, want %d", got, want)
-	}
-	if got := byteOffset(line, utf16Col(line, byteCol)); got != byteCol-1 {
-		t.Errorf("byteOffset round trip = %d, want %d", got, byteCol-1)
-	}
-	src := "a Name b\nName\n"
-	out, err := applyTextEdits(src, []lspTextEdit{
-		{Range: lspRange{lspPos{1, 0}, lspPos{1, 4}}, NewText: "Other"},
-		{Range: lspRange{lspPos{0, 2}, lspPos{0, 6}}, NewText: "Other"},
-	})
-	if err != nil || out != "a Other b\nOther\n" {
-		t.Errorf("applyTextEdits = %q, %v", out, err)
-	}
-	if _, err := applyTextEdits(src, []lspTextEdit{
-		{Range: lspRange{lspPos{0, 0}, lspPos{0, 5}}, NewText: "x"},
-		{Range: lspRange{lspPos{0, 3}, lspPos{0, 6}}, NewText: "y"},
-	}); err == nil {
-		t.Error("overlapping edits were applied")
-	}
-}
-
 func TestTreeWatch_diffAndFingerprint(t *testing.T) {
 	root := writeTree(t, lspTree)
 	settle(t, root)
@@ -844,3 +818,6 @@ func TestCache_renamePlanSeesEditsToDocsAndTestdata(t *testing.T) {
 		}
 	}
 }
+
+// at is an LSP position in a test server's reply.
+func at(line, char int) lspPos { return lspPos{Line: line, Character: char} }

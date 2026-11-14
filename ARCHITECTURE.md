@@ -155,6 +155,7 @@ Every constant and the pipeline order are pinned to semble's Python — see DESI
 | Cold start: snapshots, serve-before-warm, parse budget, GC | [`engine/snapshot.go`](engine/snapshot.go) (ADR-039); [`cmd/ken-mcp/internal/server/`](cmd/ken-mcp/internal/server/) (`enrich_budget.go`, `gc.go`); env: `KEN_MCP_SNAPSHOT` / `KEN_MCP_STAGED` / `KEN_MCP_LAZY_ENRICH` / `KEN_MCP_EMBED_CACHE` |
 | Walker / gitignore | [`internal/repo/`](internal/repo/) |
 | Go typed tier: references, implementations, package-to-package uses and checked rename plans from go/types in process (optionally resident and cached), merged over build configurations (ADR-059 to ADR-062) | [`internal/gotypes/`](internal/gotypes/), [`engine/gotyped.go`](engine/gotyped.go), [`mcp/go_tools.go`](mcp/go_tools.go), [`cmd/ken/go.go`](cmd/ken/go.go) |
+| Language-server client, no language of its own: JSON-RPC over a server's stdio, the handshake, positions, locations, text edits. The Go tier drives gopls with it; a tier for another language brings its own server command | [`internal/lsp/`](internal/lsp/) |
 | Structural extraction + enrichment + structural MCP tools | [`internal/structural/`](internal/structural/), [`mcp/structural_tools.go`](mcp/structural_tools.go) |
 | DB indexing (static SQL / live introspection; Postgres · MySQL · MariaDB · SQLite) | [`internal/sql/`](internal/sql/), [`internal/db/`](internal/db/), [`mcp/db/`](mcp/db/), [docs/db-indexing.md](docs/db-indexing.md) |
 | MCP server, cache, clone, SSRF guard | [`mcp/`](mcp/) (`server.go`, `cache.go`, `clone.go`, `run.go`) |
