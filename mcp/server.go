@@ -179,13 +179,16 @@ func NewServer(cfg Config) *sdk.Server {
 	if cfg.Chunker == "" {
 		cfg.Chunker = "regex"
 	}
+	// Which typed tools this server offers is decided once, here: the instructions name the ones that are offered and
+	// no others.
+	typed := typedTools{
+		goTools: engine.GoPath() != "",
+		ts:      tsToolsAvailable(&cfg),
+		py:      pyToolsAvailable(&cfg),
+	}
+	typed.goRename = typed.goTools && (!cfg.GoTyped.NeedsGopls() || engine.GoplsPath() != "")
 	if cfg.Instructions == "" {
-		cfg.Instructions = "Instant code search for any local or remote git repository. " +
-			"Call `search` to find relevant code; call `find_related` on a result to discover similar code elsewhere. " +
-			"When working in a local project, pass the project root as `repo`. " +
-			"For remote repos, pass an explicit https:// URL. Never guess or infer URLs. " +
-			"Prefer ken for conceptual queries (\"where do we handle X?\"), locating definitions, and \"show me the surface of this area\" explorations. " +
-			"For refactors, renames, or any operation that must be exhaustive, fall back to your native grep / file-search tool — grep gives 100% recall on literal matches, while ken's hybrid search optimizes for relevance over completeness and isn't designed for exhaustive enumeration."
+		cfg.Instructions = defaultInstructions(typed)
 	}
 
 	srv := sdk.NewServer(&sdk.Implementation{
@@ -364,17 +367,17 @@ func NewServer(cfg Config) *sdk.Server {
 	// The Go typed tier (ADR-059, ADR-061, ADR-062) needs the go command, and gopls only when an engine that asks
 	// gopls was chosen: go_rename_plan is then offered only with gopls on PATH, so that no tool is offered that
 	// could only fail.
-	if engine.GoPath() != "" {
-		registerGoTools(srv, &cfg, !cfg.GoTyped.NeedsGopls() || engine.GoplsPath() != "")
+	if typed.goTools {
+		registerGoTools(srv, &cfg, typed.goRename)
 	}
 
 	// The TypeScript typed tier (ADR-064) asks the compiler installed in the repository, so its tool is offered when
 	// the default repository has one.
-	if tsToolsAvailable(&cfg) {
+	if typed.ts {
 		registerTSTools(srv, &cfg)
 	}
 	// The Python typed tier (ADR-065) asks the type checker the repository installed, by the same rule.
-	if pyToolsAvailable(&cfg) {
+	if typed.py {
 		registerPyTools(srv, &cfg)
 	}
 

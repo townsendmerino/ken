@@ -646,3 +646,28 @@ func TestSafeDBErrorMessage(t *testing.T) {
 		}
 	}
 }
+
+// The default instructions name a typed tool only on a server that offers it.
+func TestDefaultInstructions_NameOnlyTheTypedToolsOffered(t *testing.T) {
+	none := defaultInstructions(typedTools{})
+	for _, tool := range []string{"go_references", "go_rename_plan", "go_check_edit", "ts_check_edit", "py_check_edit"} {
+		if strings.Contains(none, tool) {
+			t.Errorf("a server with no typed tool names %s:\n%s", tool, none)
+		}
+	}
+	if strings.Contains(none, "For refactors, renames") {
+		t.Error("the instructions still send every refactor and rename to grep")
+	}
+	all := defaultInstructions(typedTools{goTools: true, goRename: true, ts: true, py: true})
+	for _, want := range []string{"go_references", "go_rename_plan", "`go_check_edit` (Go) or `ts_check_edit` (TypeScript, JavaScript) or `py_check_edit` (Python)", "100% recall"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("a server with every typed tool lacks %q:\n%s", want, all)
+		}
+	}
+	if noRename := defaultInstructions(typedTools{goTools: true}); strings.Contains(noRename, "go_rename_plan") || !strings.Contains(noRename, "go_references") {
+		t.Errorf("a server without go_rename_plan: %s", noRename)
+	}
+	if tsOnly := defaultInstructions(typedTools{ts: true}); strings.Contains(tsOnly, "go_") || !strings.Contains(tsOnly, "ts_check_edit") {
+		t.Errorf("a TypeScript-only server: %s", tsOnly)
+	}
+}
