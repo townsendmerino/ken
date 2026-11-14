@@ -308,5 +308,15 @@ func handleGoCheckEdit(ctx context.Context, cfg *Config, args GoCheckEditArgs) (
 	if limit <= 0 {
 		limit = 40
 	}
-	return dispatchOutput(args.Output, res, note+res.Text(len(gt.Config.Configs), limit))
+	spots := make([]editSpot, 0, len(args.Edits))
+	for _, e := range args.Edits {
+		if e.Content == nil && !e.Delete && e.MoveTo == "" {
+			spots = append(spots, editSpot{e.File, e.OldString})
+		}
+	}
+	tests := testsForEdit(ctx, cfg, args.Repo, gt.Repo, spots)
+	return dispatchOutput(args.Output, struct {
+		*engine.GoEditCheck
+		Tests *EditTests `json:"tests,omitempty"`
+	}{res, tests}, note+res.Text(len(gt.Config.Configs), limit)+tests.text())
 }

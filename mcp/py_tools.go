@@ -90,5 +90,15 @@ func handlePyCheckEdit(ctx context.Context, cfg *Config, args PyCheckEditArgs) (
 	if limit <= 0 {
 		limit = 40
 	}
-	return dispatchOutput(args.Output, res, res.Text(limit))
+	spots := make([]editSpot, 0, len(args.Edits))
+	for _, e := range args.Edits {
+		if e.Content == nil && !e.Delete && e.MoveTo == "" {
+			spots = append(spots, editSpot{e.File, e.OldString})
+		}
+	}
+	tests := testsForEdit(ctx, cfg, args.Repo, key, spots)
+	return dispatchOutput(args.Output, struct {
+		*engine.PyEditCheck
+		Tests *EditTests `json:"tests,omitempty"`
+	}{res, tests}, res.Text(limit)+tests.text())
 }

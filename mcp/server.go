@@ -318,6 +318,20 @@ func NewServer(cfg Config) *sdk.Server {
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
+		Name: "tests_for",
+		Description: "Find the tests that call a function or method, and the command that runs them: " +
+			"`go test -run '^(TestA|TestB)$' ./pkg` per Go package, or a pytest line. Includes tests one call away " +
+			"(a test that calls a function that calls the symbol) unless depth is 1. Use it after changing a " +
+			"function, to run the tests that exercise it and not the whole suite. Go and Python test files only. " +
+			"Name-resolved, not type-resolved: a same-named function elsewhere brings its tests too, and a test " +
+			"that reaches the symbol through an interface or more than one call away is not found.",
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args TestsForArgs) (*sdk.CallToolResult, any, error) {
+		stop := startProgressHeartbeat(ctx, req, "ken tests_for")
+		defer stop()
+		return handleTestsFor(ctx, &cfg, args)
+	})
+
+	sdk.AddTool(srv, &sdk.Tool{
 		Name: "outline",
 		Description: "Show the structural outline of a file or directory. " +
 			"For a file path: returns every top-level function, class, and method " +

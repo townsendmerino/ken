@@ -96,6 +96,7 @@ func TestServer_ListsRegisteredTools(t *testing.T) {
 		"definition":       true,
 		"references":       true,
 		"callers":          true,
+		"tests_for":        true,
 		"outline":          true,
 		"symbols":          true,
 		"status":           true,
