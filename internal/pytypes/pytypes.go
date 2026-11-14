@@ -1,6 +1,6 @@
-// Package pytypes is the typed tier for Python (ADR-065). It asks the type checker the project itself installed, ty
-// or pyright, over the language-server protocol (internal/lsp). ken links no checker, downloads none, and does not
-// choose one for a project that has none.
+// Package pytypes is the typed tier for Python (ADR-065). It asks the type checker the project itself installed: ty,
+// pyright or basedpyright over the language-server protocol (internal/lsp), or mypy by running it (mypy.go). ken
+// links no checker, downloads none, and does not choose one for a project that has none.
 //
 // What it answers today is one question: what would an edit do to the project's type check (Runner.CheckEdit). The
 // check itself is internal/lspcheck; this package finds the checker and describes it.
@@ -26,8 +26,8 @@ import (
 type Runner struct {
 	// Repo is the repository root, an absolute path.
 	Repo string
-	// Checker is the program to run: a ty binary, or pyright's pyright-langserver. "" finds the one installed for
-	// the edited file's project (FindChecker).
+	// Checker is the program to run: a ty or mypy binary, or the pyright-langserver or basedpyright-langserver
+	// launcher. "" finds the one installed for the edited file's project (FindChecker).
 	Checker string
 	// Timeout bounds one check. 0 means two minutes.
 	Timeout time.Duration
@@ -38,6 +38,10 @@ type Runner struct {
 	// Spawn starts the server; nil runs the real program. Environ is its environment; nil means the process's own.
 	Spawn   lsp.SpawnFunc
 	Environ []string
+	// Exec runs mypy; nil runs the real program. CacheDir is where mypy keeps its cache between checks; "" means a
+	// directory per project under the user's cache directory, so that nothing is written to the repository.
+	Exec     ExecFunc
+	CacheDir string
 }
 
 // ErrNoChecker is what errors.Is matches when the repository has no type checker this tier can ask.
@@ -49,19 +53,25 @@ var sourceExts = lspcheck.Languages{".py": "python", ".pyi": "python"}
 // IsSource reports whether name is a file a Python type checker checks.
 func IsSource(name string) bool { return sourceExts.Has(name) }
 
-// The checkers this tier can ask.
+// The checkers this tier can ask, in the order one is chosen where a project has several and configures none or
+// more than one of them.
 const (
-	Ty      = "ty"
-	Pyright = "pyright"
+	Ty           = "ty"
+	Pyright      = "pyright"
+	BasedPyright = "basedpyright"
+	Mypy         = "mypy"
 )
+
+var kinds = []string{Ty, Pyright, BasedPyright, Mypy}
 
 // Checker is a type checker installed for a project.
 type Checker struct {
-	Kind string // Ty or Pyright
-	Path string // the program: ty itself, or pyright-langserver
+	Kind string // Ty, Pyright, BasedPyright or Mypy
+	Path string // the program: ty or mypy itself, or the pyright-langserver or basedpyright-langserver launcher
+	Dir  string // the project directory it was found in; "" when the caller named the program
 }
 
-// KindOf tells which checker a program is from its file name, or "" when it is neither.
+// KindOf tells which checker a program is from its file name, or "" when it is none of them.
 func KindOf(path string) string {
 	base := strings.ToLower(filepath.Base(path))
 	base = strings.TrimSuffix(strings.TrimSuffix(base, ".exe"), ".cmd")
@@ -70,6 +80,10 @@ func KindOf(path string) string {
 		return Ty
 	case "pyright-langserver":
 		return Pyright
+	case "basedpyright-langserver":
+		return BasedPyright
+	case "mypy":
+		return Mypy
 	}
 	return ""
 }
@@ -80,48 +94,59 @@ func isFile(p string) bool {
 }
 
 // FindChecker returns the type checker installed for the project that holds dir: in the nearest directory at or
-// above dir, no higher than repo, that has one. ty is looked for in the directory's virtual environment (.venv or
-// venv), pyright in its node_modules. Where a directory has both, the one the project configures wins
-// (pyrightconfig.json or [tool.pyright] for pyright; ty.toml or [tool.ty] for ty), and ty when neither or both are
-// configured. The error matches ErrNoChecker and says what was looked for.
+// above dir, no higher than repo, that has one. ty, basedpyright and mypy are looked for in the directory's virtual
+// environment (.venv or venv), pyright in its node_modules. Where a directory has several, the one the project
+// configures wins when it configures exactly one of them (ty.toml or [tool.ty]; pyrightconfig.json or
+// [tool.pyright]; [tool.basedpyright]; mypy.ini, .mypy.ini, [tool.mypy] or a [mypy] section in setup.cfg), and
+// otherwise the first of ty, pyright, basedpyright, mypy. The error matches ErrNoChecker and says what was looked
+// for.
 func FindChecker(repo, dir string) (Checker, error) {
 	repo = filepath.Clean(repo)
-	bin, tyExe, lsExe := "bin", "ty", "pyright-langserver"
+	bin, exe, lsExe := "bin", "", "pyright-langserver"
 	if runtime.GOOS == "windows" {
-		bin, tyExe, lsExe = "Scripts", "ty.exe", "pyright-langserver.cmd"
+		bin, exe, lsExe = "Scripts", ".exe", "pyright-langserver.cmd"
 	}
 	pipPyright := false
 	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
-		var ty, pyright string
+		found := map[string]string{}
 		for _, venv := range []string{".venv", "venv"} {
-			if p := filepath.Join(d, venv, bin, tyExe); ty == "" && isFile(p) {
-				ty = p
+			for kind, name := range map[string]string{Ty: "ty", BasedPyright: "basedpyright-langserver", Mypy: "mypy"} {
+				if p := filepath.Join(d, venv, bin, name+exe); found[kind] == "" && isFile(p) {
+					found[kind] = p
+				}
 			}
-			if isFile(filepath.Join(d, venv, bin, strings.TrimSuffix(lsExe, ".cmd"))) || isFile(filepath.Join(d, venv, bin, "pyright-langserver.exe")) {
+			if isFile(filepath.Join(d, venv, bin, "pyright-langserver"+exe)) {
 				pipPyright = true
 			}
 		}
 		if p := filepath.Join(d, "node_modules", ".bin", lsExe); isFile(p) {
-			pyright = p
+			found[Pyright] = p
 		}
-		switch {
-		case ty != "" && pyright != "":
-			if configures(d, repo, "pyrightconfig.json", "[tool.pyright]") && !configures(d, repo, "ty.toml", "[tool.ty]") {
-				return Checker{Pyright, pyright}, nil
+		if len(found) > 0 {
+			pick, configured := "", 0
+			for _, k := range kinds {
+				if found[k] != "" && configures(d, repo, k) {
+					configured++
+					pick = k
+				}
 			}
-			return Checker{Ty, ty}, nil
-		case ty != "":
-			return Checker{Ty, ty}, nil
-		case pyright != "":
-			return Checker{Pyright, pyright}, nil
+			if configured != 1 {
+				for _, k := range kinds {
+					if found[k] != "" {
+						pick = k
+						break
+					}
+				}
+			}
+			return Checker{Kind: pick, Path: found[pick], Dir: d}, nil
 		}
 		if d == repo || d == filepath.Dir(d) || !strings.HasPrefix(d, repo) {
 			break
 		}
 	}
-	msg := "looked for ty in .venv and venv, and for pyright in node_modules, from " + dir + " up to the repository root. Install one in the project (`uv add --dev ty`, or `npm install --save-dev pyright`). mypy has no language server and cannot be asked"
+	msg := "looked for ty, basedpyright and mypy in .venv and venv, and for pyright in node_modules, from " + dir + " up to the repository root. Install one in the project (`uv add --dev ty`, `uv add --dev mypy`, `uv add --dev basedpyright`, or `npm install --save-dev pyright`)"
 	if pipPyright {
-		msg = "pyright is installed here from pip, and that package fetches Node and pyright itself when first run, which ken does not start. " + msg
+		msg = "pyright is installed here from pip, and that package fetches Node and pyright itself when first run, which ken does not start (basedpyright from pip carries its own and can be asked). " + msg
 	}
 	return Checker{}, fmt.Errorf("%w: %s", ErrNoChecker, msg)
 }
@@ -138,14 +163,36 @@ func Installed(repo string) Checker {
 	return Checker{}
 }
 
-// configures reports whether a directory from d up to repo has the named configuration file, or a pyproject.toml
-// with the table.
-func configures(d, repo, file, table string) bool {
-	for ; ; d = filepath.Dir(d) {
-		if isFile(filepath.Join(d, file)) {
-			return true
+// configuration is where a project configures each checker: files of its own, and text in pyproject.toml or
+// setup.cfg.
+var configuration = map[string]struct {
+	files     []string
+	pyproject string
+	setupCfg  string
+}{
+	Ty:           {files: []string{"ty.toml"}, pyproject: "[tool.ty]"},
+	Pyright:      {files: []string{"pyrightconfig.json"}, pyproject: "[tool.pyright]"},
+	BasedPyright: {pyproject: "[tool.basedpyright]"},
+	Mypy:         {files: []string{"mypy.ini", ".mypy.ini"}, pyproject: "[tool.mypy", setupCfg: "[mypy"},
+}
+
+// configures reports whether a directory from d up to repo configures the checker.
+func configures(d, repo, kind string) bool {
+	c := configuration[kind]
+	has := func(file, text string) bool {
+		if text == "" {
+			return false
 		}
-		if b, err := os.ReadFile(filepath.Join(d, "pyproject.toml")); err == nil && strings.Contains(string(b), table) {
+		b, err := os.ReadFile(filepath.Join(d, file))
+		return err == nil && strings.Contains(string(b), text)
+	}
+	for ; ; d = filepath.Dir(d) {
+		for _, f := range c.files {
+			if isFile(filepath.Join(d, f)) {
+				return true
+			}
+		}
+		if has("pyproject.toml", c.pyproject) || has("setup.cfg", c.setupCfg) {
 			return true
 		}
 		if d == repo || d == filepath.Dir(d) || !strings.HasPrefix(d, repo) {
@@ -165,9 +212,9 @@ type (
 // server describes how a checker is started and asked.
 func server(c Checker) (lspcheck.Server, error) {
 	s := lspcheck.Server{Name: c.Kind, Label: c.Kind, Where: "the project's type checker (" + c.Kind + ")", Verdict: "WOULD NOT TYPE-CHECK",
-		// Neither checker reports on a file that is not open unless it is configured to, so every file is opened.
+		// None of them reports on a file that is not open unless it is configured to, so every file is opened.
 		OpenAll: true,
-		// Both resolve a module on disk: one the edit creates is not found, whatever is opened.
+		// All resolve a module on disk: one the edit creates is not found, whatever is opened.
 		ImportsNewFile: importsModule}
 	switch c.Kind {
 	case Ty:
@@ -187,8 +234,23 @@ func server(c Checker) (lspcheck.Server, error) {
 				}
 			}
 		}
+	case BasedPyright:
+		// the pip package carries its own Node: nothing else is needed
+		s.Argv = []string{c.Path, "--stdio"}
+		for _, lib := range []string{"lib/python*/site-packages", "Lib/site-packages"} {
+			m, _ := filepath.Glob(filepath.Join(filepath.Dir(filepath.Dir(c.Path)), filepath.FromSlash(lib), "basedpyright", "package.json"))
+			if len(m) == 0 {
+				continue
+			}
+			if b, err := os.ReadFile(m[0]); err == nil {
+				var pkg struct{ Version string }
+				if json.Unmarshal(b, &pkg) == nil {
+					s.Version = pkg.Version
+				}
+			}
+		}
 	default:
-		return s, fmt.Errorf("%s is neither ty nor pyright-langserver", c.Path)
+		return s, fmt.Errorf("%s is not ty, mypy, pyright-langserver or basedpyright-langserver", c.Path)
 	}
 	return s, nil
 }
@@ -230,6 +292,9 @@ func (r *Runner) CheckEdit(ctx context.Context, edits []FileEdit) (*EditCheck, e
 		if c, err = FindChecker(patch.Root, filepath.Dir(patch.Order[0])); err != nil {
 			return nil, err
 		}
+	}
+	if c.Kind == Mypy {
+		return r.checkMypy(ctx, c, patch)
 	}
 	srv, err := server(c)
 	if err != nil {

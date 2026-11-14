@@ -33,7 +33,7 @@ type PyCheckEditArgs struct {
 // openPyTyped opens the tier on a repository; a test substitutes it.
 var openPyTyped = engine.OpenPyTyped
 
-// pyToolsAvailable reports whether the server's default repository is a local checkout with ty or pyright installed
+// pyToolsAvailable reports whether the server's default repository is a local checkout with a Python type checker installed (ty, pyright, basedpyright or mypy)
 // at its root: the tool is offered only where it can answer.
 func pyToolsAvailable(cfg *Config) bool {
 	if cfg.DefaultRepo == "" {
@@ -51,16 +51,17 @@ func registerPyTools(srv *sdk.Server, cfg *Config) {
 	sdk.AddTool(srv, &sdk.Tool{
 		Name: "py_check_edit",
 		Description: "Check an edit to Python files before making it. The edit is opened as unsaved contents in the " +
-			"type checker the project itself installed (ty in its virtual environment, or pyright in its " +
-			"node_modules; nothing is written) and every Python file of the repo is asked for its errors, before and " +
-			"after. The reply lists the errors the edit would cause that are not there now (ERROR, with file, line " +
+			"type checker the project itself installed (ty, basedpyright or mypy in its virtual environment, or " +
+			"pyright in its node_modules; nothing is written) and every Python file of the repo is asked for its " +
+			"errors, before and after. mypy is run instead, with each edited file replaced by its new contents; it " +
+			"cannot check a file the edit creates, and the reply says so. The reply lists the errors the edit would cause that are not there now (ERROR, with file, line " +
 			"and the checker's rule), in the edited files and in every file that depends on them. Use it before a " +
 			"change to a signature, a class or a protocol, to see every caller that breaks: Python has no compile " +
 			"step that would. What counts as an error is that checker's opinion under the project's configuration. " +
 			"It does not say whether a name on an untouched line now refers to another declaration, and it says " +
 			"nothing about behaviour: tests still have to run. Edits take the shape of an editor's replace (file, " +
 			"old_string, new_string) or a whole file (file, content), and several are checked together. A file can also be deleted (file, delete) or moved (file, move_to); a file that goes is checked as an empty file. Each call " +
-			"starts the checker and stops it. Local repositories with ty or pyright installed only.",
+			"starts the checker and stops it. Local repositories with one of those checkers installed only.",
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args PyCheckEditArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken py_check_edit")
 		defer stop()

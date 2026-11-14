@@ -19,7 +19,8 @@ func TestServer_PyToolFollowsTheDefaultRepo(t *testing.T) {
 	}
 	withTy := writeTSRepo(t, map[string]string{".venv/bin/ty": "", "a.py": ""})
 	withPyright := writeTSRepo(t, map[string]string{"node_modules/.bin/pyright-langserver": "", "a.py": ""})
-	neither := writeTSRepo(t, map[string]string{".venv/bin/mypy": "", "a.py": ""})
+	withMypy := writeTSRepo(t, map[string]string{".venv/bin/mypy": "", "a.py": ""})
+	neither := writeTSRepo(t, map[string]string{".venv/bin/pylint": "", "a.py": ""})
 	nested := writeTSRepo(t, map[string]string{"backend/.venv/bin/ty": "", "backend/a.py": "", "frontend/a.ts": ""})
 	for _, tc := range []struct {
 		name, repo string
@@ -28,7 +29,8 @@ func TestServer_PyToolFollowsTheDefaultRepo(t *testing.T) {
 		{"a repo with ty", withTy, true},
 		{"a project one level down", nested, true},
 		{"a repo with pyright", withPyright, true},
-		{"a repo with mypy only", neither, false},
+		{"a repo with mypy only", withMypy, true},
+		{"a repo with no type checker", neither, false},
 		{"no default repo", "", false},
 		{"a URL", "https://example.com/x/y", false},
 	} {

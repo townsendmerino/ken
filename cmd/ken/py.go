@@ -16,18 +16,23 @@ const pyUsage = `Usage: ken py check-edit <repo> <file> <new-contents-file> [--j
        ken py check-edit <repo> --edits FILE [--json] [--max N] [--checker PATH]
 
 Answers about a Python repository from the type checker the project itself
-installed: ty in its virtual environment (.venv or venv), or pyright in its
-node_modules (pyright needs node on PATH). ken installs neither.
+installed: ty, basedpyright or mypy in its virtual environment (.venv or venv),
+or pyright in its node_modules (pyright needs node on PATH). ken installs none.
+Where a project has several, the one it configures is asked.
 
   check-edit   what an edit would do to the type check, before it is made; writes
                nothing. The edit is opened as unsaved contents in the checker
                and every Python file is asked for its errors, before and after.
+               mypy has no such mode: it is run twice, as the project is and
+               with each edited file replaced (--shadow-file), with its cache
+               kept outside the repository. It cannot check a new file.
                <new-contents-file> holds the whole new contents of <file>
                ("-" reads standard input). --edits FILE is a JSON list of
                {"file","old_string","new_string","replace_all"} or
                {"file","content"} ("-" reads standard input).
   --checker PATH  the program to run, in place of the one found for the edited
-               file's project: a ty binary, or pyright's pyright-langserver
+               file's project: a ty or mypy binary, or the pyright-langserver
+               or basedpyright-langserver launcher
   --max N      cap on the error lines shown (default 200; 0 shows all)
 
 Exit status: 0 when the edit causes no new error, 3 when it does or when not

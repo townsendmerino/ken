@@ -3,13 +3,14 @@ package engine
 import "github.com/townsendmerino/ken/internal/pytypes"
 
 // The Python typed tier (ADR-065): answers about a Python repository from the type checker the project itself
-// installed, ty (in its virtual environment) or pyright (in its node_modules), asked over the language-server
-// protocol. ken links no checker, downloads none, and does not pick one for a project that has none. The tier is
-// independent of the search index: no Workspace is needed.
+// installed: ty or basedpyright (in its virtual environment) or pyright (in its node_modules), asked over the
+// language-server protocol, or mypy (in its virtual environment), which is run with the edit as shadow files.
+// ken links no checker, downloads none, and does not pick one for a project that has none. The tier is independent
+// of the search index: no Workspace is needed.
 //
 // PyTyped.CheckEdit applies an edit the caller wrote as unsaved contents inside that checker and reports the errors
 // that appear, in the edited files and in every other Python file of the repository (PyEditCheck, the same shape as
-// TSEditCheck). Nothing is written. A project with neither checker gets ErrNoPyChecker.
+// TSEditCheck). Nothing is written. A project with none of them gets ErrNoPyChecker.
 type (
 	PyTyped       = pytypes.Runner
 	PyFileEdit    = pytypes.FileEdit
@@ -23,7 +24,7 @@ var ErrNoPyChecker = pytypes.ErrNoChecker
 
 // OpenPyTyped returns the typed tier for the repository at repo (an absolute path). It holds nothing between checks:
 // each starts the checker and stops it. The checker is found when a check runs, for the edited file's project; set
-// the returned value's Checker to name one (a ty binary, or pyright's pyright-langserver).
+// the returned value's Checker to name one (a ty or mypy binary, or the pyright-langserver or basedpyright-langserver launcher).
 //
 // Running a check runs that program, which the repository chose. Open a repository you would run its tests in.
 func OpenPyTyped(repo string) *PyTyped { return &pytypes.Runner{Repo: repo} }
