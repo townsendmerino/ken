@@ -100,6 +100,8 @@ func main() {
 		os.Exit(cmdTS(os.Args[2:]))
 	case "py":
 		os.Exit(cmdPy(os.Args[2:]))
+	case "hook":
+		os.Exit(cmdHook(os.Args[2:]))
 	default:
 		cli.Usage()
 		os.Exit(2)

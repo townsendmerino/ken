@@ -1,0 +1,300 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/townsendmerino/ken/engine"
+)
+
+const hookUsage = `Usage: ken hook check-edit [--repo DIR] [--timeout SECONDS] [--max N] [--vet] [--quiet-incomplete] [--why]
+
+A Claude Code hook: put it on PreToolUse for Edit and Write, and every edit the agent is about to make to a Go, TypeScript, JavaScript or
+Python file is checked first, as 'ken go|ts|py check-edit' would check it. The
+hook reads the tool call as JSON on standard input.
+
+It never blocks an edit. When the edit would cause errors that are not there
+now, the errors are handed to the agent as context, and the edit goes ahead: a
+refactor often breaks its callers in one edit and mends them in the next. When
+the edit is clean, when the file is not one of those languages, when the
+project has no compiler or checker ken can ask, or when the check does not
+finish in time, the hook says nothing.
+
+  --repo DIR       the repository (default: the nearest directory at or above
+                   the edited file that holds .git, else the session's cwd)
+  --timeout S      give up, silently, after S seconds (default 20). Each check
+                   starts from nothing: on a large Go repository it will not
+                   finish in that time, and the hook then stays out of the way
+  --max N          cap on the error lines handed over (default 15)
+  --vet            Go: also put an edit that compiles to go vet (slower)
+  --quiet-incomplete  say nothing when no error was found but not everything
+                   could be checked (default: say so, in one line)
+  --why            when an edit could not be checked, say why on standard error
+                   (for trying the hook by hand: the agent does not see it)
+
+In .claude/settings.json:
+
+  {"hooks": {"PreToolUse": [{"matcher": "Edit|Write",
+    "hooks": [{"type": "command", "command": "ken hook check-edit", "timeout": 30}]}]}}
+
+Exit status: always 0, so a failure of the hook is never a failure of the edit.
+`
+
+// hookInput is the part of a Claude Code PreToolUse payload the hook reads.
+type hookInput struct {
+	Cwd       string `json:"cwd"`
+	Event     string `json:"hook_event_name"`
+	ToolName  string `json:"tool_name"`
+	ToolInput struct {
+		FilePath   string  `json:"file_path"`
+		OldString  string  `json:"old_string"`
+		NewString  string  `json:"new_string"`
+		ReplaceAll bool    `json:"replace_all"`
+		Content    *string `json:"content"`
+		Edits      []struct {
+			OldString  string `json:"old_string"`
+			NewString  string `json:"new_string"`
+			ReplaceAll bool   `json:"replace_all"`
+		} `json:"edits"`
+	} `json:"tool_input"`
+}
+
+// hookOptions are the hook's flags.
+type hookOptions struct {
+	repo            string
+	timeout         time.Duration
+	max             int
+	vet             bool
+	quietIncomplete bool
+	why             io.Writer // where to say why nothing was said; nil says nothing
+}
+
+// hookEdit is one edit in the shape all three tiers take.
+type hookEdit struct {
+	oldString, newString string
+	replaceAll           bool
+	content              *string
+}
+
+// repoOf returns the nearest directory at or above dir that holds .git, or "".
+func repoOf(dir string) string {
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+			return d
+		}
+		if d == filepath.Dir(d) {
+			return ""
+		}
+	}
+}
+
+// hookCheck checks the edit a tool call is about to make and returns what the agent should be told: "" when there is
+// nothing to say. It reports the tier asked ("go", "ts", "py", or "" for a file of no tier).
+func hookCheck(ctx context.Context, in hookInput, o hookOptions) (text, tier string) {
+	file := in.ToolInput.FilePath
+	if file == "" {
+		return "", ""
+	}
+	if !filepath.IsAbs(file) {
+		file = filepath.Join(in.Cwd, file)
+	}
+	var edits []hookEdit
+	switch in.ToolName {
+	case "Edit":
+		edits = []hookEdit{{oldString: in.ToolInput.OldString, newString: in.ToolInput.NewString, replaceAll: in.ToolInput.ReplaceAll}}
+	case "Write":
+		if in.ToolInput.Content == nil {
+			return "", ""
+		}
+		edits = []hookEdit{{content: in.ToolInput.Content}}
+	case "MultiEdit": // older Claude Code
+		for _, e := range in.ToolInput.Edits {
+			edits = append(edits, hookEdit{oldString: e.OldString, newString: e.NewString, replaceAll: e.ReplaceAll})
+		}
+	}
+	if len(edits) == 0 {
+		return "", ""
+	}
+	repo := o.repo
+	if repo == "" {
+		if repo = repoOf(filepath.Dir(file)); repo == "" {
+			repo = in.Cwd
+		}
+	}
+	if repo == "" {
+		return "", ""
+	}
+	repo, err := filepath.Abs(repo)
+	if err != nil {
+		return "", ""
+	}
+	rel, err := filepath.Rel(repo, file)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", ""
+	}
+	rel = filepath.ToSlash(rel)
+	ctx, cancel := context.WithTimeout(ctx, o.timeout)
+	defer cancel()
+
+	var (
+		body       string
+		findings   int
+		clean      bool
+		incomplete bool
+		tool       string
+	)
+	switch {
+	case strings.HasSuffix(file, ".go"):
+		tier, tool = "go", "go_check_edit"
+		if engine.GoPath() == "" {
+			return "", tier
+		}
+		gt, _, gerr := engine.OpenGoTyped(repo, "")
+		if gerr != nil {
+			return "", tier
+		}
+		gt.SkipVet = !o.vet
+		ge := make([]engine.GoFileEdit, len(edits))
+		for i, e := range edits {
+			ge[i] = engine.GoFileEdit{File: rel, OldString: e.oldString, NewString: e.newString, ReplaceAll: e.replaceAll, Content: e.content}
+		}
+		res, cerr := gt.CheckEdit(ctx, ge)
+		if err = cerr; err == nil {
+			findings, clean = len(res.Errors)+len(res.Moved)+len(res.Vet), res.Clean
+			incomplete = !clean && findings == 0
+			body = res.Text(len(gt.Config.Configs), o.max)
+		}
+	case engine.IsTSSource(file):
+		tier, tool = "ts", "ts_check_edit"
+		te := make([]engine.TSFileEdit, len(edits))
+		for i, e := range edits {
+			te[i] = engine.TSFileEdit{File: rel, OldString: e.oldString, NewString: e.newString, ReplaceAll: e.replaceAll, Content: e.content}
+		}
+		tt := engine.OpenTSTyped(repo)
+		tt.Timeout = o.timeout
+		res, cerr := tt.CheckEdit(ctx, te)
+		if err = cerr; err == nil {
+			findings, clean, incomplete = len(res.Errors), res.Clean, res.Incomplete
+			body = res.Text(o.max)
+		}
+	case engine.IsPySource(file):
+		tier, tool = "py", "py_check_edit"
+		pe := make([]engine.PyFileEdit, len(edits))
+		for i, e := range edits {
+			pe[i] = engine.PyFileEdit{File: rel, OldString: e.oldString, NewString: e.newString, ReplaceAll: e.replaceAll, Content: e.content}
+		}
+		pt := engine.OpenPyTyped(repo)
+		pt.Timeout = o.timeout
+		res, cerr := pt.CheckEdit(ctx, pe)
+		if err = cerr; err == nil {
+			findings, clean, incomplete = len(res.Errors), res.Clean, res.Incomplete
+			body = res.Text(o.max)
+		}
+	default:
+		return "", ""
+	}
+	if err != nil {
+		// No tool to ask, an edit the tool call itself will refuse (old_string not found), or out of time: none of
+		// them is the agent's to act on. Only a project with a tool is counted.
+		if !errors.Is(err, engine.ErrNoTSCompiler) && !errors.Is(err, engine.ErrNoPyChecker) && ctx.Err() == nil {
+			recordCheckUsage(tool, err, 0, false)
+		}
+		if o.why != nil {
+			fmt.Fprintf(o.why, "ken hook: %s not checked: %v\n", rel, err)
+		}
+		return "", tier
+	}
+	recordCheckUsage(tool, nil, findings, clean)
+	switch {
+	case clean:
+		return "", tier
+	case findings == 0 && incomplete && o.quietIncomplete:
+		return "", tier
+	case findings == 0:
+		return "ken checked this edit to " + rel + " before it was made and found no new error, but could not check everything:\n" + body, tier
+	}
+	return "ken checked this edit to " + rel + " before it was made (nothing was blocked). It would cause errors that are not there now. " +
+		"If a later edit of yours fixes them, carry on; otherwise fix them next:\n" + body, tier
+}
+
+func cmdHook(args []string) int {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		fmt.Print(hookUsage)
+		return 0
+	}
+	if args[0] != "check-edit" {
+		fmt.Fprint(os.Stderr, hookUsage)
+		return 2
+	}
+	o := hookOptions{timeout: 20 * time.Second, max: 15}
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--vet":
+			o.vet = true
+		case "--quiet-incomplete":
+			o.quietIncomplete = true
+		case "--why":
+			o.why = os.Stderr
+		case "--repo", "--timeout", "--max":
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "ken hook: %s needs a value\n", args[i])
+				return 2
+			}
+			switch args[i] {
+			case "--repo":
+				o.repo = args[i+1]
+			case "--timeout":
+				s, err := strconv.ParseFloat(args[i+1], 64)
+				if err != nil || s <= 0 {
+					fmt.Fprintf(os.Stderr, "ken hook: --timeout %q is not a number of seconds\n", args[i+1])
+					return 2
+				}
+				o.timeout = time.Duration(s * float64(time.Second))
+			default:
+				n, err := strconv.Atoi(args[i+1])
+				if err != nil || n < 0 {
+					fmt.Fprintf(os.Stderr, "ken hook: --max %q is not a count\n", args[i+1])
+					return 2
+				}
+				o.max = n
+			}
+			i++
+		default:
+			fmt.Fprint(os.Stderr, hookUsage)
+			return 2
+		}
+	}
+	// From here on nothing fails the tool call: a hook that exits non-zero would get in the agent's way.
+	doc, err := io.ReadAll(io.LimitReader(os.Stdin, 64<<20))
+	if err != nil {
+		return 0
+	}
+	var in hookInput
+	if json.Unmarshal(doc, &in) != nil {
+		return 0
+	}
+	text, _ := hookCheck(context.Background(), in, o)
+	if text == "" {
+		return 0
+	}
+	if out, err := json.Marshal(hookReply(in.Event, text)); err == nil {
+		fmt.Println(string(out))
+	}
+	return 0
+}
+
+// hookReply is the JSON a hook prints to hand text to the agent without deciding anything about the tool call.
+func hookReply(event, text string) map[string]any {
+	if event == "" {
+		event = "PreToolUse"
+	}
+	return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": event, "additionalContext": text}}
+}
