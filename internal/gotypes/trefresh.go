@@ -174,7 +174,7 @@ func (p *program) refreshWith(changed []string, createdOrDeleted bool, pc *patch
 		ntp := &tPackage{ID: tp.ID, PkgPath: tp.PkgPath, Name: tp.Name, Dir: tp.Dir, ForTest: tp.ForTest, Files: tp.Files,
 			Imports: tp.Imports, deps: tp.deps, GoVersion: tp.GoVersion, Standard: tp.Standard, Workspace: tp.Workspace, listErr: tp.listErr}
 		if !affected[tp] {
-			ntp.types, ntp.nerr, ntp.bodies, ntp.errs = tp.types, tp.nerr, tp.bodies, tp.errs
+			ntp.types, ntp.nerr, ntp.bodies, ntp.errs, ntp.soft = tp.types, tp.nerr, tp.bodies, tp.errs, tp.soft
 			ntp.defs, ntp.useAtDecl, ntp.uses, ntp.typeSpecs = tp.defs, tp.useAtDecl, tp.uses, tp.typeSpecs
 			if ties := tp.ties.Load(); ties != nil {
 				ntp.ties.Store(ties) // they name declarations of this package and its dependencies, all unchanged

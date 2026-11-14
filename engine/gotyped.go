@@ -16,6 +16,11 @@ import (
 // is run only when one of the gopls engines is chosen. The tier is independent of the search index: no Workspace
 // is needed.
 //
+// GoTyped.CheckEdit asks the same check of an edit the caller wrote: the edit is applied in memory, what it reaches
+// is type-checked again under every configuration, and the answer is the compile errors it would cause, the
+// identifiers on untouched lines that would come to mean another declaration, and what it changes in the edited
+// packages' exported declarations (GoEditCheck). Nothing is written.
+//
 // GoResult.GroupBy turns a references or implementations answer into counts per package, directory or file.
 // GoTyped.Uses is the reverse question (which identifiers of one package another names); it runs the go command and
 // type-checks in process, and does not need gopls.
@@ -31,6 +36,10 @@ type (
 	GoGroup       = gotypes.Group
 	GoUse         = gotypes.Use
 	GoUsesResult  = gotypes.UsesResult
+	GoFileEdit    = gotypes.FileEdit
+	GoEditCheck   = gotypes.EditCheck
+	GoEditFinding = gotypes.EditFinding
+	GoEditedFile  = gotypes.EditedFile
 )
 
 // GoConfigFile is the repository-root file that lists a Go repository's build configurations.

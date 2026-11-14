@@ -156,6 +156,30 @@ func programKey(r *Runner, bc BuildConfig, dir string) string {
 	return r.Repo + "\x00" + bc.Name + "\x00" + sha256Hex(strings.Join(env, "\x00")+"\x01"+r.goPath()) + "\x00" + dir
 }
 
+// keyFor returns the key of the program that serves dir under bc. A program is a whole workspace, so one that was
+// loaded for another directory serves dir too when it has a package there: the question about a second symbol
+// must not load the repository a second time. Failing that the key is dir's own. pending is a program of the
+// same repository and configuration that is still loading: it may turn out to be the one, so the caller waits
+// for it and asks again. c.mu is held.
+func (c *ProgramCache) keyFor(r *Runner, bc BuildConfig, dir string) (key string, pending *heldProgram) {
+	key = programKey(r, bc, dir)
+	if c.held[key] != nil {
+		return key, nil
+	}
+	prefix := key[:len(key)-len(dir)]
+	for k, h := range c.held {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		if h.prog == nil {
+			pending = h
+		} else if h.prog.holdsDir(dir) {
+			return k, nil
+		}
+	}
+	return key, pending
+}
+
 // treeScan is one scan of a repository's tree, shared by the configurations of one query.
 type treeScan struct {
 	stats map[string]fileStat
@@ -175,7 +199,8 @@ func (c *ProgramCache) holds(r *Runner, bc BuildConfig, dir string) bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	h := c.held[programKey(r, bc, dir)]
+	key, _ := c.keyFor(r, bc, dir)
+	h := c.held[key]
 	return h != nil && h.prog != nil
 }
 
@@ -194,7 +219,6 @@ func heapNow() int64 {
 // can affect is checked again) if that is possible, and otherwise load runs; either way the result replaces it.
 // Callers asking for the same program at once share one load.
 func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir string, scan *treeScan, load func() (*program, error)) (*program, func(), error) {
-	key := programKey(r, bc, dir)
 	stats, scanned, serr := scan.stats, scan.at, scan.err
 	for {
 		c.mu.Lock()
@@ -202,6 +226,16 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 			c.mu.Unlock()
 			p, err := load()
 			return p, func() {}, err
+		}
+		key, pending := c.keyFor(r, bc, dir)
+		if pending != nil {
+			c.mu.Unlock()
+			select {
+			case <-pending.ready:
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
+			continue
 		}
 		var stale *heldProgram
 		if h, ok := c.held[key]; ok {

@@ -55,6 +55,10 @@ type Runner struct {
 	// Parallel is how many configurations EngineTypes type-checks at once. 0 or 1 is one at a time, which keeps one
 	// program in memory; more is faster and holds that many.
 	Parallel int
+
+	// checkEditReload makes CheckEdit list and type-check each configuration afresh with the edit in place, where
+	// it would refresh the program it has. Tests hold the two to the same answer.
+	checkEditReload bool
 }
 
 // realRepo is the repository root with symlinks resolved, which is how gopls names the files it reports.

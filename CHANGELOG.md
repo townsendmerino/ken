@@ -15,6 +15,15 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Added
+
+- **`go_check_edit` and `ken go check-edit`: check an edit to Go files before making it (ADR-063).** The edit (`{file, old_string, new_string}`, or `{file, content}` for a whole or new file; several together) is applied in memory, every package it reaches is type-checked again under every build configuration, and nothing is written. The reply lists the compile errors that are not there now, in the edited files and in everything that depends on them (`ERROR`, unused variables and imports included); the identifiers on lines the edit does not touch that would refer to another declaration, such as a name it shadows (`MOVED`); and the exported declarations it removes or changes (`API`). It is the check behind `go_rename_plan`, opened to an edit the caller wrote. On ken's own source (449 Go files, one configuration) it takes 0.04 to 0.09 s on a server that holds the repository and 1.1 to 1.9 s from the command line; an edit that changes a file's imports has the go command list the packages again and takes about 1.1 s held. Its verdict is held to `go vet` on the edited tree in tests, and the two ways it builds the edited program (refreshing the held one, loading afresh) are held to the same answer. `engine.GoTyped.CheckEdit`, `GoFileEdit`, `GoEditCheck`. Not covered: deleting a file, edits to `go.mod`, `go vet`'s own checks, and behaviour.
+
+### Fixed
+
+- **A server that holds a repository's type-checked programs reloaded them for every question about a symbol in another directory.** A held program was keyed by the directory of the declaration asked about, so asking about `engine.X` and then `mcp.Y` loaded the repository twice, and with the default size each load evicted the other. On ken's own source every such question took 1.1 s where a repeat in the same directory took 0.02 s. The 0.1 to 0.2 s that 1.17.0 reports for a loaded repository held only while the questions stayed in one directory. A held program now serves every directory of its workspace: the second directory's first question takes 0.02 s.
+- **A repository whose packages import each other in a circle made a load wait for itself.** The loader now reports the cycle (`import cycle not allowed: a -> b -> a`).
+
 ## [1.17.0] — 2026-11-13 — the Go typed tier in ken's own process: no gopls, and rename plans checked by applying them
 
 The Go typed tier now answers `go_references` and `go_implementations` in ken's own process with Go's type checker, without gopls, and returns the lines gopls would: on goinfer every declaration of the default build configuration (27,217) and a sample of all three were compared with gopls and none differed (ADR-061). A merged three-configuration answer that took 37 s (`ResidentForward.Forward`, 497 lines) or 263 s (`decoder.Options`, 2,525 lines) takes about 5 s and peaks at 0.8 GB instead of 2.9 GB. A long-lived host then keeps the type-checked programs loaded: three configurations hold about 0.65 GB, answer any question on an unchanged tree in 0.1 to 0.2 s, and after an edit re-check only the packages it can affect.

@@ -240,3 +240,57 @@ func TestGoReferences_directOnly(t *testing.T) {
 		t.Errorf("the JSON form should carry through, labelled and direct:\n%s", js)
 	}
 }
+
+// go_check_edit end to end through the handler: an edit that breaks a caller in another package comes back with the
+// caller's line, a clean one is called checked, and nothing is written.
+func TestGoCheckEdit_handler(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs go list: skipped under -short")
+	}
+	if engine.GoPath() == "" {
+		t.Skip("go not on PATH")
+	}
+	t.Setenv("KEN_MCP_ALLOWED_REPO_ROOTS", "")
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", "-mod=mod")
+	repo := t.TempDir()
+	lib := "package lib\n\nfunc New(n int) int { return n }\n"
+	for name, body := range map[string]string{
+		"go.mod":     "module example.com/m\n\ngo 1.21\n",
+		"lib/lib.go": lib,
+		"app/app.go": "package app\n\nimport \"example.com/m/lib\"\n\nfunc F() int { return lib.New(1) }\n",
+	} {
+		p := filepath.Join(repo, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(edits ...GoEditArg) string {
+		res, _, err := handleGoCheckEdit(context.Background(), &Config{}, GoCheckEditArgs{Edits: edits, repoArg: repoArg{Repo: repo}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resultText(t, res)
+	}
+	text := check(GoEditArg{File: "lib/lib.go", OldString: "func New(n int) int {", NewString: "func New(n int, scale int) int {"})
+	for _, want := range []string{"ERROR: app/app.go:5: not enough arguments in call to lib.New", "API: example.com/m/lib: changed: func New(n int) int", "WOULD NOT COMPILE: 1 new errors"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("go_check_edit lacks %q:\n%s", want, text)
+		}
+	}
+	if text = check(GoEditArg{File: "lib/lib.go", OldString: "return n", NewString: "return n + 0"}); !strings.Contains(text, "checked: the edit was applied in memory") {
+		t.Errorf("a harmless edit was not called checked:\n%s", text)
+	}
+	if text = check(); !strings.Contains(text, "edits is required") {
+		t.Errorf("no edits: %q", text)
+	}
+	if text = check(GoEditArg{File: "lib/lib.go", OldString: "absent", NewString: "x"}); !strings.Contains(text, "old_string is not in the file") {
+		t.Errorf("an edit that does not apply: %q", text)
+	}
+	if src, _ := os.ReadFile(filepath.Join(repo, "lib", "lib.go")); string(src) != lib {
+		t.Error("go_check_edit changed a file")
+	}
+}

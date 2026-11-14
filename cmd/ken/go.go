@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,10 +18,12 @@ const goUsage = `Usage: ken go refs        <repo> <symbol> [--json] [--max N] [-
        ken go impls       <repo> <symbol> [--json] [--max N] [--group-by K]
        ken go uses        <repo> <importer> <imported> [--json] [--max N]
        ken go rename-plan <repo> <symbol> <new-name> [--json] [--patch FILE]
+       ken go check-edit  <repo> <file> <new-contents-file> [--json] [--max N]
+       ken go check-edit  <repo> --edits FILE [--json] [--max N]
 
 Type-resolved answers for a Go repository, merged over the build configurations
 listed in <repo>/` + engine.GoConfigFile + ` (without the file: the host default only).
-All four are answered in process with go/types: no gopls is needed.
+All are answered in process with go/types: no gopls is needed.
 
   symbol       Name, Type.Member, pkg.Name, pkg.Type.Member, or dir/sub.Name
   refs         every line that refers to the symbol under any configuration
@@ -34,6 +37,16 @@ All four are answered in process with go/types: no gopls is needed.
                applied in memory first and every configuration type-checked again:
                a rename that would break the build or change what an identifier
                refers to is reported as CONFLICT lines, with no patch
+  check-edit   what an edit would do to the build, before it is made; writes
+               nothing. <file> is checked as if it held the contents of
+               <new-contents-file> (- reads standard input; <file> need not
+               exist yet). --edits FILE (or -) takes a JSON list instead, each
+               {"file", "old_string", "new_string"} or {"file", "content"}, all
+               checked together. Every package the edit reaches is type-checked
+               again under every configuration. ERROR lines are compile errors
+               that are not there now; MOVED lines are identifiers the edit does
+               not touch that would refer to another declaration; API lines are
+               exported declarations it removes or changes
   --max N      cap the printed lines (default 200; 0 = all)
   --group-by K counts instead of lines, one row per K: package, dir or file,
                each split into non-test and test (_test.go) lines
@@ -50,8 +63,9 @@ All four are answered in process with go/types: no gopls is needed.
   --parallel N type-check N configurations at once with --engine types (default 1:
                one program in memory at a time; more is faster and holds that many)
 
-Exit status: 0 complete, 3 the answer is a lower bound (see INCOMPLETE lines),
-1 on error, 2 on usage.
+Exit status: 0 complete, 3 the answer is a lower bound (see INCOMPLETE lines)
+or, for check-edit, the edit is not clean (ERROR or MOVED lines), 1 on error,
+2 on usage.
 `
 
 func cmdGo(args []string) int {
@@ -63,6 +77,7 @@ func cmdGo(args []string) int {
 		pos        []string
 		jsonOut    bool
 		patch      string
+		editsFile  string
 		cfgFile    string
 		groupBy    string
 		engineName string
@@ -76,13 +91,15 @@ func cmdGo(args []string) int {
 			jsonOut = true
 		case "--direct":
 			directOnly = true
-		case "--patch", "--max", "--config", "--group-by", "--engine", "--parallel":
+		case "--patch", "--max", "--config", "--group-by", "--engine", "--parallel", "--edits":
 			if i+1 >= len(args) {
 				fmt.Fprintf(os.Stderr, "ken go: %s needs a value\n", args[i])
 				return 2
 			}
 			if args[i] == "--patch" {
 				patch = args[i+1]
+			} else if args[i] == "--edits" {
+				editsFile = args[i+1]
 			} else if args[i] == "--config" {
 				cfgFile = args[i+1]
 			} else if args[i] == "--group-by" {
@@ -111,7 +128,14 @@ func cmdGo(args []string) int {
 			pos = append(pos, args[i])
 		}
 	}
-	want := map[string]int{"refs": 2, "impls": 2, "uses": 3, "rename-plan": 3}[args[0]]
+	want := map[string]int{"refs": 2, "impls": 2, "uses": 3, "rename-plan": 3, "check-edit": 3}[args[0]]
+	if args[0] == "check-edit" && editsFile != "" {
+		want = 1
+	}
+	if editsFile != "" && args[0] != "check-edit" {
+		fmt.Fprintln(os.Stderr, "ken go: --edits goes with check-edit")
+		return 2
+	}
 	if want == 0 || len(pos) != want {
 		fmt.Fprint(os.Stderr, goUsage)
 		return 2
@@ -197,6 +221,38 @@ func cmdGo(args []string) int {
 			return 1
 		}
 		return emit(res, res.Text(n, maxN), res.Incomplete)
+	case "check-edit":
+		read := func(name string) ([]byte, error) {
+			if name == "-" {
+				return io.ReadAll(os.Stdin)
+			}
+			return os.ReadFile(name)
+		}
+		var edits []engine.GoFileEdit
+		if editsFile != "" {
+			doc, err := read(editsFile)
+			if err == nil {
+				err = json.Unmarshal(doc, &edits)
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ken go: --edits: %v\n", err)
+				return 1
+			}
+		} else {
+			src, err := read(pos[2])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ken go: %v\n", err)
+				return 1
+			}
+			content := string(src)
+			edits = []engine.GoFileEdit{{File: pos[1], Content: &content}}
+		}
+		res, err := gt.CheckEdit(ctx, edits)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ken go: %v\n", err)
+			return 1
+		}
+		return emit(res, res.Text(n, maxN), !res.Clean)
 	default:
 		plan, err := gt.RenamePlan(ctx, pos[1], pos[2])
 		if err != nil {

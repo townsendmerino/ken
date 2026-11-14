@@ -70,6 +70,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-060](#adr-060-the-go-typed-tier-asks-gopls-over-lsp-and-keeps-nothing-unless-told-to) | The Go typed tier asks gopls over LSP and keeps nothing unless told to (amends ADR-059) | Accepted |
 | [ADR-061](#adr-061-references-and-implementations-are-answered-in-process-with-gotypes-held-to-gopls-by-a-differential) | References and implementations are answered in process with go/types, held to gopls by a differential (amends ADR-060) | Accepted |
 | [ADR-062](#adr-062-a-rename-plan-is-computed-in-process-and-checked-by-making-it) | A rename plan is computed in process and checked by making it (amends ADR-061) | Accepted |
+| [ADR-063](#adr-063-an-edit-the-caller-wrote-is-checked-the-way-a-rename-plan-is) | An edit the caller wrote is checked the way a rename plan is | Accepted |
 
 ---
 
@@ -3417,3 +3418,44 @@ With the three programs held the process is 1.35 GB after loading them (0.65 GB 
 - A workspace package that imports "C" is type-checked from files the go command generates; an edit that would fall in one is left out and reported, and the check then refuses. That path has not been exercised on a real cgo package.
 - One repository, two fixtures, one gopls version. Windows has not been run.
 
+---
+
+## ADR-063: An edit the caller wrote is checked the way a rename plan is
+
+**Status:** Accepted
+**Date:** 2026-11-14
+**Decided by:** Francis: "could build another tool for go code, like go_rename, where the agent sends a file-edit and we apply it and then check like we do for rename".
+
+### Context
+
+ADR-062 checks a rename plan by making it: the patch is applied in memory to the held program, what it touches is type-checked again, and the two programs are compared. Nothing in that depends on ken having computed the patch. An agent edits far more often than it renames, and what it does today to learn whether an edit compiles is to write the file and run `go build`, which covers one build configuration and has already changed the tree.
+
+### Decision
+
+1. **`go_check_edit` (`ken go check-edit`, `GoTyped.CheckEdit`) takes edits and writes nothing.** An edit is `{file, old_string, new_string}` with an editor's rule (the old text occurs once, or `replace_all`), or `{file, content}` for a whole file, which may be new. Several are checked together.
+2. **The program of the edit is the held program refreshed with the edited files in place of the files on disk** (`refreshWith`, as for a rename), with two differences. Every function body of every package the edit reaches is checked: an edit can change anything, so the narrow check of a rename does not apply. And when the edit changes what the go command lists (an import, a package clause, a build constraint, a new file) the configuration is listed again with `go list -overlay` and type-checked whole.
+3. **Three things are reported**, each merged over the configurations with the ones it holds under:
+   - **new compile errors**, in every package checked again. An error is new when no error was at that place before; inside a line the edit rewrote, when no error there said the same. The errors `go/types` calls soft (an unused variable or import) are compile errors and are reported; every program now keeps them (`tPackage.soft`) so that the ones already there are not;
+   - **moved identifiers**: on every line the edit leaves alone, an identifier that refers to a different declaration. Lines are matched by a diff of the old and new contents (`lineMap`). A declaration on a line the edit rewrote counts as the same declaration when the edit wrote one of that name and kind in that package, so moving a function is not reported and shadowing a variable is;
+   - **exported declarations removed or changed** in the packages the edit writes in, described as code outside the package sees them. Code outside the repository cannot be checked; this is what it would see.
+4. **The verdict.** `checked` when there is no new error and no moved identifier under every configuration that compiles an edited file. An API line does not change the verdict. A file that does not parse is reported as that and nothing is type-checked.
+5. **It always runs in process**, whatever engine the host chose, and is offered whenever `go` is on PATH.
+
+### What it rests on
+
+- `TestCheckEdit`: fifteen edits of a fixture, each checked by a runner that refreshes held programs and by one that loads afresh with the edit in place, which must agree; and each applied to a copy of the tree and given to `go vet ./...` under both configurations, which must fail exactly when the check reports an error, at no line the check does not report.
+- On ken's own source (449 Go files, one configuration, M1 Pro): 0.04 to 0.09 s held and 1.1 to 1.9 s from the command line for an edit that leaves imports alone; about 1.1 s held (2.2 s the first time) for one that changes them, which type-checks all 634 packages again. No larger repository and no three-configuration run has been measured.
+
+### Found on the way
+
+A held program was keyed by the directory of the declaration asked about. A question about a symbol in another directory loaded the repository again, and under the default size evicted the first. `ProgramCache.keyFor` now finds the held program whose workspace has a package in the directory. The figures ADR-061 gives for a loaded repository were measured with questions in one directory.
+
+A listing whose packages import each other in a circle would have made the loader wait for itself; an edit that adds an import makes that likely. `buildWith` now returns the cycle as an error, and the check reports it.
+
+### Limits
+
+- A file cannot be deleted, and only `.go` files can be edited.
+- `go vet`'s checks are not run. Behaviour is not checked at all.
+- A new import costs a full listing and type-check. Reusing the held program when every new import is a package already listed would avoid it; not done.
+- The moved-identifier rule for a declaration on a rewritten line goes by name, kind and package. Two declarations of one name swapped by a single edit would be taken for each other.
+- Soft errors are kept for every package of every program. A repository that compiles has none.
