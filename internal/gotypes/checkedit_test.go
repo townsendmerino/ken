@@ -234,6 +234,33 @@ func TestCheckEdit(t *testing.T) {
 			},
 			errs: []string{"b/b.go:8 [linux,darwin] mismatched types"},
 		},
+		{
+			name:  "a file moves within its package, unchanged: nothing it declares means anything else",
+			edits: []FileEdit{{File: "a/a.go", MoveTo: "a/shapes.go"}},
+		},
+		{
+			name: "a file moves and is edited under its new name",
+			edits: []FileEdit{
+				{File: "b/b.go", MoveTo: "b/core.go"},
+				{File: "b/core.go", OldString: "a.Scale(s, 2)", NewString: "a.Scale(s)"},
+			},
+			errs: []string{"b/core.go:5 [linux,darwin] not enough arguments in call to a.Scale"},
+		},
+		{
+			name:  "a file is deleted: its package's test no longer compiles, nor does what imports the package",
+			edits: []FileEdit{{File: "a/a.go", Delete: true}},
+			errs: []string{
+				"a/a_test.go:6 [linux,darwin] undefined: Scale",
+				"a/a_test.go:6 [linux,darwin] undefined: Sq",
+				"b/b.go:3 [linux,darwin] could not import example.com/ed/a: no non-test Go files in ",
+			},
+			api: []string{"example.com/ed/a: removed: func Parse", "example.com/ed/a: removed: func Scale", "example.com/ed/a: removed: type Shape", "example.com/ed/a: removed: type Sq"},
+		},
+		{
+			name:  "a platform file is deleted: only its configuration loses the function",
+			edits: []FileEdit{{File: "b/b_linux.go", Delete: true}},
+			api:   []string{"example.com/ed/b: removed: func Triple("},
+		},
 	}
 	root := writeTree(t, ed)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -317,6 +344,14 @@ func TestCheckEdit(t *testing.T) {
 				cur := files[e.File]
 				if p, ok := patch[e.File]; ok {
 					cur = p
+				}
+				if e.Delete || e.MoveTo != "" {
+					if e.MoveTo != "" {
+						patch[e.MoveTo] = cur
+					}
+					delete(files, e.File)
+					delete(patch, e.File)
+					continue
 				}
 				if e.Content != nil {
 					patch[e.File] = *e.Content

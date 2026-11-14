@@ -54,6 +54,8 @@ type GoEditArg struct {
 	NewString  string  `json:"new_string,omitempty" jsonschema:"What replaces old_string (empty deletes it)."`
 	ReplaceAll bool    `json:"replace_all,omitempty" jsonschema:"Replace every occurrence of old_string."`
 	Content    *string `json:"content,omitempty" jsonschema:"The file's whole new contents, in place of old_string and new_string. The file need not exist yet."`
+	Delete     bool    `json:"delete,omitempty" jsonschema:"Delete the file."`
+	MoveTo     string  `json:"move_to,omitempty" jsonschema:"Move the file to this path, relative to the repo root. Later edits may then change it under its new name."`
 }
 
 // GoCheckEditArgs is the argument schema for go_check_edit.
@@ -123,7 +125,7 @@ func registerGoTools(srv *sdk.Server, cfg *Config, canRename bool) {
 			"type or an interface, to see every caller that breaks, including code behind another GOOS or build tag " +
 			"that a local `go build` does not compile. It says nothing about behaviour: tests still have to run. " +
 			"Edits take the shape of an editor's replace (file, old_string, new_string) or a whole file (file, " +
-			"content), and several are checked together. Merged over the build configurations in " + engine.GoConfigFile +
+			"content), and several are checked together. A file can also be deleted (file, delete) or moved (file, move_to). Merged over the build configurations in " + engine.GoConfigFile +
 			" (without that file: the host's default only). A change to a file's imports costs a few seconds more " +
 			"(the go command lists the packages again). Local Go repositories only.",
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args GoCheckEditArgs) (*sdk.CallToolResult, any, error) {
@@ -285,7 +287,7 @@ func handleGoRename(ctx context.Context, cfg *Config, args GoRenameArgs) (*sdk.C
 
 func handleGoCheckEdit(ctx context.Context, cfg *Config, args GoCheckEditArgs) (*sdk.CallToolResult, any, error) {
 	if len(args.Edits) == 0 {
-		return errorResult(args.Output, "edits is required: at least one {file, old_string, new_string} or {file, content}"), nil, nil
+		return errorResult(args.Output, "edits is required: at least one {file, old_string, new_string}, {file, content}, {file, delete} or {file, move_to}"), nil, nil
 	}
 	gt, note, errResult := openGoTyped(cfg, args.Repo, args.Output)
 	if errResult != nil {
@@ -293,7 +295,7 @@ func handleGoCheckEdit(ctx context.Context, cfg *Config, args GoCheckEditArgs) (
 	}
 	edits := make([]engine.GoFileEdit, len(args.Edits))
 	for i, e := range args.Edits {
-		edits[i] = engine.GoFileEdit{File: e.File, OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll, Content: e.Content}
+		edits[i] = engine.GoFileEdit{File: e.File, OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll, Content: e.Content, Delete: e.Delete, MoveTo: e.MoveTo}
 	}
 	gt.SkipVet = args.NoVet
 	res, err := gt.CheckEdit(ctx, edits)

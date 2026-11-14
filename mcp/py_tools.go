@@ -18,6 +18,8 @@ type PyEditArg struct {
 	NewString  string  `json:"new_string,omitempty" jsonschema:"What replaces old_string (empty deletes it)."`
 	ReplaceAll bool    `json:"replace_all,omitempty" jsonschema:"Replace every occurrence of old_string."`
 	Content    *string `json:"content,omitempty" jsonschema:"The file's whole new contents, in place of old_string and new_string. The file need not exist yet."`
+	Delete     bool    `json:"delete,omitempty" jsonschema:"Delete the file."`
+	MoveTo     string  `json:"move_to,omitempty" jsonschema:"Move the file to this path, relative to the repo root. Later edits may then change it under its new name."`
 }
 
 // PyCheckEditArgs is the argument schema for py_check_edit.
@@ -57,7 +59,7 @@ func registerPyTools(srv *sdk.Server, cfg *Config) {
 			"step that would. What counts as an error is that checker's opinion under the project's configuration. " +
 			"It does not say whether a name on an untouched line now refers to another declaration, and it says " +
 			"nothing about behaviour: tests still have to run. Edits take the shape of an editor's replace (file, " +
-			"old_string, new_string) or a whole file (file, content), and several are checked together. Each call " +
+			"old_string, new_string) or a whole file (file, content), and several are checked together. A file can also be deleted (file, delete) or moved (file, move_to); a file that goes is checked as an empty file. Each call " +
 			"starts the checker and stops it. Local repositories with ty or pyright installed only.",
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args PyCheckEditArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken py_check_edit")
@@ -68,7 +70,7 @@ func registerPyTools(srv *sdk.Server, cfg *Config) {
 
 func handlePyCheckEdit(ctx context.Context, cfg *Config, args PyCheckEditArgs) (*sdk.CallToolResult, any, error) {
 	if len(args.Edits) == 0 {
-		return errorResult(args.Output, "edits is required: at least one {file, old_string, new_string} or {file, content}"), nil, nil
+		return errorResult(args.Output, "edits is required: at least one {file, old_string, new_string}, {file, content}, {file, delete} or {file, move_to}"), nil, nil
 	}
 	key, errResult := localRepoForItsOwnTool(cfg, args.Repo, args.Output, "py_check_edit", "the type checker installed in the repo")
 	if errResult != nil {
@@ -76,7 +78,7 @@ func handlePyCheckEdit(ctx context.Context, cfg *Config, args PyCheckEditArgs) (
 	}
 	edits := make([]engine.PyFileEdit, len(args.Edits))
 	for i, e := range args.Edits {
-		edits[i] = engine.PyFileEdit{File: e.File, OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll, Content: e.Content}
+		edits[i] = engine.PyFileEdit{File: e.File, OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll, Content: e.Content, Delete: e.Delete, MoveTo: e.MoveTo}
 	}
 	res, err := openPyTyped(key).CheckEdit(ctx, edits)
 	if err != nil {

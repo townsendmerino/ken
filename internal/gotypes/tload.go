@@ -291,6 +291,10 @@ func (r *Runner) listWorkspaceWith(ctx context.Context, bc BuildConfig, dir stri
 		sort.Strings(files)
 		replace := map[string]string{}
 		for i, f := range files {
+			if overlay[f] == nil {
+				replace[f] = "" // the go command reads an empty replacement as "this file is not there"
+				continue
+			}
 			to := filepath.Join(tmp, fmt.Sprintf("%d.go", i))
 			if err := os.WriteFile(to, overlay[f], 0o600); err != nil {
 				return nil, err
@@ -382,6 +386,11 @@ func (l *listing) buildWith(opts buildOpts) (*program, error) {
 				n = filepath.Join(rec.Dir, n)
 			}
 			tp.Files = append(tp.Files, n)
+		}
+		// A package whose every file is a test file cannot be imported. The go command says so on one run and not on
+		// the next (it drops the error when it answers from its cache), so it is said here, in the go command's words.
+		if tp.listErr == "" && len(tp.Files) == 0 && !rec.Standard && rec.ForTest == "" && rec.Dir != "" {
+			tp.listErr = "no non-test Go files in " + rec.Dir
 		}
 		for _, imp := range rec.Imports {
 			tp.deps = append(tp.deps, imp)

@@ -166,7 +166,9 @@ type (
 func server(c Checker) (lspcheck.Server, error) {
 	s := lspcheck.Server{Name: c.Kind, Label: c.Kind, Where: "the project's type checker (" + c.Kind + ")", Verdict: "WOULD NOT TYPE-CHECK",
 		// Neither checker reports on a file that is not open unless it is configured to, so every file is opened.
-		OpenAll: true}
+		OpenAll: true,
+		// Both resolve a module on disk: one the edit creates is not found, whatever is opened.
+		ImportsNewFile: importsModule}
 	switch c.Kind {
 	case Ty:
 		s.Argv = []string{c.Path, "server"}
@@ -189,6 +191,27 @@ func server(c Checker) (lspcheck.Server, error) {
 		return s, fmt.Errorf("%s is neither ty nor pyright-langserver", c.Path)
 	}
 	return s, nil
+}
+
+// importsModule reports whether a source line is an import that names the module the file at created is: its name
+// without .py, or its directory's name for an __init__.py.
+func importsModule(line, created string) bool {
+	text := strings.TrimSpace(line)
+	if !strings.HasPrefix(text, "import ") && !strings.HasPrefix(text, "from ") {
+		return false
+	}
+	name := strings.TrimSuffix(strings.TrimSuffix(filepath.Base(created), ".pyi"), ".py")
+	if name == "__init__" {
+		name = filepath.Base(filepath.Dir(created))
+	}
+	for _, word := range strings.FieldsFunc(text, func(r rune) bool {
+		return !(r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= 0x80)
+	}) {
+		if word == name {
+			return true
+		}
+	}
+	return false
 }
 
 // CheckEdit applies edits to unsaved copies of the files inside the project's own type checker and reports the

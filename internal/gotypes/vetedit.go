@@ -48,6 +48,10 @@ func (r *Runner) vetRun(ctx context.Context, bc BuildConfig, dirs []string, over
 		sort.Strings(files)
 		replace := map[string]string{}
 		for i, f := range files {
+			if overlay[f] == nil {
+				replace[f] = "" // a file the edit deletes
+				continue
+			}
 			// the copy keeps the file's name: vet's "tests" check, and build constraints in names, read it
 			to := filepath.Join(tmp, strconv.Itoa(i), filepath.Base(f))
 			if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
@@ -66,8 +70,10 @@ func (r *Runner) vetRun(ctx context.Context, bc BuildConfig, dirs []string, over
 		args = append(args, "-overlay", js)
 	}
 	byBase := map[string]string{}
-	for f := range overlay {
-		byBase[filepath.Base(f)] = f
+	for f, src := range overlay {
+		if src != nil {
+			byBase[filepath.Base(f)] = f
+		}
 	}
 	args = append(args, dirs...)
 	stdout, stderr, runErr := r.exec(ctx, bc, r.goPath(), args...)
@@ -177,6 +183,9 @@ func (r *Runner) vetEdit(ctx context.Context, bc BuildConfig, patch, old map[str
 	seen := map[string]bool{}
 	for abs, src := range patch {
 		base := filepath.Base(abs)
+		if src == nil {
+			src = old[abs] // a deleted file: its package is still vetted
+		}
 		if !bc.Compiles(base, buildExpr(src)) {
 			continue
 		}

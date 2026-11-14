@@ -284,7 +284,7 @@ func TestCheckEdit_aRefusedFileMakesTheAnswerIncomplete(t *testing.T) {
 		t.Errorf("%+v", res)
 	}
 	if text := res.Text(0); !strings.Contains(text, "INCOMPLETE: no answer for 1 files (refuse.ts: no project for this file)") ||
-		!strings.Contains(text, "NO NEW ERROR FOUND, but not every file was checked") {
+		!strings.Contains(text, "NO NEW ERROR FOUND, but not everything was checked") {
 		t.Error(text)
 	}
 }
@@ -434,6 +434,9 @@ func TestCheckEdit_againstTheRealCompiler(t *testing.T) {
 		{"a new file that uses the other project wrongly",
 			[]FileEdit{{File: "packages/app/src/extra.ts", Content: str("import { scale } from \"../../core/src/shape\";\nexport const s = scale(1, 2);\n")}},
 			"packages/app/src/extra.ts:2: TS2345: Argument of type 'number' is not assignable to parameter of type 'Square'.", 0},
+		{"a module moves and its importer is updated with it",
+			[]FileEdit{{File: "packages/core/src/shape.ts", MoveTo: "packages/core/src/shapes.ts"},
+				{File: "packages/app/src/main.ts", OldString: `from "../../core/src/shape"`, NewString: `from "../../core/src/shapes"`}}, "", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := writeTree(t, realFixture)
@@ -458,7 +461,10 @@ func TestCheckEdit_againstTheRealCompiler(t *testing.T) {
 				patched[k] = v
 			}
 			for _, e := range tc.edits {
-				if e.Content != nil {
+				if e.MoveTo != "" {
+					patched[e.MoveTo] = patched[e.File]
+					delete(patched, e.File)
+				} else if e.Content != nil {
 					patched[e.File] = *e.Content
 				} else {
 					patched[e.File] = strings.Replace(patched[e.File], e.OldString, e.NewString, 1)

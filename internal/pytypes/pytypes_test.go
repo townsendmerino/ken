@@ -358,6 +358,9 @@ func TestCheckEdit_againstTheRealCheckers(t *testing.T) {
 				[]FileEdit{{File: "pkg/app/extra.py", Content: str("from pkg.core.shape import scale\n\ns = scale(1, 2)\n")}},
 				[]string{"pkg/app/extra.py:3"}, 0},
 			{"a syntax error", []FileEdit{{File: "pkg/app/main.py", OldString: "return scale(s, 2)", NewString: "return scale(s, 2"}}, []string{"pkg/app/main.py"}, 0},
+			{"a module moves and its importer is updated with it",
+				[]FileEdit{{File: "pkg/core/shape.py", MoveTo: "pkg/core/shapes.py"},
+					{File: "pkg/app/main.py", OldString: "from pkg.core.shape import", NewString: "from pkg.core.shapes import"}}, nil, 0},
 		} {
 			t.Run(kind+"/"+tc.name, func(t *testing.T) {
 				root := writeTree(t, realFixture)
@@ -380,8 +383,17 @@ func TestCheckEdit_againstTheRealCheckers(t *testing.T) {
 				} else if strings.Join(got, " ") != strings.Join(tc.want, " ") {
 					t.Errorf("errors %v, want %v", got, tc.want)
 				}
-				if res.Fixed != tc.fixed || res.Incomplete || res.Clean != (len(tc.want) == 0) {
-					t.Errorf("fixed %d, incomplete %v, clean %v", res.Fixed, res.Incomplete, res.Clean)
+				// A module the edit creates is not found by either checker, which resolve imports on disk: the import
+				// of it is set aside, and the check says it is incomplete.
+				unseen := 0
+				if strings.HasPrefix(tc.name, "a module moves") {
+					unseen = 1
+				}
+				if res.UnseenImports != unseen || res.Incomplete != (unseen > 0) {
+					t.Errorf("unseen imports %d, incomplete %v; want %d", res.UnseenImports, res.Incomplete, unseen)
+				}
+				if res.Fixed != tc.fixed || res.Clean != (len(tc.want) == 0 && unseen == 0) {
+					t.Errorf("fixed %d, clean %v", res.Fixed, res.Clean)
 				}
 
 				// The oracle: write the edit to a copy and run the checker's own command line over both trees. What
@@ -392,7 +404,10 @@ func TestCheckEdit_againstTheRealCheckers(t *testing.T) {
 					patched[k] = v
 				}
 				for _, e := range tc.edits {
-					if e.Content != nil {
+					if e.MoveTo != "" {
+						patched[e.MoveTo] = patched[e.File]
+						delete(patched, e.File)
+					} else if e.Content != nil {
 						patched[e.File] = *e.Content
 					} else {
 						patched[e.File] = strings.Replace(patched[e.File], e.OldString, e.NewString, 1)
