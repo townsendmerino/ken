@@ -249,9 +249,11 @@ func cmdGo(args []string) int {
 		}
 		res, err := gt.CheckEdit(ctx, edits)
 		if err != nil {
+			recordCheckUsage("go_check_edit", err, 0, false)
 			fmt.Fprintf(os.Stderr, "ken go: %v\n", err)
 			return 1
 		}
+		recordCheckUsage("go_check_edit", nil, len(res.Errors)+len(res.Moved), res.Clean)
 		return emit(res, res.Text(n, maxN), !res.Clean)
 	default:
 		plan, err := gt.RenamePlan(ctx, pos[1], pos[2])

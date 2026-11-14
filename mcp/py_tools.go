@@ -80,8 +80,10 @@ func handlePyCheckEdit(ctx context.Context, cfg *Config, args PyCheckEditArgs) (
 	}
 	res, err := openPyTyped(key).CheckEdit(ctx, edits)
 	if err != nil {
+		recordCheck(cfg, "py_check_edit", err, 0, false)
 		return errorResult(args.Output, err.Error()), nil, nil
 	}
+	recordCheck(cfg, "py_check_edit", nil, len(res.Errors), res.Clean)
 	limit := args.Max
 	if limit <= 0 {
 		limit = 40

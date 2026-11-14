@@ -44,7 +44,21 @@ type Record struct {
 	Results      int     `json:"results"`
 	SnippetChars int     `json:"snippet_chars"`
 	FileChars    int     `json:"file_chars"`
+	// Outcome is set on the row of an edit check (go_check_edit, ts_check_edit, py_check_edit) and absent on every
+	// other row: one of the Outcome constants. Results is then the number of new errors the check found. semble's
+	// log has no such field; its renderer ignores it.
+	Outcome string `json:"outcome,omitempty"`
 }
+
+// What an edit check came to. The log holds the word and never the edit, the file or the error text.
+const (
+	OutcomeClean      = "clean"      // checked, and the edit causes no new error
+	OutcomeBreaks     = "breaks"     // the edit would cause errors: Results says how many
+	OutcomeIncomplete = "incomplete" // no error found, but not everything could be checked
+	OutcomeNoTool     = "no-tool"    // refused: the project has no compiler or checker to ask
+	OutcomeOlderTool  = "older-tool" // refused: the project's compiler is older than the check needs
+	OutcomeError      = "error"      // the edit could not be applied, or the check failed
+)
 
 // Recorder is an append-only writer for a savings.jsonl file. Safe
 // for concurrent use across goroutines (a sync.Mutex serializes the
@@ -129,16 +143,20 @@ func DefaultPath() string {
 // add noise to every tool call for a feature that's strictly
 // informational).
 func (r *Recorder) Record(callType string, results, snippetChars, fileChars int) {
+	r.write(Record{Call: callType, Results: results, SnippetChars: snippetChars, FileChars: fileChars})
+}
+
+// RecordCheck appends the row of one edit check: which tool, what it came to (an Outcome constant) and how many new
+// errors it found. Best-effort, as Record is.
+func (r *Recorder) RecordCheck(callType, outcome string, findings int) {
+	r.write(Record{Call: callType, Results: findings, Outcome: outcome})
+}
+
+func (r *Recorder) write(rec Record) {
 	if r == nil {
 		return
 	}
-	rec := Record{
-		TS:           float64(time.Now().UnixNano()) / 1e9,
-		Call:         callType,
-		Results:      results,
-		SnippetChars: snippetChars,
-		FileChars:    fileChars,
-	}
+	rec.TS = float64(time.Now().UnixNano()) / 1e9
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return // shouldn't happen for fixed-shape struct, but defensive
@@ -231,6 +249,11 @@ type Summary struct {
 	Last7Days      Bucket
 	AllTime        Bucket
 	CallTypeCounts map[string]int
+	// Checks counts the edit checks by tool, then by outcome. They are not calls of the savings table: a check
+	// returns no code, so it saves no reading.
+	Checks map[string]map[string]int
+	// CheckFindings is the number of new errors the checks of a tool found, in total.
+	CheckFindings map[string]int
 }
 
 // BuildSummary reads the jsonl file at path and aggregates by the
@@ -243,7 +266,7 @@ type Summary struct {
 // with UTC; we honor local since interactive users live in their
 // own tz).
 func BuildSummary(path string) (Summary, error) {
-	s := Summary{CallTypeCounts: map[string]int{}}
+	s := Summary{CallTypeCounts: map[string]int{}, Checks: map[string]map[string]int{}, CheckFindings: map[string]int{}}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -268,6 +291,16 @@ func BuildSummary(path string) (Summary, error) {
 	for scan.Scan() {
 		var rec Record
 		if err := json.Unmarshal(scan.Bytes(), &rec); err != nil {
+			continue
+		}
+		if rec.Outcome != "" {
+			if s.Checks[rec.Call] == nil {
+				s.Checks[rec.Call] = map[string]int{}
+			}
+			s.Checks[rec.Call][rec.Outcome]++
+			if rec.Outcome == OutcomeBreaks {
+				s.CheckFindings[rec.Call] += rec.Results
+			}
 			continue
 		}
 		s.CallTypeCounts[rec.Call]++
@@ -297,7 +330,10 @@ func BuildSummary(path string) (Summary, error) {
 // search first." — same string semble uses.
 func FormatReport(s Summary, verbose bool) string {
 	if s.AllTime.Calls == 0 {
-		return "No stats yet. Run a search first."
+		if len(s.Checks) == 0 {
+			return "No stats yet. Run a search first."
+		}
+		return "\n" + formatChecks(s) + "\n"
 	}
 	const barWidth = 16
 	heavy := "  " + strings.Repeat("═", 64)
@@ -376,6 +412,46 @@ func FormatReport(s Summary, verbose bool) string {
 		}
 		b.WriteString(heavy + "\n")
 	}
+	if len(s.Checks) > 0 {
+		b.WriteString("\n" + formatChecks(s))
+	}
 	b.WriteString("\n")
+	return b.String()
+}
+
+// formatChecks renders the edit checks: per tool, how many ran to an answer, how many of those would have broken
+// the build, and how many were refused and why.
+func formatChecks(s Summary) string {
+	light := "  " + strings.Repeat("─", 64)
+	var b strings.Builder
+	b.WriteString("  Edit Checks (all time)\n")
+	b.WriteString(light + "\n")
+	fmt.Fprintf(&b, "  %-14s  %-7s  %-12s  %s\n", "Tool", "Checked", "Would break", "Not checked")
+	tools := make([]string, 0, len(s.Checks))
+	for t := range s.Checks {
+		tools = append(tools, t)
+	}
+	sort.Strings(tools)
+	for _, t := range tools {
+		c := s.Checks[t]
+		checked := c[OutcomeClean] + c[OutcomeBreaks] + c[OutcomeIncomplete]
+		breaks := fmt.Sprintf("%d", c[OutcomeBreaks])
+		if n := s.CheckFindings[t]; n > 0 {
+			breaks += fmt.Sprintf(" (%d errors)", n)
+		}
+		var not []string
+		for _, o := range []struct{ key, label string }{
+			{OutcomeIncomplete, "incomplete"}, {OutcomeNoTool, "no compiler or checker"}, {OutcomeOlderTool, "compiler too old"}, {OutcomeError, "failed"},
+		} {
+			if c[o.key] > 0 {
+				not = append(not, fmt.Sprintf("%d %s", c[o.key], o.label))
+			}
+		}
+		rest := "-"
+		if len(not) > 0 {
+			rest = strings.Join(not, ", ")
+		}
+		fmt.Fprintf(&b, "  %-14s  %-7d  %-12s  %s\n", t, checked, breaks, rest)
+	}
 	return b.String()
 }

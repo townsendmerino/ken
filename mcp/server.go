@@ -161,6 +161,20 @@ type UsageRecorder interface {
 	Record(callType string, results, snippetChars, fileChars int)
 }
 
+// CheckRecorder is what a UsageRecorder may also implement to count edit checks (go_check_edit, ts_check_edit,
+// py_check_edit): the tool, what the check came to (engine.EditCheckOutcome) and how many new errors it found. A
+// recorder without it counts no checks.
+type CheckRecorder interface {
+	RecordCheck(callType, outcome string, findings int)
+}
+
+// recordCheck counts one edit check, when the server's recorder can.
+func recordCheck(cfg *Config, tool string, err error, findings int, clean bool) {
+	if rec, ok := cfg.UsageRecorder.(CheckRecorder); ok && rec != nil {
+		rec.RecordCheck(tool, engine.EditCheckOutcome(err, findings, clean), findings)
+	}
+}
+
 // NewServer returns an MCP server with `search` and `find_related`
 // registered. The server speaks JSON-RPC over whatever Transport the
 // caller passes to server.Run — ken-mcp uses sdk.StdioTransport.

@@ -75,8 +75,10 @@ func handleTSCheckEdit(ctx context.Context, cfg *Config, args TSCheckEditArgs) (
 	}
 	res, err := openTSTyped(key).CheckEdit(ctx, edits)
 	if err != nil {
+		recordCheck(cfg, "ts_check_edit", err, 0, false)
 		return errorResult(args.Output, err.Error()), nil, nil
 	}
+	recordCheck(cfg, "ts_check_edit", nil, len(res.Errors), res.Clean)
 	limit := args.Max
 	if limit <= 0 {
 		limit = 40

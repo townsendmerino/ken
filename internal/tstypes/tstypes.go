@@ -65,6 +65,19 @@ func platformPackage() string {
 	return "typescript-" + goos + "-" + arch
 }
 
+// ErrOlderCompiler is what errors.Is matches, with ErrNoCompiler, when the project has a TypeScript older than 7.
+var ErrOlderCompiler = errors.New("the project's TypeScript is older than 7.0")
+
+// olderError is the error for a project on TypeScript 5 or 6: it is both "no compiler to ask" and "an older one".
+type olderError struct{ version string }
+
+func (e olderError) Error() string {
+	return ErrNoCompiler.Error() + ": this project has TypeScript " + e.version + " installed, and the check needs the native compiler that ships with 7.0 and later"
+}
+func (e olderError) Is(target error) bool {
+	return target == ErrNoCompiler || target == ErrOlderCompiler
+}
+
 // FindCompiler returns the native TypeScript compiler installed for the project that holds dir: the nearest
 // node_modules at or above dir, no higher than repo, that has one. The error says what was found instead (an older
 // TypeScript, or none) and matches ErrNoCompiler.
@@ -95,7 +108,7 @@ func FindCompiler(repo, dir string) (string, error) {
 	}
 	switch {
 	case older != "" && !strings.HasPrefix(older, "7.") && !strings.HasPrefix(older, "8."):
-		return "", fmt.Errorf("%w: this project has TypeScript %s installed, and the check needs the native compiler that ships with 7.0 and later", ErrNoCompiler, older)
+		return "", olderError{older}
 	case older != "":
 		return "", fmt.Errorf("%w: TypeScript %s is installed but its native program for this machine (@typescript/%s) is not; run the project's package install", ErrNoCompiler, older, platformPackage())
 	}

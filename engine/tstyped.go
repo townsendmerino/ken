@@ -1,6 +1,10 @@
 package engine
 
-import "github.com/townsendmerino/ken/internal/tstypes"
+import (
+	"errors"
+
+	"github.com/townsendmerino/ken/internal/tstypes"
+)
 
 // The TypeScript typed tier (ADR-064): answers about a TypeScript or JavaScript repository from the project's own
 // compiler, the native TypeScript 7 program in its node_modules, asked over the language-server protocol. ken links
@@ -19,6 +23,30 @@ type (
 
 // ErrNoTSCompiler is what errors.Is matches when a repository has no TypeScript 7 compiler installed.
 var ErrNoTSCompiler = tstypes.ErrNoCompiler
+
+// ErrOlderTSCompiler is what errors.Is matches, as well as ErrNoTSCompiler, when the repository's TypeScript is
+// older than 7.0.
+var ErrOlderTSCompiler = tstypes.ErrOlderCompiler
+
+// EditCheckOutcome names what an edit check came to, for a usage count: "clean", "breaks" (findings new errors),
+// "incomplete" (no error found, but not everything was checked), "no-tool" (the project has no compiler or checker
+// to ask), "older-tool" (its compiler is older than the check needs) or "error". err is the check's error; findings
+// and clean are read off its result when err is nil.
+func EditCheckOutcome(err error, findings int, clean bool) string {
+	switch {
+	case errors.Is(err, ErrOlderTSCompiler):
+		return "older-tool"
+	case errors.Is(err, ErrNoTSCompiler), errors.Is(err, ErrNoPyChecker):
+		return "no-tool"
+	case err != nil:
+		return "error"
+	case findings > 0:
+		return "breaks"
+	case clean:
+		return "clean"
+	}
+	return "incomplete"
+}
 
 // OpenTSTyped returns the typed tier for the repository at repo (an absolute path). It holds nothing between checks:
 // each starts the compiler and stops it. The compiler is found when a check runs, in the node_modules of the edited

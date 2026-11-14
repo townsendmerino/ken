@@ -317,3 +317,44 @@ func TestRecorder_ReopensAfterRotation(t *testing.T) {
 		t.Errorf("rotated file should hold only the pre-rotation record: %s", old)
 	}
 }
+
+// Edit checks are counted apart from the savings table: per tool, how many reached an answer, how many of those
+// would have broken the build, and how many were refused and why.
+func TestSummary_CountsEditChecks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "savings.jsonl")
+	r := NewRecorder(path)
+	r.Record("search", 3, 100, 1000)
+	r.RecordCheck("go_check_edit", OutcomeClean, 0)
+	r.RecordCheck("go_check_edit", OutcomeBreaks, 4)
+	r.RecordCheck("go_check_edit", OutcomeBreaks, 1)
+	r.RecordCheck("ts_check_edit", OutcomeOlderTool, 0)
+	r.RecordCheck("py_check_edit", OutcomeNoTool, 0)
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := BuildSummary(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.AllTime.Calls != 1 || s.CallTypeCounts["go_check_edit"] != 0 {
+		t.Errorf("a check was counted as a call of the savings table: %+v %v", s.AllTime, s.CallTypeCounts)
+	}
+	if s.Checks["go_check_edit"][OutcomeBreaks] != 2 || s.CheckFindings["go_check_edit"] != 5 {
+		t.Errorf("go checks = %v, findings %d", s.Checks["go_check_edit"], s.CheckFindings["go_check_edit"])
+	}
+	report := FormatReport(s, false)
+	for _, want := range []string{"Edit Checks (all time)", "go_check_edit   3        2 (5 errors)  -", "ts_check_edit   0        0             1 compiler too old", "py_check_edit   0        0             1 no compiler or checker"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("report lacks %q:\n%s", want, report)
+		}
+	}
+	// checks alone are still a report
+	only := filepath.Join(t.TempDir(), "only.jsonl")
+	r = NewRecorder(only)
+	r.RecordCheck("py_check_edit", OutcomeClean, 0)
+	_ = r.Close()
+	s, _ = BuildSummary(only)
+	if got := FormatReport(s, false); !strings.Contains(got, "py_check_edit   1 ") {
+		t.Errorf("a log of checks only: %q", got)
+	}
+}

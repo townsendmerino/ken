@@ -688,6 +688,22 @@ func recordInteractiveSearchUsage(callType string, results []engine.Hit, sourceR
 	r.Record(callType, len(results), snippetChars, fileChars)
 }
 
+// recordCheckUsage appends the row of one `ken go|ts|py check-edit` to the usage log: the tool, what the check came
+// to and how many new errors it found. Never the edit, a path or an error's text. KEN_NO_USAGE_STATS=1 turns it off.
+func recordCheckUsage(tool string, err error, findings int, clean bool) {
+	if os.Getenv("KEN_NO_USAGE_STATS") != "" {
+		return
+	}
+	path := strings.TrimSpace(os.Getenv("KEN_USAGE_STATS_PATH"))
+	if path == "" {
+		path = usagepkg.DefaultPath()
+	}
+	if r := usagepkg.NewRecorder(path); r != nil {
+		r.RecordCheck(tool, engine.EditCheckOutcome(err, findings, clean), findings)
+		_ = r.Close()
+	}
+}
+
 // printTelemetry prints a one-block summary of per-query timings to w
 // (typically os.Stderr). Format is human-readable; ken bench emits the
 // same fields as JSON. Zero-value sub-breakdown fields (e.g. when the

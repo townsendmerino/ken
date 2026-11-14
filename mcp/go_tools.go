@@ -294,8 +294,10 @@ func handleGoCheckEdit(ctx context.Context, cfg *Config, args GoCheckEditArgs) (
 	}
 	res, err := gt.CheckEdit(ctx, edits)
 	if err != nil {
+		recordCheck(cfg, "go_check_edit", err, 0, false)
 		return errorResult(args.Output, err.Error()), nil, nil
 	}
+	recordCheck(cfg, "go_check_edit", nil, len(res.Errors)+len(res.Moved), res.Clean)
 	limit := args.Max
 	if limit <= 0 {
 		limit = 40

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -80,9 +81,18 @@ func TestServer_TSToolFollowsTheDefaultRepo(t *testing.T) {
 	}
 }
 
+// checkCounter is a usage recorder that keeps the edit checks it is told of.
+type checkCounter struct{ rows []string }
+
+func (c *checkCounter) Record(string, int, int, int) {}
+func (c *checkCounter) RecordCheck(call, outcome string, findings int) {
+	c.rows = append(c.rows, fmt.Sprintf("%s %s %d", call, outcome, findings))
+}
+
 func TestTSCheckEdit_handlerRefusals(t *testing.T) {
 	repo := writeTSRepo(t, map[string]string{"node_modules/typescript/package.json": `{"version":"5.9.3"}`, "a.ts": "export const a = 1;\n"})
-	cfg := &Config{DefaultRepo: repo}
+	counted := &checkCounter{}
+	cfg := &Config{DefaultRepo: repo, UsageRecorder: counted}
 	check := func(args TSCheckEditArgs) string {
 		res, _, err := handleTSCheckEdit(context.Background(), cfg, args)
 		if err != nil {
@@ -101,6 +111,10 @@ func TestTSCheckEdit_handlerRefusals(t *testing.T) {
 	}
 	if text := check(TSCheckEditArgs{Edits: edit}); !strings.Contains(text, "this project has TypeScript 5.9.3 installed") {
 		t.Errorf("a project on TypeScript 5: %q", text)
+	}
+	// the refusal is counted with its reason, and nothing else about it
+	if len(counted.rows) != 1 || counted.rows[0] != "ts_check_edit older-tool 0" {
+		t.Errorf("counted checks = %q, want one older-tool row", counted.rows)
 	}
 	t.Setenv("KEN_MCP_ALLOWED_REPO_ROOTS", repo)
 	if text := check(TSCheckEditArgs{Edits: edit, repoArg: repoArg{Repo: repo}}); !strings.Contains(text, "this project has TypeScript 5.9.3 installed") {

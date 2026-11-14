@@ -115,9 +115,11 @@ func cmdTS(args []string) int {
 	tt.Tsc = tsc
 	res, err := tt.CheckEdit(context.Background(), edits)
 	if err != nil {
+		recordCheckUsage("ts_check_edit", err, 0, false)
 		fmt.Fprintf(os.Stderr, "ken ts: %v\n", err)
 		return 1
 	}
+	recordCheckUsage("ts_check_edit", nil, len(res.Errors), res.Clean)
 	if jsonOut {
 		out, err := json.MarshalIndent(res, "", "  ")
 		if err != nil {
