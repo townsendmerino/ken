@@ -74,6 +74,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-064](#adr-064-a-typed-tier-for-typescript-asks-the-projects-own-compiler-over-lsp-starting-with-a-check-for-an-edit) | A typed tier for TypeScript asks the project's own compiler over LSP, starting with a check for an edit | Accepted |
 | [ADR-065](#adr-065-the-python-edit-check-asks-the-checker-the-project-installed-ty-or-pyright) | The Python edit check asks the checker the project installed, ty or pyright | Accepted |
 | [ADR-066](#adr-066-after-118-the-edit-check-reaches-further-more-checkers-renames-a-hook-and-files-that-go) | After 1.18 the edit check reaches further: more checkers, renames, a hook, and files that go | Accepted |
+| [ADR-067](#adr-067-the-edit-hook-asks-a-running-ken-mcp-over-a-socket-only-the-user-can-reach) | The edit hook asks a running ken-mcp over a socket only the user can reach | Accepted |
 
 ---
 
@@ -3581,9 +3582,50 @@ M1 Pro, 2026-11-14. The real-tool tests are gated by `KEN_TEST_TSC`, `KEN_TEST_T
 
 ### Consequences and what is not done
 
-- The hook starts every check from nothing. A large Go repository will not finish in its 20 seconds, and the hook is then silent. Asking a running `ken-mcp`, which answers in under 0.1 s, needs a way for a command to reach a stdio server and is not built.
+- The hook starts every check from nothing. A large Go repository will not finish in its 20 seconds, and the hook is then silent. Asking a running `ken-mcp`, which answers in under 0.1 s, needs a way for a command to reach a stdio server and is not built. (Built the same day: ADR-067.)
 - mypy cannot check a file the edit creates, and cannot compute a rename.
 - A TypeScript or Python rename that changes what another name refers to passes the check. `go_rename_plan` remains the only plan that verifies meaning.
 - `tests_for` and the tests an edit check names come from the name-resolved call graph: a test of another symbol with the same name can be listed, and a test that reaches the symbol only through an interface or a callback can be missed.
 - Two servers are started for a rename plan (one to compute it, one to check it), as one is for every check.
+
+## ADR-067: The edit hook asks a running ken-mcp over a socket only the user can reach
+
+**Status:** Accepted
+**Date:** 2026-11-14
+**Decided by:** Francis: "Can we make the hook fast", after ADR-066 shipped a hook that checks every Go edit from nothing.
+
+### Context
+
+`ken hook check-edit` (ADR-066) is a new process for every edit. For Go it listed and type-checked the repository each time: 0.9 to 1.6 s on ken's own source, more on a larger one, on every edit an agent makes. A `ken-mcp` serving the same agent already holds those programs and answers `go_check_edit` in under 0.1 s, but it speaks MCP on a standard input and output that belong to the client that started it. A command has no way in.
+
+Two ways to give it one were weighed. A daemon the hook starts and leaves behind works without `ken-mcp`, and is a second copy of the programs (about 0.2 GB per configuration on a 3,000-file repository) and a process nobody asked for; ADR-066 declined dmypy for that reason. A socket on the server that is already running costs a listener.
+
+### Decision
+
+1. **`ken-mcp` listens on a Unix socket of its own**, `~/.ken/run/mcp-<pid>.sock`, when its transport is stdio and `go` is on PATH. The directory is created 0700 (and set to it if it exists) and the socket 0600: the user's own processes can connect, and no one else. It is on by default; `KEN_MCP_HOOK_SOCKET=0` turns it off. The http transport, which serves other machines, never opens it.
+2. **One JSON request and one JSON reply per connection** (`internal/hooksock`): a repository path and the edits in; the check's text, its count of findings and whether it is clean out. It is not MCP and carries one operation, the Go edit check.
+3. **The request is answered as `go_check_edit` answers an agent**, by the same function that opens the repository: allowed roots apply, a wrap command is honored for the server's default repository and dropped for any other on a server without allowed roots, and the check is counted by the server.
+4. **The hook asks before it checks from nothing.** It tries each socket in the directory, newest first, and takes the first answer. A server that declines (an edit that does not apply, a repository it may not open) is not an answer. With none, the hook does what it did before. A socket nothing listens on, left by a server that was killed, is removed by the hook that finds it.
+5. **Only Go.** The TypeScript and Python checks start the project's compiler or checker for each check wherever they run; a server holds nothing that would make them faster. Holding a language server between checks is the change that would, and it is not made here.
+6. **`mcp.Run` does not open the socket.** A server an SDK author builds listens on nothing it was not asked to; `mcp.ServeHook` is there to call.
+
+### What was measured
+
+M1 Pro, ken's own source (about 450 Go files, one configuration), the hook run by hand on a payload that adds a parameter to a function with four callers:
+
+| | per edit |
+|---|---|
+| no server: from nothing, edit that breaks callers | 1.59 s |
+| no server: from nothing, clean edit | 0.86 s |
+| server running, first edit (loads the programs) | 1.07 s |
+| server running, later edits | 0.07 to 0.08 s |
+
+**Not measured:** a large repository, where the first edit's load is longer and may pass the hook's 20 seconds (the hook is then silent and the server keeps loading, so a later edit is answered); several servers at once; Windows, where Go supports Unix sockets but file modes do not protect the socket the same way.
+
+### Consequences and what is not done
+
+- `ken-mcp` now creates `~/.ken/run` and a socket in it. A server that is killed leaves its socket file; the next hook removes it.
+- A path under a long home directory can exceed what a Unix socket path may be (about 100 bytes). The server then logs that it is not listening and the hook checks from nothing.
+- With two servers running, the hook asks the newest first. Either gives a right answer; the one that does not hold the repository yet loads it.
+- No hook client other than ken's own is promised the protocol: it may change with the two sides together.
 

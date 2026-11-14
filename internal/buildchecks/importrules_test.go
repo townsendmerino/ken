@@ -50,7 +50,7 @@ var importRules = map[string][]string{
 	"bench/tokens":                {"internal/envcfg", "internal/repo", "internal/search", "mcp"},
 
 	// Programs.
-	"cmd/ken":              {"cmd/ken/internal/cli", "cmd/ken/internal/measure", "engine", "internal/envcfg", "internal/modelfetch", "internal/status", "internal/usage"},
+	"cmd/ken":              {"cmd/ken/internal/cli", "cmd/ken/internal/measure", "engine", "internal/envcfg", "internal/hooksock", "internal/modelfetch", "internal/status", "internal/usage"},
 	"cmd/ken/internal/cli": {"engine"},
 	// The named exception: `ken bench` and `ken perf` measure the pipeline's
 	// internals, so this one package under cmd/ imports internal/search
@@ -76,7 +76,7 @@ var importRules = map[string][]string{
 
 	// Public library packages.
 	"engine": {"internal/gotypes", "internal/repo", "internal/search", "internal/pytypes", "internal/structural", "internal/tstypes"},
-	"mcp":    {"engine", "internal/envcfg", "internal/mcplog", "internal/status"},
+	"mcp":    {"engine", "internal/envcfg", "internal/hooksock", "internal/mcplog", "internal/status"},
 	"mcp/db": {"internal/db", "mcp"},
 
 	// Internal packages.
@@ -88,6 +88,7 @@ var importRules = map[string][]string{
 	"internal/embedcache":  {},
 	"internal/envcfg":      {"internal/bytesize", "internal/mcplog", "internal/repo"},
 	"internal/gotypes":     {"internal/lsp"},
+	"internal/hooksock":    {},
 	"internal/lsp":         {},
 	"internal/lspcheck":    {"internal/lsp", "internal/repo"},
 	"internal/mcplog":      {},

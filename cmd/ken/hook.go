@@ -13,9 +13,10 @@ import (
 	"time"
 
 	"github.com/townsendmerino/ken/engine"
+	"github.com/townsendmerino/ken/internal/hooksock"
 )
 
-const hookUsage = `Usage: ken hook check-edit [--repo DIR] [--timeout SECONDS] [--max N] [--vet] [--quiet-incomplete] [--why]
+const hookUsage = `Usage: ken hook check-edit [--repo DIR] [--timeout SECONDS] [--max N] [--vet] [--quiet-incomplete] [--why] [--no-server]
 
 A Claude Code hook: put it on PreToolUse for Edit and Write, and every edit the agent is about to make to a Go, TypeScript, JavaScript or
 Python file is checked first, as 'ken go|ts|py check-edit' would check it. The
@@ -30,9 +31,13 @@ finish in time, the hook says nothing.
 
   --repo DIR       the repository (default: the nearest directory at or above
                    the edited file that holds .git, else the session's cwd)
-  --timeout S      give up, silently, after S seconds (default 20). Each check
-                   starts from nothing: on a large Go repository it will not
-                   finish in that time, and the hook then stays out of the way
+  --timeout S      give up, silently, after S seconds (default 20)
+  --no-server      Go: do not ask a running ken-mcp. By default the hook asks
+                   one first, over a socket in ~/.ken/run that only you can
+                   reach: the server holds the type-checked programs, so a check
+                   takes a fraction of a second where starting from nothing
+                   takes seconds. With no server running, or one started with
+                   KEN_MCP_HOOK_SOCKET=0, the check starts from nothing
   --max N          cap on the error lines handed over (default 15)
   --vet            Go: also put an edit that compiles to go vet (slower)
   --quiet-incomplete  say nothing when no error was found but not everything
@@ -75,6 +80,7 @@ type hookOptions struct {
 	vet             bool
 	quietIncomplete bool
 	why             io.Writer // where to say why nothing was said; nil says nothing
+	sockDir         string    // where running servers listen; "" asks none
 }
 
 // hookEdit is one edit in the shape all three tiers take.
@@ -145,15 +151,30 @@ func hookCheck(ctx context.Context, in hookInput, o hookOptions) (text, tier str
 	defer cancel()
 
 	var (
-		body       string
-		findings   int
-		clean      bool
-		incomplete bool
-		tool       string
+		body     string
+		findings int
+		clean    bool
+		tool     string
 	)
 	switch {
 	case strings.HasSuffix(file, ".go"):
 		tier, tool = "go", "go_check_edit"
+		// A running ken-mcp holds the type-checked programs: ask it first. It counts the check itself.
+		if o.sockDir != "" {
+			req := hooksock.Request{Repo: repo, Vet: o.vet, Max: o.max}
+			for _, e := range edits {
+				req.Edits = append(req.Edits, hooksock.Edit{File: rel, OldString: e.oldString, NewString: e.newString, ReplaceAll: e.replaceAll, Content: e.content})
+			}
+			if reply, ok := hooksock.Ask(ctx, o.sockDir, req); ok {
+				return hookSay(rel, reply.Text, reply.Findings, reply.Clean, o), tier
+			}
+			if ctx.Err() != nil {
+				if o.why != nil {
+					fmt.Fprintf(o.why, "ken hook: %s not checked: the running server did not answer in %s\n", rel, o.timeout)
+				}
+				return "", tier
+			}
+		}
 		if engine.GoPath() == "" {
 			return "", tier
 		}
@@ -169,7 +190,6 @@ func hookCheck(ctx context.Context, in hookInput, o hookOptions) (text, tier str
 		res, cerr := gt.CheckEdit(ctx, ge)
 		if err = cerr; err == nil {
 			findings, clean = len(res.Errors)+len(res.Moved)+len(res.Vet), res.Clean
-			incomplete = !clean && findings == 0
 			body = res.Text(len(gt.Config.Configs), o.max)
 		}
 	case engine.IsTSSource(file):
@@ -182,7 +202,7 @@ func hookCheck(ctx context.Context, in hookInput, o hookOptions) (text, tier str
 		tt.Timeout = o.timeout
 		res, cerr := tt.CheckEdit(ctx, te)
 		if err = cerr; err == nil {
-			findings, clean, incomplete = len(res.Errors), res.Clean, res.Incomplete
+			findings, clean = len(res.Errors), res.Clean
 			body = res.Text(o.max)
 		}
 	case engine.IsPySource(file):
@@ -195,7 +215,7 @@ func hookCheck(ctx context.Context, in hookInput, o hookOptions) (text, tier str
 		pt.Timeout = o.timeout
 		res, cerr := pt.CheckEdit(ctx, pe)
 		if err = cerr; err == nil {
-			findings, clean, incomplete = len(res.Errors), res.Clean, res.Incomplete
+			findings, clean = len(res.Errors), res.Clean
 			body = res.Text(o.max)
 		}
 	default:
@@ -213,16 +233,21 @@ func hookCheck(ctx context.Context, in hookInput, o hookOptions) (text, tier str
 		return "", tier
 	}
 	recordCheckUsage(tool, nil, findings, clean)
+	return hookSay(rel, body, findings, clean, o), tier
+}
+
+// hookSay is what the agent is told about a check that ran: nothing when the edit is clean.
+func hookSay(rel, body string, findings int, clean bool, o hookOptions) string {
 	switch {
 	case clean:
-		return "", tier
-	case findings == 0 && incomplete && o.quietIncomplete:
-		return "", tier
+		return ""
+	case findings == 0 && o.quietIncomplete:
+		return ""
 	case findings == 0:
-		return "ken checked this edit to " + rel + " before it was made and found no new error, but could not check everything:\n" + body, tier
+		return "ken checked this edit to " + rel + " before it was made and found no new error, but could not check everything:\n" + body
 	}
 	return "ken checked this edit to " + rel + " before it was made (nothing was blocked). It would cause errors that are not there now. " +
-		"If a later edit of yours fixes them, carry on; otherwise fix them next:\n" + body, tier
+		"If a later edit of yours fixes them, carry on; otherwise fix them next:\n" + body
 }
 
 func cmdHook(args []string) int {
@@ -234,7 +259,7 @@ func cmdHook(args []string) int {
 		fmt.Fprint(os.Stderr, hookUsage)
 		return 2
 	}
-	o := hookOptions{timeout: 20 * time.Second, max: 15}
+	o := hookOptions{timeout: 20 * time.Second, max: 15, sockDir: hooksock.Dir()}
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--vet":
@@ -243,6 +268,8 @@ func cmdHook(args []string) int {
 			o.quietIncomplete = true
 		case "--why":
 			o.why = os.Stderr
+		case "--no-server":
+			o.sockDir = ""
 		case "--repo", "--timeout", "--max":
 			if i+1 >= len(args) {
 				fmt.Fprintf(os.Stderr, "ken hook: %s needs a value\n", args[i])
