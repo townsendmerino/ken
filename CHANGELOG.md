@@ -15,6 +15,8 @@ pre-built binaries.
 
 ## [Unreleased]
 
+## [1.19.1] — 2026-11-15 — the edit hook on a large Go repository
+
 ### Fixed
 
 - **`ken hook check-edit` and `go_check_edit` on a large Go repository: an edit that creates a file or a package, or adds an import, no longer type-checks the whole workspace (ADR-068).** Such an edit changes what the go command lists, and the check then type-checked every package of the listing under every configuration, one after another. Only the packages the edit reaches are checked now, on a fresh listing, and the configurations run side by side when their programs are held. On goinfer (seven modules, about 665 packages per configuration, three configurations; M1 Pro) a Write that creates a file in a new package went from 14 s on the first call and 7.5 s on every later one to under 2 s; a Write that creates a file in a package 63 others depend on from about 8 s to about 3.3 s; an edit to that package with nothing changed on disk from about 2.7 s to about 1.6 s.
