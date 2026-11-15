@@ -25,7 +25,8 @@ import (
 // its old place (see parse).
 //
 // The result must be what a fresh load would give. TestRefresh_equalsAFreshLoad holds it to that, edit by edit.
-// Whenever a condition above cannot be shown to hold, refresh reports false and the caller loads afresh.
+// Whenever a condition above cannot be shown to hold, refresh reports false. The caller then asks the go command for
+// its list again and refreshes onto that (refreshOnto, below), and loads afresh only if that fails too.
 
 // refresh returns a program for the tree as it is now, given the files that changed since p was loaded: created and
 // deleted are whether any Go or module file appeared or disappeared. It reports false when p cannot be refreshed and

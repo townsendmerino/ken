@@ -21,8 +21,10 @@ import (
 // unused. It starts empty.
 //
 // A held program is used only while every Go and module file it was built from is unchanged: each use scans the
-// tree first (tree.go). On a difference the program is replaced, by a refresh of it when the edit allows one
-// (trefresh.go) and by a fresh load otherwise.
+// tree first (tree.go). On a difference the program is replaced by a refresh of it: only what the change reaches is
+// type-checked again, on the package list the program has when the change cannot have altered it and on a new one
+// from the go command otherwise (trefresh.go). A fresh load is what is left when neither can be done (go.mod or
+// go.work changed). A host that hears of a change has the refresh done before the next use (Renew).
 type ProgramCache struct {
 	max  int
 	auto bool // sized by Fit
@@ -116,7 +118,7 @@ type ProgramCacheStatus struct {
 	Refreshes   int64           `json:"refreshes"` // programs brought up to date after an edit without a full load
 	Reuses      int64           `json:"reuses"`
 	Stale       int64           `json:"stale"`   // uses that found the tree changed
-	Dropped     int64           `json:"dropped"` // programs dropped because a watcher said the tree changed
+	Dropped     int64           `json:"dropped"` // programs dropped by Invalidate
 	Evictions   int64           `json:"evictions"`
 	IdleStops   int64           `json:"idle_stops"`
 }
@@ -540,8 +542,9 @@ func (c *ProgramCache) reap() {
 	c.armReaper()
 }
 
-// Invalidate drops every program of repo that is not in use. The watcher calls it when files change; a scan would have
-// caught the change at the next use, so this only frees the memory sooner.
+// Invalidate drops every program of repo that is not in use, to give their memory back now. It is not what a change
+// to the tree calls for: a program that is behind the tree is what a refresh starts from (see Renew), and the next
+// use scans the tree whether or not anyone said it changed.
 func (c *ProgramCache) Invalidate(repo string) {
 	if c == nil {
 		return
