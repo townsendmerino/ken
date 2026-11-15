@@ -75,6 +75,7 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-065](#adr-065-the-python-edit-check-asks-the-checker-the-project-installed-ty-or-pyright) | The Python edit check asks the checker the project installed, ty or pyright | Accepted |
 | [ADR-066](#adr-066-after-118-the-edit-check-reaches-further-more-checkers-renames-a-hook-and-files-that-go) | After 1.18 the edit check reaches further: more checkers, renames, a hook, and files that go | Accepted |
 | [ADR-067](#adr-067-the-edit-hook-asks-a-running-ken-mcp-over-a-socket-only-the-user-can-reach) | The edit hook asks a running ken-mcp over a socket only the user can reach | Accepted |
+| [ADR-068](#adr-068-a-change-to-what-the-go-command-lists-is-checked-again-only-where-it-reaches-and-a-watcher-refreshes-held-programs) | A change to what the go command lists is checked again only where it reaches, and a watcher refreshes held programs | Accepted |
 
 ---
 
@@ -3620,7 +3621,7 @@ M1 Pro, ken's own source (about 450 Go files, one configuration), the hook run b
 | server running, first edit (loads the programs) | 1.07 s |
 | server running, later edits | 0.07 to 0.08 s |
 
-**Not measured:** a large repository, where the first edit's load is longer and may pass the hook's 20 seconds (the hook is then silent and the server keeps loading, so a later edit is answered); several servers at once; Windows, where Go supports Unix sockets but file modes do not protect the socket the same way.
+**Not measured:** a large repository (measured since: ADR-068), where the first edit's load is longer and may pass the hook's 20 seconds (the hook is then silent and the server keeps loading, so a later edit is answered); several servers at once; Windows, where Go supports Unix sockets but file modes do not protect the socket the same way.
 
 ### Consequences and what is not done
 
