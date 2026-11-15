@@ -310,7 +310,11 @@ func TestLSP_oneShotStartsOneServerPerConfigurationAndStopsIt(t *testing.T) {
 	if got, want := hitLines(res), []string{"b.go:3 one,two", "c.go:3 one,two"}; !slices.Equal(got, want) || res.Incomplete {
 		t.Fatalf("hits %v (incomplete %v), want %v", got, res.Incomplete, want)
 	}
+	// "exit" is a notification: the client does not wait for the server to have counted it.
 	starts, shut, exits, reqs := f.snapshot()
+	for deadline := time.Now().Add(5 * time.Second); exits < 2 && time.Now().Before(deadline); starts, shut, exits, reqs = f.snapshot() {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if starts != 2 || shut != 2 || exits != 2 || reqs != 2 {
 		t.Errorf("starts %d shutdowns %d exits %d requests %d, want 2 each: one server per configuration, stopped after the query", starts, shut, exits, reqs)
 	}
