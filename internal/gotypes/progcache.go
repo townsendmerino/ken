@@ -53,6 +53,11 @@ type heldProgram struct {
 	busy              int
 	stats             map[string]fileStat // the scan it was built from, to tell what changed
 	ready             chan struct{}       // closed when the load finished
+	// What it was asked for with, to bring it up to date when nobody is asking (Renew): the runner (a copy), the
+	// configuration and the directory.
+	r   *Runner
+	bc  BuildConfig
+	dir string
 }
 
 // NewProgramCache returns a cache of at most max programs (>= 1), each dropped after idle without a query (<= 0 means
@@ -250,13 +255,27 @@ func heapNow() int64 {
 // can affect is checked again) if that is possible, and otherwise load runs; either way the result replaces it.
 // Callers asking for the same program at once share one load.
 func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir string, scan *treeScan, load func() (*program, error)) (*program, func(), error) {
+	p, h, err := c.acquire(ctx, r, bc, dir, scan, load, false)
+	if h == nil {
+		return p, func() {}, err
+	}
+	return p, func() { c.release(h) }, err
+}
+
+// acquire is get, returning the held entry in place of the function that releases it: nil when the program is not
+// kept (or there is an error) and nothing is to be released. renewing is set by Renew: nobody is asking, so a closed
+// cache does nothing, and the entry's count of queries and the time of its last one stay what they were.
+func (c *ProgramCache) acquire(ctx context.Context, r *Runner, bc BuildConfig, dir string, scan *treeScan, load func() (*program, error), renewing bool) (*program, *heldProgram, error) {
 	stats, scanned, serr := scan.stats, scan.at, scan.err
 	for {
 		c.mu.Lock()
 		if c.closed {
 			c.mu.Unlock()
+			if renewing {
+				return nil, nil, nil
+			}
 			p, err := load()
-			return p, func() {}, err
+			return p, nil, err
 		}
 		key, pending := c.keyFor(r, bc, dir)
 		if pending != nil {
@@ -281,11 +300,13 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 			}
 			if serr == nil && fingerprint(stats, h.asOf) == h.fp {
 				h.busy++
-				h.uses++
-				c.reuses++
+				if !renewing {
+					h.uses++
+					c.reuses++
+				}
 				p := h.prog
 				c.mu.Unlock()
-				return p, func() { c.release(h) }, nil
+				return p, h, nil
 			}
 			delete(c.held, key)
 			c.stale++
@@ -308,9 +329,10 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 		if len(c.held) >= c.max {
 			c.mu.Unlock()
 			p, err := load()
-			return p, func() {}, err
+			return p, nil, err
 		}
-		h := &heldProgram{key: key, repo: r.Repo, config: bc.Name, ready: make(chan struct{})}
+		keep := *r
+		h := &heldProgram{key: key, repo: r.Repo, config: bc.Name, ready: make(chan struct{}), r: &keep, bc: bc, dir: dir}
 		c.held[key] = h
 		c.mu.Unlock()
 
@@ -355,9 +377,14 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 		c.mu.Lock()
 		if err != nil || serr != nil {
 			delete(c.held, key)
+			if stale != nil && err != nil && !c.closed {
+				// It could not be brought up to date (the wrap command refused, the go command failed). It is still
+				// what a refresh starts from once that passes, and a load of everything is what dropping it costs.
+				c.held[key] = stale
+			}
 			close(h.ready)
 			c.mu.Unlock()
-			return p, func() {}, err
+			return p, nil, err
 		}
 		// An edit during the load could leave a program built from a mixture of two trees: keep it only if the
 		// tree is still the one scanned before the load.
@@ -369,7 +396,7 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 			delete(c.held, key)
 			close(h.ready)
 			c.mu.Unlock()
-			return p, func() {}, nil
+			return p, nil, nil
 		}
 		h.prog, h.fp, h.asOf, h.stats, h.lastUsed = p, fp, scanned, stats, time.Now()
 		// The heap's growth across the load is the measure. Other work in the process moves the heap too, so it is
@@ -390,10 +417,71 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 			c.loads++
 		}
 		h.busy, h.uses = 1, 1
+		if renewing && stale != nil {
+			h.uses, h.lastUsed = stale.uses, stale.lastUsed
+		}
 		close(h.ready)
 		c.mu.Unlock()
-		return p, func() { c.release(h) }, nil
+		return p, h, nil
 	}
+}
+
+// Renew brings the held programs of repo up to date with the tree, now, for a host that has just heard the tree
+// changed (a file watcher). The next query then finds them current, where it would have found them stale and paid for
+// the refresh itself; an edit hook has a few seconds in all. Only what the change reaches is type-checked (refresh,
+// refreshOnto), behind the repository's wrap command as a query's work is; a program that cannot be brought up to
+// date stays as it is for the next query to deal with. It returns when the programs are done, so a caller that must
+// not wait runs it on a goroutine. Renewing is not a query: a program nobody asks goes after the idle timeout
+// whatever the tree does.
+func (c *ProgramCache) Renew(ctx context.Context, repo string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	var hs []*heldProgram
+	for _, h := range c.held {
+		if h.repo == repo && h.prog != nil && h.r != nil && !c.closed {
+			hs = append(hs, h)
+		}
+	}
+	c.mu.Unlock()
+	if len(hs) == 0 {
+		return
+	}
+	scan := hs[0].r.scanNow()
+	var wg sync.WaitGroup
+	for _, was := range hs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := was.r
+			ctx, cancel := context.WithTimeout(ctx, r.timeout())
+			defer cancel()
+			// A program that is gone by now (evicted, idle) is not loaded again for nobody.
+			if !c.holds(r, was.bc, was.dir) {
+				return
+			}
+			_, h, _ := c.acquire(ctx, r, was.bc, was.dir, scan, func() (*program, error) {
+				l, err := r.listWorkspace(ctx, was.bc, was.dir)
+				if err != nil {
+					return nil, err
+				}
+				release, err := r.holdForWork(ctx)
+				if err != nil {
+					return nil, err
+				}
+				defer release()
+				return l.build(false)
+			}, true)
+			if h != nil {
+				c.mu.Lock()
+				h.busy--
+				c.armReaper()
+				c.mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // freeSoon gives the memory of replaced programs back to the operating system shortly after the last replacement,

@@ -658,3 +658,85 @@ func TestProgramCache_relistsWithoutLoadingAgain(t *testing.T) {
 		t.Errorf("after four changes to what is listed: %+v, want the 2 loads of the first question and 8 refreshes", st)
 	}
 }
+
+// When the tree changes, a host that hears of it (a file watcher) has the held programs brought up to date at once,
+// off the path of any query: the next question finds them current. A program brought up to date this way was not
+// asked anything, so it is no younger for it and still goes when nothing has asked for the idle timeout.
+func TestProgramCache_renewBringsHeldProgramsUpToDate(t *testing.T) {
+	needGo(t)
+	root := writeTree(t, ed)
+	settle(t, root)
+	pc := NewProgramCache(2, time.Minute)
+	defer pc.Close()
+	r := &Runner{Repo: root, Config: edConfigs, Engine: EngineTypes, Programs: pc}
+	ctx := context.Background()
+	pc.Renew(ctx, root) // nothing held: nothing to do
+	if st := pc.Status(); st.Loads != 0 || len(st.Programs) != 0 {
+		t.Fatalf("renewing an empty cache loaded something: %+v", st)
+	}
+	res, err := r.References(ctx, "a.Scale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := hitLines(res)
+	time.Sleep(150 * time.Millisecond)
+	if err := os.WriteFile(filepath.Join(root, "b", "extra.go"), []byte("package b\n\nimport \"example.com/ed/a\"\n\nfunc Quad(s a.Sq) a.Sq { return a.Scale(s, 4) }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pc.Renew(ctx, root)
+	st := pc.Status()
+	if st.Loads != 2 || st.Refreshes != 2 || len(st.Programs) != 2 {
+		t.Fatalf("after Renew: %+v, want both programs refreshed and held, with no load", st)
+	}
+	for _, p := range st.Programs {
+		if p.IdleSec < 0.15 || p.Queries != 1 {
+			t.Errorf("%s: idle %.3fs after %d queries; a renewal is not a query, and must not keep an unused program alive", p.Config, p.IdleSec, p.Queries)
+		}
+	}
+	pc.Renew(ctx, root) // nothing changed since: the programs stand
+	if st := pc.Status(); st.Refreshes != 2 || st.Loads != 2 {
+		t.Errorf("a second Renew of an unchanged tree: %+v, want nothing done", st)
+	}
+	res, err = r.References(ctx, "a.Scale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := hitLines(res); len(after) != len(before)+1 {
+		t.Errorf("after Renew: %v, want one more use than %v", after, before)
+	}
+	if st := pc.Status(); st.Refreshes != 2 || st.Loads != 2 || st.Reuses != 2 {
+		t.Errorf("the question after Renew: %+v, want both programs reused as they are", st)
+	}
+}
+
+// A held program that could not be brought up to date (the repository's wrap command refused: its lock is taken) is
+// kept. It is still the cheapest thing to refresh once the lock is free; dropping it would make the next question
+// load every configuration from nothing.
+func TestProgramCache_keepsAProgramItCouldNotRefresh(t *testing.T) {
+	needGo(t)
+	if _, err := exec.LookPath("false"); err != nil {
+		t.Skip("no false command to stand in for a wrap command that refuses")
+	}
+	root := writeTree(t, ed)
+	settle(t, root)
+	pc := NewProgramCache(2, time.Minute)
+	defer pc.Close()
+	r := &Runner{Repo: root, Config: edConfigs, Engine: EngineTypes, Programs: pc}
+	ctx := context.Background()
+	if _, err := r.References(ctx, "a.Scale"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b", "extra.go"), []byte("package b\n\nimport \"example.com/ed/a\"\n\nfunc Quad(s a.Sq) a.Sq { return a.Scale(s, 4) }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	locked := edConfigs
+	locked.Wrap = []string{"false"}
+	refused := &Runner{Repo: root, Config: locked, Engine: EngineTypes, Programs: pc}
+	if res, err := refused.References(ctx, "a.Scale"); err == nil && !res.Incomplete {
+		t.Fatalf("a query behind a wrap command that refuses answered: %v", hitLines(res))
+	}
+	pc.Renew(ctx, root) // renews as the runner that loaded them would: that one is not refused
+	if st := pc.Status(); len(st.Programs) != 2 || st.Loads != 2 || st.Refreshes != 2 {
+		t.Errorf("after a refused query and a renewal: %+v, want the 2 programs kept through the refusal and then refreshed, with no load", st)
+	}
+}

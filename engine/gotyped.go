@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -199,8 +200,8 @@ func goRelevant(rel string) bool {
 	return false
 }
 
-// Invalidate tells the host that files of repo changed: remembered answers for the repo are dropped and its idle gopls
-// processes are told to reload now. Paths may be repo-relative or absolute; only Go and module files matter. It never
+// Invalidate tells the host that files of repo changed: remembered answers for the repo are dropped, its held programs
+// are brought up to date in the background, and its idle gopls processes are told to reload now. Paths may be repo-relative or absolute; only Go and module files matter. It never
 // blocks on a query.
 func (h *GoTypedHost) Invalidate(repo string, paths []string) {
 	if h == nil || !h.opts.Enabled() {
@@ -217,7 +218,10 @@ func (h *GoTypedHost) Invalidate(repo string, paths []string) {
 		return
 	}
 	h.cache.Invalidate(repo)
-	h.programs.Invalidate(repo)
+	// The held programs are not dropped: a program that is behind the tree is what a refresh starts from, and
+	// checking again only what the change reaches costs a fraction of loading every configuration, which is what
+	// the next query paid when they were dropped here. They are brought up to date now, off the path of that query.
+	go h.programs.Renew(context.Background(), repo)
 	if h.pool != nil {
 		go h.pool.Refresh(repo)
 	}

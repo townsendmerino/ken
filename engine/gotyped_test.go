@@ -59,6 +59,14 @@ func TestGoTyped_ResidentStateFollowsEditsThroughTheWatcher(t *testing.T) {
 // residentStateFollowsEdits drives one engine: "types" keeps type-checked programs, "lsp" keeps gopls processes.
 func residentStateFollowsEdits(t *testing.T, eng string) {
 	root := goTypedFixture(t)
+	// The fixture was written this instant, and a file that young counts as possibly changed again (go.mod among
+	// them, which no refresh survives). A repository's files are older than that.
+	old := time.Now().Add(-time.Hour)
+	for _, name := range []string{"go.mod", "a.go", "b.go"} {
+		if err := os.Chtimes(filepath.Join(root, name), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	ws, err := engine.Open(ctx, root, engine.Options{Mode: "bm25", Watch: true,
@@ -166,10 +174,10 @@ func residentStateFollowsEdits(t *testing.T, eng string) {
 		if _, starts, _ := resident(); starts != 1 {
 			t.Errorf("starts %d: edits must reach the resident gopls, not restart it", starts)
 		}
-	} else if st := ws.Status().GoTyped.Programs; st.Stale+st.Dropped < 2 || st.Loads+st.Refreshes < 3 {
-		// each edit made the held program unusable: found stale at the next query and refreshed or reloaded, or
-		// dropped by the watcher first and loaded again
-		t.Errorf("programs %+v: want the held program replaced after each edit", st)
+	} else if st := ws.Status().GoTyped.Programs; st.Stale < 2 || st.Refreshes < 2 || st.Loads != 1 || st.Dropped != 0 {
+		// each edit left the held program behind the tree: it was brought up to date, by the query that found it
+		// so or by the watcher before one came, and never dropped to be loaded from nothing (a new file included)
+		t.Errorf("programs %+v: want the one program loaded once and refreshed after each edit", st)
 	}
 
 	// 5. Close releases everything
