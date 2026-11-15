@@ -3629,3 +3629,60 @@ M1 Pro, ken's own source (about 450 Go files, one configuration), the hook run b
 - With two servers running, the hook asks the newest first. Either gives a right answer; the one that does not hold the repository yet loads it.
 - No hook client other than ken's own is promised the protocol: it may change with the two sides together.
 
+## ADR-068: A change to what the go command lists is checked again only where it reaches, and a watcher refreshes held programs
+
+**Status:** Accepted
+**Date:** 2026-11-15
+**Decided by:** Francis: "make `ken hook check-edit` fast for an edit in a package ken-mcp hasn't loaded yet, and for a stale program", after a day of the 1.19 hook on goinfer in which 15 of 28 Go edits on one machine ran out the hook's 20 seconds.
+
+### Context
+
+ADR-067 measured the hook on ken's own source and left a large repository unmeasured. goinfer is one: seven modules in a workspace, about 665 packages listed per configuration, three configurations, and a `decoder` package 63 packages depend on. Replaying hook events against a `ken-mcp` at v1.19.0 (M1 Pro, 8 cores) found four separate costs, none of them the go command, which lists a configuration in about 0.75 s:
+
+1. **A refresh refused whatever could change the package list** (a file created or deleted, an import added, a package clause or constraint edited). The caller then listed the configuration again and type-checked *every* package of the listing: about 2 s per configuration for an edit check, 3 to 4 s for a load.
+2. **A directory no package lives in had a cache key of its own.** A Write that creates a package names a directory the held program has no package in (the edit check walks up to the nearest directory that exists). The cache loaded the whole workspace again under that key, and, sized to the configurations, evicted the programs just used.
+3. **The edit check ran the configurations one after another** even when every program was held, which references and rename plans do not.
+4. **The file watcher dropped held programs.** `GoTypedHost.Invalidate` called `ProgramCache.Invalidate` on every change to a Go file of a watched repository "to free the memory sooner". The next query loaded every configuration from nothing, so in an agent's edit loop every edit that reached the disk made the next check a cold one. A program whose refresh failed because the repository's wrap command refused (goinfer's takes a timing lock) was dropped the same way.
+
+### Decision
+
+1. **`refreshOnto` refreshes a program onto a new listing.** A package keeps the types and tables it had when the go command lists it exactly as before (files, imports and what each resolves to, Go version, error), none of its files changed, and every package it imports, by any chain, keeps its own. Everything else in the listing is type-checked, new packages included; a package no longer listed is dropped. An unchanged file of a package that is checked again is parsed at the place it had, as in a refresh. Whether a plain package is checked with function bodies depends on its test variant's files (ADR-061): where the variant changed or went, the plain package is asked again. A change to go.mod, go.sum or go.work, and a workspace whose modules differ, still load afresh.
+2. **The edit check uses it for a patch that changes the list**, with the patch as the go command's overlay, and the program cache uses it for a tree that changed on disk. A full type-check of the listing is the fallback, and what `checkEditReload` (the test's second opinion) still does.
+3. **A directory inside one of a held program's modules is served by that program**, whether or not a package lives there. The module is the nearest go.mod at or above the directory, so a nested module outside the workspace still gets its own program.
+4. **The edit check runs its configurations side by side when every program it needs is held**, the rule references and rename plans follow. A program that has to be loaded is loaded as `Parallel` says.
+5. **A watcher's change renews held programs instead of dropping them** (`ProgramCache.Renew`, called by `GoTypedHost.Invalidate` on a goroutine). Renewing is the refresh the next query would have done, done before it: behind the wrap command, only what the change reaches. It is not a query: a program's idle clock and query count are not touched, so a program nobody asks still goes after `IdleTimeout` however often the tree changes.
+6. **A held program that could not be brought up to date is kept.** It is what a refresh starts from once the lock is free.
+
+### What was measured
+
+M1 Pro, goinfer at its `kv5-7c` branch (a private copy for the cases that change files on disk; the worktree itself is only read), `ken hook check-edit --why --timeout 90` replaying one event at a time against a `ken-mcp` started over stdio with the repository as its default, so its watcher is on. Seconds per hook call, v1.19.0 then this change:
+
+| Event | 1.19.0 | after |
+|---|---|---|
+| Edit renaming a `decoder` method (63 packages reached), programs held and current | 2.5 to 2.9 | 1.5 to 1.7 |
+| the same, 6 s after a function body changed on disk | 8.9 | 1.9 |
+| the same, 6 s after a file was created in `decoder` | 8.8 | 3.6 |
+| the same, 6 s after a new package was created on disk | 10.2 | 1.6 |
+| the same, 6 s after an import was added on disk | 9.0 | 3.7 |
+| Write creating a file in a package that does not exist, first call | 14.3 to 14.4 | 1.9 |
+| the same Write, later calls | 7.3 to 7.6 | 1.5 to 1.9 |
+| Write creating a file in `decoder` | 7.4 to 8.2 | 3.1 to 3.4 |
+| first call after the server starts (loads three programs) | 9.7 to 11.2 | 10.5 to 12.9 |
+
+The server's resident memory after each run of the cases was higher with the change: 2.2 GB against 1.7 GB on the worktree, 3.7 GB against 3.0 GB with the search index of the copy loaded. Three checks at once hold three sets of re-checked packages where one at a time held one, and programs that used to be dropped are now kept until idle.
+
+**Not measured:** Linux, where the report came from (its times were about 1.5 times the Mac's at 1.19.0); memory at the peak of a check rather than after it; an agent session, as opposed to events replayed by hand; why the two cases that add a file or an import to `decoder` take about 2 s more than the configurations' own times add up to.
+
+### Consequences and what is not done
+
+- **The first check after a start, or after `KEN_MCP_GO_IDLE` (5 minutes) without one, still loads every configuration**: 10 to 13 s on goinfer, inside the hook's default 20 s on this machine and outside a shorter one. The server finishes the load whether or not the hook waited, so the next edit is answered. Loading the configurations at once (`KEN_MCP_GO_PARALLEL`) or answering "loading" at once are the two ways to shorten it; neither is done here, the first because it is a memory decision.
+- A watched repository now does work nobody asked for: after a change to a Go file, a go list and a type-check of what the change reaches per held configuration, behind the wrap command. With goinfer's timing lock that is one more shared holder for a second or two after a save; a timed run that holds the lock makes the renewal fail, and the program waits.
+- `ProgramCache.Invalidate` stays and is no longer called by the host. The `dropped` count in the status therefore stays at 0 for programs.
+- A rename plan's check of a patch that changes the list (`checkPatch`) still type-checks the whole listing; a rename seldom changes one.
+- The hook says nothing when a check was slow or why. `--why` reports only a check that did not happen.
+
+### Tests
+
+- `TestRefresh_equalsAFreshLoad` walks a chain of edits over a module and holds each refreshed program to a fresh load on every declaration (references and implementations, over 100 questions a step). The edits a refresh refuses now go through `refreshOnto`, and the chain gained the ones that change the list: a new file, a new package, a first test file, a method in it, the test file deleted, a file deleted, an import dropped, the package deleted.
+- `TestCheckEdit_aNewFileOrPackageChecksOnlyWhatItReaches`: six edits that change the list are checked against held programs with one or two packages type-checked, no load and no eviction, and agree with a runner that loads afresh.
+- `TestProgramCache_relistsWithoutLoadingAgain`, `TestProgramCache_renewBringsHeldProgramsUpToDate`, `TestProgramCache_keepsAProgramItCouldNotRefresh`, and the engine's watcher test, which now requires the one program to be loaded once and never dropped.
