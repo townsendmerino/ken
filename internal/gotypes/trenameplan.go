@@ -46,7 +46,7 @@ func (c *configPrograms) program(dir string) (*program, error) {
 		return p, nil
 	}
 	for _, p := range c.byDir { // a workspace is the same for every directory inside it
-		if p.holdsDir(dir) {
+		if p.servesDir(dir) {
 			return p, nil
 		}
 	}

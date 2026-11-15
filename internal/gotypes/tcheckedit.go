@@ -204,8 +204,14 @@ func (p *program) checkEdit(patch map[string][]byte, maps map[string]*lineMap, e
 				force[tp.ID] = true
 			}
 		}
+		opts := buildOpts{overlay: patch, forceBodies: force, read: env.read}
 		var err error
-		if post, err = env.reload(buildOpts{overlay: patch, forceBodies: force, read: env.read}); err != nil {
+		if env.list == nil {
+			post, err = env.reload(opts)
+		} else {
+			post, err = p.relisted(changed, opts, env)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -214,6 +220,28 @@ func (p *program) checkEdit(patch map[string][]byte, maps map[string]*lineMap, e
 	}
 	defer post.discard()
 	return compareEdit(p, post, patch, maps), nil
+}
+
+// relisted returns the program a patch that changes the go command's list would make: the packages the patch
+// reaches type-checked again on the new listing, the rest of p kept (refreshOnto), or, where that cannot be done
+// and whenever env.full says so, everything the go command lists type-checked afresh.
+func (p *program) relisted(changed []string, opts buildOpts, env patchEnv) (*program, error) {
+	l, err := env.list()
+	if err != nil {
+		return nil, err
+	}
+	release, err := env.hold() // after the listing, which ran behind the wrap command itself
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if !env.full {
+		post, ok, err := p.refreshOnto(l, changed, &patchProgram{overlay: opts.overlay, read: opts.read})
+		if err != nil || ok {
+			return post, err
+		}
+	}
+	return l.buildWith(opts)
 }
 
 // compareEdit returns the ways post, pre with an edit applied, differs from pre.

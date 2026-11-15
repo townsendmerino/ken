@@ -178,6 +178,10 @@ type patchEnv struct {
 	// reload loads the configuration afresh with the patch in place of the files, as its buildOpts say, taking the
 	// lock itself after its listing. It is called only when the program cannot be refreshed with the patch.
 	reload func(buildOpts) (*program, error)
+	// list asks the go command for the configuration's packages with the patch in place of the files. The check of
+	// an edit calls it when the patch changes what is listed, and type-checks of the answer only what the patch
+	// reaches (refreshOnto), under hold.
+	list func() (*listing, error)
 	// read reads a file the patch leaves alone; nil reads the disk.
 	read func(file string) ([]byte, error)
 	// full checks every function body of every package the patch reaches, whatever the patch renames. It is how

@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -19,8 +21,10 @@ import (
 // unused. It starts empty.
 //
 // A held program is used only while every Go and module file it was built from is unchanged: each use scans the
-// tree first (tree.go). On a difference the program is replaced, by a refresh of it when the edit allows one
-// (trefresh.go) and by a fresh load otherwise.
+// tree first (tree.go). On a difference the program is replaced by a refresh of it: only what the change reaches is
+// type-checked again, on the package list the program has when the change cannot have altered it and on a new one
+// from the go command otherwise (trefresh.go). A fresh load is what is left when neither can be done (go.mod or
+// go.work changed). A host that hears of a change has the refresh done before the next use (Renew).
 type ProgramCache struct {
 	max  int
 	auto bool // sized by Fit
@@ -51,6 +55,11 @@ type heldProgram struct {
 	busy              int
 	stats             map[string]fileStat // the scan it was built from, to tell what changed
 	ready             chan struct{}       // closed when the load finished
+	// What it was asked for with, to bring it up to date when nobody is asking (Renew): the runner (a copy), the
+	// configuration and the directory.
+	r   *Runner
+	bc  BuildConfig
+	dir string
 }
 
 // NewProgramCache returns a cache of at most max programs (>= 1), each dropped after idle without a query (<= 0 means
@@ -109,7 +118,7 @@ type ProgramCacheStatus struct {
 	Refreshes   int64           `json:"refreshes"` // programs brought up to date after an edit without a full load
 	Reuses      int64           `json:"reuses"`
 	Stale       int64           `json:"stale"`   // uses that found the tree changed
-	Dropped     int64           `json:"dropped"` // programs dropped because a watcher said the tree changed
+	Dropped     int64           `json:"dropped"` // programs dropped by Invalidate
 	Evictions   int64           `json:"evictions"`
 	IdleStops   int64           `json:"idle_stops"`
 }
@@ -177,7 +186,36 @@ func (c *ProgramCache) keyFor(r *Runner, bc BuildConfig, dir string) (key string
 			return k, nil
 		}
 	}
+	// A directory no package lives in (one an edit is about to create a package in, or a directory of directories)
+	// is served by the program of the workspace it is inside: asking for it must not load that workspace again
+	// under another key, and push the program that was asked about a moment ago out of the cache.
+	if mod := moduleDirOf(dir); mod != "" {
+		for k, h := range c.held {
+			if h.prog != nil && strings.HasPrefix(k, prefix) && slices.Contains(h.prog.mods, mod) {
+				return k, nil
+			}
+		}
+	}
 	return key, pending
+}
+
+// moduleDirOf returns the directory of the module dir is in: the nearest one, at or above it, that holds a go.mod.
+// "" when there is none.
+func moduleDirOf(dir string) string {
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if st, err := os.Stat(filepath.Join(d, "go.mod")); err == nil && !st.IsDir() {
+			return d
+		}
+		if d == filepath.Dir(d) {
+			return ""
+		}
+	}
+}
+
+// servesDir reports whether the program is the one to ask about dir: a workspace package lives there, or dir is
+// inside one of the program's modules and no package does yet.
+func (p *program) servesDir(dir string) bool {
+	return p.holdsDir(dir) || slices.Contains(p.mods, moduleDirOf(dir))
 }
 
 // treeScan is one scan of a repository's tree, shared by the configurations of one query.
@@ -219,13 +257,27 @@ func heapNow() int64 {
 // can affect is checked again) if that is possible, and otherwise load runs; either way the result replaces it.
 // Callers asking for the same program at once share one load.
 func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir string, scan *treeScan, load func() (*program, error)) (*program, func(), error) {
+	p, h, err := c.acquire(ctx, r, bc, dir, scan, load, false)
+	if h == nil {
+		return p, func() {}, err
+	}
+	return p, func() { c.release(h) }, err
+}
+
+// acquire is get, returning the held entry in place of the function that releases it: nil when the program is not
+// kept (or there is an error) and nothing is to be released. renewing is set by Renew: nobody is asking, so a closed
+// cache does nothing, and the entry's count of queries and the time of its last one stay what they were.
+func (c *ProgramCache) acquire(ctx context.Context, r *Runner, bc BuildConfig, dir string, scan *treeScan, load func() (*program, error), renewing bool) (*program, *heldProgram, error) {
 	stats, scanned, serr := scan.stats, scan.at, scan.err
 	for {
 		c.mu.Lock()
 		if c.closed {
 			c.mu.Unlock()
+			if renewing {
+				return nil, nil, nil
+			}
 			p, err := load()
-			return p, func() {}, err
+			return p, nil, err
 		}
 		key, pending := c.keyFor(r, bc, dir)
 		if pending != nil {
@@ -250,11 +302,13 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 			}
 			if serr == nil && fingerprint(stats, h.asOf) == h.fp {
 				h.busy++
-				h.uses++
-				c.reuses++
+				if !renewing {
+					h.uses++
+					c.reuses++
+				}
 				p := h.prog
 				c.mu.Unlock()
-				return p, func() { c.release(h) }, nil
+				return p, h, nil
 			}
 			delete(c.held, key)
 			c.stale++
@@ -277,9 +331,10 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 		if len(c.held) >= c.max {
 			c.mu.Unlock()
 			p, err := load()
-			return p, func() {}, err
+			return p, nil, err
 		}
-		h := &heldProgram{key: key, repo: r.Repo, config: bc.Name, ready: make(chan struct{})}
+		keep := *r
+		h := &heldProgram{key: key, repo: r.Repo, config: bc.Name, ready: make(chan struct{}), r: &keep, bc: bc, dir: dir}
 		c.held[key] = h
 		c.mu.Unlock()
 
@@ -307,6 +362,16 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 				p, refreshed = stale.prog.refresh(changed, createdOrDeleted)
 				release()
 			}
+			if !refreshed {
+				// The change may have altered what the go command lists (a file created or deleted, an import, a
+				// constraint). It is asked again, and only what the change reaches is type-checked on its answer.
+				if l, lerr := r.listModules(ctx, bc, stale.prog.mods, nil); lerr == nil {
+					if release, herr := r.holdForWork(ctx); herr == nil { // after the listing: a lock is not taken twice
+						p, refreshed, _ = stale.prog.refreshOnto(l, changed, nil)
+						release()
+					}
+				}
+			}
 		}
 		if !refreshed {
 			p, err = load()
@@ -314,9 +379,14 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 		c.mu.Lock()
 		if err != nil || serr != nil {
 			delete(c.held, key)
+			if stale != nil && err != nil && !c.closed {
+				// It could not be brought up to date (the wrap command refused, the go command failed). It is still
+				// what a refresh starts from once that passes, and a load of everything is what dropping it costs.
+				c.held[key] = stale
+			}
 			close(h.ready)
 			c.mu.Unlock()
-			return p, func() {}, err
+			return p, nil, err
 		}
 		// An edit during the load could leave a program built from a mixture of two trees: keep it only if the
 		// tree is still the one scanned before the load.
@@ -328,7 +398,7 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 			delete(c.held, key)
 			close(h.ready)
 			c.mu.Unlock()
-			return p, func() {}, nil
+			return p, nil, nil
 		}
 		h.prog, h.fp, h.asOf, h.stats, h.lastUsed = p, fp, scanned, stats, time.Now()
 		// The heap's growth across the load is the measure. Other work in the process moves the heap too, so it is
@@ -349,10 +419,71 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 			c.loads++
 		}
 		h.busy, h.uses = 1, 1
+		if renewing && stale != nil {
+			h.uses, h.lastUsed = stale.uses, stale.lastUsed
+		}
 		close(h.ready)
 		c.mu.Unlock()
-		return p, func() { c.release(h) }, nil
+		return p, h, nil
 	}
+}
+
+// Renew brings the held programs of repo up to date with the tree, now, for a host that has just heard the tree
+// changed (a file watcher). The next query then finds them current, where it would have found them stale and paid for
+// the refresh itself; an edit hook has a few seconds in all. Only what the change reaches is type-checked (refresh,
+// refreshOnto), behind the repository's wrap command as a query's work is; a program that cannot be brought up to
+// date stays as it is for the next query to deal with. It returns when the programs are done, so a caller that must
+// not wait runs it on a goroutine. Renewing is not a query: a program nobody asks goes after the idle timeout
+// whatever the tree does.
+func (c *ProgramCache) Renew(ctx context.Context, repo string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	var hs []*heldProgram
+	for _, h := range c.held {
+		if h.repo == repo && h.prog != nil && h.r != nil && !c.closed {
+			hs = append(hs, h)
+		}
+	}
+	c.mu.Unlock()
+	if len(hs) == 0 {
+		return
+	}
+	scan := hs[0].r.scanNow()
+	var wg sync.WaitGroup
+	for _, was := range hs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := was.r
+			ctx, cancel := context.WithTimeout(ctx, r.timeout())
+			defer cancel()
+			// A program that is gone by now (evicted, idle) is not loaded again for nobody.
+			if !c.holds(r, was.bc, was.dir) {
+				return
+			}
+			_, h, _ := c.acquire(ctx, r, was.bc, was.dir, scan, func() (*program, error) {
+				l, err := r.listWorkspace(ctx, was.bc, was.dir)
+				if err != nil {
+					return nil, err
+				}
+				release, err := r.holdForWork(ctx)
+				if err != nil {
+					return nil, err
+				}
+				defer release()
+				return l.build(false)
+			}, true)
+			if h != nil {
+				c.mu.Lock()
+				h.busy--
+				c.armReaper()
+				c.mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // freeSoon gives the memory of replaced programs back to the operating system shortly after the last replacement,
@@ -411,8 +542,9 @@ func (c *ProgramCache) reap() {
 	c.armReaper()
 }
 
-// Invalidate drops every program of repo that is not in use. The watcher calls it when files change; a scan would have
-// caught the change at the next use, so this only frees the memory sooner.
+// Invalidate drops every program of repo that is not in use, to give their memory back now. It is not what a change
+// to the tree calls for: a program that is behind the tree is what a refresh starts from (see Renew), and the next
+// use scans the tree whether or not anyone said it changed.
 func (c *ProgramCache) Invalidate(repo string) {
 	if c == nil {
 		return

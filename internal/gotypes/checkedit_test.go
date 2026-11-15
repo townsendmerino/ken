@@ -546,3 +546,197 @@ func Show(n float64) string {
 		t.Errorf("SkipVet: %v %+v", err, skipped)
 	}
 }
+
+// An edit that changes what the go command lists (a new file, a new package, a new import) is checked against the
+// held programs: nothing is loaded again, and only the packages the edit reaches are type-checked again, not the
+// workspace. A file in a directory no package lives in yet is still in the workspace the held program is of.
+func TestCheckEdit_aNewFileOrPackageChecksOnlyWhatItReaches(t *testing.T) {
+	needGo(t)
+	root := writeTree(t, ed)
+	settle(t, root)
+	pc := NewProgramCache(2, time.Minute)
+	defer pc.Close()
+	r := &Runner{Repo: root, Config: edConfigs, Programs: pc, SkipVet: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if _, err := r.CheckEdit(ctx, []FileEdit{{File: "a/a.go", OldString: "return len(text), nil", NewString: "return len(text) + 0, nil"}}); err != nil {
+		t.Fatal(err)
+	}
+	if st := pc.Status(); st.Loads != 2 {
+		t.Fatalf("the first check loaded %d programs, want 2", st.Loads)
+	}
+	for _, c := range []struct {
+		name  string
+		edits []FileEdit
+		errs  int
+		pkgs  int // the most packages that may be type-checked again
+	}{
+		{"a new package in a new directory", []FileEdit{{File: "d/deep/d.go", Content: str("package deep\n\nimport \"example.com/ed/a\"\n\nfunc Area() float64 { return a.Sq{Side: 2}.Area() }\n")}}, 0, 1},
+		{"a new package that does not compile", []FileEdit{{File: "d/deep/d.go", Content: str("package deep\n\nimport \"example.com/ed/a\"\n\nfunc Area() float64 { return a.Sq{Side: 2}.Volume() }\n")}}, 1, 1},
+		{"a new package with a test file", []FileEdit{
+			{File: "d/deep/d.go", Content: str("package deep\n\nfunc One() int { return 1 }\n")},
+			{File: "d/deep/d_test.go", Content: str("package deep\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) { _ = One() }\n")},
+		}, 0, 2},
+		{"a new file in a package that is there", []FileEdit{{File: "b/extra.go", Content: str("package b\n\nimport \"example.com/ed/a\"\n\nfunc Quad(s a.Sq) a.Sq { return a.Scale(s, 4) }\n")}}, 0, 1},
+		{"a new file that declares a name its package has", []FileEdit{{File: "b/extra.go", Content: str("package b\n\nfunc Label(k int) string { return \"\" }\n")}}, 2, 1},
+		{"a new import", []FileEdit{{File: "b/b.go", OldString: `import "example.com/ed/a"`, NewString: "import (\n\t\"strings\"\n\n\t\"example.com/ed/a\"\n)\n\nvar _ = strings.ToUpper"}}, 0, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := r.CheckEdit(ctx, c.edits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Incomplete || len(got.Errors) != c.errs {
+				t.Errorf("incomplete %v, %d errors, want complete with %d\n%s", got.Incomplete, len(got.Errors), c.errs, got.Text(2, 0))
+			}
+			if got.Packages < 1 || got.Packages > c.pkgs {
+				t.Errorf("%d packages type-checked again, want 1 to %d: only what the edit reaches", got.Packages, c.pkgs)
+			}
+			again, err := (&Runner{Repo: root, Config: edConfigs, checkEditReload: true, SkipVet: true}).CheckEdit(ctx, c.edits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(findings(got), findings(again)) {
+				t.Errorf("the held programs and a fresh load disagree:\nheld:\n%s\nfresh:\n%s", got.Text(2, 0), again.Text(2, 0))
+			}
+		})
+	}
+	if st := pc.Status(); st.Loads != 2 || st.Evictions != 0 || len(st.Programs) != 2 {
+		t.Errorf("after the edits: %d loads, %d evictions, %d programs held; want the 2 programs of the first check and nothing else", st.Loads, st.Evictions, len(st.Programs))
+	}
+}
+
+// A file created on disk, or one that gains an import, changes what the go command lists. The held programs are
+// brought up to date from a new listing: the packages the change does not reach keep their types.
+func TestProgramCache_relistsWithoutLoadingAgain(t *testing.T) {
+	needGo(t)
+	root := writeTree(t, ed)
+	settle(t, root)
+	pc := NewProgramCache(2, time.Minute)
+	defer pc.Close()
+	r := &Runner{Repo: root, Config: edConfigs, Engine: EngineTypes, Programs: pc}
+	ctx := context.Background()
+	refs := func() []string {
+		t.Helper()
+		res, err := r.References(ctx, "a.Scale")
+		if err != nil || res.Incomplete {
+			t.Fatalf("%v %v", err, res)
+		}
+		return hitLines(res)
+	}
+	before := refs()
+	write := func(name, body string) {
+		t.Helper()
+		p := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("b/extra.go", "package b\n\nimport \"example.com/ed/a\"\n\nfunc Quad(s a.Sq) a.Sq { return a.Scale(s, 4) }\n")
+	after := refs()
+	if len(after) != len(before)+1 {
+		t.Errorf("after a new file: %v, want one more use than %v", after, before)
+	}
+	write("d/deep/d.go", "package deep\n\nimport \"example.com/ed/a\"\n\nfunc Half(s a.Sq) a.Sq { return a.Scale(s, 0.5) }\n")
+	if got := refs(); len(got) != len(before)+2 {
+		t.Errorf("after a new package: %v, want two more uses than %v", got, before)
+	}
+	write("b/b.go", strings.Replace(ed["b/b.go"], `import "example.com/ed/a"`, "import (\n\t\"strings\"\n\n\t\"example.com/ed/a\"\n)\n\nvar _ = strings.ToUpper", 1))
+	if got := refs(); len(got) != len(before)+2 {
+		t.Errorf("after a new import: %v, want two more uses than %v", got, before)
+	}
+	if err := os.Remove(filepath.Join(root, "b", "extra.go")); err != nil {
+		t.Fatal(err)
+	}
+	if got := refs(); len(got) != len(before)+1 {
+		t.Errorf("after a file was deleted: %v, want one more use than %v", got, before)
+	}
+	if st := pc.Status(); st.Loads != 2 || st.Refreshes != 8 || st.Stale != 8 {
+		t.Errorf("after four changes to what is listed: %+v, want the 2 loads of the first question and 8 refreshes", st)
+	}
+}
+
+// When the tree changes, a host that hears of it (a file watcher) has the held programs brought up to date at once,
+// off the path of any query: the next question finds them current. A program brought up to date this way was not
+// asked anything, so it is no younger for it and still goes when nothing has asked for the idle timeout.
+func TestProgramCache_renewBringsHeldProgramsUpToDate(t *testing.T) {
+	needGo(t)
+	root := writeTree(t, ed)
+	settle(t, root)
+	pc := NewProgramCache(2, time.Minute)
+	defer pc.Close()
+	r := &Runner{Repo: root, Config: edConfigs, Engine: EngineTypes, Programs: pc}
+	ctx := context.Background()
+	pc.Renew(ctx, root) // nothing held: nothing to do
+	if st := pc.Status(); st.Loads != 0 || len(st.Programs) != 0 {
+		t.Fatalf("renewing an empty cache loaded something: %+v", st)
+	}
+	res, err := r.References(ctx, "a.Scale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := hitLines(res)
+	time.Sleep(150 * time.Millisecond)
+	if err := os.WriteFile(filepath.Join(root, "b", "extra.go"), []byte("package b\n\nimport \"example.com/ed/a\"\n\nfunc Quad(s a.Sq) a.Sq { return a.Scale(s, 4) }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pc.Renew(ctx, root)
+	st := pc.Status()
+	if st.Loads != 2 || st.Refreshes != 2 || len(st.Programs) != 2 {
+		t.Fatalf("after Renew: %+v, want both programs refreshed and held, with no load", st)
+	}
+	for _, p := range st.Programs {
+		if p.IdleSec < 0.15 || p.Queries != 1 {
+			t.Errorf("%s: idle %.3fs after %d queries; a renewal is not a query, and must not keep an unused program alive", p.Config, p.IdleSec, p.Queries)
+		}
+	}
+	pc.Renew(ctx, root) // nothing changed since: the programs stand
+	if st := pc.Status(); st.Refreshes != 2 || st.Loads != 2 {
+		t.Errorf("a second Renew of an unchanged tree: %+v, want nothing done", st)
+	}
+	res, err = r.References(ctx, "a.Scale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := hitLines(res); len(after) != len(before)+1 {
+		t.Errorf("after Renew: %v, want one more use than %v", after, before)
+	}
+	if st := pc.Status(); st.Refreshes != 2 || st.Loads != 2 || st.Reuses != 2 {
+		t.Errorf("the question after Renew: %+v, want both programs reused as they are", st)
+	}
+}
+
+// A held program that could not be brought up to date (the repository's wrap command refused: its lock is taken) is
+// kept. It is still the cheapest thing to refresh once the lock is free; dropping it would make the next question
+// load every configuration from nothing.
+func TestProgramCache_keepsAProgramItCouldNotRefresh(t *testing.T) {
+	needGo(t)
+	if _, err := exec.LookPath("false"); err != nil {
+		t.Skip("no false command to stand in for a wrap command that refuses")
+	}
+	root := writeTree(t, ed)
+	settle(t, root)
+	pc := NewProgramCache(2, time.Minute)
+	defer pc.Close()
+	r := &Runner{Repo: root, Config: edConfigs, Engine: EngineTypes, Programs: pc}
+	ctx := context.Background()
+	if _, err := r.References(ctx, "a.Scale"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b", "extra.go"), []byte("package b\n\nimport \"example.com/ed/a\"\n\nfunc Quad(s a.Sq) a.Sq { return a.Scale(s, 4) }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	locked := edConfigs
+	locked.Wrap = []string{"false"}
+	refused := &Runner{Repo: root, Config: locked, Engine: EngineTypes, Programs: pc}
+	if res, err := refused.References(ctx, "a.Scale"); err == nil && !res.Incomplete {
+		t.Fatalf("a query behind a wrap command that refuses answered: %v", hitLines(res))
+	}
+	pc.Renew(ctx, root) // renews as the runner that loaded them would: that one is not refused
+	if st := pc.Status(); len(st.Programs) != 2 || st.Loads != 2 || st.Refreshes != 2 {
+		t.Errorf("after a refused query and a renewal: %+v, want the 2 programs kept through the refusal and then refreshed, with no load", st)
+	}
+}

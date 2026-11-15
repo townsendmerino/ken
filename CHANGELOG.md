@@ -15,6 +15,16 @@ pre-built binaries.
 
 ## [Unreleased]
 
+## [1.19.1] — 2026-11-15 — the edit hook on a large Go repository
+
+### Fixed
+
+- **`ken hook check-edit` and `go_check_edit` on a large Go repository: an edit that creates a file or a package, or adds an import, no longer type-checks the whole workspace (ADR-068).** Such an edit changes what the go command lists, and the check then type-checked every package of the listing under every configuration, one after another. Only the packages the edit reaches are checked now, on a fresh listing, and the configurations run side by side when their programs are held. On goinfer (seven modules, about 665 packages per configuration, three configurations; M1 Pro) a Write that creates a file in a new package went from 14 s on the first call and 7.5 s on every later one to under 2 s; a Write that creates a file in a package 63 others depend on from about 8 s to about 3.3 s; an edit to that package with nothing changed on disk from about 2.7 s to about 1.6 s.
+- **A directory with no package in it no longer loads the workspace a second time.** The program cache gave the directory a new package is about to be created in a key of its own, loaded every configuration again for it, and evicted the programs just used to make room.
+- **`ken-mcp` no longer drops its type-checked Go programs when a file of a watched repository changes.** The next typed query, or the next edit the hook checked, loaded every configuration from nothing: about 9 s on goinfer after any edit that reached the disk. The watcher now has the programs brought up to date in the background, checking again only what the change reaches, and the next check finds them current: 1.6 to 3.7 s in the same cases. A program that could not be brought up to date because the repository's wrap command refused is kept for the next attempt, not dropped.
+
+Before upgrading: `ken-mcp` holds more memory on a large repository (2.2 GB against 1.7 GB resident after the same checks on goinfer), because three configurations are checked at once and programs stay until `KEN_MCP_GO_IDLE` where a file change used to drop them; and a watched repository with programs loaded runs `go list` and a partial type-check after each change to a Go file, behind the repository's wrap command. Not changed: the first check after the server starts, or after the idle timeout, loads every configuration (10 to 13 s on goinfer). Not measured: Linux, and a real agent session.
+
 ## [1.19.0] — 2026-11-14 — every edit checked as the agent makes it
 
 1.18 gave an agent three tools that say whether an edit would break the build. An agent has to remember to call them. `ken hook check-edit` is a Claude Code hook that runs the same check on every `Edit` and `Write` before it is made, and hands any new error to the agent as context; it never blocks an edit. For Go it asks the running `ken-mcp`, which already holds the type-checked programs: 0.07 s an edit on ken's own source (about 450 files), against 0.9 to 1.6 s from nothing (ADR-067).

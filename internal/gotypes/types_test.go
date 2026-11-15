@@ -586,12 +586,21 @@ func TestRefresh_equalsAFreshLoad(t *testing.T) {
 		t.Helper()
 		p := filepath.Join(root, filepath.FromSlash(name))
 		src, err := os.ReadFile(p)
-		if err != nil {
+		if err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
-		next := change(string(src))
+		next := change(string(src)) // of a file that is not there, "": the edit creates it. "" back deletes it.
 		if next == string(src) {
 			t.Fatalf("the edit to %s changed nothing", name)
+		}
+		if next == "" {
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
 		}
 		if err := os.WriteFile(p, []byte(next), 0o644); err != nil {
 			t.Fatal(err)
@@ -601,6 +610,7 @@ func TestRefresh_equalsAFreshLoad(t *testing.T) {
 	replace := func(old, new string) func(string) string {
 		return func(s string) string { return strings.Replace(s, old, new, 1) }
 	}
+	whole := func(text string) func(string) string { return func(string) string { return text } }
 	steps := []struct {
 		what    string
 		file    string
@@ -630,6 +640,22 @@ func TestRefresh_equalsAFreshLoad(t *testing.T) {
 		{"use of the new import", "c/c.go", func(s string) string { return s + "\nvar _ = strings.ToUpper\n" }, true, true},
 		{"a first method in a test file", "c/c_test.go", func(s string) string { return s + "\nfunc (b Box[T]) Peek() T { return b.Item }\n" }, false, false},
 		{"a build constraint", "b/b_fancy.go", replace("//go:build fancy", "//go:build fancy && !never"), false, false},
+		// Files and packages that come and go: the go command lists another set.
+		{"a new file in a leaf package", "c/more.go",
+			whole("package c\n\nimport \"example.com/tricky/a\"\n\nfunc More(s a.Shape) string { return s.Name() + usePair() }\n"), false, true},
+		{"a new package", "d/d.go",
+			whole("package d\n\nimport (\n\t\"example.com/tricky/a\"\n\t\"example.com/tricky/c\"\n)\n\ntype Dot struct{}\n\nfunc (Dot) Area() float64 { return 0 }\nfunc (Dot) Name() string  { return c.More(Dot{}) }\n\nvar _ a.Shape = Dot{}\n"), false, true},
+		{"a first test file, for the new package", "d/d_test.go",
+			whole("package d\n\nimport \"testing\"\n\nfunc TestDot(t *testing.T) { _ = Dot{}.Name() }\n"), false, true},
+		{"a method in that test file: the plain package is searched too", "d/d_test.go",
+			func(s string) string { return s + "\nfunc (Dot) Weight() int { return 0 }\n" }, false, true},
+		{"the test file deleted: the plain package is the only one left to search", "d/d_test.go", whole(""), false, true},
+		{"a file deleted, and its function with it", "c/more.go", whole(""), false, false},
+		{"the package that used it mended", "d/d.go", replace("return c.More(Dot{})", "return \"dot\""), true, true},
+		{"an import dropped", "d/d.go", func(s string) string {
+			return strings.Replace(strings.Replace(s, "\t\"example.com/tricky/c\"\n", "", 1), "var _ a.Shape = Dot{}", "var _ a.Namer = Dot{}", 1)
+		}, false, true},
+		{"the new package deleted", "d/d.go", whole(""), false, false},
 	}
 	// "a method renamed" is refreshable in principle (no import, clause or constraint changes): let it be, and compare.
 	steps[2].refresh = true
@@ -655,11 +681,18 @@ func TestRefresh_equalsAFreshLoad(t *testing.T) {
 					t.Errorf("%s: refresh possible = %v, want %v", st.what, ok, st.refresh)
 				}
 				if !ok {
-					prog, err = r.load(ctx, bc, root) // what the cache does when a refresh is refused
+					// what the cache does when a refresh is refused: the go command lists the tree again, and only
+					// what the change reaches is type-checked on its answer
+					l, err := r.listModules(ctx, bc, prog.mods, nil)
 					if err != nil {
 						t.Fatal(err)
 					}
-					continue
+					if np, ok, err = prog.refreshOnto(l, []string{file}, nil); err != nil || !ok {
+						t.Fatalf("%s: the program could not be refreshed onto a new listing (%v)", st.what, err)
+					}
+					if np == prog && compiled {
+						t.Errorf("%s: the refresh onto a new listing changed nothing", st.what)
+					}
 				}
 				if st.leaf && compiled && (np.refreshed == 0 || np.refreshed > 4) {
 					t.Errorf("%s: %d packages were checked again, want only the leaf package's own variants", st.what, np.refreshed)
