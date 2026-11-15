@@ -15,6 +15,14 @@ pre-built binaries.
 
 ## [Unreleased]
 
+## [1.19.0] — 2026-11-14 — every edit checked as the agent makes it
+
+1.18 gave an agent three tools that say whether an edit would break the build. An agent has to remember to call them. `ken hook check-edit` is a Claude Code hook that runs the same check on every `Edit` and `Write` before it is made, and hands any new error to the agent as context; it never blocks an edit. For Go it asks the running `ken-mcp`, which already holds the type-checked programs: 0.07 s an edit on ken's own source (about 450 files), against 0.9 to 1.6 s from nothing (ADR-067).
+
+The checks themselves reach further. `py_check_edit` asks mypy and basedpyright as well as ty and pyright. `ts_rename_plan` and `py_rename_plan` take a rename from the project's own tool and refuse it when the edit check finds it would add an error. An edit can delete or move a file. `go_check_edit` puts an edit that compiles to `go vet`. `tests_for` names the tests that reach a symbol, and the edit checks name them for the symbols an edit touches (ADR-066).
+
+Two things to check before upgrading. `ken-mcp` on the stdio transport now listens on a Unix socket in `~/.ken/run` (directory 0700, socket 0600) so the hook can ask it; `KEN_MCP_HOOK_SOCKET=0` turns that off, and the HTTP transport never opens it. `go_check_edit` now runs `go vet` on an edit that compiles, which takes longer; `--no-vet` (`no_vet`) skips it. Not measured: the hook on a large repository, on Windows, or inside a long agent session; the TypeScript and Python hook checks start the project's tool on every edit.
+
 ### Added
 
 - **`ken hook check-edit`: a Claude Code hook that checks every edit before it is made.** Registered on `PreToolUse` for `Edit` and `Write`, it runs the edit the agent is about to make to a Go, TypeScript, JavaScript or Python file through the same check as `go_check_edit`, `ts_check_edit` and `py_check_edit`. An edit that would add errors still goes ahead, and the errors are handed to the agent as context; the hook decides nothing about the tool call and always exits 0. A clean edit, a file of another kind, a project with no tool to ask and a check that runs out of time (20 s by default) are silent; `--why` says which on standard error. For Go it asks a running `ken-mcp` first (ADR-067): the server listens on a socket in `~/.ken/run` that only the user can reach, and answers from the type-checked programs it already holds. On ken's own source (about 450 files) that is 0.07 s an edit, against 0.9 to 1.6 s when the check starts from nothing, which is what happens with no server running, with `--no-server`, or with a server started with `KEN_MCP_HOOK_SOCKET=0`. The first edit after the server starts loads the programs (1.1 s there). A large repository is not measured.
