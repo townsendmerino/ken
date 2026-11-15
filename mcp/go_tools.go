@@ -54,6 +54,8 @@ type GoEditArg struct {
 	NewString  string  `json:"new_string,omitempty" jsonschema:"What replaces old_string (empty deletes it)."`
 	ReplaceAll bool    `json:"replace_all,omitempty" jsonschema:"Replace every occurrence of old_string."`
 	Content    *string `json:"content,omitempty" jsonschema:"The file's whole new contents, in place of old_string and new_string. The file need not exist yet."`
+	Delete     bool    `json:"delete,omitempty" jsonschema:"Delete the file."`
+	MoveTo     string  `json:"move_to,omitempty" jsonschema:"Move the file to this path, relative to the repo root. Later edits may then change it under its new name."`
 }
 
 // GoCheckEditArgs is the argument schema for go_check_edit.
@@ -62,6 +64,7 @@ type GoCheckEditArgs struct {
 	repoArg
 	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json'."`
 	Max    int    `json:"max,omitempty" jsonschema:"Cap on the lines shown of each kind (default 40; the verdict always carries the totals)."`
+	NoVet  bool   `json:"no_vet,omitempty" jsonschema:"Leave go vet out and type-check only. By default an edit that compiles is also put to go vet."`
 }
 
 const goTierNote = "Type-resolved (by Go's own type checker, following gopls's rules for what counts) and merged over every build configuration the repo lists in " +
@@ -116,11 +119,13 @@ func registerGoTools(srv *sdk.Server, cfg *Config, canRename bool) {
 			"errors the edit would cause that are not there now, in the edited files and in every package that depends " +
 			"on them (ERROR, with file and line); the identifiers on lines the edit does not touch that would come to " +
 			"refer to another declaration, such as a name the edit shadows (MOVED: it compiles and means something " +
-			"else); and the exported declarations it removes or changes (API). Use it before a change to a signature, a " +
+			"else); what `go vet` would newly report in the edited packages when the edit compiles, such as a Printf verb " +
+			"that does not fit its argument (VET: go test will not run a package with one); and the exported " +
+			"declarations it removes or changes (API). Use it before a change to a signature, a " +
 			"type or an interface, to see every caller that breaks, including code behind another GOOS or build tag " +
 			"that a local `go build` does not compile. It says nothing about behaviour: tests still have to run. " +
 			"Edits take the shape of an editor's replace (file, old_string, new_string) or a whole file (file, " +
-			"content), and several are checked together. Merged over the build configurations in " + engine.GoConfigFile +
+			"content), and several are checked together. A file can also be deleted (file, delete) or moved (file, move_to). Merged over the build configurations in " + engine.GoConfigFile +
 			" (without that file: the host's default only). A change to a file's imports costs a few seconds more " +
 			"(the go command lists the packages again). Local Go repositories only.",
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args GoCheckEditArgs) (*sdk.CallToolResult, any, error) {
@@ -282,7 +287,7 @@ func handleGoRename(ctx context.Context, cfg *Config, args GoRenameArgs) (*sdk.C
 
 func handleGoCheckEdit(ctx context.Context, cfg *Config, args GoCheckEditArgs) (*sdk.CallToolResult, any, error) {
 	if len(args.Edits) == 0 {
-		return errorResult(args.Output, "edits is required: at least one {file, old_string, new_string} or {file, content}"), nil, nil
+		return errorResult(args.Output, "edits is required: at least one {file, old_string, new_string}, {file, content}, {file, delete} or {file, move_to}"), nil, nil
 	}
 	gt, note, errResult := openGoTyped(cfg, args.Repo, args.Output)
 	if errResult != nil {
@@ -290,15 +295,28 @@ func handleGoCheckEdit(ctx context.Context, cfg *Config, args GoCheckEditArgs) (
 	}
 	edits := make([]engine.GoFileEdit, len(args.Edits))
 	for i, e := range args.Edits {
-		edits[i] = engine.GoFileEdit{File: e.File, OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll, Content: e.Content}
+		edits[i] = engine.GoFileEdit{File: e.File, OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll, Content: e.Content, Delete: e.Delete, MoveTo: e.MoveTo}
 	}
+	gt.SkipVet = args.NoVet
 	res, err := gt.CheckEdit(ctx, edits)
 	if err != nil {
+		recordCheck(cfg, "go_check_edit", err, 0, false)
 		return errorResult(args.Output, err.Error()), nil, nil
 	}
+	recordCheck(cfg, "go_check_edit", nil, len(res.Errors)+len(res.Moved)+len(res.Vet), res.Clean)
 	limit := args.Max
 	if limit <= 0 {
 		limit = 40
 	}
-	return dispatchOutput(args.Output, res, note+res.Text(len(gt.Config.Configs), limit))
+	spots := make([]editSpot, 0, len(args.Edits))
+	for _, e := range args.Edits {
+		if e.Content == nil && !e.Delete && e.MoveTo == "" {
+			spots = append(spots, editSpot{e.File, e.OldString})
+		}
+	}
+	tests := testsForEdit(ctx, cfg, args.Repo, gt.Repo, spots)
+	return dispatchOutput(args.Output, struct {
+		*engine.GoEditCheck
+		Tests *EditTests `json:"tests,omitempty"`
+	}{res, tests}, note+res.Text(len(gt.Config.Configs), limit)+tests.text())
 }

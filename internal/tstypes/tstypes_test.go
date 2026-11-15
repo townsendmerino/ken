@@ -133,6 +133,8 @@ func (f *fakeServer) serve() {
 			Method string
 			Params struct {
 				TextDocument struct{ URI, Text string }
+				Position     struct{ Line, Character int }
+				NewName      string
 			}
 		}
 		_ = json.Unmarshal(buf, &m)
@@ -146,6 +148,32 @@ func (f *fakeServer) serve() {
 		case "textDocument/didClose":
 			delete(f.open, path)
 			f.closes++
+		case "textDocument/rename":
+			// the name under the position is renamed on every "def" and "use" line of every source file
+			lines := strings.Split(f.text(path), "\n")
+			word := regexp.MustCompile(`\w+`)
+			name := ""
+			for _, span := range word.FindAllStringIndex(lines[m.Params.Position.Line], -1) {
+				if span[0] <= m.Params.Position.Character && m.Params.Position.Character < span[1] {
+					name = lines[m.Params.Position.Line][span[0]:span[1]]
+				}
+			}
+			changes := map[string][]any{}
+			_ = filepath.WalkDir(f.root, func(p string, d os.DirEntry, err error) error {
+				if err != nil || d.IsDir() || !IsSource(p) {
+					return nil
+				}
+				for i, l := range strings.Split(f.text(p), "\n") {
+					for _, kw := range []string{"def ", "use "} {
+						if at := strings.Index(l, kw+name); at >= 0 && name != "" && len(l) == at+len(kw)+len(name) {
+							changes[lsp.PathToURI(p)] = append(changes[lsp.PathToURI(p)], map[string]any{"newText": m.Params.NewName,
+								"range": map[string]any{"start": map[string]int{"line": i, "character": at + len(kw)}, "end": map[string]int{"line": i, "character": len(l)}}})
+						}
+					}
+				}
+				return nil
+			})
+			f.reply(m.ID, map[string]any{"changes": changes}, "")
 		case "shutdown":
 			f.sawShutdow = true
 			f.reply(m.ID, nil, "")
@@ -284,7 +312,7 @@ func TestCheckEdit_aRefusedFileMakesTheAnswerIncomplete(t *testing.T) {
 		t.Errorf("%+v", res)
 	}
 	if text := res.Text(0); !strings.Contains(text, "INCOMPLETE: no answer for 1 files (refuse.ts: no project for this file)") ||
-		!strings.Contains(text, "NO NEW ERROR FOUND, but not every file was checked") {
+		!strings.Contains(text, "NO NEW ERROR FOUND, but not everything was checked") {
 		t.Error(text)
 	}
 }
@@ -434,6 +462,9 @@ func TestCheckEdit_againstTheRealCompiler(t *testing.T) {
 		{"a new file that uses the other project wrongly",
 			[]FileEdit{{File: "packages/app/src/extra.ts", Content: str("import { scale } from \"../../core/src/shape\";\nexport const s = scale(1, 2);\n")}},
 			"packages/app/src/extra.ts:2: TS2345: Argument of type 'number' is not assignable to parameter of type 'Square'.", 0},
+		{"a module moves and its importer is updated with it",
+			[]FileEdit{{File: "packages/core/src/shape.ts", MoveTo: "packages/core/src/shapes.ts"},
+				{File: "packages/app/src/main.ts", OldString: `from "../../core/src/shape"`, NewString: `from "../../core/src/shapes"`}}, "", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := writeTree(t, realFixture)
@@ -458,7 +489,10 @@ func TestCheckEdit_againstTheRealCompiler(t *testing.T) {
 				patched[k] = v
 			}
 			for _, e := range tc.edits {
-				if e.Content != nil {
+				if e.MoveTo != "" {
+					patched[e.MoveTo] = patched[e.File]
+					delete(patched, e.File)
+				} else if e.Content != nil {
 					patched[e.File] = *e.Content
 				} else {
 					patched[e.File] = strings.Replace(patched[e.File], e.OldString, e.NewString, 1)
@@ -487,4 +521,154 @@ func TestCheckEdit_againstTheRealCompiler(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRenamePlan_againstTheRealCompiler(t *testing.T) {
+	tsc := os.Getenv(realTree)
+	if tsc == "" {
+		t.Skip(realTree + " is not set")
+	}
+	plan := func(t *testing.T, file string, line int, name, to string) (*RenamePlan, string) {
+		t.Helper()
+		root := writeTree(t, realFixture)
+		p, err := (&Runner{Repo: root, Tsc: tsc}).RenamePlan(context.Background(), file, line, name, to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("\n%s%s", p.Text(0), p.Patch)
+		return p, root
+	}
+	files := func(p *RenamePlan) string {
+		var out []string
+		for _, f := range p.Files {
+			out = append(out, fmt.Sprintf("%s%v", f.File, f.Lines))
+		}
+		return strings.Join(out, " ")
+	}
+
+	t.Run("a function used in the other project", func(t *testing.T) {
+		p, root := plan(t, "packages/core/src/shape.ts", 12, "scale", "resize")
+		if got, want := files(p), "packages/app/src/main.ts[1 4] packages/core/src/shape.ts[12]"; got != want {
+			t.Errorf("files %s, want %s", got, want)
+		}
+		if !p.Verified || p.Refused || p.Incomplete || len(p.Mentions) != 0 || p.Patch == "" {
+			t.Errorf("verified %v, refused %v, incomplete %v, mentions %v", p.Verified, p.Refused, p.Incomplete, p.Mentions)
+		}
+		// the patch is one git applies, and the project it leaves builds as it did
+		base := compilerErrors(t, tsc, writeTree(t, realFixture))
+		patchFile := filepath.Join(t.TempDir(), "rename.patch")
+		if err := os.WriteFile(patchFile, []byte(p.Patch), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := testenv.Command(t, "git", "apply", "--unsafe-paths", "--directory="+root, patchFile)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git apply: %v\n%s", err, out)
+		}
+		src, _ := os.ReadFile(filepath.Join(root, "packages/app/src/main.ts"))
+		if !strings.Contains(string(src), "return resize(s, 2);") || strings.Contains(string(src), "scale") {
+			t.Errorf("main.ts after the patch:\n%s", src)
+		}
+		if after := compilerErrors(t, tsc, root); strings.Join(after, "|") != strings.Join(base, "|") {
+			t.Errorf("the build after the patch: %v, before: %v", after, base)
+		}
+	})
+
+	t.Run("an interface member renames its implementation", func(t *testing.T) {
+		p, _ := plan(t, "packages/core/src/shape.ts", 2, "area", "surface")
+		if got, want := files(p), "packages/core/src/shape.ts[2 7]"; got != want || !p.Verified {
+			t.Errorf("files %s, want %s; verified %v", got, want, p.Verified)
+		}
+	})
+
+	t.Run("a rename onto a name the module already has is refused", func(t *testing.T) {
+		p, _ := plan(t, "packages/core/src/shape.ts", 12, "scale", "Square")
+		if !p.Refused || p.Verified || p.Patch != "" || len(p.Conflicts) == 0 || !strings.Contains(p.Text(0), "NOT SAFE as computed") {
+			t.Errorf("refused %v, verified %v, conflicts %v", p.Refused, p.Verified, p.Conflicts)
+		}
+	})
+
+	t.Run("what is not a symbol", func(t *testing.T) {
+		root := writeTree(t, realFixture)
+		r := &Runner{Repo: root, Tsc: tsc}
+		for _, tc := range []struct {
+			file       string
+			line       int
+			name, want string
+		}{
+			{"packages/core/src/shape.ts", 12, "nothere", `does not name "nothere"`},
+			{"packages/core/src/shape.ts", 99, "scale", "there is no line 99"},
+			{"tsconfig.json", 1, "files", "not a source file"},
+			{"../elsewhere.ts", 1, "x", "outside the repository"},
+		} {
+			if _, err := r.RenamePlan(context.Background(), tc.file, tc.line, tc.name, "other"); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("%s:%d %s: err = %v, want %q", tc.file, tc.line, tc.name, err, tc.want)
+			}
+		}
+	})
+}
+
+func TestRenamePlan_againstAFakeServer(t *testing.T) {
+	tree := map[string]string{
+		"a.ts":       "def foo\n",
+		"b.ts":       "use foo\nnote: foo is spelled here too\n",
+		"other.ts":   "def unrelated\n",
+		".gitignore": "gen/\n",
+	}
+	runner := func(root string) *Runner {
+		// a rename is two sessions: the one that computes it, and the check's
+		return &Runner{Repo: root, Tsc: "fake-tsc", Spawn: func(context.Context, string, []string, []string) (lsp.Proc, error) {
+			return newFake(root), nil
+		}}
+	}
+	t.Run("a rename that holds", func(t *testing.T) {
+		root := writeTree(t, tree)
+		p, err := runner(root).RenamePlan(context.Background(), "b.ts", 1, "foo", "bar")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("\n%s%s", p.Text(0), p.Patch)
+		want := "--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,1 @@\n-def foo\n+def bar\n--- a/b.ts\n+++ b/b.ts\n@@ -1,2 +1,2 @@\n-use foo\n+use bar\n note: foo is spelled here too\n"
+		if p.Patch != want {
+			t.Errorf("patch:\n%s\nwant:\n%s", p.Patch, want)
+		}
+		if !p.Verified || p.Refused || len(p.Files) != 2 || len(p.Mentions) != 1 || p.Mentions[0].File != "b.ts" || p.Mentions[0].Lines[0] != 2 {
+			t.Errorf("verified %v, refused %v, files %v, mentions %v", p.Verified, p.Refused, p.Files, p.Mentions)
+		}
+		if src, _ := os.ReadFile(filepath.Join(root, "a.ts")); string(src) != "def foo\n" {
+			t.Errorf("the plan wrote to the repository: %q", src)
+		}
+	})
+	t.Run("a rename that breaks the build is refused", func(t *testing.T) {
+		p, err := runner(writeTree(t, tree)).RenamePlan(context.Background(), "a.ts", 1, "foo", "BAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !p.Refused || p.Verified || p.Patch != "" || len(p.Conflicts) != 2 || !strings.Contains(p.Conflicts[0], "a.ts:1: with the rename applied: TS1: bad line") {
+			t.Errorf("refused %v, conflicts %v, patch %q", p.Refused, p.Conflicts, p.Patch)
+		}
+	})
+	t.Run("a rename that reaches a file git ignores is refused", func(t *testing.T) {
+		files := map[string]string{"gen/out.ts": "use foo\n"}
+		for k, v := range tree {
+			files[k] = v
+		}
+		p, err := runner(writeTree(t, files)).RenamePlan(context.Background(), "a.ts", 1, "foo", "bar")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !p.Refused || p.Verified || p.Patch != "" || len(p.Conflicts) != 1 || !strings.Contains(p.Conflicts[0], "gen/out.ts: the rename would edit this file, which is not one of the repository's own source files") {
+			t.Errorf("refused %v, conflicts %v", p.Refused, p.Conflicts)
+		}
+	})
+	t.Run("nothing to rename", func(t *testing.T) {
+		_, err := runner(writeTree(t, tree)).RenamePlan(context.Background(), "b.ts", 2, "note", "bar")
+		if err == nil || !strings.Contains(err.Error(), `offers no rename for "note" at b.ts:2`) {
+			t.Errorf("err = %v", err)
+		}
+		_, err = runner(writeTree(t, tree)).RenamePlan(context.Background(), "b.ts", 1, "foo", "two words")
+		if err == nil || !strings.Contains(err.Error(), "is not a name") {
+			t.Errorf("err = %v", err)
+		}
+	})
 }

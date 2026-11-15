@@ -56,6 +56,9 @@ type Runner struct {
 	// program in memory; more is faster and holds that many.
 	Parallel int
 
+	// SkipVet makes CheckEdit leave go vet out: the type check only, as it was before 1.19.
+	SkipVet bool
+
 	// checkEditReload makes CheckEdit list and type-check each configuration afresh with the edit in place, where
 	// it would refresh the program it has. Tests hold the two to the same answer.
 	checkEditReload bool

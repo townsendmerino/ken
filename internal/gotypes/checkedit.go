@@ -28,6 +28,10 @@ type FileEdit struct {
 	// Content, when not nil, is the file's whole new contents; the file need not exist yet. OldString and NewString
 	// are then ignored.
 	Content *string `json:"content,omitempty"`
+	// Delete removes the file. MoveTo moves it, with the contents it has at that point of the edits, to another
+	// path (another package, if the directory differs), which later edits may change.
+	Delete bool   `json:"delete,omitempty"`
+	MoveTo string `json:"move_to,omitempty"`
 }
 
 // EditedFile is one file an edit changes.
@@ -36,6 +40,9 @@ type EditedFile struct {
 	Lines   []int  `json:"lines"`             // the lines of the new contents the edit wrote
 	Removed int    `json:"removed,omitempty"` // lines of the old contents it took out
 	Created bool   `json:"created,omitempty"`
+	Deleted bool   `json:"deleted,omitempty"`
+	// MovedFrom is the file this one was, when the edit moves it.
+	MovedFrom string `json:"moved_from,omitempty"`
 }
 
 // EditFinding is one thing the check of an edit found, at a line of the edited tree.
@@ -66,8 +73,16 @@ type EditCheck struct {
 	// Packages is how many packages were type-checked again, under the configuration with the most.
 	Packages int         `json:"packages"`
 	Runs     []ConfigRun `json:"runs"`
-	// Clean is true when every listed configuration that compiles an edited file was checked and found no new error
-	// and no moved identifier.
+	// Vet are the problems `go vet` would report in the edited packages that it does not report now: the edit
+	// compiles, and `go test` would refuse to run a package with one of the checks it runs first (printf among
+	// them). Each message starts with the name of vet's check. Vet is asked only about an edit that compiles.
+	Vet []EditFinding `json:"vet,omitempty"`
+	// Vetted is true when go vet was asked about the edited packages under every configuration checked. VetNote
+	// says why when it could not be.
+	Vetted  bool   `json:"vetted"`
+	VetNote string `json:"vet_note,omitempty"`
+	// Clean is true when every listed configuration that compiles an edited file was checked and found no new error,
+	// no moved identifier and no new vet finding.
 	Clean bool `json:"clean"`
 	// Incomplete is true when a configuration could not be checked, or none compiles the edited files.
 	Incomplete bool `json:"incomplete"`
@@ -84,45 +99,91 @@ func (r *Runner) CheckEdit(ctx context.Context, edits []FileEdit) (*EditCheck, e
 		return nil, errors.New("no edit given")
 	}
 	root := r.realRepo()
+	// patch holds each edited file's new contents; a nil entry is a file the edit deletes.
 	patch, old := map[string][]byte{}, map[string][]byte{}
-	var order []string // absolute, in the order first named
-	for _, e := range edits {
-		name := strings.TrimSpace(e.File)
+	var order []string               // absolute, in the order first named
+	movedFrom := map[string]string{} // a file a move creates -> the file it was
+	place := func(name string) (abs, rel string, err error) {
+		name = strings.TrimSpace(name)
 		if name == "" {
-			return nil, errors.New("an edit names no file")
+			return "", "", errors.New("an edit names no file")
 		}
-		abs := filepath.FromSlash(name)
+		abs = filepath.FromSlash(name)
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(root, abs)
 		}
 		abs = filepath.Clean(abs)
 		rel, inRepo := r.rel(abs)
 		if !inRepo {
-			return nil, fmt.Errorf("%s is outside the repository", name)
+			return "", "", fmt.Errorf("%s is outside the repository", name)
 		}
 		abs = filepath.Join(root, filepath.FromSlash(rel)) // spelled as the go command spells it
 		if !strings.HasSuffix(abs, ".go") {
-			return nil, fmt.Errorf("%s: only .go files are checked (an edit to go.mod or go.work changes what is built, not how it type-checks)", rel)
+			return "", "", fmt.Errorf("%s: only .go files are checked (an edit to go.mod or go.work changes what is built, not how it type-checks)", rel)
 		}
-		cur, have := patch[abs]
-		if !have {
-			src, err := os.ReadFile(abs)
-			switch {
-			case err == nil:
-				old[abs] = src
-			case !os.IsNotExist(err):
-				return nil, fmt.Errorf("%s: %w", rel, err)
-			case e.Content == nil:
-				return nil, fmt.Errorf("%s does not exist: give its whole contents to create it", rel)
-			}
-			cur = src
-			order = append(order, abs)
+		return abs, rel, nil
+	}
+	// load brings a file into the patch as it is on disk (nil when it is not there).
+	load := func(abs, rel string) error {
+		if _, have := patch[abs]; have {
+			return nil
 		}
+		src, err := os.ReadFile(abs)
 		switch {
+		case err == nil:
+			old[abs] = src
+			patch[abs] = src
+		case !os.IsNotExist(err):
+			return fmt.Errorf("%s: %w", rel, err)
+		default:
+			patch[abs] = nil
+		}
+		order = append(order, abs)
+		return nil
+	}
+	for _, e := range edits {
+		abs, rel, err := place(e.File)
+		if err != nil {
+			return nil, err
+		}
+		if err := load(abs, rel); err != nil {
+			return nil, err
+		}
+		cur := patch[abs]
+		switch {
+		case e.Delete || e.MoveTo != "":
+			if cur == nil {
+				return nil, fmt.Errorf("%s does not exist, so it cannot be deleted or moved", rel)
+			}
+			if e.MoveTo != "" {
+				to, toRel, err := place(e.MoveTo)
+				if err != nil {
+					return nil, err
+				}
+				if err := load(to, toRel); err != nil {
+					return nil, err
+				}
+				if to == abs || patch[to] != nil {
+					return nil, fmt.Errorf("%s cannot be moved to %s: that file exists", rel, toRel)
+				}
+				patch[to] = cur
+				from := abs
+				if earlier, ok := movedFrom[abs]; ok {
+					from = earlier // moved twice
+					delete(movedFrom, abs)
+				}
+				if _, onDisk := old[from]; onDisk {
+					movedFrom[to] = from
+				}
+			}
+			delete(movedFrom, abs)
+			cur = nil
 		case e.Content != nil:
-			cur = []byte(*e.Content)
+			cur = append([]byte{}, *e.Content...) // never nil: an empty file is a file
+		case cur == nil:
+			return nil, fmt.Errorf("%s does not exist: give its whole contents to create it", rel)
 		case e.OldString == "":
-			return nil, fmt.Errorf("%s: an edit needs old_string, or content for the whole file", rel)
+			return nil, fmt.Errorf("%s: an edit needs old_string, content for the whole file, delete or move_to", rel)
 		default:
 			n := strings.Count(string(cur), e.OldString)
 			switch {
@@ -140,12 +201,28 @@ func (r *Runner) CheckEdit(ctx context.Context, edits []FileEdit) (*EditCheck, e
 	for _, abs := range order {
 		rel, _ := r.rel(abs)
 		was, existed := old[abs]
-		if existed && string(was) == string(patch[abs]) {
-			delete(patch, abs)
+		if (existed && patch[abs] != nil && string(was) == string(patch[abs])) || (!existed && patch[abs] == nil) {
+			delete(patch, abs) // unchanged, or created and deleted again
 			continue
 		}
-		ef := EditedFile{File: rel, Created: !existed}
-		if existed {
+		ef := EditedFile{File: rel, Created: !existed, Deleted: patch[abs] == nil}
+		from, moved := movedFrom[abs]
+		if moved && (existed || patch[abs] == nil || patch[from] != nil) {
+			moved = false // the target was there before, or the source came back
+		}
+		if moved {
+			// the file is the one at from, under another name: its lines are carried over, and only the ones a later
+			// edit wrote count as written
+			m := newLineMap(old[from], patch[abs])
+			m.to = abs
+			maps[from], maps[abs] = m, m
+			ef.MovedFrom, _ = r.rel(from)
+			ef.Lines, _ = m.changedLines()
+		} else if ef.Deleted {
+			if _, isSource := maps[abs]; !isSource {
+				ef.Removed = strings.Count(strings.TrimSuffix(string(was), "\n"), "\n") + 1
+			}
+		} else if existed {
 			maps[abs] = newLineMap(was, patch[abs])
 			ef.Lines, ef.Removed = maps[abs].changedLines()
 		} else {
@@ -163,6 +240,9 @@ func (r *Runner) CheckEdit(ctx context.Context, edits []FileEdit) (*EditCheck, e
 	// is noise.
 	for _, ef := range res.Files {
 		abs := filepath.Join(root, filepath.FromSlash(ef.File))
+		if ef.Deleted {
+			continue
+		}
 		_, err := parser.ParseFile(token.NewFileSet(), abs, patch[abs], parser.SkipObjectResolution)
 		var list scanner.ErrorList
 		if errors.As(err, &list) {
@@ -387,7 +467,53 @@ func (r *Runner) CheckEdit(ctx context.Context, edits []FileEdit) (*EditCheck, e
 	}
 	sort.Strings(res.API)
 	res.Incomplete = failed || !checkedAny
-	res.Clean = !res.Incomplete && len(res.Errors) == 0 && len(res.Moved) == 0
+
+	// An edit that compiles is put to go vet, by the go command itself with the edit as an overlay (vetedit.go).
+	if checkedAny && len(res.Errors) == 0 && !r.SkipVet && r.Run == nil {
+		type vkey struct {
+			file string
+			line int
+			msg  string
+		}
+		under := map[vkey][]string{}
+		var order []vkey
+		res.Vetted = true
+		for _, j := range jobs {
+			if j.err != nil || len(j.diffs) == 0 {
+				continue
+			}
+			bc := r.Config.Configs[j.ci]
+			fs, err := r.vetEdit(ctx, bc, patch, old)
+			if err != nil {
+				res.Vetted = false
+				if res.VetNote == "" {
+					res.VetNote = firstLine(err.Error())
+				}
+				continue
+			}
+			for _, f := range fs {
+				rel, inRepo := r.rel(f.file)
+				if !inRepo {
+					rel = f.file
+				}
+				k := vkey{rel, f.line, f.analyzer + ": " + f.msg}
+				if under[k] == nil {
+					order = append(order, k)
+				}
+				under[k] = append(under[k], bc.Name)
+			}
+		}
+		sort.SliceStable(order, func(a, b int) bool {
+			if order[a].file != order[b].file {
+				return order[a].file < order[b].file
+			}
+			return order[a].line < order[b].line
+		})
+		for _, k := range order {
+			res.Vet = append(res.Vet, EditFinding{File: k.file, Line: k.line, Message: k.msg, Configs: under[k]})
+		}
+	}
+	res.Clean = !res.Incomplete && len(res.Errors) == 0 && len(res.Moved) == 0 && len(res.Vet) == 0
 	return res, nil
 }
 
@@ -411,8 +537,13 @@ func (c *EditCheck) Text(nConfigs, maxFindings int) string {
 	b.WriteByte('\n')
 	for _, f := range c.Files {
 		fmt.Fprintf(&b, "  %s", f.File)
-		if f.Created {
+		switch {
+		case f.MovedFrom != "":
+			b.WriteString(" (moved from " + f.MovedFrom + ")")
+		case f.Created:
 			b.WriteString(" (new file)")
+		case f.Deleted:
+			b.WriteString(" (deleted)")
 		}
 		b.WriteByte('\n')
 	}
@@ -449,6 +580,10 @@ func (c *EditCheck) Text(nConfigs, maxFindings int) string {
 	}
 	list("ERROR", c.Errors)
 	list("MOVED", c.Moved)
+	list("VET", c.Vet)
+	if c.VetNote != "" {
+		fmt.Fprintf(&b, "go vet was not asked: %s\n", c.VetNote)
+	}
 	for _, a := range c.API {
 		fmt.Fprintf(&b, "API: %s\n", a)
 	}
@@ -457,11 +592,20 @@ func (c *EditCheck) Text(nConfigs, maxFindings int) string {
 	}
 	switch {
 	case c.Clean:
-		b.WriteString("checked: the edit was applied in memory and what it reaches type-checked again; no new compile error, and every identifier on a line it does not touch still refers to the declaration it referred to\n")
+		b.WriteString("checked: the edit was applied in memory and what it reaches type-checked again; no new compile error, and every identifier on a line it does not touch still refers to the declaration it referred to")
+		if c.Vetted {
+			b.WriteString("; go vet reports nothing new in the edited packages")
+		}
+		b.WriteByte('\n')
 	case len(c.Errors) > 0:
 		fmt.Fprintf(&b, "WOULD NOT COMPILE: %d new errors\n", len(c.Errors))
 	case len(c.Moved) > 0:
 		fmt.Fprintf(&b, "COMPILES, BUT MEANS SOMETHING ELSE in %d places the edit does not touch (MOVED lines): check each is intended\n", len(c.Moved))
+		if len(c.Vet) > 0 {
+			fmt.Fprintf(&b, "and go vet would report %d new problems (VET lines)\n", len(c.Vet))
+		}
+	case len(c.Vet) > 0:
+		fmt.Fprintf(&b, "COMPILES, BUT go vet WOULD REPORT %d new problems (VET lines): go test runs these checks first and does not run a package's tests when one fails\n", len(c.Vet))
 	default:
 		b.WriteString("NOT CHECKED: no listed configuration could check the edit\n")
 	}

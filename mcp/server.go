@@ -161,6 +161,20 @@ type UsageRecorder interface {
 	Record(callType string, results, snippetChars, fileChars int)
 }
 
+// CheckRecorder is what a UsageRecorder may also implement to count edit checks (go_check_edit, ts_check_edit,
+// py_check_edit): the tool, what the check came to (engine.EditCheckOutcome) and how many new errors it found. A
+// recorder without it counts no checks.
+type CheckRecorder interface {
+	RecordCheck(callType, outcome string, findings int)
+}
+
+// recordCheck counts one edit check, when the server's recorder can.
+func recordCheck(cfg *Config, tool string, err error, findings int, clean bool) {
+	if rec, ok := cfg.UsageRecorder.(CheckRecorder); ok && rec != nil {
+		rec.RecordCheck(tool, engine.EditCheckOutcome(err, findings, clean), findings)
+	}
+}
+
 // NewServer returns an MCP server with `search` and `find_related`
 // registered. The server speaks JSON-RPC over whatever Transport the
 // caller passes to server.Run — ken-mcp uses sdk.StdioTransport.
@@ -179,13 +193,17 @@ func NewServer(cfg Config) *sdk.Server {
 	if cfg.Chunker == "" {
 		cfg.Chunker = "regex"
 	}
+	// Which typed tools this server offers is decided once, here: the instructions name the ones that are offered and
+	// no others.
+	typed := typedTools{
+		goTools: engine.GoPath() != "",
+		ts:      tsToolsAvailable(&cfg),
+		py:      pyToolsAvailable(&cfg),
+	}
+	typed.pyRename = typed.py && pyRenameAvailable(&cfg)
+	typed.goRename = typed.goTools && (!cfg.GoTyped.NeedsGopls() || engine.GoplsPath() != "")
 	if cfg.Instructions == "" {
-		cfg.Instructions = "Instant code search for any local or remote git repository. " +
-			"Call `search` to find relevant code; call `find_related` on a result to discover similar code elsewhere. " +
-			"When working in a local project, pass the project root as `repo`. " +
-			"For remote repos, pass an explicit https:// URL. Never guess or infer URLs. " +
-			"Prefer ken for conceptual queries (\"where do we handle X?\"), locating definitions, and \"show me the surface of this area\" explorations. " +
-			"For refactors, renames, or any operation that must be exhaustive, fall back to your native grep / file-search tool — grep gives 100% recall on literal matches, while ken's hybrid search optimizes for relevance over completeness and isn't designed for exhaustive enumeration."
+		cfg.Instructions = defaultInstructions(typed)
 	}
 
 	srv := sdk.NewServer(&sdk.Implementation{
@@ -301,6 +319,20 @@ func NewServer(cfg Config) *sdk.Server {
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
+		Name: "tests_for",
+		Description: "Find the tests that call a function or method, and the command that runs them: " +
+			"`go test -run '^(TestA|TestB)$' ./pkg` per Go package, or a pytest line. Includes tests one call away " +
+			"(a test that calls a function that calls the symbol) unless depth is 1. Use it after changing a " +
+			"function, to run the tests that exercise it and not the whole suite. Go and Python test files only. " +
+			"Name-resolved, not type-resolved: a same-named function elsewhere brings its tests too, and a test " +
+			"that reaches the symbol through an interface or more than one call away is not found.",
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args TestsForArgs) (*sdk.CallToolResult, any, error) {
+		stop := startProgressHeartbeat(ctx, req, "ken tests_for")
+		defer stop()
+		return handleTestsFor(ctx, &cfg, args)
+	})
+
+	sdk.AddTool(srv, &sdk.Tool{
 		Name: "outline",
 		Description: "Show the structural outline of a file or directory. " +
 			"For a file path: returns every top-level function, class, and method " +
@@ -364,18 +396,22 @@ func NewServer(cfg Config) *sdk.Server {
 	// The Go typed tier (ADR-059, ADR-061, ADR-062) needs the go command, and gopls only when an engine that asks
 	// gopls was chosen: go_rename_plan is then offered only with gopls on PATH, so that no tool is offered that
 	// could only fail.
-	if engine.GoPath() != "" {
-		registerGoTools(srv, &cfg, !cfg.GoTyped.NeedsGopls() || engine.GoplsPath() != "")
+	if typed.goTools {
+		registerGoTools(srv, &cfg, typed.goRename)
 	}
 
 	// The TypeScript typed tier (ADR-064) asks the compiler installed in the repository, so its tool is offered when
 	// the default repository has one.
-	if tsToolsAvailable(&cfg) {
+	if typed.ts {
 		registerTSTools(srv, &cfg)
+		registerTSRenameTool(srv, &cfg)
 	}
 	// The Python typed tier (ADR-065) asks the type checker the repository installed, by the same rule.
-	if pyToolsAvailable(&cfg) {
+	if typed.py {
 		registerPyTools(srv, &cfg)
+		if typed.pyRename {
+			registerPyRenameTool(srv, &cfg)
+		}
 	}
 
 	return srv

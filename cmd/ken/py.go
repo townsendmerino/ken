@@ -14,30 +14,43 @@ import (
 
 const pyUsage = `Usage: ken py check-edit <repo> <file> <new-contents-file> [--json] [--max N] [--checker PATH]
        ken py check-edit <repo> --edits FILE [--json] [--max N] [--checker PATH]
+       ken py rename-plan <repo> <file>:<line> <name> <new-name> [--json] [--patch FILE] [--checker PATH]
 
 Answers about a Python repository from the type checker the project itself
-installed: ty in its virtual environment (.venv or venv), or pyright in its
-node_modules (pyright needs node on PATH). ken installs neither.
+installed: ty, basedpyright or mypy in its virtual environment (.venv or venv),
+or pyright in its node_modules (pyright needs node on PATH). ken installs none.
+Where a project has several, the one it configures is asked.
 
   check-edit   what an edit would do to the type check, before it is made; writes
                nothing. The edit is opened as unsaved contents in the checker
                and every Python file is asked for its errors, before and after.
+               mypy has no such mode: it is run twice, as the project is and
+               with each edited file replaced (--shadow-file), with its cache
+               kept outside the repository. It cannot check a new file.
                <new-contents-file> holds the whole new contents of <file>
                ("-" reads standard input). --edits FILE is a JSON list of
                {"file","old_string","new_string","replace_all"} or
                {"file","content"} ("-" reads standard input).
+` + renamePlanUsage + `               (ty, pyright or basedpyright compute it; mypy cannot). None of
+               them renames a method together with the protocol member it
+               satisfies: the check reports the classes that would be left behind
   --checker PATH  the program to run, in place of the one found for the edited
-               file's project: a ty binary, or pyright's pyright-langserver
+               file's project: a ty or mypy binary, or the pyright-langserver
+               or basedpyright-langserver launcher
   --max N      cap on the error lines shown (default 200; 0 shows all)
 
-Exit status: 0 when the edit causes no new error, 3 when it does or when not
-every file could be checked, 1 on error, 2 on usage.
+Exit status: 0 when the edit causes no new error (rename-plan: the plan is
+checked and holds), 3 when it does or when not every file could be checked,
+1 on error, 2 on usage.
 `
 
 func cmdPy(args []string) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		fmt.Print(pyUsage)
 		return 0
+	}
+	if args[0] == "rename-plan" {
+		return cmdLSPRename("py", "--checker", args[1:])
 	}
 	var (
 		pos       []string
@@ -115,9 +128,11 @@ func cmdPy(args []string) int {
 	tt.Checker = checker
 	res, err := tt.CheckEdit(context.Background(), edits)
 	if err != nil {
+		recordCheckUsage("py_check_edit", err, 0, false)
 		fmt.Fprintf(os.Stderr, "ken py: %v\n", err)
 		return 1
 	}
+	recordCheckUsage("py_check_edit", nil, len(res.Errors), res.Clean)
 	if jsonOut {
 		out, err := json.MarshalIndent(res, "", "  ")
 		if err != nil {

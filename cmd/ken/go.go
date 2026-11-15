@@ -18,8 +18,8 @@ const goUsage = `Usage: ken go refs        <repo> <symbol> [--json] [--max N] [-
        ken go impls       <repo> <symbol> [--json] [--max N] [--group-by K]
        ken go uses        <repo> <importer> <imported> [--json] [--max N]
        ken go rename-plan <repo> <symbol> <new-name> [--json] [--patch FILE]
-       ken go check-edit  <repo> <file> <new-contents-file> [--json] [--max N]
-       ken go check-edit  <repo> --edits FILE [--json] [--max N]
+       ken go check-edit  <repo> <file> <new-contents-file> [--json] [--max N] [--no-vet]
+       ken go check-edit  <repo> --edits FILE [--json] [--max N] [--no-vet]
 
 Type-resolved answers for a Go repository, merged over the build configurations
 listed in <repo>/` + engine.GoConfigFile + ` (without the file: the host default only).
@@ -63,8 +63,11 @@ All are answered in process with go/types: no gopls is needed.
   --parallel N type-check N configurations at once with --engine types (default 1:
                one program in memory at a time; more is faster and holds that many)
 
+  --no-vet     with check-edit: type-check only. By default an edit that compiles
+               is also put to go vet (the go command, with the edit as an overlay)
+
 Exit status: 0 complete, 3 the answer is a lower bound (see INCOMPLETE lines)
-or, for check-edit, the edit is not clean (ERROR or MOVED lines), 1 on error,
+or, for check-edit, the edit is not clean (ERROR, MOVED or VET lines), 1 on error,
 2 on usage.
 `
 
@@ -82,6 +85,7 @@ func cmdGo(args []string) int {
 		groupBy    string
 		engineName string
 		directOnly bool
+		noVet      bool
 		parallel   int
 		maxN       = 200
 	)
@@ -91,6 +95,8 @@ func cmdGo(args []string) int {
 			jsonOut = true
 		case "--direct":
 			directOnly = true
+		case "--no-vet":
+			noVet = true
 		case "--patch", "--max", "--config", "--group-by", "--engine", "--parallel", "--edits":
 			if i+1 >= len(args) {
 				fmt.Fprintf(os.Stderr, "ken go: %s needs a value\n", args[i])
@@ -247,11 +253,14 @@ func cmdGo(args []string) int {
 			content := string(src)
 			edits = []engine.GoFileEdit{{File: pos[1], Content: &content}}
 		}
+		gt.SkipVet = noVet
 		res, err := gt.CheckEdit(ctx, edits)
 		if err != nil {
+			recordCheckUsage("go_check_edit", err, 0, false)
 			fmt.Fprintf(os.Stderr, "ken go: %v\n", err)
 			return 1
 		}
+		recordCheckUsage("go_check_edit", nil, len(res.Errors)+len(res.Moved)+len(res.Vet), res.Clean)
 		return emit(res, res.Text(n, maxN), !res.Clean)
 	default:
 		plan, err := gt.RenamePlan(ctx, pos[1], pos[2])

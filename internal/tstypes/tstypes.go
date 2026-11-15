@@ -65,6 +65,19 @@ func platformPackage() string {
 	return "typescript-" + goos + "-" + arch
 }
 
+// ErrOlderCompiler is what errors.Is matches, with ErrNoCompiler, when the project has a TypeScript older than 7.
+var ErrOlderCompiler = errors.New("the project's TypeScript is older than 7.0")
+
+// olderError is the error for a project on TypeScript 5 or 6: it is both "no compiler to ask" and "an older one".
+type olderError struct{ version string }
+
+func (e olderError) Error() string {
+	return ErrNoCompiler.Error() + ": this project has TypeScript " + e.version + " installed, and the check needs the native compiler that ships with 7.0 and later"
+}
+func (e olderError) Is(target error) bool {
+	return target == ErrNoCompiler || target == ErrOlderCompiler
+}
+
 // FindCompiler returns the native TypeScript compiler installed for the project that holds dir: the nearest
 // node_modules at or above dir, no higher than repo, that has one. The error says what was found instead (an older
 // TypeScript, or none) and matches ErrNoCompiler.
@@ -95,11 +108,23 @@ func FindCompiler(repo, dir string) (string, error) {
 	}
 	switch {
 	case older != "" && !strings.HasPrefix(older, "7.") && !strings.HasPrefix(older, "8."):
-		return "", fmt.Errorf("%w: this project has TypeScript %s installed, and the check needs the native compiler that ships with 7.0 and later", ErrNoCompiler, older)
+		return "", olderError{older}
 	case older != "":
 		return "", fmt.Errorf("%w: TypeScript %s is installed but its native program for this machine (@typescript/%s) is not; run the project's package install", ErrNoCompiler, older, platformPackage())
 	}
 	return "", fmt.Errorf("%w in node_modules (looked from %s up to the repository root): install the project's dependencies, with typescript 7.0 or later", ErrNoCompiler, dir)
+}
+
+// Installed returns the native compiler of the first project of repo that has one: the repository root, or a
+// directory up to two levels below it (frontend/, packages/web/). "" when none has. It decides whether a check is
+// worth offering; a check itself looks from the edited file upward (FindCompiler).
+func Installed(repo string) string {
+	for _, d := range lspcheck.ProjectDirs(repo, 2) {
+		if p, err := FindCompiler(d, d); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
 // The edit and its answer are the shared check's.
@@ -127,9 +152,39 @@ func (r *Runner) CheckEdit(ctx context.Context, edits []FileEdit) (*EditCheck, e
 			return nil, err
 		}
 	}
-	return lspcheck.Run(ctx, lspcheck.Options{
+	return lspcheck.Run(ctx, r.options(tsc), patch)
+}
+
+func (r *Runner) options(tsc string) lspcheck.Options {
+	return lspcheck.Options{
 		Server: lspcheck.Server{Name: "tsc", Label: "TypeScript", Where: "the project's compiler", Verdict: "WOULD NOT COMPILE",
 			Argv: []string{tsc, "--lsp", "--stdio"}, CodePrefix: "TS"},
 		Languages: sourceExts, Timeout: r.Timeout, MaxFiles: r.MaxFiles, Parallel: r.Parallel, Spawn: r.Spawn, Environ: r.Environ,
-	}, patch)
+	}
+}
+
+// RenamePlan is a rename the project's compiler computed and the edit check then checked.
+type RenamePlan = lspcheck.RenamePlan
+
+// RenamePlan asks the project's compiler for the edits that rename the symbol called name on line (1-based) of file
+// to newName, applies them as unsaved contents and checks the result as CheckEdit does. Nothing is written. A plan
+// that would not compile, or that edits a file outside the repository's own source, is refused and carries no patch.
+func (r *Runner) RenamePlan(ctx context.Context, file string, line int, name, newName string) (*RenamePlan, error) {
+	root, err := filepath.EvalSymlinks(r.Repo)
+	if err != nil {
+		return nil, err
+	}
+	tsc := r.Tsc
+	if tsc == "" {
+		abs := file
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(root, filepath.FromSlash(file))
+		}
+		if tsc, err = FindCompiler(root, filepath.Dir(abs)); err != nil {
+			return nil, err
+		}
+	}
+	pinned := *r
+	pinned.Tsc = tsc
+	return lspcheck.Rename(ctx, r.options(tsc), root, file, line, name, newName, pinned.CheckEdit)
 }

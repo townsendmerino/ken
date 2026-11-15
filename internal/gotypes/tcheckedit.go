@@ -38,6 +38,9 @@ type lineMap struct {
 	o2n, n2o             []int // the matching line on the other side, or -1-h for a line of hunk h
 	hunks                int
 	lastEmpty            bool // the new source ends in a newline: its last element is not a line
+	// to is the file the new contents are in, when the edit moves the file: a place of the old file is then carried
+	// to that one. "" when the file stays where it is.
+	to string
 }
 
 // newLineMap diffs old against new line by line.
@@ -180,7 +183,11 @@ func (p *program) checkEdit(patch map[string][]byte, maps map[string]*lineMap, e
 	sort.Strings(changed)
 	var post *program
 	ok := false
-	if !env.full {
+	deletes := false
+	for _, src := range patch {
+		deletes = deletes || src == nil // a file that goes changes what the go command lists
+	}
+	if !env.full && !deletes {
 		release, err := env.hold()
 		if err != nil {
 			return nil, err
@@ -219,11 +226,15 @@ func compareEdit(pre, post *program, patch map[string][]byte, maps map[string]*l
 	}
 	at := func(k posKey) spot {
 		if m := maps[k.file]; m != nil {
+			file := k.file
+			if m.to != "" {
+				file = m.to // the edit moves the file: the place is in the file it becomes
+			}
 			off, hunk := m.toNew(k.off)
 			if hunk >= 0 {
-				return spot{posKey{k.file, 0}, hunk}
+				return spot{posKey{file, 0}, hunk}
 			}
-			return spot{posKey{k.file, off}, -1}
+			return spot{posKey{file, off}, -1}
 		}
 		return spot{k, -1}
 	}

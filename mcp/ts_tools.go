@@ -18,6 +18,8 @@ type TSEditArg struct {
 	NewString  string  `json:"new_string,omitempty" jsonschema:"What replaces old_string (empty deletes it)."`
 	ReplaceAll bool    `json:"replace_all,omitempty" jsonschema:"Replace every occurrence of old_string."`
 	Content    *string `json:"content,omitempty" jsonschema:"The file's whole new contents, in place of old_string and new_string. The file need not exist yet."`
+	Delete     bool    `json:"delete,omitempty" jsonschema:"Delete the file."`
+	MoveTo     string  `json:"move_to,omitempty" jsonschema:"Move the file to this path, relative to the repo root. Later edits may then change it under its new name."`
 }
 
 // TSCheckEditArgs is the argument schema for ts_check_edit.
@@ -52,7 +54,7 @@ func registerTSTools(srv *sdk.Server, cfg *Config) {
 			"or an interface, to see every caller that breaks. It does not say whether a name on an untouched line " +
 			"now refers to another declaration, and it says nothing about behaviour: tests still have to run. Edits " +
 			"take the shape of an editor's replace (file, old_string, new_string) or a whole file (file, content), " +
-			"and several are checked together. Each call starts the compiler and stops it. Local repositories with " +
+			"and several are checked together. A file can also be deleted (file, delete) or moved (file, move_to); a file that goes is checked as an empty file. Each call starts the compiler and stops it. Local repositories with " +
 			"TypeScript 7 or later installed only.",
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args TSCheckEditArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken ts_check_edit")
@@ -63,7 +65,7 @@ func registerTSTools(srv *sdk.Server, cfg *Config) {
 
 func handleTSCheckEdit(ctx context.Context, cfg *Config, args TSCheckEditArgs) (*sdk.CallToolResult, any, error) {
 	if len(args.Edits) == 0 {
-		return errorResult(args.Output, "edits is required: at least one {file, old_string, new_string} or {file, content}"), nil, nil
+		return errorResult(args.Output, "edits is required: at least one {file, old_string, new_string}, {file, content}, {file, delete} or {file, move_to}"), nil, nil
 	}
 	key, errResult := localRepoForItsOwnTool(cfg, args.Repo, args.Output, "ts_check_edit", "the TypeScript compiler installed in the repo")
 	if errResult != nil {
@@ -71,12 +73,14 @@ func handleTSCheckEdit(ctx context.Context, cfg *Config, args TSCheckEditArgs) (
 	}
 	edits := make([]engine.TSFileEdit, len(args.Edits))
 	for i, e := range args.Edits {
-		edits[i] = engine.TSFileEdit{File: e.File, OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll, Content: e.Content}
+		edits[i] = engine.TSFileEdit{File: e.File, OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll, Content: e.Content, Delete: e.Delete, MoveTo: e.MoveTo}
 	}
 	res, err := openTSTyped(key).CheckEdit(ctx, edits)
 	if err != nil {
+		recordCheck(cfg, "ts_check_edit", err, 0, false)
 		return errorResult(args.Output, err.Error()), nil, nil
 	}
+	recordCheck(cfg, "ts_check_edit", nil, len(res.Errors), res.Clean)
 	limit := args.Max
 	if limit <= 0 {
 		limit = 40

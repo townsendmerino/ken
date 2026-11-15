@@ -274,6 +274,9 @@ type Config struct {
 	EmbedCacheEnabled bool // KEN_MCP_EMBED_CACHE
 	EmbedCacheMax     int  // KEN_MCP_EMBED_CACHE_MAX
 	MmapModel         bool // KEN_MCP_MMAP_MODEL
+	// HookSocket lets `ken hook check-edit` ask this server over a socket in ~/.ken/run that only the user can
+	// reach (KEN_MCP_HOOK_SOCKET; on by default, stdio transport only).
+	HookSocket bool
 
 	// GoTyped is what the Go typed tier (go_references, go_implementations, go_rename_plan, go_uses) keeps between
 	// calls: KEN_MCP_GO_RESIDENT gopls processes, each stopped after KEN_MCP_GO_IDLE, and KEN_MCP_GO_CACHE_MB of
@@ -472,6 +475,7 @@ func LoadConfig(logger *kenmcp.Logger) Config {
 		EmbedCacheEnabled: embedCacheEnabled,
 		EmbedCacheMax:     embedCacheMax,
 		MmapModel:         mmapModel,
+		HookSocket:        envcfg.EnvBool("KEN_MCP_HOOK_SOCKET", true, logger),
 		GoTyped:           goTyped,
 		Startup:           sm,
 
@@ -695,6 +699,18 @@ func Run(cfg Config, logger *kenmcp.Logger) {
 	}
 	srv := kenmcp.NewServer(srvCfg)
 
+	// The edit hook's way in (ADR-067): a command cannot reach a stdio server, so the server listens on a socket of
+	// its own. Not for the http transport, which serves other machines.
+	stopHook := func() {}
+	if cfg.HookSocket && transport != transportHTTP && engine.GoPath() != "" {
+		if stop, path, herr := kenmcp.ServeHook(&srvCfg, ""); herr != nil {
+			logger.Logf(kenmcp.LogWarn, "hook socket: not listening (%v): `ken hook check-edit` will check each edit from nothing", herr)
+		} else {
+			stopHook = stop
+			logger.Logf(kenmcp.LogInfo, "hook socket: listening on %s for `ken hook check-edit`", path)
+		}
+	}
+
 	// Shutdown cleanup: drop temp clone directories (disk leak) and, M9,
 	// persist the rerank LRU to disk so the next ken-mcp launch starts warm.
 	// Best-effort — a save failure logs warn and cleanup continues.
@@ -724,6 +740,7 @@ func Run(cfg Config, logger *kenmcp.Logger) {
 		}
 		// Flush + close the cached usage-stats append handle (audit §19).
 		_ = usageRecorder.Close()
+		stopHook()
 		cache.Close()
 		goHost.Close() // stops any gopls the Go typed tier kept alive
 

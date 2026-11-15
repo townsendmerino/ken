@@ -234,6 +234,33 @@ func TestCheckEdit(t *testing.T) {
 			},
 			errs: []string{"b/b.go:8 [linux,darwin] mismatched types"},
 		},
+		{
+			name:  "a file moves within its package, unchanged: nothing it declares means anything else",
+			edits: []FileEdit{{File: "a/a.go", MoveTo: "a/shapes.go"}},
+		},
+		{
+			name: "a file moves and is edited under its new name",
+			edits: []FileEdit{
+				{File: "b/b.go", MoveTo: "b/core.go"},
+				{File: "b/core.go", OldString: "a.Scale(s, 2)", NewString: "a.Scale(s)"},
+			},
+			errs: []string{"b/core.go:5 [linux,darwin] not enough arguments in call to a.Scale"},
+		},
+		{
+			name:  "a file is deleted: its package's test no longer compiles, nor does what imports the package",
+			edits: []FileEdit{{File: "a/a.go", Delete: true}},
+			errs: []string{
+				"a/a_test.go:6 [linux,darwin] undefined: Scale",
+				"a/a_test.go:6 [linux,darwin] undefined: Sq",
+				"b/b.go:3 [linux,darwin] could not import example.com/ed/a: no non-test Go files in ",
+			},
+			api: []string{"example.com/ed/a: removed: func Parse", "example.com/ed/a: removed: func Scale", "example.com/ed/a: removed: type Shape", "example.com/ed/a: removed: type Sq"},
+		},
+		{
+			name:  "a platform file is deleted: only its configuration loses the function",
+			edits: []FileEdit{{File: "b/b_linux.go", Delete: true}},
+			api:   []string{"example.com/ed/b: removed: func Triple("},
+		},
 	}
 	root := writeTree(t, ed)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -317,6 +344,14 @@ func TestCheckEdit(t *testing.T) {
 				cur := files[e.File]
 				if p, ok := patch[e.File]; ok {
 					cur = p
+				}
+				if e.Delete || e.MoveTo != "" {
+					if e.MoveTo != "" {
+						patch[e.MoveTo] = cur
+					}
+					delete(files, e.File)
+					delete(patch, e.File)
+					continue
 				}
 				if e.Content != nil {
 					patch[e.File] = *e.Content
@@ -436,5 +471,78 @@ func TestProgramCache_oneProgramServesEveryDirectory(t *testing.T) {
 	}
 	if st := pc.Status(); st.Loads != 2 || st.Evictions != 0 || len(st.Programs) != 2 {
 		t.Errorf("four questions in two directories under two configurations: %d loads, %d evictions, %d programs held; want 2, 0, 2", st.Loads, st.Evictions, len(st.Programs))
+	}
+}
+
+// An edit that compiles is put to go vet: what vet would newly report is listed, what it reports already is not,
+// and the finding is placed in the file the edit names, not in the copy the go command read.
+func TestCheckEdit_vet(t *testing.T) {
+	needGo(t)
+	root := writeTree(t, map[string]string{
+		"go.mod": "module example.com/vt\n\ngo 1.21\n",
+		"a/a.go": `package a
+
+import "fmt"
+
+func Old(n float64) string { return fmt.Sprintf("%d", n) }
+
+func Show(n float64) string {
+	return fmt.Sprint(n)
+}
+`,
+		"a/a_test.go": "package a\n\nimport \"testing\"\n\nfunc TestShow(t *testing.T) { _ = Show(1) }\n",
+	})
+	cfg := Config{Configs: []BuildConfig{{Name: "host", Env: map[string]string{"GOWORK": "off", "GOFLAGS": "-mod=mod", "GOPROXY": "off"}}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	r := &Runner{Repo: root, Config: cfg}
+	bad := []FileEdit{{File: "a/a.go", OldString: "return fmt.Sprint(n)", NewString: "return fmt.Sprintf(\"%s\", n)"}}
+
+	got, err := r.CheckEdit(ctx, bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := got.Text(1, 0)
+	if len(got.Errors) != 0 || got.Clean || !got.Vetted || len(got.Vet) != 1 {
+		t.Fatalf("want one vet finding and no compile error:\n%s", text)
+	}
+	if f := got.Vet[0]; f.File != "a/a.go" || f.Line != 8 || !strings.HasPrefix(f.Message, "printf: ") || !strings.Contains(f.Message, "%s") {
+		t.Errorf("vet finding = %+v", f)
+	}
+	for _, want := range []string{"VET: a/a.go:8: printf: ", "COMPILES, BUT go vet WOULD REPORT 1 new problems"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text lacks %q:\n%s", want, text)
+		}
+	}
+	// the same edit again: the go command answers from its cache, with the position of the earlier run's copy
+	if again, err := r.CheckEdit(ctx, bad); err != nil || len(again.Vet) != 1 || again.Vet[0].File != "a/a.go" {
+		t.Errorf("the second check of the same edit: %v %+v", err, again)
+	}
+
+	// an edit elsewhere in a file that vet already complains about reports nothing, though the complaint moved
+	fine, err := r.CheckEdit(ctx, []FileEdit{{File: "a/a.go", OldString: "import \"fmt\"\n", NewString: "import \"fmt\"\n\n// Old formats n.\n"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fine.Clean || !fine.Vetted || len(fine.Vet) != 0 {
+		t.Errorf("an edit beside a vet finding that is already there:\n%s", fine.Text(1, 0))
+	}
+	if !strings.Contains(fine.Text(1, 0), "go vet reports nothing new in the edited packages") {
+		t.Errorf("a clean check does not say vet was asked:\n%s", fine.Text(1, 0))
+	}
+
+	// vet's "tests" check reads the file's name: a malformed test name in a new _test.go file is found
+	named, err := r.CheckEdit(ctx, []FileEdit{{File: "a/b_test.go", Content: str("package a\n\nimport \"testing\"\n\nfunc Testshow(t *testing.T) {}\n")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(named.Vet) != 1 || named.Vet[0].File != "a/b_test.go" || !strings.HasPrefix(named.Vet[0].Message, "tests: ") {
+		t.Errorf("a malformed test name in a new file:\n%s", named.Text(1, 0))
+	}
+
+	// SkipVet is the type check alone
+	r.SkipVet = true
+	if skipped, err := r.CheckEdit(ctx, bad); err != nil || !skipped.Clean || skipped.Vetted {
+		t.Errorf("SkipVet: %v %+v", err, skipped)
 	}
 }

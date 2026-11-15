@@ -73,6 +73,8 @@ ADR statuses: **Proposed** (documenting design alternatives; no implementation d
 | [ADR-063](#adr-063-an-edit-the-caller-wrote-is-checked-the-way-a-rename-plan-is) | An edit the caller wrote is checked the way a rename plan is | Accepted |
 | [ADR-064](#adr-064-a-typed-tier-for-typescript-asks-the-projects-own-compiler-over-lsp-starting-with-a-check-for-an-edit) | A typed tier for TypeScript asks the project's own compiler over LSP, starting with a check for an edit | Accepted |
 | [ADR-065](#adr-065-the-python-edit-check-asks-the-checker-the-project-installed-ty-or-pyright) | The Python edit check asks the checker the project installed, ty or pyright | Accepted |
+| [ADR-066](#adr-066-after-118-the-edit-check-reaches-further-more-checkers-renames-a-hook-and-files-that-go) | After 1.18 the edit check reaches further: more checkers, renames, a hook, and files that go | Accepted |
+| [ADR-067](#adr-067-the-edit-hook-asks-a-running-ken-mcp-over-a-socket-only-the-user-can-reach) | The edit hook asks a running ken-mcp over a socket only the user can reach | Accepted |
 
 ---
 
@@ -3543,3 +3545,87 @@ M1 Pro, Python 3.12.10, a seven-file fixture with no third-party imports.
 - pyright needs `node` on PATH. Its diagnostics are pulled for open files, which the server does not advertise in its handshake; the oracle test is what holds that this works.
 - The limits of ADR-064 apply unchanged: one server per check, every file asked about twice, 20,000 files at most, no deletion.
 - The MCP tool's verdict line for an edit that breaks something is `WOULD NOT TYPE-CHECK`, where the TypeScript tool says `WOULD NOT COMPILE`.
+
+## ADR-066: After 1.18 the edit check reaches further: more checkers, renames, a hook, and files that go
+
+**Status:** Accepted
+**Date:** 2026-11-14
+**Decided by:** Francis: "do all 10", to a list of ten ways to make the 1.18 tools more useful. Nine are changes; the tenth was a measurement. No ranking constant changes.
+
+### Context
+
+1.18 shipped three edit checks (ADR-063 to ADR-065). Using them showed where they stop short: an agent has to remember to call them; a Python project on mypy or basedpyright is not served; an edit could not delete or move a file; a rename in TypeScript or Python had no checked plan; a clean check said nothing about which tests to run; and nobody could see whether the checks were being used.
+
+### Decision
+
+1. **mypy is run, not asked.** mypy has no language server, but it has `--shadow-file SOURCE SHADOW`, made for tools: SOURCE is read from SHADOW and errors are still reported against SOURCE. A check is two runs of the project's mypy from the project directory, with and without the shadows, compared by the comparison the language-server checks use (`lspcheck.EditCheck.Compare`, moved out of `lspcheck.Run`). The cache goes under the user's cache directory, keyed by project, so nothing is written to the repository. dmypy was not used: it would be a daemon ken leaves behind.
+2. **basedpyright is a third language server**, found in the virtual environment. Its pip package depends on a wheel that carries Node, so the rule that keeps pip pyright from being run (it downloads Node when started) does not apply to it.
+3. **Where a project has several checkers, the one it configures is asked**, when it configures exactly one; otherwise the first of ty, pyright, basedpyright, mypy. This generalizes ADR-065's rule for ty and pyright.
+4. **A rename in TypeScript or Python is the server's plan put to the edit check** (`lspcheck.Rename`). The server computes the edits; ken refuses the plan if the check finds a new error, or if an edit lands in a file that is not one of the repository's own source files as the index walks them (a dependency, a file git ignores). The symbol is named by file, line and name, because these servers take positions and ken has no type-resolved name lookup for these languages.
+5. **The meaning check of the TypeScript Phase 0 is not built.** That record proposed asking `textDocument/definition` for every identifier spelled with the old or new name, before and after. It is one request per identifier and was not measured. The plan's reply says what is not checked.
+6. **A file that is deleted or moved away is checked as an empty file by the language-server checks.** LSP has no way to tell a server that a file on disk is gone short of writing to disk, and the check writes nothing. The Go check removes the file from the build (an overlay entry with an empty replacement).
+7. **An error on a line that imports a file the edit creates is set aside, and the answer is incomplete.** ty, pyright, basedpyright and mypy resolve imports on disk; reporting their "cannot resolve" as the edit's fault was a false error in 1.18.0. TypeScript 7 resolves unsaved new files and is not treated this way.
+8. **The Go check runs `go vet` on an edit that compiles**, through the go command with the edit as an overlay, and reports the findings that are new. It runs the go command's default vet set, not only the subset `go test` runs.
+9. **The hook is advisory.** `ken hook check-edit` on `PreToolUse` returns `hookSpecificOutput.additionalContext` and no permission decision, and exits 0 whatever happens. Blocking was rejected: a refactor routinely breaks callers in one edit and fixes them in the next, and a hook that refused the first edit would stop it.
+10. **The check tools that run a program the repository supplies keep the rule of ADR-064**: offered for the default repository, a `repo` argument refused on a server without allowed roots. The rename tools and mypy fall under it unchanged.
+
+### What was measured
+
+M1 Pro, 2026-11-14. The real-tool tests are gated by `KEN_TEST_TSC`, `KEN_TEST_TY`, `KEN_TEST_PYRIGHT`, `KEN_TEST_BASEDPYRIGHT` and `KEN_TEST_MYPY`; CI runs none of them.
+
+- mypy 2.4.1 and basedpyright 1.40.2 pass the seven edits of ADR-065's oracle test (each answer held to the checker's own command line on a real edited copy), with two stated differences for mypy: a new file's own error is not reported, and a syntax error stops the run. A mypy check of the seven-file fixture takes 0.6 to 0.7 s.
+- Rename plans: TypeScript 7.0.2 renames a function across two projects and an interface member with its implementation; the patch applies with `git apply` and the build is unchanged. A rename onto a name the module has is refused on six compiler errors.
+- ty 0.0.104, pyright 1.1.414 and basedpyright 1.40.2 each rename a protocol's `area` without `Square.area`, which satisfies it. Each plan is refused on the one error it causes.
+- The embedder comparison: [`results/embedder-comparison-2026-11.md`](results/embedder-comparison-2026-11.md). potion-retrieval-32M is worse than the shipped model (hybrid 0.8201 against 0.8436); nothing changes.
+
+**Not measured:** any of this on a large TypeScript or Python repository, or on a Python project with third-party packages installed; mypy on a project with plugins; the hook inside a real Claude Code session (its input and output follow the hooks reference, and it was run by hand on payloads of that shape).
+
+### Consequences and what is not done
+
+- The hook starts every check from nothing. A large Go repository will not finish in its 20 seconds, and the hook is then silent. Asking a running `ken-mcp`, which answers in under 0.1 s, needs a way for a command to reach a stdio server and is not built. (Built the same day: ADR-067.)
+- mypy cannot check a file the edit creates, and cannot compute a rename.
+- A TypeScript or Python rename that changes what another name refers to passes the check. `go_rename_plan` remains the only plan that verifies meaning.
+- `tests_for` and the tests an edit check names come from the name-resolved call graph: a test of another symbol with the same name can be listed, and a test that reaches the symbol only through an interface or a callback can be missed.
+- Two servers are started for a rename plan (one to compute it, one to check it), as one is for every check.
+
+## ADR-067: The edit hook asks a running ken-mcp over a socket only the user can reach
+
+**Status:** Accepted
+**Date:** 2026-11-14
+**Decided by:** Francis: "Can we make the hook fast", after ADR-066 shipped a hook that checks every Go edit from nothing.
+
+### Context
+
+`ken hook check-edit` (ADR-066) is a new process for every edit. For Go it listed and type-checked the repository each time: 0.9 to 1.6 s on ken's own source, more on a larger one, on every edit an agent makes. A `ken-mcp` serving the same agent already holds those programs and answers `go_check_edit` in under 0.1 s, but it speaks MCP on a standard input and output that belong to the client that started it. A command has no way in.
+
+Two ways to give it one were weighed. A daemon the hook starts and leaves behind works without `ken-mcp`, and is a second copy of the programs (about 0.2 GB per configuration on a 3,000-file repository) and a process nobody asked for; ADR-066 declined dmypy for that reason. A socket on the server that is already running costs a listener.
+
+### Decision
+
+1. **`ken-mcp` listens on a Unix socket of its own**, `~/.ken/run/mcp-<pid>.sock`, when its transport is stdio and `go` is on PATH. The directory is created 0700 (and set to it if it exists) and the socket 0600: the user's own processes can connect, and no one else. It is on by default; `KEN_MCP_HOOK_SOCKET=0` turns it off. The http transport, which serves other machines, never opens it.
+2. **One JSON request and one JSON reply per connection** (`internal/hooksock`): a repository path and the edits in; the check's text, its count of findings and whether it is clean out. It is not MCP and carries one operation, the Go edit check.
+3. **The request is answered as `go_check_edit` answers an agent**, by the same function that opens the repository: allowed roots apply, a wrap command is honored for the server's default repository and dropped for any other on a server without allowed roots, and the check is counted by the server.
+4. **The hook asks before it checks from nothing.** It tries each socket in the directory, newest first, and takes the first answer. A server that declines (an edit that does not apply, a repository it may not open) is not an answer. With none, the hook does what it did before. A socket nothing listens on, left by a server that was killed, is removed by the hook that finds it.
+5. **Only Go.** The TypeScript and Python checks start the project's compiler or checker for each check wherever they run; a server holds nothing that would make them faster. Holding a language server between checks is the change that would, and it is not made here.
+6. **`mcp.Run` does not open the socket.** A server an SDK author builds listens on nothing it was not asked to; `mcp.ServeHook` is there to call.
+
+### What was measured
+
+M1 Pro, ken's own source (about 450 Go files, one configuration), the hook run by hand on a payload that adds a parameter to a function with four callers:
+
+| | per edit |
+|---|---|
+| no server: from nothing, edit that breaks callers | 1.59 s |
+| no server: from nothing, clean edit | 0.86 s |
+| server running, first edit (loads the programs) | 1.07 s |
+| server running, later edits | 0.07 to 0.08 s |
+
+**Not measured:** a large repository, where the first edit's load is longer and may pass the hook's 20 seconds (the hook is then silent and the server keeps loading, so a later edit is answered); several servers at once; Windows, where Go supports Unix sockets but file modes do not protect the socket the same way.
+
+### Consequences and what is not done
+
+- `ken-mcp` now creates `~/.ken/run` and a socket in it. A server that is killed leaves its socket file; the next hook removes it.
+- A path under a long home directory can exceed what a Unix socket path may be (about 100 bytes). The server then logs that it is not listening and the hook checks from nothing.
+- With two servers running, the hook asks the newest first. Either gives a right answer; the one that does not hold the repository yet loads it.
+- No hook client other than ken's own is promised the protocol: it may change with the two sides together.
+

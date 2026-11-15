@@ -193,8 +193,8 @@ func TestCheckEdit_refusals(t *testing.T) {
 		want  string
 	}{
 		{&Runner{Repo: root}, []FileEdit{{File: "pyproject.toml", Content: str("")}}, "only Python files"},
-		{&Runner{Repo: root}, []FileEdit{{File: "a.py", Content: str("x = 2\n")}}, "mypy has no language server"},
-		{&Runner{Repo: root, Checker: "/usr/bin/mypy"}, []FileEdit{{File: "a.py", Content: str("x = 2\n")}}, "neither ty nor pyright-langserver"},
+		{&Runner{Repo: root}, []FileEdit{{File: "a.py", Content: str("x = 2\n")}}, "uv add --dev mypy"},
+		{&Runner{Repo: root, Checker: "/usr/bin/pylint"}, []FileEdit{{File: "a.py", Content: str("x = 2\n")}}, "is not ty, mypy, pyright-langserver or basedpyright-langserver"},
 	} {
 		_, err := tc.r.CheckEdit(context.Background(), tc.edits)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -221,6 +221,16 @@ func TestFindChecker(t *testing.T) {
 		"bothconfigured/node_modules/.bin/pyright-langserver": "",
 		"bothconfigured/pyproject.toml":                       "[tool.pyright]\n[tool.ty]\n",
 		"pip/.venv/bin/pyright-langserver":                    "",
+		"mypyonly/.venv/bin/mypy":                             "",
+		"based/.venv/bin/basedpyright-langserver":             "",
+		"tyandmypy/.venv/bin/ty":                              "",
+		"tyandmypy/.venv/bin/mypy":                            "",
+		"mypyconfigured/.venv/bin/ty":                         "",
+		"mypyconfigured/.venv/bin/mypy":                       "",
+		"mypyconfigured/pyproject.toml":                       "[[tool.mypy.overrides]]\n",
+		"setupcfg/.venv/bin/basedpyright-langserver":          "",
+		"setupcfg/.venv/bin/mypy":                             "",
+		"setupcfg/setup.cfg":                                  "[mypy]\nstrict = True\n",
 		"none/x.py":                                           "",
 	})
 	for dir, want := range map[string]string{
@@ -230,11 +240,19 @@ func TestFindChecker(t *testing.T) {
 		"both":           "ty both/.venv/bin/ty",
 		"bothpyright":    "pyright bothpyright/node_modules/.bin/pyright-langserver",
 		"bothconfigured": "ty bothconfigured/.venv/bin/ty",
+		"mypyonly":       "mypy mypyonly/.venv/bin/mypy",
+		"based":          "basedpyright based/.venv/bin/basedpyright-langserver",
+		"tyandmypy":      "ty tyandmypy/.venv/bin/ty",
+		"mypyconfigured": "mypy mypyconfigured/.venv/bin/mypy",
+		"setupcfg":       "mypy setupcfg/.venv/bin/mypy",
 	} {
 		c, err := FindChecker(root, filepath.Join(root, dir))
 		rel, _ := filepath.Rel(root, c.Path)
 		if got := c.Kind + " " + filepath.ToSlash(rel); err != nil || got != want {
 			t.Errorf("%s: %q, %v; want %q", dir, got, err, want)
+		}
+		if want := filepath.Join(root, strings.SplitN(dir, "/", 2)[0]); c.Dir != want {
+			t.Errorf("%s: found in %q, want %q", dir, c.Dir, want)
 		}
 	}
 	_, err := FindChecker(root, filepath.Join(root, "none"))
@@ -248,7 +266,8 @@ func TestFindChecker(t *testing.T) {
 	if _, err := FindChecker(filepath.Join(root, "withty/src"), filepath.Join(root, "withty/src")); !errors.Is(err, ErrNoChecker) {
 		t.Errorf("found a checker above the root: %v", err)
 	}
-	for path, want := range map[string]string{"/a/.venv/bin/ty": Ty, `C:\v\Scripts\ty.exe`: "", "/n/.bin/pyright-langserver": Pyright, "/usr/bin/mypy": "", "/x/typo": ""} {
+	for path, want := range map[string]string{"/a/.venv/bin/ty": Ty, `C:\v\Scripts\ty.exe`: "", "/n/.bin/pyright-langserver": Pyright, "/usr/bin/mypy": Mypy,
+		"/v/bin/basedpyright-langserver": BasedPyright, "/x/typo": ""} {
 		if runtime.GOOS != "windows" && strings.Contains(path, `\`) {
 			continue
 		}
@@ -259,7 +278,8 @@ func TestFindChecker(t *testing.T) {
 }
 
 // The tests below run the real checkers, which ken does not ship or download. KEN_TEST_TY names a ty binary;
-// KEN_TEST_PYRIGHT names pyright's pyright-langserver (its sibling `pyright` is the oracle's command line).
+// KEN_TEST_PYRIGHT names pyright's pyright-langserver (its sibling `pyright` is the oracle's command line),
+// KEN_TEST_BASEDPYRIGHT basedpyright's basedpyright-langserver (likewise), and KEN_TEST_MYPY a mypy.
 var realFixture = map[string]string{
 	"pyproject.toml":       "[project]\nname = \"fx\"\nversion = \"0.0.0\"\nrequires-python = \">=3.12\"\n",
 	"pkg/__init__.py":      "",
@@ -308,8 +328,19 @@ func checkerErrors(t *testing.T, kind, program, root string) []string {
 		for _, m := range regexp.MustCompile(`(?m)^(\S+?):(\d+):\d+: error\[`).FindAllStringSubmatch(string(out), -1) {
 			errs = append(errs, m[1]+":"+m[2])
 		}
-	case Pyright:
-		cmd := testenv.Command(t, filepath.Join(filepath.Dir(program), "pyright"), "--outputjson")
+	case Mypy:
+		cmd := testenv.Command(t, program, "--show-absolute-path", "--no-color-output", "--cache-dir", t.TempDir(), ".")
+		cmd.Dir = root
+		out, _ := cmd.Output()
+		real, _ := filepath.EvalSymlinks(root)
+		for file, ds := range parseMypy(real, out).diags {
+			rel, _ := filepath.Rel(real, file)
+			for _, d := range ds {
+				errs = append(errs, fmt.Sprintf("%s:%d", filepath.ToSlash(rel), d.Line))
+			}
+		}
+	case Pyright, BasedPyright:
+		cmd := testenv.Command(t, filepath.Join(filepath.Dir(program), strings.TrimSuffix(filepath.Base(program), "-langserver")), "--outputjson")
 		cmd.Dir = root
 		out, _ := cmd.Output()
 		var rep struct {
@@ -334,7 +365,7 @@ func checkerErrors(t *testing.T, kind, program, root string) []string {
 
 func TestCheckEdit_againstTheRealCheckers(t *testing.T) {
 	ran := false
-	for kind, env := range map[string]string{Ty: "KEN_TEST_TY", Pyright: "KEN_TEST_PYRIGHT"} {
+	for kind, env := range map[string]string{Ty: "KEN_TEST_TY", Pyright: "KEN_TEST_PYRIGHT", BasedPyright: "KEN_TEST_BASEDPYRIGHT", Mypy: "KEN_TEST_MYPY"} {
 		program := os.Getenv(env)
 		if program == "" {
 			continue
@@ -358,30 +389,64 @@ func TestCheckEdit_againstTheRealCheckers(t *testing.T) {
 				[]FileEdit{{File: "pkg/app/extra.py", Content: str("from pkg.core.shape import scale\n\ns = scale(1, 2)\n")}},
 				[]string{"pkg/app/extra.py:3"}, 0},
 			{"a syntax error", []FileEdit{{File: "pkg/app/main.py", OldString: "return scale(s, 2)", NewString: "return scale(s, 2"}}, []string{"pkg/app/main.py"}, 0},
+			{"a module moves and its importer is updated with it",
+				[]FileEdit{{File: "pkg/core/shape.py", MoveTo: "pkg/core/shapes.py"},
+					{File: "pkg/app/main.py", OldString: "from pkg.core.shape import", NewString: "from pkg.core.shapes import"}}, nil, 0},
 		} {
 			t.Run(kind+"/"+tc.name, func(t *testing.T) {
 				root := writeTree(t, realFixture)
-				res, err := (&Runner{Repo: root, Checker: program}).CheckEdit(context.Background(), tc.edits)
+				res, err := (&Runner{Repo: root, Checker: program, CacheDir: t.TempDir()}).CheckEdit(context.Background(), tc.edits)
 				if err != nil {
 					t.Fatal(err)
 				}
 				t.Logf("\n%s", res.Text(0))
+				if entries, _ := os.ReadDir(root); len(entries) != len(map[string]bool{"pyproject.toml": true, "pkg": true}) {
+					t.Errorf("the check left something in the repository: %v", entries)
+				}
+				// mypy reads its files from disk: one the edit creates is not checked, and the check says so.
+				creates, want := 0, tc.want
+				for _, e := range tc.edits {
+					if _, serr := os.Stat(filepath.Join(root, e.File)); serr != nil || e.MoveTo != "" {
+						creates++
+					}
+				}
+				unchecked := kind == Mypy && creates > 0
+				if unchecked && strings.HasPrefix(tc.name, "a new file") {
+					want = nil
+				}
+				if kind == Mypy && (len(res.Unasked) != creates) {
+					t.Errorf("unasked %v, want %d files", res.Unasked, creates)
+				}
 				var got []string
 				for _, e := range res.Errors {
 					got = append(got, fmt.Sprintf("%s:%d", e.File, e.Line))
 				}
 				sort.Strings(got)
-				syntax := len(tc.want) == 1 && !strings.Contains(tc.want[0], ":")
+				syntax := len(want) == 1 && !strings.Contains(want[0], ":")
 				if syntax {
 					// a syntax error is reported differently by each checker: what is held is that there is one, in the file
-					if len(got) == 0 || !strings.HasPrefix(got[0], tc.want[0]+":") {
-						t.Errorf("errors %v, want some in %s", got, tc.want[0])
+					if len(got) == 0 || !strings.HasPrefix(got[0], want[0]+":") {
+						t.Errorf("errors %v, want some in %s", got, want[0])
 					}
-				} else if strings.Join(got, " ") != strings.Join(tc.want, " ") {
-					t.Errorf("errors %v, want %v", got, tc.want)
+				} else if strings.Join(got, " ") != strings.Join(want, " ") {
+					t.Errorf("errors %v, want %v", got, want)
 				}
-				if res.Fixed != tc.fixed || res.Incomplete || res.Clean != (len(tc.want) == 0) {
-					t.Errorf("fixed %d, incomplete %v, clean %v", res.Fixed, res.Incomplete, res.Clean)
+				// A module the edit creates is not found by either checker, which resolve imports on disk: the import
+				// of it is set aside, and the check says it is incomplete.
+				unseen := 0
+				if strings.HasPrefix(tc.name, "a module moves") {
+					unseen = 1
+				}
+				// mypy stops at a syntax error, and says that nothing else was checked
+				incomplete := unseen > 0 || unchecked || kind == Mypy && syntax
+				if res.UnseenImports != unseen || res.Incomplete != incomplete {
+					t.Errorf("unseen imports %d, incomplete %v; want %d, %v", res.UnseenImports, res.Incomplete, unseen, incomplete)
+				}
+				if res.Fixed != tc.fixed || res.Clean != (len(want) == 0 && !incomplete) {
+					t.Errorf("fixed %d, clean %v", res.Fixed, res.Clean)
+				}
+				if unchecked && len(want) != len(tc.want) {
+					return // the oracle sees the new file's own error, which this check has said it cannot
 				}
 
 				// The oracle: write the edit to a copy and run the checker's own command line over both trees. What
@@ -392,7 +457,10 @@ func TestCheckEdit_againstTheRealCheckers(t *testing.T) {
 					patched[k] = v
 				}
 				for _, e := range tc.edits {
-					if e.Content != nil {
+					if e.MoveTo != "" {
+						patched[e.MoveTo] = patched[e.File]
+						delete(patched, e.File)
+					} else if e.Content != nil {
 						patched[e.File] = *e.Content
 					} else {
 						patched[e.File] = strings.Replace(patched[e.File], e.OldString, e.NewString, 1)
@@ -418,6 +486,63 @@ func TestCheckEdit_againstTheRealCheckers(t *testing.T) {
 		}
 	}
 	if !ran {
-		t.Skip("neither KEN_TEST_TY nor KEN_TEST_PYRIGHT is set")
+		t.Skip("none of KEN_TEST_TY, KEN_TEST_PYRIGHT, KEN_TEST_BASEDPYRIGHT and KEN_TEST_MYPY is set")
+	}
+}
+
+func TestRenamePlan_againstTheRealCheckers(t *testing.T) {
+	ran := false
+	for kind, env := range map[string]string{Ty: "KEN_TEST_TY", Pyright: "KEN_TEST_PYRIGHT", BasedPyright: "KEN_TEST_BASEDPYRIGHT"} {
+		program := os.Getenv(env)
+		if program == "" {
+			continue
+		}
+		ran = true
+		t.Run(kind, func(t *testing.T) {
+			root := writeTree(t, realFixture)
+			r := &Runner{Repo: root, Checker: program}
+			p, err := r.RenamePlan(context.Background(), "pkg/core/shape.py", 16, "scale", "resize")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("\n%s%s", p.Text(0), p.Patch)
+			var got []string
+			for _, f := range p.Files {
+				got = append(got, fmt.Sprintf("%s%v", f.File, f.Lines))
+			}
+			if want := "pkg/app/main.py[1 5] pkg/core/shape.py[16]"; strings.Join(got, " ") != want {
+				t.Errorf("files %v, want %s", got, want)
+			}
+			if !p.Verified || p.Refused || p.Patch == "" || len(p.Mentions) != 0 {
+				t.Errorf("verified %v, refused %v, mentions %v", p.Verified, p.Refused, p.Mentions)
+			}
+			// a method: the protocol's member and the class's are one name to a caller
+			p, err = r.RenamePlan(context.Background(), "pkg/core/shape.py", 5, "area", "surface")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("\n%s%s", p.Text(0), p.Patch)
+			// Measured on ty 0.0.104, pyright 1.1.414 and basedpyright 1.40.2: none renames Square.area with the
+			// protocol member it satisfies, so the plan each gives breaks the one place a Square is used as a Shape.
+			// The check is what finds that, and the line the server left is listed.
+			if !p.Refused || p.Patch != "" || len(p.Conflicts) != 1 || !strings.HasPrefix(p.Conflicts[0], "pkg/app/main.py:8: ") ||
+				len(p.Mentions) != 1 || p.Mentions[0].File != "pkg/core/shape.py" || fmt.Sprint(p.Mentions[0].Lines) != "[12]" {
+				t.Errorf("refused %v, conflicts %v, mentions %v", p.Refused, p.Conflicts, p.Mentions)
+			}
+		})
+	}
+	if !ran {
+		t.Skip("none of KEN_TEST_TY, KEN_TEST_PYRIGHT and KEN_TEST_BASEDPYRIGHT is set")
+	}
+}
+
+func TestRenamePlan_mypyCannot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the layout below is the POSIX one")
+	}
+	root := writeTree(t, map[string]string{".venv/bin/mypy": "", "a.py": "x = 1\n"})
+	_, err := (&Runner{Repo: root}).RenamePlan(context.Background(), "a.py", 1, "x", "y")
+	if !errors.Is(err, ErrNoChecker) || !strings.Contains(err.Error(), "has no language server to compute one") {
+		t.Errorf("err = %v", err)
 	}
 }

@@ -66,8 +66,9 @@ were found in the first hour, one of them silent. Phase 2 has earned its place.
    servers that need it (rust-analyzer reports `quiescent`).
 3. **One session serves all projects of a workspace.** The Go tier's merge across build configurations has no
    counterpart to build here.
-4. **The checked rename is the server's plan plus `ts_check_edit` plus a meaning check.** Diagnostics catch four of
-   the five cases. The silent one needs the second check: every identifier spelled with the old or the new name must
+4. **The checked rename is the server's plan plus `ts_check_edit` plus a meaning check.** Of the four plans
+   that were compiled, diagnostics catch three; the fourth compiles and is wrong, and the fifth, its reverse, was not
+   compiled (corrected 2026-11-14: this line said "four of the five"). The silent one needs the second check: every identifier spelled with the old or the new name must
    still resolve to the same declaration (`textDocument/definition` before and after).
 
 ## Not done
