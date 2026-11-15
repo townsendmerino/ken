@@ -546,3 +546,115 @@ func Show(n float64) string {
 		t.Errorf("SkipVet: %v %+v", err, skipped)
 	}
 }
+
+// An edit that changes what the go command lists (a new file, a new package, a new import) is checked against the
+// held programs: nothing is loaded again, and only the packages the edit reaches are type-checked again, not the
+// workspace. A file in a directory no package lives in yet is still in the workspace the held program is of.
+func TestCheckEdit_aNewFileOrPackageChecksOnlyWhatItReaches(t *testing.T) {
+	needGo(t)
+	root := writeTree(t, ed)
+	settle(t, root)
+	pc := NewProgramCache(2, time.Minute)
+	defer pc.Close()
+	r := &Runner{Repo: root, Config: edConfigs, Programs: pc, SkipVet: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if _, err := r.CheckEdit(ctx, []FileEdit{{File: "a/a.go", OldString: "return len(text), nil", NewString: "return len(text) + 0, nil"}}); err != nil {
+		t.Fatal(err)
+	}
+	if st := pc.Status(); st.Loads != 2 {
+		t.Fatalf("the first check loaded %d programs, want 2", st.Loads)
+	}
+	for _, c := range []struct {
+		name  string
+		edits []FileEdit
+		errs  int
+		pkgs  int // the most packages that may be type-checked again
+	}{
+		{"a new package in a new directory", []FileEdit{{File: "d/deep/d.go", Content: str("package deep\n\nimport \"example.com/ed/a\"\n\nfunc Area() float64 { return a.Sq{Side: 2}.Area() }\n")}}, 0, 1},
+		{"a new package that does not compile", []FileEdit{{File: "d/deep/d.go", Content: str("package deep\n\nimport \"example.com/ed/a\"\n\nfunc Area() float64 { return a.Sq{Side: 2}.Volume() }\n")}}, 1, 1},
+		{"a new package with a test file", []FileEdit{
+			{File: "d/deep/d.go", Content: str("package deep\n\nfunc One() int { return 1 }\n")},
+			{File: "d/deep/d_test.go", Content: str("package deep\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) { _ = One() }\n")},
+		}, 0, 2},
+		{"a new file in a package that is there", []FileEdit{{File: "b/extra.go", Content: str("package b\n\nimport \"example.com/ed/a\"\n\nfunc Quad(s a.Sq) a.Sq { return a.Scale(s, 4) }\n")}}, 0, 1},
+		{"a new file that declares a name its package has", []FileEdit{{File: "b/extra.go", Content: str("package b\n\nfunc Label(k int) string { return \"\" }\n")}}, 2, 1},
+		{"a new import", []FileEdit{{File: "b/b.go", OldString: `import "example.com/ed/a"`, NewString: "import (\n\t\"strings\"\n\n\t\"example.com/ed/a\"\n)\n\nvar _ = strings.ToUpper"}}, 0, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := r.CheckEdit(ctx, c.edits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Incomplete || len(got.Errors) != c.errs {
+				t.Errorf("incomplete %v, %d errors, want complete with %d\n%s", got.Incomplete, len(got.Errors), c.errs, got.Text(2, 0))
+			}
+			if got.Packages < 1 || got.Packages > c.pkgs {
+				t.Errorf("%d packages type-checked again, want 1 to %d: only what the edit reaches", got.Packages, c.pkgs)
+			}
+			again, err := (&Runner{Repo: root, Config: edConfigs, checkEditReload: true, SkipVet: true}).CheckEdit(ctx, c.edits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(findings(got), findings(again)) {
+				t.Errorf("the held programs and a fresh load disagree:\nheld:\n%s\nfresh:\n%s", got.Text(2, 0), again.Text(2, 0))
+			}
+		})
+	}
+	if st := pc.Status(); st.Loads != 2 || st.Evictions != 0 || len(st.Programs) != 2 {
+		t.Errorf("after the edits: %d loads, %d evictions, %d programs held; want the 2 programs of the first check and nothing else", st.Loads, st.Evictions, len(st.Programs))
+	}
+}
+
+// A file created on disk, or one that gains an import, changes what the go command lists. The held programs are
+// brought up to date from a new listing: the packages the change does not reach keep their types.
+func TestProgramCache_relistsWithoutLoadingAgain(t *testing.T) {
+	needGo(t)
+	root := writeTree(t, ed)
+	settle(t, root)
+	pc := NewProgramCache(2, time.Minute)
+	defer pc.Close()
+	r := &Runner{Repo: root, Config: edConfigs, Engine: EngineTypes, Programs: pc}
+	ctx := context.Background()
+	refs := func() []string {
+		t.Helper()
+		res, err := r.References(ctx, "a.Scale")
+		if err != nil || res.Incomplete {
+			t.Fatalf("%v %v", err, res)
+		}
+		return hitLines(res)
+	}
+	before := refs()
+	write := func(name, body string) {
+		t.Helper()
+		p := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("b/extra.go", "package b\n\nimport \"example.com/ed/a\"\n\nfunc Quad(s a.Sq) a.Sq { return a.Scale(s, 4) }\n")
+	after := refs()
+	if len(after) != len(before)+1 {
+		t.Errorf("after a new file: %v, want one more use than %v", after, before)
+	}
+	write("d/deep/d.go", "package deep\n\nimport \"example.com/ed/a\"\n\nfunc Half(s a.Sq) a.Sq { return a.Scale(s, 0.5) }\n")
+	if got := refs(); len(got) != len(before)+2 {
+		t.Errorf("after a new package: %v, want two more uses than %v", got, before)
+	}
+	write("b/b.go", strings.Replace(ed["b/b.go"], `import "example.com/ed/a"`, "import (\n\t\"strings\"\n\n\t\"example.com/ed/a\"\n)\n\nvar _ = strings.ToUpper", 1))
+	if got := refs(); len(got) != len(before)+2 {
+		t.Errorf("after a new import: %v, want two more uses than %v", got, before)
+	}
+	if err := os.Remove(filepath.Join(root, "b", "extra.go")); err != nil {
+		t.Fatal(err)
+	}
+	if got := refs(); len(got) != len(before)+1 {
+		t.Errorf("after a file was deleted: %v, want one more use than %v", got, before)
+	}
+	if st := pc.Status(); st.Loads != 2 || st.Refreshes != 8 || st.Stale != 8 {
+		t.Errorf("after four changes to what is listed: %+v, want the 2 loads of the first question and 8 refreshes", st)
+	}
+}

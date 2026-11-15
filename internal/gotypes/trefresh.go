@@ -2,8 +2,10 @@ package gotypes
 
 import (
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -321,4 +323,215 @@ func (p *program) narrowed(affected map[*tPackage]bool, direct []*tPackage, name
 		}
 	}
 	return out
+}
+
+// Refreshing onto a new listing.
+//
+// refresh gives up whenever the go command's list of packages may have changed: a file created or deleted, an import
+// added, a package clause or a constraint edited. The caller then asked the go command again and type-checked
+// everything it listed, though such a change reaches no more of the program than any other: the packages whose own
+// record changed, and the packages that import those. refreshOnto takes the new listing and does only that. A
+// package keeps the types and tables it had when
+//
+//   - the go command lists it exactly as before (its files, its imports and what each resolves to, its module's Go
+//     version, its error if it has one),
+//   - none of its files changed, and
+//   - every package it imports, by any chain, keeps its own.
+//
+// Every other package of the listing is type-checked, a new one included; a package that is no longer listed is
+// dropped. As in refresh, an unchanged file of a package that is checked again is parsed at the place it had.
+
+// sameRecord reports whether the go command lists tp as it listed old.
+func sameRecord(old, tp *tPackage) bool {
+	return old.PkgPath == tp.PkgPath && old.Name == tp.Name && old.Dir == tp.Dir && old.ForTest == tp.ForTest &&
+		old.GoVersion == tp.GoVersion && old.Standard == tp.Standard && old.Workspace == tp.Workspace && old.listErr == tp.listErr &&
+		slices.Equal(old.Files, tp.Files) && slices.Equal(old.deps, tp.deps) && maps.Equal(old.Imports, tp.Imports)
+}
+
+// refreshOnto returns a program for the tree as l lists it, given the files that changed since p was loaded (created
+// and deleted ones among them), type-checking only what the change reaches. With a patch (pc, when not nil) in place
+// of the files on disk, l is the listing made with the patch as its overlay and changed the patched files; the
+// program is then one to compare with p and discard, as refreshWith's is. It reports false when p cannot be brought
+// up to date this way and the listing must be type-checked whole. The error is an import cycle in the listing.
+func (p *program) refreshOnto(l *listing, changed []string, pc *patchProgram) (*program, bool, error) {
+	if p.keepSyntax || !slices.Equal(l.mods, p.mods) || (pc != nil && pc.narrow) {
+		return nil, false, nil
+	}
+	isChanged := map[string]bool{}
+	for _, f := range changed {
+		if buildFile(filepath.Base(f)) {
+			return nil, false, nil // go.mod, go.work: which modules there are, and at which versions, may differ
+		}
+		isChanged[f] = true
+	}
+	order, err := l.packages()
+	if err != nil {
+		return nil, false, nil // the whole build reports it
+	}
+	np := &program{bc: p.bc, fset: p.fset, pkgs: make(map[string]*tPackage, len(order)), byFile: map[string][]*tPackage{},
+		sizes: p.sizes, parsed: map[string]*parsedFile{}, tfiles: map[string]*token.File{}, mods: p.mods,
+		rechecked: map[string]bool{}, order: order, listSeconds: l.seconds}
+	if pc != nil {
+		np.overlay, np.read = pc.overlay, pc.read
+		np.forceBodies = map[string]bool{}
+		for _, tp := range p.order {
+			if tp.bodies {
+				np.forceBodies[tp.ID] = true
+			}
+		}
+	}
+	for _, tp := range order {
+		np.pkgs[tp.ID] = tp
+	}
+	for _, tp := range order {
+		for _, d := range tp.deps {
+			if dp := np.pkgs[d]; dp != nil {
+				dp.importedBy = append(dp.importedBy, tp)
+			}
+		}
+		for _, f := range tp.Files {
+			np.byFile[f] = append(np.byFile[f], tp)
+		}
+	}
+	if cycle := importCycle(np); cycle != "" {
+		return nil, false, &cycleError{cycle}
+	}
+	p.parseMu.Lock()
+	for f, tf := range p.tfiles {
+		np.tfiles[f] = tf
+	}
+	old := make(map[string]*parsedFile, len(p.parsed))
+	for f, pf := range p.parsed {
+		old[f] = pf
+	}
+	p.parseMu.Unlock()
+	fail := func() (*program, bool, error) {
+		np.discard()
+		return nil, false, nil
+	}
+
+	// What is known about each file: a changed or new one is parsed afresh, at a new place; an unchanged one carries
+	// over what the last parse found.
+	for f := range np.byFile {
+		was := old[f]
+		if isChanged[f] || was == nil {
+			np.parsed[f] = &parsedFile{}
+			continue
+		}
+		if !was.metaOK {
+			return fail()
+		}
+		np.parsed[f] = &parsedFile{tfile: was.tfile, carried: true, metaOK: true, parsedOK: was.parsedOK, hasMethod: was.hasMethod, universe: was.universe, header: was.header, bodies: was.bodies}
+	}
+
+	// The packages whose own record or files changed.
+	affected := map[*tPackage]bool{}
+	var direct []*tPackage
+	for _, tp := range order {
+		was := p.pkgs[tp.ID]
+		differs := was == nil || !sameRecord(was, tp)
+		for i := 0; !differs && i < len(tp.Files); i++ {
+			differs = isChanged[tp.Files[i]]
+		}
+		for i := 0; !differs && i < len(tp.deps); i++ {
+			differs = (p.pkgs[tp.deps[i]] == nil) != (np.pkgs[tp.deps[i]] == nil) // an import that appeared, or went
+		}
+		if differs {
+			affected[tp] = true
+			direct = append(direct, tp)
+		}
+	}
+	if pc == nil {
+		// Whether a plain package is checked with function bodies depends on the test files of its test variant
+		// (needsBodies). Where the variant changed, the plain package is asked again, and checked again if the
+		// answer is another. (A program that checks a patch keeps the bodies p had.)
+		for _, tv := range direct {
+			if tv.ForTest == "" || tv.ForTest != tv.PkgPath {
+				continue
+			}
+			tp := np.pkgs[tv.PkgPath]
+			if tp == nil || affected[tp] {
+				continue
+			}
+			if was := p.pkgs[tp.ID]; was == nil || np.needsBodies(tp, nil) != was.bodies {
+				affected[tp] = true
+				direct = append(direct, tp)
+			}
+		}
+		// A test variant that is gone leaves its plain package the only one searched.
+		for _, was := range p.order {
+			if was.ForTest != "" && was.ForTest == was.PkgPath && np.pkgs[was.ID] == nil {
+				if tp := np.pkgs[was.PkgPath]; tp != nil && !affected[tp] {
+					affected[tp] = true
+					direct = append(direct, tp)
+				}
+			}
+		}
+	}
+	if len(affected) == 0 {
+		gone := len(order) != len(p.order) // a package nothing imports that is no longer listed
+		for i := 0; !gone && i < len(p.order); i++ {
+			gone = np.pkgs[p.order[i].ID] == nil
+		}
+		if !gone {
+			np.discard()
+			return p, true, nil // nothing this configuration compiles changed
+		}
+	}
+	// And the packages that import one of those, by any chain.
+	var reach func(tp *tPackage)
+	reach = func(tp *tPackage) {
+		for _, q := range tp.importedBy {
+			if !affected[q] {
+				affected[q] = true
+				reach(q)
+			}
+		}
+	}
+	for _, tp := range direct {
+		reach(tp)
+	}
+
+	for _, tp := range order {
+		if affected[tp] {
+			np.rechecked[tp.ID] = true
+			for _, f := range tp.Files {
+				pf := np.parsed[f]
+				if !pf.carried {
+					continue
+				}
+				// an unchanged file, parsed again where it was: every position in it stays the position it had
+				if pf.tfile == nil {
+					return fail()
+				}
+				pf.base = pf.tfile.Base()
+			}
+			continue
+		}
+		was := p.pkgs[tp.ID]
+		tp.types, tp.nerr, tp.bodies, tp.errs, tp.soft = was.types, was.nerr, was.bodies, was.errs, was.soft
+		tp.defs, tp.useAtDecl, tp.uses, tp.typeSpecs = was.defs, was.useAtDecl, was.uses, was.typeSpecs
+		if ties := was.ties.Load(); ties != nil {
+			tp.ties.Store(ties) // they name declarations of this package and its dependencies, all unchanged
+		}
+		if names := was.defNames.Load(); names != nil {
+			tp.defNames.Store(names)
+		}
+		tp.once.Do(func() {}) // checked
+	}
+	for f, users := range np.byFile {
+		n := 0
+		for _, tp := range users {
+			if affected[tp] {
+				n++
+			}
+		}
+		np.parsed[f].users.Store(int32(n))
+	}
+	np.checkAll()
+	if np.refreshBroken.Load() {
+		return fail()
+	}
+	np.checkSeconds, np.refreshed = 0, len(affected)
+	return np, true, nil
 }

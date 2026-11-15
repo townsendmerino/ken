@@ -318,17 +318,9 @@ func (r *Runner) CheckEdit(ctx context.Context, edits []FileEdit) (*EditCheck, e
 			}
 			checked[prog] = true
 			hold := func() (func(), error) { return r.holdForWork(ctx) }
-			d, err := prog.checkEdit(patch, maps, patchEnv{hold: hold, full: r.checkEditReload, reload: func(opts buildOpts) (*program, error) {
-				l, err := r.listWorkspaceWith(ctx, bc, dir, patch)
-				if err != nil {
-					return nil, err
-				}
-				release, err := hold() // after the listing, which ran behind the wrap command itself
-				if err != nil {
-					return nil, err
-				}
-				defer release()
-				return l.buildWith(opts)
+			// The held program says which modules the workspace is of: the go command is asked for the packages only.
+			d, err := prog.checkEdit(patch, maps, patchEnv{hold: hold, full: r.checkEditReload, list: func() (*listing, error) {
+				return r.listModules(ctx, bc, prog.mods, patch)
 			}})
 			var cyc *cycleError
 			if errors.As(err, &cyc) {
@@ -347,9 +339,22 @@ func (r *Runner) CheckEdit(ctx context.Context, edits []FileEdit) (*EditCheck, e
 			}
 		}
 	}
-	// Each check type-checks again every package the edit reaches, with their function bodies: as much memory while
-	// it runs as loading them. They go one configuration at a time unless Parallel says more.
+	// Each check type-checks again every package the edit reaches, with their function bodies. When every program
+	// asked for is held, they are all in memory already and what a check adds to them is the packages the edit
+	// reaches, for as long as it runs: the configurations are checked side by side, and the edit costs the slowest
+	// of them, not their sum. A program that has to be loaded is loaded as Parallel says.
 	par := max(r.Parallel, 1)
+	if r.Programs != nil {
+		all := true
+		for _, j := range jobs {
+			for _, dir := range j.dirs {
+				all = all && r.Programs.holds(r, r.Config.Configs[j.ci], dir)
+			}
+		}
+		if all {
+			par = max(par, len(jobs))
+		}
+	}
 	if par == 1 || len(jobs) < 2 {
 		for _, j := range jobs {
 			check(j)

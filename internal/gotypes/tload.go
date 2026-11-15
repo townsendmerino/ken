@@ -277,6 +277,17 @@ func (r *Runner) listWorkspaceWith(ctx context.Context, bc BuildConfig, dir stri
 	if err != nil {
 		return nil, err
 	}
+	l, err := r.listModules(ctx, bc, mods, overlay)
+	if l != nil {
+		l.seconds = nowSeconds() - t0
+	}
+	return l, err
+}
+
+// listModules is listWorkspaceWith for a workspace whose module directories are known: a program of it is held
+// (program.mods), and the go command need not be asked again which they are.
+func (r *Runner) listModules(ctx context.Context, bc BuildConfig, mods []string, overlay map[string][]byte) (*listing, error) {
+	t0 := nowSeconds()
 	args := []string{"-C", mods[0], "list", "-e", "-deps", "-test", "-compiled", "-json=" + tListFields}
 	if len(overlay) > 0 {
 		tmp, err := os.MkdirTemp("", "ken-overlay-")
@@ -349,13 +360,11 @@ type buildOpts struct {
 	read      func(file string) ([]byte, error)
 }
 
-func (l *listing) buildWith(opts buildOpts) (*program, error) {
-	bc, mods, stdout := l.bc, l.mods, l.stdout
-	keepSyntax := opts.keepSyntax
-	p := &program{bc: bc, fset: token.NewFileSet(), pkgs: map[string]*tPackage{}, byFile: map[string][]*tPackage{},
-		sizes: types.SizesFor("gc", bc.goarch()), parsed: map[string]*parsedFile{}, tfiles: map[string]*token.File{},
-		keepSyntax: keepSyntax}
-	dec := json.NewDecoder(bytes.NewReader(stdout))
+// packages reads the listing's records: one package each, in the go command's order (dependencies first), not yet
+// type-checked.
+func (l *listing) packages() ([]*tPackage, error) {
+	var order []*tPackage
+	dec := json.NewDecoder(bytes.NewReader(l.stdout))
 	for {
 		var rec listRecord
 		if err := dec.Decode(&rec); err == io.EOF {
@@ -400,16 +409,32 @@ func (l *listing) buildWith(opts buildOpts) (*program, error) {
 			tp.Imports[from] = to
 		}
 		if !rec.Standard && rec.Dir != "" {
-			for _, m := range mods {
+			for _, m := range l.mods {
 				if inDir(m, rec.Dir) {
 					tp.Workspace = true
 					break
 				}
 			}
 		}
-		p.pkgs[tp.ID] = tp
-		p.order = append(p.order, tp)
+		order = append(order, tp)
 	}
+	return order, nil
+}
+
+func (l *listing) buildWith(opts buildOpts) (*program, error) {
+	bc, mods := l.bc, l.mods
+	keepSyntax := opts.keepSyntax
+	p := &program{bc: bc, fset: token.NewFileSet(), pkgs: map[string]*tPackage{}, byFile: map[string][]*tPackage{},
+		sizes: types.SizesFor("gc", bc.goarch()), parsed: map[string]*parsedFile{}, tfiles: map[string]*token.File{},
+		keepSyntax: keepSyntax}
+	order, err := l.packages()
+	if err != nil {
+		return nil, err
+	}
+	for _, tp := range order {
+		p.pkgs[tp.ID] = tp
+	}
+	p.order = order
 	for _, tp := range p.order {
 		for _, d := range tp.deps {
 			if dp := p.pkgs[d]; dp != nil {

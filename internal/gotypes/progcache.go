@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -177,7 +179,36 @@ func (c *ProgramCache) keyFor(r *Runner, bc BuildConfig, dir string) (key string
 			return k, nil
 		}
 	}
+	// A directory no package lives in (one an edit is about to create a package in, or a directory of directories)
+	// is served by the program of the workspace it is inside: asking for it must not load that workspace again
+	// under another key, and push the program that was asked about a moment ago out of the cache.
+	if mod := moduleDirOf(dir); mod != "" {
+		for k, h := range c.held {
+			if h.prog != nil && strings.HasPrefix(k, prefix) && slices.Contains(h.prog.mods, mod) {
+				return k, nil
+			}
+		}
+	}
 	return key, pending
+}
+
+// moduleDirOf returns the directory of the module dir is in: the nearest one, at or above it, that holds a go.mod.
+// "" when there is none.
+func moduleDirOf(dir string) string {
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if st, err := os.Stat(filepath.Join(d, "go.mod")); err == nil && !st.IsDir() {
+			return d
+		}
+		if d == filepath.Dir(d) {
+			return ""
+		}
+	}
+}
+
+// servesDir reports whether the program is the one to ask about dir: a workspace package lives there, or dir is
+// inside one of the program's modules and no package does yet.
+func (p *program) servesDir(dir string) bool {
+	return p.holdsDir(dir) || slices.Contains(p.mods, moduleDirOf(dir))
 }
 
 // treeScan is one scan of a repository's tree, shared by the configurations of one query.
@@ -306,6 +337,16 @@ func (c *ProgramCache) get(ctx context.Context, r *Runner, bc BuildConfig, dir s
 			if release, herr := r.holdForWork(ctx); herr == nil {
 				p, refreshed = stale.prog.refresh(changed, createdOrDeleted)
 				release()
+			}
+			if !refreshed {
+				// The change may have altered what the go command lists (a file created or deleted, an import, a
+				// constraint). It is asked again, and only what the change reaches is type-checked on its answer.
+				if l, lerr := r.listModules(ctx, bc, stale.prog.mods, nil); lerr == nil {
+					if release, herr := r.holdForWork(ctx); herr == nil { // after the listing: a lock is not taken twice
+						p, refreshed, _ = stale.prog.refreshOnto(l, changed, nil)
+						release()
+					}
+				}
 			}
 		}
 		if !refreshed {
