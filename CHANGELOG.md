@@ -15,6 +15,12 @@ pre-built binaries.
 
 ## [Unreleased]
 
+## [1.19.2] — 2026-11-16 — `callers` lists Go values passed without a call
+
+### Fixed
+
+- **`callers` on a Go method or function that is only passed as a value no longer comes back empty.** A method handed over as a value (`Emit: s.emitTurn`, an argument, an assignment, a method expression `(*T).M`) has no call expression, so `callers` returned nothing, and an agent read the empty list as "unused". The Go extractor now records each selector that is not a call target, `Index.ValueUses` and `engine.Workspace.ValueUses` expose them, and `callers` lists them under "Passed as a value" (JSON `value_uses`). Calls made through the func value are not traced. The match is by name, so a same-named field read also appears, and the output says so. Calls through an interface were already found (`TestCallers_InterfaceDispatch`). Go only.
+
 ## [1.19.1] — 2026-11-15 — the edit hook on a large Go repository
 
 ### Fixed
