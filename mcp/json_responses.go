@@ -168,6 +168,12 @@ type CallersResponse struct {
 	Symbol string          `json:"symbol"`
 	Files  []string        `json:"files"`
 	Sites  []CallerSiteOut `json:"sites,omitempty"`
+	// ValueUses lists where the name is taken as a value instead of
+	// called (method value `s.emitTurn` passed, stored or assigned; method
+	// expression `T.M`). Go only. Calls through the func value are not
+	// traced, so a non-empty ValueUses with empty Files means "used, but
+	// not called directly" — not "unused".
+	ValueUses []CallerSiteOut `json:"value_uses,omitempty"`
 }
 
 // CallerSiteOut is one file's calls to the symbol.

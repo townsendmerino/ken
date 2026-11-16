@@ -121,6 +121,11 @@ func (l *structuralLookups) Callers(sym string) []engine.CallSite {
 	return out
 }
 
+func (l *structuralLookups) ValueUses(sym string) []engine.CallSite {
+	out, _ := l.ws.ValueUses(l.ctx, sym)
+	return out
+}
+
 // HasFile reports whether the index holds path as a file.
 func (l *structuralLookups) HasFile(path string) bool {
 	_, ok, _ := l.ws.OutlineOfFile(l.ctx, path)
@@ -329,7 +334,8 @@ func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.Cal
 	}
 
 	sites := sidx.Callers(sym)
-	if len(sites) == 0 {
+	valueUses := sidx.ValueUses(sym)
+	if len(sites) == 0 && len(valueUses) == 0 {
 		// Empty: same shape in JSON (files: []) so agents don't
 		// have to special-case missing data; markdown gets the
 		// human-readable hint.
@@ -358,6 +364,13 @@ func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.Cal
 		}
 		resp.Sites = append(resp.Sites, CallerSiteOut{File: s.File, Calls: calls})
 	}
+	for _, s := range valueUses {
+		uses := make([]CallOut, 0, len(s.Calls))
+		for _, c := range s.Calls {
+			uses = append(uses, CallOut{Line: c.Line, Caller: c.Caller})
+		}
+		resp.ValueUses = append(resp.ValueUses, CallerSiteOut{File: s.File, Calls: uses})
+	}
 	return dispatchOutput(args.Output, resp, renderCallersMarkdown(resp))
 }
 
@@ -367,24 +380,38 @@ func renderCallersMarkdown(r CallersResponse) string {
 	fmt.Fprintf(&b, "_%d file%s contain%s a call to this name; each call shows its line and the function it's in. "+
 		"Tree-sitter-grade, name-resolved, NOT type-resolved._\n\n",
 		len(r.Files), pluralS(len(r.Files)), agreeVerb(len(r.Files) == 1, "s", ""))
-	for i, s := range r.Sites {
-		fmt.Fprintf(&b, "%d. **%s**", i+1, s.File)
-		for j, c := range s.Calls {
-			if j == maxLinesInMarkdown {
-				fmt.Fprintf(&b, ", +%d more", len(s.Calls)-j)
-				break
+	writeSites := func(sites []CallerSiteOut) {
+		for i, s := range sites {
+			fmt.Fprintf(&b, "%d. **%s**", i+1, s.File)
+			for j, c := range s.Calls {
+				if j == maxLinesInMarkdown {
+					fmt.Fprintf(&b, ", +%d more", len(s.Calls)-j)
+					break
+				}
+				sep := ", "
+				if j == 0 {
+					sep = " — "
+				}
+				if c.Caller != "" {
+					fmt.Fprintf(&b, "%s%d (in %s)", sep, c.Line, c.Caller)
+				} else {
+					fmt.Fprintf(&b, "%s%d (file scope)", sep, c.Line)
+				}
 			}
-			sep := ", "
-			if j == 0 {
-				sep = " — "
-			}
-			if c.Caller != "" {
-				fmt.Fprintf(&b, "%s%d (in %s)", sep, c.Line, c.Caller)
-			} else {
-				fmt.Fprintf(&b, "%s%d (file scope)", sep, c.Line)
-			}
+			b.WriteString("\n")
 		}
-		b.WriteString("\n")
+	}
+	writeSites(r.Sites)
+	if len(r.ValueUses) > 0 {
+		if len(r.Sites) == 0 {
+			b.WriteString("**No direct calls, but the name is used as a value — it is not unused.**\n\n")
+		} else {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "## Passed as a value (%d file%s)\n\n", len(r.ValueUses), pluralS(len(r.ValueUses)))
+		b.WriteString("_Sites where the name is taken as a func value or method expression, or a same-named field is read; " +
+			"calls through the func value are not traced._\n\n")
+		writeSites(r.ValueUses)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

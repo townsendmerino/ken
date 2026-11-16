@@ -124,6 +124,15 @@ type FileStruct struct {
 	// to expose, byte-identical to the pre-Phase-0 behaviour.
 	CallRefs []CallRef
 
+	// ValueRefs is every `x.Name` selector that is NOT a call target
+	// (Go only): a method or function taken as a value — passed as an
+	// argument, stored in a field, assigned, returned — or a method
+	// expression `T.M`. Plain field reads land here too: syntax alone
+	// can't tell them apart. Callee is the selector's field name,
+	// Receiver its operand text. Not part of the call graph; read by
+	// Index.ValueUses.
+	ValueRefs []CallRef
+
 	// Raises: every exception type the file's `raise X(...)`
 	// statements name. Dedup'd; order matches first occurrence.
 	Raises []string
@@ -1006,6 +1015,47 @@ func callsTo(fs *FileStruct, callee string, keep func(*FileStruct, CallRef) bool
 		return out[i].Caller < out[j].Caller
 	})
 	return slices.Compact(out)
+}
+
+// ValueUses returns the files where the name is used as a value rather
+// than called: `Emit: s.emitTurn`, `run(s.emitTurn)`, `f := s.emitTurn`,
+// `(*Server).emitTurn`. Calls made later through the func value are not
+// traced. Go only. Matching is by leaf name, so a struct field of the
+// same spelling also shows up. Sorted by path; Calls holds each use's
+// line and enclosing function.
+func (ix *Index) ValueUses(name string) []CallSite {
+	leaf := name
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		leaf = name[i+1:]
+	}
+	paths := make([]string, 0)
+	for p, fs := range ix.files {
+		if len(fs.ValueRefs) > 0 {
+			paths = append(paths, p)
+		}
+	}
+	sort.Strings(paths)
+	var out []CallSite
+	for _, p := range paths {
+		fs := ix.files[p]
+		var uses []Call
+		for _, r := range fs.ValueRefs {
+			if r.Callee == leaf {
+				uses = append(uses, Call{Line: r.Line, Caller: r.EnclosingSymbol})
+			}
+		}
+		if len(uses) == 0 {
+			continue
+		}
+		sort.SliceStable(uses, func(i, j int) bool {
+			if uses[i].Line != uses[j].Line {
+				return uses[i].Line < uses[j].Line
+			}
+			return uses[i].Caller < uses[j].Caller
+		})
+		out = append(out, CallSite{File: p, Calls: slices.Compact(uses)})
+	}
+	return out
 }
 
 // Defs returns the files that define the given top-level name, sorted
