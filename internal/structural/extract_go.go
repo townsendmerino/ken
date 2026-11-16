@@ -129,6 +129,35 @@ func walkGo(src []byte, n *gotreesitter.Node, lang *gotreesitter.Language, enclo
 			fs.appendCall(name, goCallReceiver(src, n, lang), n, enclosingSymbol)
 		}
 		nc := n.NamedChildCount()
+		fn := n.ChildByFieldName("function", lang)
+		for i := range nc {
+			c := n.NamedChild(i)
+			if c != nil && fn != nil && c.StartByte() == fn.StartByte() && c.EndByte() == fn.EndByte() &&
+				c.Type(lang) == "selector_expression" {
+				// The call target `x.M` is a call, not a value use: walk
+				// only its operand (`a.b.M()` still has `a.b` to inspect).
+				walkGo(src, c.ChildByFieldName("operand", lang), lang, enclosingType, enclosingSymbol, fs)
+				continue
+			}
+			walkGo(src, c, lang, enclosingType, enclosingSymbol, fs)
+		}
+	case "selector_expression":
+		// A selector outside call-target position: `x.M` passed, stored,
+		// returned, or `T.M` as a method expression. No call expression,
+		// so callers can't see it; record it as a value use.
+		if field := n.ChildByFieldName("field", lang); field != nil {
+			op := ""
+			if o := n.ChildByFieldName("operand", lang); o != nil {
+				op = nodeText(src, o)
+			}
+			fs.ValueRefs = append(fs.ValueRefs, CallRef{
+				Callee:          nodeText(src, field),
+				Receiver:        op,
+				Line:            nodeStartLine(n),
+				EnclosingSymbol: enclosingSymbol,
+			})
+		}
+		nc := n.NamedChildCount()
 		for i := range nc {
 			walkGo(src, n.NamedChild(i), lang, enclosingType, enclosingSymbol, fs)
 		}

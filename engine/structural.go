@@ -361,6 +361,18 @@ func (w *Workspace) Callers(ctx context.Context, symbol string) ([]CallSite, err
 	return idx.Callers(symbol), nil
 }
 
+// ValueUses returns the files that use symbol as a value (a method value
+// or expression, a function passed or stored) rather than calling it, one
+// CallSite per file with each use's line and enclosing function. Calls
+// through the func value are not traced. Go only; name-resolved.
+func (w *Workspace) ValueUses(ctx context.Context, symbol string) ([]CallSite, error) {
+	idx, err := w.structuralIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return idx.ValueUses(symbol), nil
+}
+
 // Outline returns the structural outline (every top-level function, class,
 // and method) for path. If path matches an indexed file exactly, the
 // result has exactly one entry for it; otherwise path is treated as a
