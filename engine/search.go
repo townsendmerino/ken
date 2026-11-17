@@ -251,6 +251,12 @@ type SearchOptions struct {
 	// The ranking, scores and every other Hit field are unchanged; the
 	// call is cheaper. Best-effort, outside the stability promise.
 	NoArmRanks bool
+
+	// Scope restricts the search to part of the index, inside both
+	// retrieval arms (see Scope). The zero value searches everything and
+	// is byte-identical to a call without it. An empty scope (no chunk
+	// passes) returns no results without searching.
+	Scope Scope
 }
 
 // Telemetry is one query's per-stage timing breakdown (see
@@ -280,13 +286,17 @@ func (w *Workspace) SearchWith(ctx context.Context, query string, k int, mode Mo
 
 // searchResults runs one query against one snapshot, as opts asks.
 func searchResults(ix *search.Index, query string, k int, mode Mode, opts SearchOptions) (results []search.Result, eff Mode) {
+	allow, _, inScope := opts.Scope.compile(ix)
+	if allow != nil && inScope == 0 {
+		return nil, ix.ResolveMode(mode)
+	}
 	switch {
 	case opts.BudgetPacking:
-		results, eff = ix.SearchModeAblated(query, k, mode, search.AdaptiveAlphas, search.RankAblation{SaturationDecay: budgetPackingSaturationDecay})
+		results, eff = ix.SearchModeAblatedScoped(query, k, mode, search.AdaptiveAlphas, search.RankAblation{SaturationDecay: budgetPackingSaturationDecay}, allow)
 	case opts.Telemetry != nil:
-		results, eff, *opts.Telemetry = ix.SearchModeWithTelemetry(query, k, mode)
+		results, eff, *opts.Telemetry = ix.SearchModeWithTelemetryScoped(query, k, mode, allow)
 	default:
-		results, eff = ix.SearchMode(query, k, mode)
+		results, eff = ix.SearchModeAblatedScoped(query, k, mode, search.AdaptiveAlphas, search.RankAblation{}, allow)
 	}
 	return results, eff
 }

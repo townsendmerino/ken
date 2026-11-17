@@ -49,8 +49,9 @@ func hybridSearch(
 	alphas AlphaPair,
 	predicted []string,
 	abl RankAblation,
+	allow *ChunkSet,
 ) []rankedItem {
-	return hybridRankFused(fuseArms(query, qVec, flat, bm, topK, alphas, predicted), query, chunks, topK, predicted, abl)
+	return hybridRankFused(fuseArms(query, qVec, flat, bm, topK, alphas, predicted, allow), query, chunks, topK, predicted, abl)
 }
 
 // hybridRankFused is hybridSearch after the arms: the boosts, penalties and
@@ -89,8 +90,9 @@ func fuseArms(
 	topK int,
 	alphas AlphaPair,
 	predicted []string,
+	allow *ChunkSet,
 ) fusedArms {
-	f := runArms(query, qVec, flat, bm, topK, alphas, predicted)
+	f := runArms(query, qVec, flat, bm, topK, alphas, predicted, allow)
 	weights := [2]float64{f.alpha, 1.0 - f.alpha}
 	fused := fuse.RRFWeighted(fuse.DefaultK, weights[:], f.semOrder, f.bmOrder)
 	f.combined = make(map[int]float64, len(fused))
@@ -110,12 +112,13 @@ func runArms(
 	topK int,
 	alphas AlphaPair,
 	predicted []string,
+	allow *ChunkSet,
 ) fusedArms {
 	alpha := resolveAlpha(query, alphas)
 	candidateCount := topK * candidateOverfetch
 
 	// Semantic candidates (cosine similarity, already sorted desc).
-	semHits := flat.Query(qVec, candidateCount)
+	semHits := queryDense(flat, qVec, candidateCount, allow)
 	semOrder := make([]int, len(semHits))
 	for i, h := range semHits {
 		semOrder[i] = h.Index
@@ -132,7 +135,7 @@ func runArms(
 			bmTerms = append(bmTerms, bm25.Tokenize(p)...)
 		}
 	}
-	bmHits := bm.TopK(bmTerms, candidateCount)
+	bmHits := bm25TopK(bm, bmTerms, candidateCount, allow)
 	bmOrder := make([]int, 0, len(bmHits))
 	for _, r := range bmHits {
 		if r.Score > 0 {
