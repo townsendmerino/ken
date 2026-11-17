@@ -15,6 +15,10 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Added
+
+- **`text_refs(path)`, and `engine.Workspace.TextRefs`: which files read a file as text.** Lists the string literals and `//go:embed` patterns that contain a file's repo path (or its base name, where the directory part fits), with file, line and enclosing function. Go is read from the syntax tree, so comments and identifiers do not match; other languages use the string literals on indexed lines. It is a lead list for source-scan tests and embeds; use grep for every match.
+
 ## [1.19.2] — 2026-11-16 — `callers` lists Go values passed without a call
 
 ### Fixed

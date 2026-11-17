@@ -333,6 +333,20 @@ func NewServer(cfg Config) *sdk.Server {
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
+		Name: "text_refs",
+		Description: "Find the code that reads a file as text: string literals and `//go:embed` patterns " +
+			"that contain the file's repo path or base name, with file, line and enclosing function. " +
+			"Use it for source-scan tests and embeds, which neither a call graph nor a reference search sees. " +
+			"In Go it reads the syntax tree, so comments and identifiers don't match; in other languages it " +
+			"reads the string literals on indexed lines. It is a lead list, not an exhaustive answer: a path " +
+			"built at run time is missed. Use grep for every literal match.",
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args TextRefsArgs) (*sdk.CallToolResult, any, error) {
+		stop := startProgressHeartbeat(ctx, req, "ken text_refs")
+		defer stop()
+		return handleTextRefs(ctx, &cfg, args)
+	})
+
+	sdk.AddTool(srv, &sdk.Tool{
 		Name: "outline",
 		Description: "Show the structural outline of a file or directory. " +
 			"For a file path: returns every top-level function, class, and method " +
