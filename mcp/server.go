@@ -285,7 +285,8 @@ func NewServer(cfg Config) *sdk.Server {
 		// the client sent no progressToken.
 		stop := startProgressHeartbeat(ctx, req, "ken definition")
 		defer stop()
-		return handleDefinition(ctx, &cfg, args)
+		res, a, err := handleDefinition(ctx, &cfg, args)
+		return noteStale(ctx, &cfg, args.Repo, args.Output, res, a, err)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -300,7 +301,8 @@ func NewServer(cfg Config) *sdk.Server {
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args ReferencesArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken references")
 		defer stop()
-		return handleReferences(ctx, &cfg, args)
+		res, a, err := handleReferences(ctx, &cfg, args)
+		return noteStale(ctx, &cfg, args.Repo, args.Output, res, a, err)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -315,7 +317,8 @@ func NewServer(cfg Config) *sdk.Server {
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args CallersArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken callers")
 		defer stop()
-		return handleCallers(ctx, &cfg, args)
+		res, a, err := handleCallers(ctx, &cfg, args)
+		return noteStale(ctx, &cfg, args.Repo, args.Output, res, a, err)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -343,7 +346,8 @@ func NewServer(cfg Config) *sdk.Server {
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args OutlineArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken outline")
 		defer stop()
-		return handleOutline(ctx, &cfg, args)
+		res, a, err := handleOutline(ctx, &cfg, args)
+		return noteStale(ctx, &cfg, args.Repo, args.Output, res, a, err)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -355,7 +359,8 @@ func NewServer(cfg Config) *sdk.Server {
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args SymbolsArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken symbols")
 		defer stop()
-		return handleSymbols(ctx, &cfg, args)
+		res, a, err := handleSymbols(ctx, &cfg, args)
+		return noteStale(ctx, &cfg, args.Repo, args.Output, res, a, err)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
