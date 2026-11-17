@@ -96,7 +96,7 @@ func (ix *Index) SearchFilesMode(query string, k int, mode Mode, keep func(file 
 		// searchCore's ModeHybridRerank branch at the whole ranking's depth,
 		// keeping the arms to read ranks from instead of running them twice.
 		fetch := max(ix.rerankCfg.rerankN, whole)
-		f := fuseArms(query, ix.model.Encode(query), ix.flat, ix.bm, fetch, AdaptiveAlphas, nil)
+		f := fuseArms(query, ix.model.Encode(query), ix.flat, ix.bm, fetch, AdaptiveAlphas, nil, nil)
 		all := ix.rerankFused(query, f, fetch, nil, RankAblation{})
 		var res []Result
 		var ranks []ArmRanks
@@ -165,7 +165,7 @@ func (ix *Index) SearchFilesMode(query string, k int, mode Mode, keep func(file 
 // requested files' chunks go on to the query boosts, penalties and
 // saturation. TestSearchFilesMode_DenseExact pins the equivalence.
 func (ix *Index) searchFilesHybrid(query string, k, whole int, target []int, keep func(string) bool) ([]Result, []ArmRanks, Mode) {
-	f := runArms(query, ix.model.Encode(query), ix.flat, ix.bm, whole, AdaptiveAlphas, nil)
+	f := runArms(query, ix.model.Encode(query), ix.flat, ix.bm, whole, AdaptiveAlphas, nil, nil)
 	n := len(ix.chunks)
 
 	// fuse.RRFWeighted: each key's score starts at 0 and adds w/(k+rank) for
