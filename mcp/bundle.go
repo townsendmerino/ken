@@ -128,10 +128,23 @@ var structuralFailCooldown = 60 * time.Second
 // running, it failed, or it found no supported files — handlers defend
 // against nil and can call StructuralPending to distinguish "building".
 func (b *RepoBundle) StructuralIndex(ctx context.Context) *engine.StructuralIndex {
+	idx, _ := b.structuralLookup(ctx)
+	return idx
+}
+
+// structuralLookup is StructuralIndex plus, on the Workspace path, why the
+// index is missing: engine.ErrStructuralBuilding, a wrapped
+// engine.ErrStructuralFailed, or engine.ErrNoStructuralIndex. Other paths
+// return a nil error with a nil index; structuralUnavailableResult falls
+// back to StructuralPending for them.
+func (b *RepoBundle) structuralLookup(ctx context.Context) (*engine.StructuralIndex, error) {
 	if b.Workspace != nil {
-		idx, _ := b.Workspace.Structural(ctx) // nil while building or unavailable
-		return idx
+		return b.Workspace.Structural(ctx)
 	}
+	return b.legacyStructuralIndex(ctx), nil
+}
+
+func (b *RepoBundle) legacyStructuralIndex(ctx context.Context) *engine.StructuralIndex {
 	if b.Structural != nil {
 		return b.Structural.StructuralIndex(ctx)
 	}
@@ -235,6 +248,9 @@ func (b *RepoBundle) stopStructuralBuild() {
 // active cooldown). Handlers use it to tell an agent "still building, retry
 // shortly" apart from "this corpus has no structural index" (audit R3).
 func (b *RepoBundle) StructuralPending() bool {
+	if b.Workspace != nil {
+		return b.Workspace.StructuralPending()
+	}
 	if b.Structural != nil {
 		return b.Structural.StructuralPending()
 	}

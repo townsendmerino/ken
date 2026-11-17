@@ -17,7 +17,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -78,6 +80,13 @@ var ErrStructuralBuilding = errors.New("engine: structural index still building"
 // (an unsupported-language corpus genuinely has none), or the last build
 // attempt failed and is in its retry cooldown.
 var ErrNoStructuralIndex = errors.New("engine: no structural index available")
+
+// ErrStructuralFailed means the last structural build attempt failed and is
+// in its retry cooldown. The returned error wraps both this and the build
+// error, so errors.Is matches ErrStructuralFailed and the text names the
+// cause. Distinct from ErrNoStructuralIndex, which means no file in the
+// corpus has a registered extractor.
+var ErrStructuralFailed = errors.New("engine: structural index build failed")
 
 // ErrFileNotIndexed means SymbolAt's path isn't in the structural index:
 // a language with no structural extractor, a file the walk skipped, or no
@@ -140,6 +149,11 @@ type structuralState struct {
 	done     chan struct{}
 	cancel   context.CancelFunc
 	failedAt time.Time
+	lastErr  error // the error of the build that set failedAt
+	// stale is the last good index while a rebuild after a resync runs;
+	// get serves it (immutable, so safe) instead of nothing. Cleared when
+	// the rebuild publishes.
+	stale atomic.Pointer[structural.Index]
 	// Changes that arrived while a build was in flight: the build may have
 	// read those files before they changed, so run applies them to its
 	// result before publishing. pendingReset means a change of unknown
@@ -180,7 +194,7 @@ func (s *structuralState) get(ctx context.Context) *structural.Index {
 	if !s.building {
 		if !s.failedAt.IsZero() && time.Since(s.failedAt) < structuralFailCooldown {
 			s.mu.Unlock()
-			return nil // recent failure — don't re-trigger the parse yet
+			return s.stale.Load() // recent failure — don't re-trigger the parse yet
 		}
 		s.building = true
 		s.done = make(chan struct{})
@@ -192,6 +206,9 @@ func (s *structuralState) get(ctx context.Context) *structural.Index {
 	s.mu.Unlock()
 
 	wait := structuralFirstWait
+	if s.stale.Load() != nil && wait > structuralStaleWait {
+		wait = structuralStaleWait // a last good index is on hand: don't make the caller sit out the full wait
+	}
 	if dl, ok := ctx.Deadline(); ok {
 		if d := time.Until(dl) - 100*time.Millisecond; d < wait {
 			wait = d
@@ -204,13 +221,20 @@ func (s *structuralState) get(ctx context.Context) *structural.Index {
 	defer timer.Stop()
 	select {
 	case <-done:
-		return s.cur.Load() // nil if the build failed
+		if idx := s.cur.Load(); idx != nil {
+			return idx
+		}
+		return s.stale.Load() // build failed: the last good index, if any
 	case <-timer.C:
-		return nil // still building — caller should retry shortly
+		return s.stale.Load() // still building: the last good index, else nil (retry shortly)
 	case <-ctx.Done():
-		return nil // caller gave up; the background build continues
+		return s.stale.Load() // caller gave up; the background build continues
 	}
 }
+
+// structuralStaleWait is how long a caller waits for a rebuild when the last
+// good index can answer instead.
+const structuralStaleWait = time.Second
 
 func (s *structuralState) run(ctx context.Context, done chan struct{}) {
 	idx, err := s.builder(ctx)
@@ -219,6 +243,7 @@ func (s *structuralState) run(ctx context.Context, done chan struct{}) {
 	switch {
 	case err != nil:
 		s.failedAt = time.Now()
+		s.lastErr = err
 	case s.pendingReset:
 		// Files changed in ways the watcher couldn't enumerate while this
 		// build ran; it may hold stale files. Drop it — the next call
@@ -233,6 +258,8 @@ func (s *structuralState) run(ctx context.Context, done chan struct{}) {
 			idx, _ = s.update(idx, paths)
 		}
 		s.cur.Store(idx) // publish last; happens-before close(done)
+		s.stale.Store(nil)
+		s.lastErr = nil
 		s.gen.Add(1)
 	}
 	s.queued = nil
@@ -289,6 +316,7 @@ func (s *structuralState) apply(paths []string, resync bool) {
 		return
 	}
 	if resync {
+		s.stale.Store(idx)
 		s.cur.Store(nil)
 		return
 	}
@@ -326,7 +354,49 @@ func (w *Workspace) structuralIndex(ctx context.Context) (*structural.Index, err
 	if w.structural.pending() {
 		return nil, ErrStructuralBuilding
 	}
+	if err := w.structural.failure(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrStructuralFailed, err)
+	}
 	return nil, ErrNoStructuralIndex
+}
+
+// failure returns the error of the last build when it is still within its
+// retry cooldown, else nil.
+func (s *structuralState) failure() error {
+	if s.external != nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastErr != nil && !s.failedAt.IsZero() && time.Since(s.failedAt) < structuralFailCooldown {
+		return s.lastErr
+	}
+	return nil
+}
+
+// StructuralStale reports whether structural answers right now come from the
+// last good index while a rebuild runs (a watcher resync dropped it), so they
+// may predate the latest file change.
+func (w *Workspace) StructuralStale() bool {
+	return w.structural.external == nil && w.structural.cur.Load() == nil && w.structural.stale.Load() != nil
+}
+
+// FileCountsByLanguage counts the indexed files by extension (lower-case,
+// with the dot; "" for none), for explaining an unsupported corpus.
+func (w *Workspace) FileCountsByLanguage() map[string]int {
+	out := map[string]int{}
+	seen := map[string]struct{}{}
+	for _, c := range w.index.Load().Chunks() {
+		if c.Tombstoned {
+			continue
+		}
+		if _, ok := seen[c.File]; ok {
+			continue
+		}
+		seen[c.File] = struct{}{}
+		out[strings.ToLower(filepath.Ext(c.File))]++
+	}
+	return out
 }
 
 // Definition returns every known definition site of symbol (exact name
