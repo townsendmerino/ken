@@ -128,23 +128,10 @@ var structuralFailCooldown = 60 * time.Second
 // running, it failed, or it found no supported files — handlers defend
 // against nil and can call StructuralPending to distinguish "building".
 func (b *RepoBundle) StructuralIndex(ctx context.Context) *engine.StructuralIndex {
-	idx, _ := b.structuralLookup(ctx)
-	return idx
-}
-
-// structuralLookup is StructuralIndex plus, on the Workspace path, why the
-// index is missing: engine.ErrStructuralBuilding, a wrapped
-// engine.ErrStructuralFailed, or engine.ErrNoStructuralIndex. Other paths
-// return a nil error with a nil index; structuralUnavailableResult falls
-// back to StructuralPending for them.
-func (b *RepoBundle) structuralLookup(ctx context.Context) (*engine.StructuralIndex, error) {
 	if b.Workspace != nil {
-		return b.Workspace.Structural(ctx)
+		idx, _ := b.Workspace.Structural(ctx) // nil while building or unavailable
+		return idx
 	}
-	return b.legacyStructuralIndex(ctx), nil
-}
-
-func (b *RepoBundle) legacyStructuralIndex(ctx context.Context) *engine.StructuralIndex {
 	if b.Structural != nil {
 		return b.Structural.StructuralIndex(ctx)
 	}
@@ -241,6 +228,18 @@ func (b *RepoBundle) stopStructuralBuild() {
 	if building && done != nil {
 		<-done
 	}
+}
+
+// structuralErr says why StructuralIndex came back nil on the Workspace path:
+// engine.ErrStructuralBuilding, a wrapped engine.ErrStructuralFailed, or
+// engine.ErrNoStructuralIndex (engine.Workspace.StructuralState). It does not
+// wait or build: StructuralIndex has already waited once. nil means no
+// Workspace, or the build finished between the two calls.
+func (b *RepoBundle) structuralErr() error {
+	if b.Workspace == nil {
+		return nil
+	}
+	return b.Workspace.StructuralState()
 }
 
 // StructuralPending reports whether a structural build is currently running

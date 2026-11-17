@@ -72,3 +72,27 @@ func TestStructuralFailedNamesTheBuildError(t *testing.T) {
 		t.Error("a failed build must not read as an unsupported corpus")
 	}
 }
+
+// StructuralState reports building / failed / none / built without blocking.
+func TestStructuralState(t *testing.T) {
+	w := &Workspace{}
+	w.structural = structuralState{
+		builder: func(context.Context) (*structural.Index, error) { return nil, errors.New("disk on fire") },
+	}
+	// Never built, no cooldown: a lookup would start one.
+	if err := w.StructuralState(); !errors.Is(err, ErrStructuralBuilding) {
+		t.Fatalf("before any build: %v, want ErrStructuralBuilding", err)
+	}
+	_, _ = w.structuralIndex(context.Background()) // the build fails
+	if err := w.StructuralState(); !errors.Is(err, ErrStructuralFailed) || !strings.Contains(err.Error(), "disk on fire") {
+		t.Fatalf("after a failed build: %v", err)
+	}
+	w.structural.failedAt = time.Now().Add(-2 * structuralFailCooldown)
+	if err := w.StructuralState(); !errors.Is(err, ErrStructuralBuilding) {
+		t.Fatalf("after the cooldown: %v, want a retry to be pending", err)
+	}
+	w.structural.cur.Store(&structural.Index{})
+	if err := w.StructuralState(); err != nil {
+		t.Fatalf("with an index: %v, want nil", err)
+	}
+}

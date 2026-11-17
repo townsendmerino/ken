@@ -374,6 +374,31 @@ func (s *structuralState) failure() error {
 	return nil
 }
 
+// StructuralState reports, without blocking and without returning the index,
+// why a structural lookup made now would not be answered from a built one:
+//
+//   - nil: an index is built (a lookup answers);
+//   - ErrStructuralBuilding: a build is in flight, or a lookup would start one;
+//   - an error wrapping ErrStructuralFailed and the build error: the last
+//     build failed and is in its retry cooldown;
+//   - ErrNoStructuralIndex: settled with no index (no file has an extractor).
+//
+// It never starts a build and never waits, so it can disagree with a
+// Structural call made just before it only by the build finishing in
+// between, which shows as nil.
+func (w *Workspace) StructuralState() error {
+	if w.structural.built() {
+		return nil
+	}
+	if w.structural.pending() {
+		return ErrStructuralBuilding
+	}
+	if err := w.structural.failure(); err != nil {
+		return fmt.Errorf("%w: %w", ErrStructuralFailed, err)
+	}
+	return ErrNoStructuralIndex
+}
+
 // StructuralStale reports whether structural answers right now come from the
 // last good index while a rebuild runs (a watcher resync dropped it), so they
 // may predate the latest file change.
