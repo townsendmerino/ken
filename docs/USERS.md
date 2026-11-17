@@ -378,6 +378,10 @@ Two things to know. The Python checkers do not rename a method together with the
 
 `tests_for` takes a symbol and lists the tests that reach it through the call graph, with a command: `go test -run '^(TestA|TestB)$' ./pkg` or `pytest tests/test_x.py::test_a`. `go_check_edit` and `py_check_edit` end their reply with the same list for the symbols the edit touches. The call graph matches by name, so a test of another symbol with the same name can appear; the list is where to start, not proof of coverage.
 
+### Which files read this file as text: `text_refs`
+
+`text_refs` takes a repo path and lists the string literals and `//go:embed` patterns that name it, with file, line and enclosing function: the source-scan tests that `os.ReadFile` a source file, the embeds, the fixtures. A call graph does not see these. In Go it reads the syntax tree, so comments and identifiers do not match; in other languages it reads the string literals on indexed lines, and skips documentation files. A bare base name matches only where its directory part does not point at another file. It is a lead list: a path built at run time is missed, so use grep when you need every match.
+
 ### Checking every edit: the Claude Code hook
 
 `ken hook check-edit` runs these checks on every edit an agent is about to make, without the agent having to call a tool. In `.claude/settings.json`:
