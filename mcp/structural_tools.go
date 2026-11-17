@@ -211,6 +211,18 @@ func (l *structuralLookups) FilesUnderPath(path string) []string {
 	return out
 }
 
+// noMatchHint says what a zero-match path argument was matched as and
+// names the nearest directory that does exist.
+func (l *structuralLookups) noMatchHint(path string) string {
+	dir, _ := l.ws.StructuralNearestDir(l.ctx, path)
+	if dir == "" {
+		dir = "the repo root"
+	}
+	return fmt.Sprintf("%q was matched as a path prefix on the indexed files' repo-relative paths "+
+		"(an exact file, a directory, or the start of a file name); nothing starts with it. "+
+		"The nearest existing directory: %s", path, dir)
+}
+
 func (l *structuralLookups) Symbols() []string {
 	out, _ := l.ws.Symbols(l.ctx, "")
 	return out
@@ -537,9 +549,9 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 				"Other files are indexed normally.", path, filepath.Ext(path))
 			return dispatchOutput(args.Output, resp, md)
 		}
-		md := fmt.Sprintf("No indexed files found at or under %q. "+
-			"Possible reasons: the path doesn't exist, the files aren't a supported "+
-			"language (no registered extractor for that file extension), or the corpus excluded them.", path)
+		md := "No indexed files found at or under " + fmt.Sprintf("%q", path) + ". " + sidx.noMatchHint(path) + ". " +
+			"Other possible reasons: the files aren't a supported " +
+			"language (no registered extractor for that file extension), or the corpus excluded them."
 		return dispatchOutput(args.Output, resp, md)
 	}
 
@@ -658,7 +670,7 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 			md = "No symbols indexed. " +
 				"The structural index has no extractors for this corpus."
 		} else {
-			md = fmt.Sprintf("No symbols found at or under %q.", path)
+			md = fmt.Sprintf("No symbols found at or under %q. %s.", path, sidx.noMatchHint(path))
 		}
 		return dispatchOutput(args.Output, resp, md)
 	}

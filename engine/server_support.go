@@ -202,6 +202,17 @@ func (w *Workspace) OutlineOfFile(ctx context.Context, path string) (entries []O
 	return idx.Outline(norm), true, nil
 }
 
+// StructuralNearestDir returns the longest parent directory of path (with a
+// trailing slash) that holds a structurally indexed file, or "" for the repo
+// root. It is for explaining a path that matched nothing.
+func (w *Workspace) StructuralNearestDir(ctx context.Context, path string) (string, error) {
+	idx, err := w.structuralIndex(ctx)
+	if err != nil {
+		return "", err
+	}
+	return idx.NearestDir(structural.NormalizePath(path)), nil
+}
+
 // StructuralFilesUnder lists the structurally indexed files at or under a
 // repo-relative directory path, sorted. It is what Outline walks for a
 // directory, exposed so a caller can page through the files and outline
