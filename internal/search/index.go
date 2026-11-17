@@ -1208,14 +1208,15 @@ func (ix *Index) Search(query string, k int) []Result {
 // Non-rerank modes (bm25 / semantic / hybrid) record only TotalWall.
 // ModeHybridRerank records Stage1Wall / RerankWall / BlendWall plus
 // the reranker sub-breakdown (via NeuralReranker.RerankWithTelemetry).
-// resolveMode applies the capability downgrades every Search* entry point
-// shares: semantic/hybrid/rerank against a bm25-only index (no flat/model)
-// falls back to ModeBM25; ModeHybridRerank with no attached reranker downgrades
-// to ModeHybrid. Both are "downgrade rather than panic/error" — see SearchMode.
+
 // ResolveMode is the mode a search asking for mode would actually run in on
 // this index (a missing retriever downgrades it).
 func (ix *Index) ResolveMode(mode Mode) Mode { return ix.resolveMode(mode) }
 
+// resolveMode applies the capability downgrades every Search* entry point
+// shares: semantic/hybrid/rerank against a bm25-only index (no flat/model)
+// falls back to ModeBM25; ModeHybridRerank with no attached reranker downgrades
+// to ModeHybrid. Both are "downgrade rather than panic/error" — see SearchMode.
 func (ix *Index) resolveMode(mode Mode) Mode {
 	if mode != ModeBM25 && (ix.flat == nil || ix.model == nil) {
 		mode = ModeBM25

@@ -70,7 +70,7 @@ func resolveBundleForTool(ctx context.Context, cfg *Config, repoArg, outputMode 
 // "genuinely no structural index" (audit R3) so an agent on a large repo
 // retries instead of concluding the repo has no symbols.
 //
-// err is why the lookup came back empty (bundle.structuralLookup); nil on a
+// err is why the lookup came back empty (bundle.structuralErr); nil on a
 // bundle path that cannot say, which falls back to StructuralPending.
 // Three distinct messages: building, failed (with the build error), and
 // unsupported (with file counts by language).
@@ -81,6 +81,10 @@ func structuralUnavailableResult(bundle *RepoBundle, err error, outputMode strin
 			"The structural index failed to build for this repo: %v. "+
 				"It will be retried automatically after a short cooldown; try again in about a minute.",
 			strings.TrimPrefix(err.Error(), engine.ErrStructuralFailed.Error()+": ")))
+	case err == nil && bundle.Workspace != nil:
+		// The build finished between StructuralIndex and the state read.
+		return errorResult(outputMode,
+			"The structural index finished building just now. Retry the call.")
 	case errors.Is(err, engine.ErrStructuralBuilding) || (err == nil && bundle.StructuralPending()):
 		return errorResult(outputMode,
 			"The structural index is still building for this repo (large corpus). "+
@@ -159,8 +163,8 @@ func resolveStructuralIndex(ctx context.Context, cfg *Config, repoArg, outputMod
 	}
 	// Builds the structural symbol index on first use (lazy — cold-start M0);
 	// nil on unsupported corpus or build failure.
-	if idx, err := bundle.structuralLookup(ctx); idx == nil {
-		return nil, structuralUnavailableResult(bundle, err, outputMode)
+	if bundle.StructuralIndex(ctx) == nil {
+		return nil, structuralUnavailableResult(bundle, bundle.structuralErr(), outputMode)
 	}
 	return &structuralLookups{ctx: ctx, ws: bundle.workspace()}, nil
 }
