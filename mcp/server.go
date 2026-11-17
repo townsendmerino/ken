@@ -195,13 +195,14 @@ func NewServer(cfg Config) *sdk.Server {
 	}
 	// Which typed tools this server offers is decided once, here: the instructions name the ones that are offered and
 	// no others.
+	gt := goTierFor(&cfg)
 	typed := typedTools{
-		goTools: engine.GoPath() != "",
-		ts:      tsToolsAvailable(&cfg),
-		py:      pyToolsAvailable(&cfg),
+		goTools:  gt.tools,
+		goRename: gt.rename,
+		ts:       tsToolsAvailable(&cfg),
+		py:       pyToolsAvailable(&cfg),
 	}
 	typed.pyRename = typed.py && pyRenameAvailable(&cfg)
-	typed.goRename = typed.goTools && (!cfg.GoTyped.NeedsGopls() || engine.GoplsPath() != "")
 	if cfg.Instructions == "" {
 		cfg.Instructions = defaultInstructions(typed)
 	}
