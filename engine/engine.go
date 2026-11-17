@@ -219,6 +219,9 @@ type Workspace struct {
 
 	index *search.WatchedIndex
 
+	// scopes caches compiled search scopes for the published index.
+	scopes scopeCache
+
 	onFlushMu sync.Mutex
 	onFlush   func(msg string)
 

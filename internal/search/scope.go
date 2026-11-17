@@ -41,26 +41,30 @@ func (s *ChunkSet) Len() int {
 // chunks are left out, so a scoped search never has to over-fetch for them.
 func (ix *Index) ScopeOfFiles(keep func(file string) bool) (set *ChunkSet, files, chunks int) {
 	set = &ChunkSet{bits: make([]uint64, (len(ix.chunks)+63)/64)}
-	decided := make(map[string]bool, 256)
-	counted := make(map[string]bool, 256)
+	// A file's chunks are normally adjacent, so decide on a file change and
+	// reuse the answer for the run; a file split by incremental updates is
+	// simply decided again (keep is pure). Distinct in-scope files are counted
+	// through a set touched only on a change.
+	var (
+		last    string
+		lastOK  bool
+		counted = make(map[string]struct{}, 64)
+	)
 	for i := range ix.chunks {
 		c := &ix.chunks[i]
-		ok, seen := decided[c.File]
-		if !seen {
-			ok = keep(c.File)
-			decided[c.File] = ok
+		if i == 0 || c.File != last {
+			last, lastOK = c.File, keep(c.File)
 		}
-		if !ok || c.Tombstoned {
+		if !lastOK || c.Tombstoned {
 			continue
 		}
 		set.bits[i>>6] |= 1 << (uint(i) & 63)
 		set.n++
-		if !counted[c.File] {
-			counted[c.File] = true
-			files++
+		if _, ok := counted[c.File]; !ok {
+			counted[c.File] = struct{}{}
 		}
 	}
-	return set, files, set.n
+	return set, len(counted), set.n
 }
 
 // filterableDense is a dense retriever that can skip rows before scoring them
@@ -103,6 +107,9 @@ func bm25TopK(bm *bm25.Index, terms []string, k int, allow *ChunkSet) []bm25.Res
 	if k <= 0 {
 		return nil
 	}
+	// aikit's TopK has no filter, so score every document (whole-corpus IDF and
+	// length norms, as unscoped) and select over the in-scope ones. A widening
+	// TopK(kk) that keeps aikit's pruning was tried and measured slower here.
 	scores := bm.Scores(terms)
 	sel := topk.New[int](k)
 	th := sel.Threshold()

@@ -3,6 +3,7 @@ package engine
 import (
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/townsendmerino/ken/internal/search"
 )
@@ -91,6 +92,58 @@ func (w *Workspace) ScopeSize(s Scope) (files, chunks int) {
 	if s.IsZero() {
 		return countUniqueFiles(ix), ix.LiveLen()
 	}
-	_, files, chunks = s.compile(ix)
+	_, files, chunks = w.scopes.get(ix, s)
 	return files, chunks
+}
+
+// scopeCache remembers the compiled form of the last few scopes for one index
+// snapshot, so an agent narrowing repeated queries to the same directory pays
+// the pass over the chunk table once. It is dropped whenever the published
+// index changes (a new snapshot has new chunk ids). The zero value is ready.
+type scopeCache struct {
+	mu      sync.Mutex
+	ix      *search.Index
+	entries []scopeEntry
+}
+
+type scopeEntry struct {
+	key    string
+	set    *search.ChunkSet
+	files  int
+	chunks int
+}
+
+const scopeCacheSize = 8
+
+func (s Scope) cacheKey() string {
+	return strings.Join(s.Languages, ",") + "\x00" + s.PathContains + "\x00" + s.ExcludePathContains
+}
+
+// get returns s compiled against ix, from the cache when it holds it.
+func (c *scopeCache) get(ix *search.Index, s Scope) (*search.ChunkSet, int, int) {
+	if s.IsZero() {
+		return nil, 0, 0
+	}
+	key := s.cacheKey()
+	c.mu.Lock()
+	if c.ix != ix {
+		c.ix, c.entries = ix, nil
+	}
+	for _, e := range c.entries {
+		if e.key == key {
+			c.mu.Unlock()
+			return e.set, e.files, e.chunks
+		}
+	}
+	c.mu.Unlock()
+	set, files, chunks := s.compile(ix)
+	c.mu.Lock()
+	if c.ix == ix {
+		if len(c.entries) >= scopeCacheSize {
+			c.entries = c.entries[1:]
+		}
+		c.entries = append(c.entries, scopeEntry{key, set, files, chunks})
+	}
+	c.mu.Unlock()
+	return set, files, chunks
 }

@@ -31,7 +31,7 @@ func (w *Workspace) SearchResults(ctx context.Context, query string, k int, mode
 	if err := ctx.Err(); err != nil {
 		return nil, mode, err
 	}
-	results, eff := searchResults(w.index.Load(), query, k, mode, opts)
+	results, eff := searchResults(w.index.Load(), query, k, mode, opts, &w.scopes)
 	return results, eff, nil
 }
 

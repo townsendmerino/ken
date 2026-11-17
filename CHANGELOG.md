@@ -15,6 +15,12 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Fixed
+- `search` filters (`languages`, `path_contains`, `exclude_path_contains`) no longer run after retrieval. They go into both retrieval arms as a per-query chunk scope, so a filtered top-k is exact over the scope with no 200-candidate limit; a file the unfiltered ranking puts below 200 is now found. The response's `filter` block reports `files_in_scope` / `chunks_in_scope` instead of `candidates_before_filter`, an empty scope is answered before searching, and a zero result says no chunk in the N files in scope matches.
+
+### Added
+- `ken search --path SUBSTR` / `--exclude-path SUBSTR`, the same scope from the CLI. `engine.SearchOptions.Scope` and `Workspace.ScopeSize` for library callers.
+
 ## [1.19.2] — 2026-11-16 — `callers` lists Go values passed without a call
 
 ### Fixed

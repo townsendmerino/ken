@@ -280,13 +280,13 @@ func (w *Workspace) SearchWith(ctx context.Context, query string, k int, mode Mo
 	}
 	ix := w.index.Load()
 	gen := w.index.Generation()
-	results, eff := searchResults(ix, query, k, mode, opts)
+	results, eff := searchResults(ix, query, k, mode, opts, &w.scopes)
 	return w.toHits(ix, results, eff, gen, query, k, opts.NoArmRanks), eff, nil
 }
 
 // searchResults runs one query against one snapshot, as opts asks.
-func searchResults(ix *search.Index, query string, k int, mode Mode, opts SearchOptions) (results []search.Result, eff Mode) {
-	allow, _, inScope := opts.Scope.compile(ix)
+func searchResults(ix *search.Index, query string, k int, mode Mode, opts SearchOptions, scopes *scopeCache) (results []search.Result, eff Mode) {
+	allow, _, inScope := scopes.get(ix, opts.Scope)
 	if allow != nil && inScope == 0 {
 		return nil, ix.ResolveMode(mode)
 	}
