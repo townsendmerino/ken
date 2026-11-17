@@ -1212,10 +1212,6 @@ func (ix *Index) Search(query string, k int) []Result {
 // shares: semantic/hybrid/rerank against a bm25-only index (no flat/model)
 // falls back to ModeBM25; ModeHybridRerank with no attached reranker downgrades
 // to ModeHybrid. Both are "downgrade rather than panic/error" — see SearchMode.
-// ResolveMode is the mode a search asking for mode would actually run in on
-// this index (a missing retriever downgrades it).
-func (ix *Index) ResolveMode(mode Mode) Mode { return ix.resolveMode(mode) }
-
 func (ix *Index) resolveMode(mode Mode) Mode {
 	if mode != ModeBM25 && (ix.flat == nil || ix.model == nil) {
 		mode = ModeBM25
@@ -1225,6 +1221,10 @@ func (ix *Index) resolveMode(mode Mode) Mode {
 	}
 	return mode
 }
+
+// ResolveMode is the mode a search asking for mode would actually run in on
+// this index (a missing retriever downgrades it).
+func (ix *Index) ResolveMode(mode Mode) Mode { return ix.resolveMode(mode) }
 
 // collectResults builds up to k tombstone-free Results by walking n candidates
 // and mapping each to (chunkIndex, score) via at. Every retriever branch shares
