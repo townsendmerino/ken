@@ -174,6 +174,22 @@ type CallersResponse struct {
 	// traced, so a non-empty ValueUses with empty Files means "used, but
 	// not called directly" — not "unused".
 	ValueUses []CallerSiteOut `json:"value_uses,omitempty"`
+	// Groups is Sites and ValueUses split by Go package import path (by
+	// directory for other languages), so same-named methods in different
+	// packages or backends can be told apart. Sites and ValueUses stay as
+	// they were; Groups repeats them, grouped.
+	Groups []CallerGroupOut `json:"groups,omitempty"`
+}
+
+// CallerGroupOut is the callers inside one Go package (Kind "package", Group
+// is its import path) or one directory (Kind "directory"). Module is the Go
+// module path, set only under a go.work that lists more than one module.
+type CallerGroupOut struct {
+	Group     string          `json:"group"`
+	Kind      string          `json:"kind"`
+	Module    string          `json:"module,omitempty"`
+	Sites     []CallerSiteOut `json:"sites,omitempty"`
+	ValueUses []CallerSiteOut `json:"value_uses,omitempty"`
 }
 
 // CallerSiteOut is one file's calls to the symbol.

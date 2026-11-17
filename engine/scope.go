@@ -44,6 +44,11 @@ func (s Scope) hasLanguages() bool {
 	return false
 }
 
+// Match reports whether the file (a repo-relative path) is in scope. It is the
+// same per-file decision a search compiles, for callers that filter a list of
+// files themselves (the callers tool's path filters).
+func (s Scope) Match(file string) bool { return s.keep()(file) }
+
 // keep compiles the per-file decision.
 func (s Scope) keep() func(file string) bool {
 	var ext map[string]bool
