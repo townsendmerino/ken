@@ -740,3 +740,34 @@ func TestProgramCache_keepsAProgramItCouldNotRefresh(t *testing.T) {
 		t.Errorf("after a refused query and a renewal: %+v, want the 2 programs kept through the refusal and then refreshed, with no load", st)
 	}
 }
+
+// F9 (a): a check also says which compile errors are there now in the packages it re-checked, so the end of a turn can
+// ask "does the breakage an edit reported still stand?" without a second tool.
+func TestCheckEdit_existingErrors(t *testing.T) {
+	needGo(t)
+	root := writeTree(t, ed)
+	r := &Runner{Repo: root, Config: edConfigs}
+	ctx := context.Background()
+	// a touch: the file as it is, with a newline added, changes no program and so reports no new error
+	touch := func(file string) []FileEdit {
+		return []FileEdit{{File: file, Content: str(ed[file] + "\n")}}
+	}
+	got, err := r.CheckEdit(ctx, touch("c/c.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Errors) != 0 {
+		t.Errorf("a touch causes errors: %+v", got.Errors)
+	}
+	if len(got.Existing) != 1 || got.Existing[0].File != "c/c.go" || got.Existing[0].Line != 3 || !strings.Contains(got.Existing[0].Message, "not an int") {
+		t.Errorf("Existing = %+v, want the c/c.go:3 error that is there now", got.Existing)
+	}
+	// a package that compiles has none
+	got, err = r.CheckEdit(ctx, touch("a/a.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Existing) != 0 {
+		t.Errorf("Existing = %+v for a package that compiles", got.Existing)
+	}
+}

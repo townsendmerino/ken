@@ -60,7 +60,11 @@ func hookGoCheck(ctx context.Context, cfg *Config, req hooksock.Request) hooksoc
 	}
 	findings := len(res.Errors) + len(res.Moved) + len(res.Vet)
 	recordCheck(cfg, "go_check_edit", nil, findings, res.Clean)
-	return hooksock.Reply{Text: res.Text(len(gt.Config.Configs), req.Max), Findings: findings, Clean: res.Clean, Incomplete: !res.Clean && findings == 0}
+	reply := hooksock.Reply{Text: res.Text(len(gt.Config.Configs), req.Max), Findings: findings, Clean: res.Clean, Incomplete: !res.Clean && findings == 0, Items: hooksock.ItemsOf(res)}
+	if req.Existing {
+		reply.Existing = hooksock.ExistingOf(res)
+	}
+	return reply
 }
 
 // sameDir reports whether two paths name one directory, whatever symlinks lead to it.

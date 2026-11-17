@@ -16,7 +16,8 @@ import (
 	"github.com/townsendmerino/ken/internal/hooksock"
 )
 
-const hookUsage = `Usage: ken hook check-edit [--repo DIR] [--timeout SECONDS] [--max N] [--vet] [--quiet-incomplete] [--why] [--no-server]
+const hookUsage = `Usage: ken hook check-edit [--repo DIR] [--timeout SECONDS] [--max N] [--vet] [--quiet-incomplete] [--why] [--no-server] [--end-of-turn]
+       ken hook stop [--repo DIR] [--timeout SECONDS] [--max N] [--no-server]
 
 A Claude Code hook: put it on PreToolUse for Edit and Write, and every edit the agent is about to make to a Go, TypeScript, JavaScript or
 Python file is checked first, as 'ken go|ts|py check-edit' would check it. The
@@ -44,6 +45,20 @@ finish in time, the hook says nothing.
                    could be checked (default: say so, in one line)
   --why            when an edit could not be checked, say why on standard error
                    (for trying the hook by hand: the agent does not see it)
+  --end-of-turn    Go: say nothing at the edit; keep the errors it would cause, and
+                   at the end of the agent's turn report only the ones that still
+                   stand (a break the next edit mends is never reported). Needs the
+                   Stop hook below: without it nothing is ever reported. Other
+                   languages are reported at the edit, as before
+
+To report at the end of the turn, also put 'ken hook stop' on Stop:
+
+  {"hooks": {"PreToolUse": [{"matcher": "Edit|Write",
+      "hooks": [{"type": "command", "command": "ken hook check-edit --end-of-turn", "timeout": 30}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "ken hook stop", "timeout": 30}]}]}}
+
+Stop holds the turn open once, with what still stands as the reason, so the agent
+fixes it; the Stop that follows is let through.
 
 In .claude/settings.json:
 
@@ -56,9 +71,13 @@ Exit status: always 0, so a failure of the hook is never a failure of the edit.
 // hookInput is the part of a Claude Code PreToolUse payload the hook reads.
 type hookInput struct {
 	Cwd       string `json:"cwd"`
+	SessionID string `json:"session_id"`
 	Event     string `json:"hook_event_name"`
-	ToolName  string `json:"tool_name"`
-	ToolInput struct {
+	// StopHookActive is set on a Stop event that follows a Stop hook's own block: the agent is already working
+	// on what the hook said, and the hook must not hold it again.
+	StopHookActive bool   `json:"stop_hook_active"`
+	ToolName       string `json:"tool_name"`
+	ToolInput      struct {
 		FilePath   string  `json:"file_path"`
 		OldString  string  `json:"old_string"`
 		NewString  string  `json:"new_string"`
@@ -81,6 +100,17 @@ type hookOptions struct {
 	quietIncomplete bool
 	why             io.Writer // where to say why nothing was said; nil says nothing
 	sockDir         string    // where running servers listen; "" asks none
+	// endOfTurn keeps a Go edit's errors until the agent's turn ends and reports only those that still stand (hookPre,
+	// hookStop). Off, every edit's errors are reported at the edit.
+	endOfTurn bool
+	// stateDir is where the errors an edit would cause are kept until the end of the turn; "" reports at the edit.
+	stateDir string
+}
+
+// hookReport is what a Go check found, kept for the end of the turn.
+type hookReport struct {
+	repo, file string // the repository, and the edited file relative to it
+	items      []hooksock.Item
 }
 
 // hookEdit is one edit in the shape all three tiers take.
@@ -105,6 +135,11 @@ func repoOf(dir string) string {
 // hookCheck checks the edit a tool call is about to make and returns what the agent should be told: "" when there is
 // nothing to say. It reports the tier asked ("go", "ts", "py", or "" for a file of no tier).
 func hookCheck(ctx context.Context, in hookInput, o hookOptions) (text, tier string) {
+	return hookCheckInto(ctx, in, o, nil)
+}
+
+// hookCheckInto is hookCheck that also hands over, in rep when it is not nil, what a Go check found.
+func hookCheckInto(ctx context.Context, in hookInput, o hookOptions, rep *hookReport) (text, tier string) {
 	file := in.ToolInput.FilePath
 	if file == "" {
 		return "", ""
@@ -166,6 +201,9 @@ func hookCheck(ctx context.Context, in hookInput, o hookOptions) (text, tier str
 				req.Edits = append(req.Edits, hooksock.Edit{File: rel, OldString: e.oldString, NewString: e.newString, ReplaceAll: e.replaceAll, Content: e.content})
 			}
 			if reply, ok := hooksock.Ask(ctx, o.sockDir, req); ok {
+				if rep != nil {
+					*rep = hookReport{repo: repo, file: rel, items: reply.Items}
+				}
 				return hookSay(rel, reply.Text, reply.Findings, reply.Clean, o), tier
 			}
 			if ctx.Err() != nil {
@@ -191,6 +229,9 @@ func hookCheck(ctx context.Context, in hookInput, o hookOptions) (text, tier str
 		if err = cerr; err == nil {
 			findings, clean = len(res.Errors)+len(res.Moved)+len(res.Vet), res.Clean
 			body = res.Text(len(gt.Config.Configs), o.max)
+			if rep != nil {
+				*rep = hookReport{repo: repo, file: rel, items: hooksock.ItemsOf(res)}
+			}
 		}
 	case engine.IsTSSource(file):
 		tier, tool = "ts", "ts_check_edit"
@@ -255,13 +296,16 @@ func cmdHook(args []string) int {
 		fmt.Print(hookUsage)
 		return 0
 	}
-	if args[0] != "check-edit" {
+	if args[0] != "check-edit" && args[0] != "stop" {
 		fmt.Fprint(os.Stderr, hookUsage)
 		return 2
 	}
-	o := hookOptions{timeout: 20 * time.Second, max: 15, sockDir: hooksock.Dir()}
+	stopEvent := args[0] == "stop"
+	o := hookOptions{timeout: 20 * time.Second, max: 15, sockDir: hooksock.Dir(), stateDir: hooksock.Dir()}
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
+		case "--end-of-turn":
+			o.endOfTurn = true
 		case "--vet":
 			o.vet = true
 		case "--quiet-incomplete":
@@ -308,7 +352,17 @@ func cmdHook(args []string) int {
 	if json.Unmarshal(doc, &in) != nil {
 		return 0
 	}
-	text, _ := hookCheck(context.Background(), in, o)
+	if stopEvent {
+		// The only way to hand the agent something at the end of its turn is to hold the turn open once: the agent
+		// reads the reason and carries on. StopHookActive keeps that to once.
+		if text := hookStop(context.Background(), in, o); text != "" {
+			if out, err := json.Marshal(map[string]any{"decision": "block", "reason": text}); err == nil {
+				fmt.Println(string(out))
+			}
+		}
+		return 0
+	}
+	text := hookPre(context.Background(), in, o)
 	if text == "" {
 		return 0
 	}
