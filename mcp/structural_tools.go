@@ -70,7 +70,7 @@ func resolveBundleForTool(ctx context.Context, cfg *Config, repoArg, outputMode 
 // "genuinely no structural index" (audit R3) so an agent on a large repo
 // retries instead of concluding the repo has no symbols.
 //
-// err is why the lookup came back empty (bundle.structuralLookup); nil on a
+// err is why the lookup came back empty (bundle.structuralErr); nil on a
 // bundle path that cannot say, which falls back to StructuralPending.
 // Three distinct messages: building, failed (with the build error), and
 // unsupported (with file counts by language).
@@ -81,6 +81,10 @@ func structuralUnavailableResult(bundle *RepoBundle, err error, outputMode strin
 			"The structural index failed to build for this repo: %v. "+
 				"It will be retried automatically after a short cooldown; try again in about a minute.",
 			strings.TrimPrefix(err.Error(), engine.ErrStructuralFailed.Error()+": ")))
+	case err == nil && bundle.Workspace != nil:
+		// The build finished between StructuralIndex and the state read.
+		return errorResult(outputMode,
+			"The structural index finished building just now. Retry the call.")
 	case errors.Is(err, engine.ErrStructuralBuilding) || (err == nil && bundle.StructuralPending()):
 		return errorResult(outputMode,
 			"The structural index is still building for this repo (large corpus). "+
@@ -159,8 +163,8 @@ func resolveStructuralIndex(ctx context.Context, cfg *Config, repoArg, outputMod
 	}
 	// Builds the structural symbol index on first use (lazy — cold-start M0);
 	// nil on unsupported corpus or build failure.
-	if idx, err := bundle.structuralLookup(ctx); idx == nil {
-		return nil, structuralUnavailableResult(bundle, err, outputMode)
+	if bundle.StructuralIndex(ctx) == nil {
+		return nil, structuralUnavailableResult(bundle, bundle.structuralErr(), outputMode)
 	}
 	return &structuralLookups{ctx: ctx, ws: bundle.workspace()}, nil
 }
@@ -209,6 +213,18 @@ func (l *structuralLookups) Outline(path string) []engine.OutlineEntry {
 func (l *structuralLookups) FilesUnderPath(path string) []string {
 	out, _ := l.ws.StructuralFilesUnder(l.ctx, path)
 	return out
+}
+
+// noMatchHint says what a zero-match path argument was matched as and
+// names the nearest directory that does exist.
+func (l *structuralLookups) noMatchHint(path string) string {
+	dir, _ := l.ws.StructuralNearestDir(l.ctx, path)
+	if dir == "" {
+		dir = "the repo root"
+	}
+	return fmt.Sprintf("%q was matched as a path prefix on the indexed files' repo-relative paths "+
+		"(an exact file, a directory, or the start of a file name); nothing starts with it. "+
+		"The nearest existing directory: %s", path, dir)
 }
 
 func (l *structuralLookups) Symbols() []string {
@@ -537,9 +553,9 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 				"Other files are indexed normally.", path, filepath.Ext(path))
 			return dispatchOutput(args.Output, resp, md)
 		}
-		md := fmt.Sprintf("No indexed files found at or under %q. "+
-			"Possible reasons: the path doesn't exist, the files aren't a supported "+
-			"language (no registered extractor for that file extension), or the corpus excluded them.", path)
+		md := "No indexed files found at or under " + fmt.Sprintf("%q", path) + ". " + sidx.noMatchHint(path) + ". " +
+			"Other possible reasons: the files aren't a supported " +
+			"language (no registered extractor for that file extension), or the corpus excluded them."
 		return dispatchOutput(args.Output, resp, md)
 	}
 
@@ -658,7 +674,7 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 			md = "No symbols indexed. " +
 				"The structural index has no extractors for this corpus."
 		} else {
-			md = fmt.Sprintf("No symbols found at or under %q.", path)
+			md = fmt.Sprintf("No symbols found at or under %q. %s.", path, sidx.noMatchHint(path))
 		}
 		return dispatchOutput(args.Output, resp, md)
 	}

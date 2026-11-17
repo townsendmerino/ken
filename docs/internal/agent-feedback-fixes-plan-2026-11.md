@@ -133,6 +133,87 @@ Only if the first group dominates, change the hook. Option (a) reports only brea
 turn. Option (b) reports only breakage that survives to the next edit of the same package. A report that was acted on
 must still arrive. The numbers decide which option, if any; this plan doesn't.
 
+### F9 measurement record (2026-11-17)
+
+Measurement only: the hook is unchanged and neither option is built.
+
+**Data.** The hook trial log (`calls.jsonl`, 235 calls, 2026-11-14 to 11-17) holds 44 reports from six ordinary sessions
+that edited Go. The main sample is two tack sessions: `2ac75230` (2026-11-16, 20 reports in 60 calls) and `d3a868e6`
+(2026-11-17, 10 reports in 42 calls). Four smaller sessions (`aac21534`, `3758c544`, `2c3835b4`, `f914da36`; 14 reports)
+were added because the main two have few reports outside the first group. A report is a call with `reported: true`.
+The "about 75" above is not in this log, which holds 44. Examples are named by their line in `calls.jsonl`.
+
+**How each report was sorted.** The hook runs before the edit (PreToolUse), so "later" means the agent's following tool
+calls in the session transcript (tool name, file and outcome only). A report is:
+- *fixed by a later edit* when every error it lists is gone by the agent's next `go build`, `go vet` or `go test`,
+  and what removed it was a further piece of the same work: an `Edit`, a `Write`, or a shell `cat >`, `sed` or `perl`
+  (the missing definition, the missing import);
+- *real and acted on* when the error is not what a following edit of the plan would produce (an unused variable) and the
+  agent changed that file and line after the report;
+- *real and ignored* when the report is accurate and nothing in the following calls changes what it names;
+- *wrong* when the agent's own build does not reproduce it.
+
+**Counts.**
+
+| class | main two (30) | all six (44) |
+|---|---|---|
+| fixed by a later edit in the same change | 28 | 38 (86%) |
+| real and acted on | 1 | 2 |
+| real and ignored | 1 | 3 |
+| wrong | 0 | 1 |
+
+**Examples.** "Next" is what the agent did after the report, with the time after it.
+
+Fixed by a later edit:
+- line 95, `internal/loop/loop.go:548`: `s.preImage undefined`. Next: an edit to `events.go` at +1s, `go test` at +3s, clean.
+- line 128, `loop.go:586`: `fin.After` and `s.afterImage` undefined. The `events.go` edit that adds them was issued in the
+  same batch as the edit that uses them.
+- line 144, `internal/core/core.go:693`: `c.fork undefined`. Next: a shell `cat > internal/core/fork.go` at +3s.
+- line 161, `internal/tui/view.go:107`: `v.pending` and `Question` undefined (4 errors). Next: another `view.go` edit at +3s, then `app.go`.
+- line 182, `internal/tui/view.go:34`: `undefined: todoState`. Next: a shell `cat > internal/tui/todos.go` at +7s.
+
+Real and acted on (all there are):
+- line 118, `cmd/tack/rewind_test.go:358`: `declared and not used: write`. Next: the agent's own `go vet` at +2s showed the same
+  error, then a `sed` on line 358 at +6s.
+- line 43, `decoderunner.go:464`: `declared and not used: inRole`. Next: three `go` commands, then four edits to
+  `decoderunner.go` at +15s to +19s; the build was clean at +63s.
+
+In both, the agent's own check sat between the report and the fix, so the transcript cannot say the report was what it
+acted on.
+
+Real and ignored (all there are; all three are `MOVED` notes, "compiles, but a name now means something else"):
+- line 127, `loop.go:550`: `err` now refers to the `err` declared at 548.
+- line 5, `decoder/arch.go:485`: `a` now refers to the `a` declared at 483.
+- line 175, `internal/tui/app.go:126-139`: `a` and `k` now refer to the declarations at 125 (eight lines of notes).
+
+In each, later builds and tests passed and no edit went back to the named lines. Whether the new binding was intended is
+not in the transcript, so "ignored" means "no visible response", not "harmful".
+
+Wrong (the only one):
+- line 41, `backend/webgpu/internal/kernels`: `no non-test Go files` in the `default` and `linux-cuda` configurations,
+  reported for an edit to a new file in a package whose other files are GPU-tagged. The agent's next `go` command, at
+  +80s, built clean. It looks like a build-tag artifact, not a break the agent met; it was not investigated further.
+
+**What else the log shows.**
+- *Speed.* For the 41 reports with a later hooked edit in the same directory, that edit came a median 5 s later, and 39 of
+  41 within 60 s (the other two were hour-long gaps in a session whose fixes went through shell commands). Three reports
+  had no later hooked edit in the directory; all three were fixed anyway.
+- *The hook cannot see most fixes.* The hook's own "fixes N compile errors that are there now" line appears in the next
+  edit's report for only 15 of those 41. The rest were fixed by `cat >`, `sed`, `perl` and `python3` shell commands, or
+  were already in the same batch.
+- *Duplicates.* Six of the 44 repeat a break reported for a sibling edit in the same second or the next (lines 128/129,
+  156/157, 161/162, 165/166, 30/31, 174/175).
+
+**Which option the numbers support.** The first group dominates (38 of 44; 28 of 30 in the main two), so the plan's
+condition for changing the hook is met. Between (a) and (b) the numbers do not choose. Both would have silenced the same
+38 reports (each was gone by the next clean build, within about 90 s) and kept the same 6. They differ in failure mode,
+and the difference is small here: (b) never reports a break that no later edit in the package follows (3 of 44, all
+fixed anyway), and (a) needs the hook to know where a turn ends, which these autonomous sessions make hard (16 user turns
+in the 10-hour session `2ac75230`). Whichever is built must keep the 2 acted-on and 3 `MOVED` reports; none is of the
+"undefined name" or "imported and not used" kind that makes up the first group, so a rule on that kind would keep them.
+It would also keep the 1 wrong report. A test to write before either option: replay `calls.jsonl` through the rule and
+expect at least those 6 to survive.
+
 ## Order
 
 1. F2 and F3: small, and they turn wrong answers into right ones.

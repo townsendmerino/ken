@@ -100,6 +100,11 @@ func (s *flatStore) Query(q []float32, k int) []ann.Hit {
 	return s.f.Query(q, k)
 }
 
+// QueryFilter is Query over only the rows keep admits; they are skipped before scoring.
+func (s *flatStore) QueryFilter(q []float32, k int, keep func(id int) bool) []ann.Hit {
+	return s.f.QueryFilter(q, k, keep)
+}
+
 func (s *flatStore) Len() int {
 	return s.f.Len()
 }
@@ -155,6 +160,11 @@ func newFlatI8Store(f *ann.FlatI8) *flatI8Store {
 
 func (s *flatI8Store) Query(q []float32, k int) []ann.Hit {
 	return s.f.Query(q, k)
+}
+
+// QueryFilter is Query over only the rows keep admits; they are skipped before scoring.
+func (s *flatI8Store) QueryFilter(q []float32, k int, keep func(id int) bool) []ann.Hit {
+	return s.f.QueryFilter(q, k, keep)
 }
 
 func (s *flatI8Store) Len() int {
@@ -264,6 +274,11 @@ func newFlatBinaryI8Store(f *ann.FlatBinaryI8) *flatBinaryI8Store {
 
 func (s *flatBinaryI8Store) Query(q []float32, k int) []ann.Hit {
 	return s.f.Query(q, k)
+}
+
+// QueryFilter is Query over only the rows keep admits; they are skipped before scoring.
+func (s *flatBinaryI8Store) QueryFilter(q []float32, k int, keep func(id int) bool) []ann.Hit {
+	return s.f.QueryFilter(q, k, keep)
 }
 
 func (s *flatBinaryI8Store) Len() int {

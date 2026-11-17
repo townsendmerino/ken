@@ -22,7 +22,7 @@ func TestHybridSearch_EndToEnd(t *testing.T) {
 	flat := ann.New([][]float32{{1, 0}, {0.8, 0.6}, {0, 1}})
 	q := []float32{1, 0}
 
-	ranked := hybridSearch("getUser", q, flat, bm, chunks, 5, AdaptiveAlphas, nil, RankAblation{}) // symbol ⇒ alpha 0.3, penalties on
+	ranked := hybridSearch("getUser", q, flat, bm, chunks, 5, AdaptiveAlphas, nil, RankAblation{}, nil) // symbol ⇒ alpha 0.3, penalties on
 	if len(ranked) == 0 {
 		t.Fatal("hybridSearch returned nothing")
 	}
@@ -53,7 +53,7 @@ func TestHybridSearch_RankAblation(t *testing.T) {
 	q := []float32{1, 0}
 	scoreOf := func(abl RankAblation) map[int]float64 {
 		m := map[int]float64{}
-		for _, r := range hybridSearch("getUser", q, flat, bm, chunks, 5, AdaptiveAlphas, nil, abl) {
+		for _, r := range hybridSearch("getUser", q, flat, bm, chunks, 5, AdaptiveAlphas, nil, abl, nil) {
 			m[r.idx] = r.score
 		}
 		return m
