@@ -597,7 +597,13 @@ func (p *program) parse(file string) *ast.File {
 			pf.metaOK = true
 		}
 	})
-	return pf.file
+	// release drops pf.file from another goroutine once the last package that compiles the file is checked, so the
+	// read is under the same lock as that write. (A caller that only wants the file's metadata, as needsBodies does,
+	// may get nil here: the syntax is gone, the metadata is not.)
+	p.parseMu.Lock()
+	f := pf.file
+	p.parseMu.Unlock()
+	return f
 }
 
 // declares reports whether a file declares a method, and whether it declares at package level a name the universe
@@ -769,10 +775,9 @@ func (p *program) release(file string) {
 		return
 	}
 	p.parseMu.Lock()
-	pf := p.parsed[file]
-	p.parseMu.Unlock()
-	if pf != nil && pf.users.Add(-1) <= 0 {
-		pf.file = nil
+	defer p.parseMu.Unlock()
+	if pf := p.parsed[file]; pf != nil && pf.users.Add(-1) <= 0 {
+		pf.file = nil // under parseMu: parse reads it there too
 	}
 }
 
