@@ -384,24 +384,17 @@ Two things to know. The Python checkers do not rename a method together with the
 
 ### Checking every edit: the Claude Code hook
 
-`ken hook check-edit` runs these checks on every edit an agent is about to make, without the agent having to call a tool. In `.claude/settings.json`:
+`ken hook check-edit` runs these checks on every edit an agent is about to make, without the agent having to call a tool, and `ken hook stop` hands over, at the end of the agent's turn, what is still broken. In `.claude/settings.json`:
 
 ```json
 {"hooks": {"PreToolUse": [{"matcher": "Edit|Write",
-  "hooks": [{"type": "command", "command": "ken hook check-edit", "timeout": 30}]}]}}
-```
-
-It never blocks. When an edit would cause errors that are not there now, the edit goes ahead and the agent is given the errors; a refactor often breaks its callers in one edit and mends them in the next. When the edit is clean, the file is not Go, TypeScript, JavaScript or Python, the project has no compiler or checker ken can ask, or the check does not finish in 20 seconds (`--timeout`), the hook says nothing. `--why` prints the reason on standard error when you try it by hand.
-
-**Reporting at the end of the turn (Go).** A refactor breaks callers in one edit and mends them in the next, and a report at each edit mostly describes what the next edit mends: in a trial of 44 reports, 38 were. With `--end-of-turn` the hook says nothing at a Go edit; it keeps the errors the edit would cause, and a second hook on the `Stop` event hands over only the ones still there when the agent's turn ends:
-
-```json
-{"hooks": {"PreToolUse": [{"matcher": "Edit|Write",
-    "hooks": [{"type": "command", "command": "ken hook check-edit --end-of-turn", "timeout": 30}]}],
+    "hooks": [{"type": "command", "command": "ken hook check-edit", "timeout": 30}]}],
   "Stop": [{"hooks": [{"type": "command", "command": "ken hook stop", "timeout": 30}]}]}}
 ```
 
-`ken hook stop` re-checks the files it kept reports for and keeps the errors that are still there (same file, same message); a `MOVED` note ("compiles, but a name now means something else") is handed over as it was. It holds the turn open once, with those lines as the reason, so the agent fixes them; the Stop that follows is let through. Without the `Stop` hook nothing is ever reported in this mode, so both are needed; the default is still a report at each edit. The reports are kept in `~/.ken/run/hook-<session>.jsonl` (directory mode 0700) and removed at the Stop. TypeScript and Python are reported at the edit either way.
+**Both hooks are needed for Go.** From ken 1.20 a Go edit's errors are not reported at the edit: a refactor breaks callers in one edit and mends them in the next, and in a trial of 44 reports, 38 described breakage the next edit mended. The PreToolUse hook keeps the errors an edit would cause, and the `Stop` hook re-checks and hands over only the ones still there when the turn ends. **A setup that has only the PreToolUse hook goes quiet for Go after upgrading to 1.20**: add the `Stop` hook, or pass `--at-edit` to `ken hook check-edit` to report at each edit as before. TypeScript and Python errors are still reported at the edit.
+
+It never blocks an edit. `ken hook stop` re-checks the files it kept reports for and keeps the errors that are still there (same file, same message); a `MOVED` note ("compiles, but a name now means something else") is handed over as it was. It holds the turn open once, with those lines as the reason, so the agent fixes them; the Stop that follows is let through. The reports are kept in `~/.ken/run/hook-<session>.jsonl` (directory mode 0700) and removed at the Stop. When an edit is clean, the file is not Go, TypeScript, JavaScript or Python, the project has no compiler or checker ken can ask, or the check does not finish in 20 seconds (`--timeout`), the hook says nothing. `--why` prints the reason on standard error when you try it by hand.
 
 **Speed, for Go.** A Go check from nothing has to list and type-check the packages first. So the hook asks a running `ken-mcp` before it does that: the server listens on a socket in `~/.ken/run` (directory mode 0700, socket 0600: your own processes only) and answers from the programs it already holds. On ken's own source, about 450 files, an edit is checked in 0.07 s that way and in 0.9 to 1.6 s from nothing; the first edit after the server starts pays for the load (1.1 s there). Nothing needs configuring: if your agent has `ken-mcp` as an MCP server, the hook finds it. With no server running the hook checks from nothing, as before. `--no-server` on the hook, or `KEN_MCP_HOOK_SOCKET=0` on the server, turns this off. TypeScript and Python checks start the project's compiler or checker each time either way.
 
