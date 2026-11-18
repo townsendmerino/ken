@@ -43,6 +43,16 @@ func TestServeHook_checksAGoEditFromTheHeldPrograms(t *testing.T) {
 	if !ok || got.Clean || got.Findings != 1 || !strings.Contains(got.Text, "ERROR: main.go:5: not enough arguments in call to price.Total") {
 		t.Errorf("a breaking edit: ok %v, %+v", ok, got)
 	}
+	if len(got.Items) != 1 || got.Items[0].Kind != "error" || got.Items[0].File != "main.go" || got.Items[0].Line != 5 {
+		t.Errorf("the findings are not handed over as items: %+v", got.Items)
+	}
+	// the end of the turn asks what is broken now: the file as it is, and a newline
+	src, _ := os.ReadFile(filepath.Join(root, "price/calc.go"))
+	touched := string(src) + "\n"
+	if got, ok := hooksock.Ask(context.Background(), dir, hooksock.Request{Repo: root, Existing: true,
+		Edits: []hooksock.Edit{{File: "price/calc.go", Content: &touched}}}); !ok || len(got.Existing) != 0 || got.Findings != 0 {
+		t.Errorf("a touch of a package that compiles: ok %v, %+v", ok, got)
+	}
 	if got, ok := ask(root, "unit * float64(n)", "float64(n) * unit"); !ok || !got.Clean || got.Findings != 0 {
 		t.Errorf("a clean edit: ok %v, %+v", ok, got)
 	}

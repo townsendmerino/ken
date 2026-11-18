@@ -170,6 +170,7 @@ type editDiff struct {
 	moved     []verifyConflict // identifiers on untouched lines that refer to another declaration
 	api       []string         // exported declarations removed or changed
 	fixed     int              // errors that were there and are gone
+	existing  []verifyConflict // compile errors that are there now in the packages checked again, in the old source
 	rechecked int              // packages type-checked again
 }
 
@@ -299,12 +300,18 @@ func compareEdit(pre, post *program, patch map[string][]byte, maps map[string]*l
 		msg string
 	}
 	had, hadAt := map[errKey]bool{}, map[spot]bool{}
+	haveExisting := map[verifyConflict]bool{}
 	for _, id := range ids {
 		if a := pre.pkgs[id]; a != nil {
 			for _, list := range [][]typeErr{a.errs, a.soft} {
 				for _, e := range list {
-					s := at(pre.place(e.pos))
+					k := pre.place(e.pos)
+					s := at(k)
 					had[errKey{s, e.msg}], hadAt[s] = true, true
+					if c := (verifyConflict{k.file, k.off, e.msg}); !haveExisting[c] {
+						haveExisting[c] = true
+						d.existing = append(d.existing, c)
+					}
 				}
 			}
 		}

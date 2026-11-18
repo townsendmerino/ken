@@ -36,6 +36,19 @@ type Request struct {
 	Edits []Edit `json:"edits"`
 	Vet   bool   `json:"vet,omitempty"`
 	Max   int    `json:"max,omitempty"`
+	// Existing also asks for the compile errors that are there now in the packages the edits reach (Reply.Existing).
+	// The end-of-turn check sends each file as it is, plus a newline, so that nothing new is caused and what is
+	// broken now is all that is reported.
+	Existing bool `json:"existing,omitempty"`
+}
+
+// Item is one finding of a check, at a line of the edited tree. Kind is "error" (a compile error the edit would
+// cause), "moved" (it compiles but a name now means something else) or "vet".
+type Item struct {
+	Kind    string `json:"kind"`
+	File    string `json:"file,omitempty"`
+	Line    int    `json:"line,omitempty"`
+	Message string `json:"message"`
 }
 
 // Reply is the server's answer. Err is set when the server could not check the edit; the caller then looks elsewhere.
@@ -45,6 +58,9 @@ type Reply struct {
 	Clean      bool   `json:"clean,omitempty"`
 	Incomplete bool   `json:"incomplete,omitempty"`
 	Err        string `json:"error,omitempty"`
+	// Items are the findings Text describes. Existing is, when asked for, the compile errors that are there now.
+	Items    []Item `json:"items,omitempty"`
+	Existing []Item `json:"existing,omitempty"`
 }
 
 // Dir is where servers put their sockets: ~/.ken/run. "" when the user has no home directory.

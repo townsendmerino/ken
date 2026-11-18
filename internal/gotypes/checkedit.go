@@ -62,6 +62,10 @@ type EditCheck struct {
 	// Errors are the compile errors the edit would cause that are not there now, in the edited files and in every
 	// package that depends on them.
 	Errors []EditFinding `json:"errors,omitempty"`
+	// Existing are the compile errors that are there now, before the edit, in the packages the check type-checked
+	// again (the edited ones and what depends on them). An edit that changes nothing of a program (a trailing newline)
+	// makes this the way to ask what is broken now. Not part of Text.
+	Existing []EditFinding `json:"existing,omitempty"`
 	// Moved are the identifiers on lines the edit does not touch that would refer to another declaration: a name
 	// the edit shadows or captures. The code compiles and means something else.
 	Moved []EditFinding `json:"moved,omitempty"`
@@ -434,6 +438,7 @@ func (r *Runner) CheckEdit(ctx context.Context, edits []FileEdit) (*EditCheck, e
 	}
 	res.Errors = merge(func(d *editDiff) []verifyConflict { return d.errs })
 	res.Moved = merge(func(d *editDiff) []verifyConflict { return d.moved })
+	res.Existing = merge(func(d *editDiff) []verifyConflict { return d.existing })
 	api := map[string]bool{}
 	checkedAny, failed := false, false
 	for _, j := range jobs {
