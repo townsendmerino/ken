@@ -17,17 +17,17 @@ import (
 
 // The end-of-turn mode of the hook (F9, option a). A refactor breaks its callers in one edit and mends them in the
 // next, so a report at each edit mostly describes breakage that is about to be mended: in the trial, 38 of 44 reports
-// were. In this mode (--end-of-turn) a Go edit's errors are kept, quietly, until the agent's turn ends (Claude Code's Stop event),
+// were. In this mode (the default; --at-edit turns it off) a Go edit's errors are kept, quietly, until the agent's turn ends (Claude Code's Stop event),
 // and only the ones that still stand then are handed over.
 
 // hookPre is the PreToolUse side: it checks the edit and returns what the agent should be told now. For a Go edit
-// that would cause errors, in end-of-turn mode, that is nothing: the errors are kept for hookStop. Everything else
+// that would cause errors, in the default mode, that is nothing: the errors are kept for hookStop. Everything else
 // (other languages, the default mode, a clean edit, a note that something could not be checked, no session to keep
 // them for) is told at once, as before.
 func hookPre(ctx context.Context, in hookInput, o hookOptions) string {
 	var rep hookReport
 	text, tier := hookCheckInto(ctx, in, o, &rep)
-	if text == "" || tier != "go" || !o.endOfTurn || o.stateDir == "" || in.SessionID == "" || len(rep.items) == 0 {
+	if text == "" || tier != "go" || o.atEdit || o.stateDir == "" || in.SessionID == "" || len(rep.items) == 0 {
 		return text
 	}
 	if keepReport(o.stateDir, in.SessionID, rep) != nil {

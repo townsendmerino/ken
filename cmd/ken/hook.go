@@ -16,7 +16,7 @@ import (
 	"github.com/townsendmerino/ken/internal/hooksock"
 )
 
-const hookUsage = `Usage: ken hook check-edit [--repo DIR] [--timeout SECONDS] [--max N] [--vet] [--quiet-incomplete] [--why] [--no-server] [--end-of-turn]
+const hookUsage = `Usage: ken hook check-edit [--repo DIR] [--timeout SECONDS] [--max N] [--vet] [--quiet-incomplete] [--why] [--no-server] [--at-edit]
        ken hook stop [--repo DIR] [--timeout SECONDS] [--max N] [--no-server]
 
 A Claude Code hook: put it on PreToolUse for Edit and Write, and every edit the agent is about to make to a Go, TypeScript, JavaScript or
@@ -24,11 +24,13 @@ Python file is checked first, as 'ken go|ts|py check-edit' would check it. The
 hook reads the tool call as JSON on standard input.
 
 It never blocks an edit. When the edit would cause errors that are not there
-now, the errors are handed to the agent as context, and the edit goes ahead: a
-refactor often breaks its callers in one edit and mends them in the next. When
-the edit is clean, when the file is not one of those languages, when the
-project has no compiler or checker ken can ask, or when the check does not
-finish in time, the hook says nothing.
+now, the edit goes ahead: a refactor often breaks its callers in one edit and
+mends them in the next. For Go the errors are kept, and 'ken hook stop' (on the
+Stop event, below) hands the agent the ones still there at the end of its turn.
+TypeScript and Python errors are handed over at the edit. When the edit is clean,
+when the file is not one of those languages, when the project has no compiler or
+checker ken can ask, or when the check does not finish in time, the hook says
+nothing. WITHOUT the Stop hook, Go errors are never reported (see --at-edit).
 
   --repo DIR       the repository (default: the nearest directory at or above
                    the edited file that holds .git, else the session's cwd)
@@ -45,25 +47,19 @@ finish in time, the hook says nothing.
                    could be checked (default: say so, in one line)
   --why            when an edit could not be checked, say why on standard error
                    (for trying the hook by hand: the agent does not see it)
-  --end-of-turn    Go: say nothing at the edit; keep the errors it would cause, and
-                   at the end of the agent's turn report only the ones that still
-                   stand (a break the next edit mends is never reported). Needs the
-                   Stop hook below: without it nothing is ever reported. Other
-                   languages are reported at the edit, as before
-
-To report at the end of the turn, also put 'ken hook stop' on Stop:
-
-  {"hooks": {"PreToolUse": [{"matcher": "Edit|Write",
-      "hooks": [{"type": "command", "command": "ken hook check-edit --end-of-turn", "timeout": 30}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": "ken hook stop", "timeout": 30}]}]}}
+  --at-edit        Go: report the errors at the edit, as before ken 1.20, instead of
+                   at the end of the turn. For a setup with no Stop hook
+                   (--end-of-turn, the default, is accepted and does nothing)
 
 Stop holds the turn open once, with what still stands as the reason, so the agent
-fixes it; the Stop that follows is let through.
+fixes it; the Stop that follows is let through. A break the next edit mends is
+never reported.
 
 In .claude/settings.json:
 
   {"hooks": {"PreToolUse": [{"matcher": "Edit|Write",
-    "hooks": [{"type": "command", "command": "ken hook check-edit", "timeout": 30}]}]}}
+      "hooks": [{"type": "command", "command": "ken hook check-edit", "timeout": 30}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "ken hook stop", "timeout": 30}]}]}}
 
 Exit status: always 0, so a failure of the hook is never a failure of the edit.
 `
@@ -100,11 +96,16 @@ type hookOptions struct {
 	quietIncomplete bool
 	why             io.Writer // where to say why nothing was said; nil says nothing
 	sockDir         string    // where running servers listen; "" asks none
-	// endOfTurn keeps a Go edit's errors until the agent's turn ends and reports only those that still stand (hookPre,
-	// hookStop). Off, every edit's errors are reported at the edit.
-	endOfTurn bool
+	// atEdit reports every Go edit's errors at the edit. Off (the default), a Go edit's errors are kept until the
+	// agent's turn ends and only those that still stand are reported (hookPre, hookStop).
+	atEdit bool
 	// stateDir is where the errors an edit would cause are kept until the end of the turn; "" reports at the edit.
 	stateDir string
+}
+
+// defaultHookOptions are the options of a bare `ken hook check-edit`: Go errors are kept for the end of the turn.
+func defaultHookOptions() hookOptions {
+	return hookOptions{timeout: 20 * time.Second, max: 15, sockDir: hooksock.Dir(), stateDir: hooksock.Dir()}
 }
 
 // hookReport is what a Go check found, kept for the end of the turn.
@@ -301,11 +302,13 @@ func cmdHook(args []string) int {
 		return 2
 	}
 	stopEvent := args[0] == "stop"
-	o := hookOptions{timeout: 20 * time.Second, max: 15, sockDir: hooksock.Dir(), stateDir: hooksock.Dir()}
+	o := defaultHookOptions()
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--end-of-turn":
-			o.endOfTurn = true
+			// the default since 1.20; accepted so a settings file written for 1.19.x keeps working
+		case "--at-edit":
+			o.atEdit = true
 		case "--vet":
 			o.vet = true
 		case "--quiet-incomplete":

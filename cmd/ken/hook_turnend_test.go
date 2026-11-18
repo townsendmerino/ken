@@ -70,7 +70,9 @@ func TestHookTurnEnd(t *testing.T) {
 	root, edit := turnEndRepo(t)
 	ctx := context.Background()
 	newOpts := func() hookOptions {
-		return hookOptions{timeout: time.Minute, max: 15, stateDir: t.TempDir(), endOfTurn: true}
+		o := defaultHookOptions() // what a bare `ken hook check-edit` runs with: the end of the turn
+		o.timeout, o.stateDir, o.sockDir = time.Minute, t.TempDir(), ""
+		return o
 	}
 	stop := func(o hookOptions, active bool) string {
 		return hookStop(ctx, hookInput{SessionID: "s1", Cwd: root, StopHookActive: active}, o)
@@ -119,16 +121,16 @@ func TestHookTurnEnd(t *testing.T) {
 		}
 	})
 
-	t.Run("without --end-of-turn the report stays at the edit", func(t *testing.T) {
+	t.Run("--at-edit keeps the report at the edit", func(t *testing.T) {
 		o := newOpts()
-		o.endOfTurn = false
+		o.atEdit = true
 		apply(t, root, "main.go", "price.Total(2, 3, 0)", "price.Total(2, 3, 0, false, 0)") // mend what the cases before left
 		in := edit("price/calc.go", "more int)", "more int, again int)")
 		if say := hookPre(ctx, in, o); !strings.Contains(say, "ERROR: main.go:5:") {
-			t.Errorf("the default did not report:\n%s", say)
+			t.Errorf("--at-edit did not report:\n%s", say)
 		}
 		if say := stop(o, false); say != "" {
-			t.Errorf("the default left something for the end of the turn:\n%s", say)
+			t.Errorf("--at-edit left something for the end of the turn:\n%s", say)
 		}
 	})
 }
