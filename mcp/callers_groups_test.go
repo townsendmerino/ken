@@ -41,8 +41,6 @@ func callersText(t *testing.T, cfg *Config, args CallersArgs) string {
 	return extractText(t, r)
 }
 
-const callerSrc = "package %s\n\nfunc use() { Shared() }\n"
-
 func backendFiles() map[string]string {
 	return map[string]string{
 		"go.mod":                 "module example.com/x\n\ngo 1.22\n",
