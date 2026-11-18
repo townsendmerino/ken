@@ -217,7 +217,9 @@ type StatusArgs struct {
 type CallersArgs struct {
 	Symbol string `json:"symbol" jsonschema:"The function name whose callers you want (exact match). 'User.Login' matches every call to Login (receiver types aren't resolved); for Go, 'pkg.Func' narrows to calls written pkg.Func(...) plus bare Func(...) inside package pkg. Returns each file with its call lines and enclosing functions."`
 	repoArg
-	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with symbol/files — see CallersResponse)."`
+	PathContains        string `json:"path_contains,omitempty" jsonschema:"Optional substring that must appear in the caller's file path (case-sensitive). E.g. 'backend/webgpu' keeps only callers under that directory. Substring match, not glob."`
+	ExcludePathContains string `json:"exclude_path_contains,omitempty" jsonschema:"Optional substring that must NOT appear in the caller's file path. E.g. '_test.go' drops test files. Substring match."`
+	Output              string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with symbol/files/groups — see CallersResponse)."`
 }
 
 // FormatResults mirrors semble utils._format_results: a header, then each

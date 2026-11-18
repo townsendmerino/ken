@@ -314,7 +314,10 @@ func NewServer(cfg Config) *sdk.Server {
 			"type-resolved — same-spelled functions across types collapse into one list. " +
 			"For Go, \"pkg.Func\" narrows to calls written pkg.Func(…) plus bare Func(…) " +
 			"calls inside package pkg. Stage 8 Gate 2 precision sample: 100% on a 400-edge " +
-			"sample across 8 languages.",
+			"sample across 8 languages. Results are grouped by Go package import path (by " +
+			"module too under a multi-module go.work), other languages by directory; " +
+			"path_contains / exclude_path_contains filter the callers. When the receiver " +
+			"type matters in Go, go_references (where offered) gives the type-resolved answer.",
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args CallersArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken callers")
 		defer stop()

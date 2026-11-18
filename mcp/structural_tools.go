@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -420,6 +421,21 @@ func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.Cal
 
 	sites := sidx.Callers(sym)
 	valueUses := sidx.ValueUses(sym)
+	// path_contains / exclude_path_contains: callers already enumerates every
+	// site, so this filters the list with the same per-file decision a search
+	// scope makes (engine.Scope), not a limit on what is fetched.
+	scope := engine.Scope{PathContains: args.PathContains, ExcludePathContains: args.ExcludePathContains}
+	if !scope.IsZero() {
+		total := len(sites) + len(valueUses)
+		sites = slices.DeleteFunc(sites, func(s engine.CallSite) bool { return !scope.Match(s.File) })
+		valueUses = slices.DeleteFunc(valueUses, func(s engine.CallSite) bool { return !scope.Match(s.File) })
+		if total > 0 && len(sites)+len(valueUses) == 0 {
+			resp := CallersResponse{Symbol: sym, Files: []string{}}
+			md := fmt.Sprintf("No callers found for %q in files matching the filter (path_contains=%q, exclude_path_contains=%q); "+
+				"%d file%s call or use it outside the filter.", sym, args.PathContains, args.ExcludePathContains, total, pluralS(total))
+			return dispatchOutput(args.Output, resp, md)
+		}
+	}
 	if len(sites) == 0 && len(valueUses) == 0 {
 		// Empty: same shape in JSON (files: []) so agents don't
 		// have to special-case missing data; markdown gets the
@@ -456,6 +472,7 @@ func handleCallers(ctx context.Context, cfg *Config, args CallersArgs) (*sdk.Cal
 		}
 		resp.ValueUses = append(resp.ValueUses, CallerSiteOut{File: s.File, Calls: uses})
 	}
+	resp.Groups = callerGroups(sidx.ws.Root(), resp.Sites, resp.ValueUses)
 	return dispatchOutput(args.Output, resp, renderCallersMarkdown(resp))
 }
 
@@ -486,7 +503,32 @@ func renderCallersMarkdown(r CallersResponse) string {
 			b.WriteString("\n")
 		}
 	}
-	writeSites(r.Sites)
+	// With more than one group, each gets a heading (a Go package import
+	// path, "(module M)" under a multi-module go.work, or a directory).
+	writeGrouped := func(pick func(CallerGroupOut) []CallerSiteOut, flat []CallerSiteOut) {
+		if len(r.Groups) < 2 {
+			writeSites(flat)
+			return
+		}
+		first := true
+		for _, g := range r.Groups {
+			sites := pick(g)
+			if len(sites) == 0 {
+				continue
+			}
+			if !first {
+				b.WriteString("\n")
+			}
+			first = false
+			if g.Module != "" {
+				fmt.Fprintf(&b, "### %s  (module %s)\n\n", g.Group, g.Module)
+			} else {
+				fmt.Fprintf(&b, "### %s\n\n", g.Group)
+			}
+			writeSites(sites)
+		}
+	}
+	writeGrouped(func(g CallerGroupOut) []CallerSiteOut { return g.Sites }, r.Sites)
 	if len(r.ValueUses) > 0 {
 		if len(r.Sites) == 0 {
 			b.WriteString("**No direct calls, but the name is used as a value — it is not unused.**\n\n")
@@ -496,7 +538,7 @@ func renderCallersMarkdown(r CallersResponse) string {
 		fmt.Fprintf(&b, "## Passed as a value (%d file%s)\n\n", len(r.ValueUses), pluralS(len(r.ValueUses)))
 		b.WriteString("_Sites where the name is taken as a func value or method expression, or a same-named field is read; " +
 			"calls through the func value are not traced._\n\n")
-		writeSites(r.ValueUses)
+		writeGrouped(func(g CallerGroupOut) []CallerSiteOut { return g.ValueUses }, r.ValueUses)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
