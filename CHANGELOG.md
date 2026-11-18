@@ -15,8 +15,12 @@ pre-built binaries.
 
 ## [Unreleased]
 
+### Fixed
+- `search` filters (`languages`, `path_contains`, `exclude_path_contains`) no longer run after retrieval. They go into both retrieval arms as a per-query chunk scope, so a filtered top-k is exact over the scope with no 200-candidate limit; a file the unfiltered ranking puts below 200 is now found. The response's `filter` block reports `files_in_scope` / `chunks_in_scope` instead of `candidates_before_filter`, an empty scope is answered before searching, and a zero result says no chunk in the N files in scope matches.
+
 ### Added
 
+- `ken search --path SUBSTR` / `--exclude-path SUBSTR`, the same scope from the CLI. `engine.SearchOptions.Scope` and `Workspace.ScopeSize` for library callers.
 - **`ken hook check-edit --end-of-turn` and `ken hook stop`: report a Go edit's errors only if they are still there at the end of the turn.** In the F9 trial, 38 of 44 hook reports described breakage that the agent's next edit mended. With the flag, the PreToolUse hook keeps the errors an edit would cause and says nothing; the Stop hook re-checks and hands over what still stands (and `MOVED` notes), once. `go_check_edit`'s result gains `existing` (the compile errors there now in the packages it re-checked), which the Stop check reads. Opt-in: a PreToolUse-only configuration with the flag would never report.
 - **`text_refs(path)`, and `engine.Workspace.TextRefs`: which files read a file as text.** Lists the string literals and `//go:embed` patterns that contain a file's repo path (or its base name, where the directory part fits), with file, line and enclosing function. Go is read from the syntax tree, so comments and identifiers do not match; other languages use the string literals on indexed lines. It is a lead list for source-scan tests and embeds; use grep for every match.
 

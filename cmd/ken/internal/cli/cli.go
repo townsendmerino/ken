@@ -105,7 +105,7 @@ func Usage() {
 
 usage:
   ken index           <path>           [--watch|--no-watch] [--write-snapshot] [--chunker regex|treesitter|line] [--mode bm25|semantic|hybrid|hybrid-rerank] [--model DIR]
-  ken search          <path> <query>...  [-k N] [--json] [--verbose] [--stream] [--no-stats] [--chunker ...] [--mode ...] [--model DIR]
+  ken search          <path> <query>...  [-k N] [--json] [--verbose] [--stream] [--no-stats] [--path SUBSTR] [--exclude-path SUBSTR] [--chunker ...] [--mode ...] [--model DIR]
                                          [--rerank-model DIR] [--rerank-top-n N] [--rerank-beta β] [--rerank-quant f32|int8] [--rerank-adaptive THRESHOLD:MINN]
   ken bench           <path>             [-k N] [--chunker ...] [--mode ...] [--model DIR] [--alpha-symbol F] [--alpha-nl F] [--no-file-saturation] [--saturation-threshold N] [--saturation-decay F]
                                          [--rerank-model DIR] [--rerank-top-n N] [--rerank-beta β] [--rerank-quant f32|int8] [--rerank-adaptive THRESHOLD:MINN]

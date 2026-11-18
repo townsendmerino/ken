@@ -75,13 +75,16 @@ type SearchResultRow struct {
 	Match *MatchInfo `json:"match,omitempty"`
 }
 
-// SearchFilterMeta documents how a filter affected the result count.
+// SearchFilterMeta documents a search's filter and the scope it produced.
 type SearchFilterMeta struct {
-	Languages              []string `json:"languages,omitempty"`
-	PathContains           string   `json:"path_contains,omitempty"`
-	ExcludePathContains    string   `json:"exclude_path_contains,omitempty"`
-	CandidatesBeforeFilter int      `json:"candidates_before_filter"`
-	ResultsAfterFilter     int      `json:"results_after_filter"`
+	Languages           []string `json:"languages,omitempty"`
+	PathContains        string   `json:"path_contains,omitempty"`
+	ExcludePathContains string   `json:"exclude_path_contains,omitempty"`
+	// FilesInScope / ChunksInScope are how much of the index the filter
+	// left; the search ran over exactly those chunks.
+	FilesInScope       int `json:"files_in_scope"`
+	ChunksInScope      int `json:"chunks_in_scope"`
+	ResultsAfterFilter int `json:"results_after_filter"`
 }
 
 // FindRelatedResponse mirrors SearchResponse without the filter +
@@ -173,6 +176,22 @@ type CallersResponse struct {
 	// expression `T.M`). Go only. Calls through the func value are not
 	// traced, so a non-empty ValueUses with empty Files means "used, but
 	// not called directly" — not "unused".
+	ValueUses []CallerSiteOut `json:"value_uses,omitempty"`
+	// Groups is Sites and ValueUses split by Go package import path (by
+	// directory for other languages), so same-named methods in different
+	// packages or backends can be told apart. Sites and ValueUses stay as
+	// they were; Groups repeats them, grouped.
+	Groups []CallerGroupOut `json:"groups,omitempty"`
+}
+
+// CallerGroupOut is the callers inside one Go package (Kind "package", Group
+// is its import path) or one directory (Kind "directory"). Module is the Go
+// module path, set only under a go.work that lists more than one module.
+type CallerGroupOut struct {
+	Group     string          `json:"group"`
+	Kind      string          `json:"kind"`
+	Module    string          `json:"module,omitempty"`
+	Sites     []CallerSiteOut `json:"sites,omitempty"`
 	ValueUses []CallerSiteOut `json:"value_uses,omitempty"`
 }
 

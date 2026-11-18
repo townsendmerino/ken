@@ -225,5 +225,33 @@ func existingErrors(ctx context.Context, repo string, files []string, o hookOpti
 	if err != nil {
 		return nil, false
 	}
-	return hooksock.ExistingOf(res), true
+	return existingOf(res), true
+}
+
+// itemsOf lists a check's findings: errors, then moved identifiers, then vet problems.
+func itemsOf(res *engine.GoEditCheck) []hooksock.Item {
+	var out []hooksock.Item
+	add := func(kind string, fs []engine.GoEditFinding) {
+		for _, f := range fs {
+			out = append(out, hooksock.Item{Kind: kind, File: f.File, Line: f.Line, Message: f.Message})
+		}
+	}
+	add("error", res.Errors)
+	add("moved", res.Moved)
+	add("vet", res.Vet)
+	return out
+}
+
+// existingOf lists the compile errors that are there now, from a check of an edit that changes nothing of the
+// program. A file that does not parse is reported by its syntax errors, as the check does.
+func existingOf(res *engine.GoEditCheck) []hooksock.Item {
+	src := res.Existing
+	if res.Syntax {
+		src = res.Errors
+	}
+	var out []hooksock.Item
+	for _, f := range src {
+		out = append(out, hooksock.Item{Kind: "error", File: f.File, Line: f.Line, Message: f.Message})
+	}
+	return out
 }

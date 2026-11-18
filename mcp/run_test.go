@@ -400,7 +400,7 @@ func TestRun_SearchFilters_Language(t *testing.T) {
 		t.Errorf("languages=[go] should have filtered out auth.py:\n%s", txt)
 	}
 	// Header should report the candidate-vs-filter ratio.
-	if !strings.Contains(txt, "passed filter") {
+	if !strings.Contains(txt, "in scope") {
 		t.Errorf("expected filter ratio in header, got:\n%s", txt)
 	}
 }
@@ -594,8 +594,8 @@ func TestRun_JSONOutput(t *testing.T) {
 		if resp.Filter == nil {
 			t.Fatal("expected Filter to be populated when filter args present")
 		}
-		if resp.Filter.CandidatesBeforeFilter <= 0 {
-			t.Errorf("CandidatesBeforeFilter = %d, want > 0", resp.Filter.CandidatesBeforeFilter)
+		if resp.Filter.ChunksInScope <= 0 || resp.Filter.FilesInScope <= 0 {
+			t.Errorf("files/chunks in scope = %d/%d, want > 0", resp.Filter.FilesInScope, resp.Filter.ChunksInScope)
 		}
 	})
 

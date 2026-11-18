@@ -19,8 +19,6 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/townsendmerino/ken/internal/gotypes"
 )
 
 // Edit is one edit, in the shape of an editor's replace or a whole file.
@@ -63,34 +61,6 @@ type Reply struct {
 	// Items are the findings Text describes. Existing is, when asked for, the compile errors that are there now.
 	Items    []Item `json:"items,omitempty"`
 	Existing []Item `json:"existing,omitempty"`
-}
-
-// ItemsOf lists a check's findings: errors, then moved identifiers, then vet problems.
-func ItemsOf(res *gotypes.EditCheck) []Item {
-	var out []Item
-	add := func(kind string, fs []gotypes.EditFinding) {
-		for _, f := range fs {
-			out = append(out, Item{Kind: kind, File: f.File, Line: f.Line, Message: f.Message})
-		}
-	}
-	add("error", res.Errors)
-	add("moved", res.Moved)
-	add("vet", res.Vet)
-	return out
-}
-
-// ExistingOf lists the compile errors that are there now, from a check of an edit that changes nothing of the
-// program. A file that does not parse is reported by its syntax errors, as the check does.
-func ExistingOf(res *gotypes.EditCheck) []Item {
-	var out []Item
-	src := res.Existing
-	if res.Syntax {
-		src = res.Errors
-	}
-	for _, f := range src {
-		out = append(out, Item{Kind: "error", File: f.File, Line: f.Line, Message: f.Message})
-	}
-	return out
 }
 
 // Dir is where servers put their sockets: ~/.ken/run. "" when the user has no home directory.

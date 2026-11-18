@@ -72,14 +72,13 @@ type SearchArgs struct {
 	// Explain adds a per-result "why this matched" annotation. See MatchInfo.
 	Explain bool `json:"explain,omitempty" jsonschema:"When true, annotate each result with why it matched: which of your query's terms appear in the chunk (kind=lexical) or that it surfaced on semantic similarity with no exact term overlap (kind=semantic). A lexical-overlap explanation for debugging 'why is this here?', not a full ranking breakdown. Off by default."`
 
-	// === 1.0 filters (over-fetch + post-filter; no ranking-quality change) ===
+	// === 1.0 filters (applied inside retrieval; no ranking-quality change) ===
 	//
-	// All three filters are AND-ed: a result must pass every set
-	// constraint to be returned. Filters apply AFTER the hybrid
-	// retriever runs; we over-fetch by a generous multiplier so the
-	// post-filter top-K still has good candidates. If the filter set
-	// removes every candidate, the response says so honestly rather
-	// than silently returning fewer than top_k.
+	// All three filters are AND-ed: a file must pass every set constraint
+	// to be in scope. The scope goes into both retrieval arms, so the
+	// top-K is exact over the files in scope however few they are; a chunk
+	// scores the same as it does unfiltered. If no file is in scope the
+	// response says so, naming the filter, before any search runs.
 	Languages           []string `json:"languages,omitempty" jsonschema:"Optional list of file extensions to include (e.g. ['py','go','ts']). Leading dot optional ('py' and '.py' both work). When set, only results from files with these extensions are returned. Use this to narrow a polyglot repo to one language."`
 	PathContains        string   `json:"path_contains,omitempty" jsonschema:"Optional substring that must appear in the result's file path (case-sensitive). E.g. 'src/api' returns only results under directories whose path contains src/api. Substring match, not glob — for glob patterns use a more specific path_contains value."`
 	ExcludePathContains string   `json:"exclude_path_contains,omitempty" jsonschema:"Optional substring that must NOT appear in the file path. E.g. '_test.go' excludes Go test files; 'node_modules' excludes vendored JS. Substring match."`
@@ -218,7 +217,9 @@ type StatusArgs struct {
 type CallersArgs struct {
 	Symbol string `json:"symbol" jsonschema:"The function name whose callers you want (exact match). 'User.Login' matches every call to Login (receiver types aren't resolved); for Go, 'pkg.Func' narrows to calls written pkg.Func(...) plus bare Func(...) inside package pkg. Returns each file with its call lines and enclosing functions."`
 	repoArg
-	Output string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with symbol/files — see CallersResponse)."`
+	PathContains        string `json:"path_contains,omitempty" jsonschema:"Optional substring that must appear in the caller's file path (case-sensitive). E.g. 'backend/webgpu' keeps only callers under that directory. Substring match, not glob."`
+	ExcludePathContains string `json:"exclude_path_contains,omitempty" jsonschema:"Optional substring that must NOT appear in the caller's file path. E.g. '_test.go' drops test files. Substring match."`
+	Output              string `json:"output,omitempty" jsonschema:"Output format: 'markdown' (default) or 'json' (structured response with symbol/files/groups — see CallersResponse)."`
 }
 
 // FormatResults mirrors semble utils._format_results: a header, then each

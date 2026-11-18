@@ -31,6 +31,7 @@ func handleStatus(ctx context.Context, cfg *Config, args StatusArgs) (*sdk.CallT
 		}
 	}
 
+	opts.TypedTier = typedTierInfo(cfg)
 	if cfg.GoTyped != nil {
 		if st := cfg.GoTyped.Status(); st.Enabled {
 			opts.GoTyped = goTypedInfo(st)

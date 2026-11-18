@@ -230,7 +230,7 @@ func hookCheckInto(ctx context.Context, in hookInput, o hookOptions, rep *hookRe
 			findings, clean = len(res.Errors)+len(res.Moved)+len(res.Vet), res.Clean
 			body = res.Text(len(gt.Config.Configs), o.max)
 			if rep != nil {
-				*rep = hookReport{repo: repo, file: rel, items: hooksock.ItemsOf(res)}
+				*rep = hookReport{repo: repo, file: rel, items: itemsOf(res)}
 			}
 		}
 	case engine.IsTSSource(file):
