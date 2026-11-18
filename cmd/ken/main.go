@@ -462,6 +462,8 @@ type searchArgs struct {
 	verbose        bool   // --verbose: print per-query telemetry breakdown to stderr
 	noStats        bool   // --no-stats: skip the ~/.ken/savings.jsonl append for this run
 	stream         bool   // --stream: print stage-1 results immediately, then the rerank-adjusted top-K
+	pathContains   string // --path SUBSTR: only files whose path contains it (searched inside both arms)
+	excludePath    string // --exclude-path SUBSTR: drop files whose path contains it
 }
 
 // hitsToJSON is toJSONResults for engine hits. Content is the chunk as the
@@ -547,6 +549,20 @@ func parseSearchArgs(args []string) (searchArgs, error) {
 			if err := setK(args[i]); err != nil {
 				return sa, err
 			}
+		case a == "--path" || a == "--exclude-path":
+			if i+1 >= len(args) {
+				return sa, fmt.Errorf("%s expects a path substring, got end of arguments", a)
+			}
+			i++
+			if a == "--path" {
+				sa.pathContains = args[i]
+			} else {
+				sa.excludePath = args[i]
+			}
+		case strings.HasPrefix(a, "--path="):
+			sa.pathContains = a[len("--path="):]
+		case strings.HasPrefix(a, "--exclude-path="):
+			sa.excludePath = a[len("--exclude-path="):]
 		case strings.HasPrefix(a, "-k="), strings.HasPrefix(a, "--k="):
 			if err := setK(a[strings.IndexByte(a, '=')+1:]); err != nil {
 				return sa, err
@@ -593,7 +609,7 @@ func cmdSearch(args []string) int {
 	ctx := context.Background()
 	// The CLI prints rank, score and text only, so skip the per-arm rank
 	// queries a Hit would otherwise carry.
-	quick := engine.SearchOptions{NoArmRanks: true}
+	quick := engine.SearchOptions{NoArmRanks: true, Scope: engine.Scope{PathContains: sa.pathContains, ExcludePathContains: sa.excludePath}}
 	// M10: --stream prints preliminary stage-1 results to stdout BEFORE
 	// the (slower) rerank runs. Useful on rerank-cold queries where
 	// the rerank step takes seconds; the terminal user sees relevant-

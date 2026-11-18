@@ -15,6 +15,8 @@ type indexView struct{ ix *search.Index }
 
 func (v indexView) CurrentMode() engine.Mode { return v.ix.Mode() }
 
+func (v indexView) ScopeSize(engine.Scope) (int, int) { return 0, v.ix.LiveLen() }
+
 func (v indexView) SearchResults(_ context.Context, query string, k int, mode engine.Mode, opts engine.SearchOptions) ([]engine.Result, engine.Mode, error) {
 	if opts.Telemetry != nil {
 		res, eff, tel := v.ix.SearchModeWithTelemetry(query, k, mode)

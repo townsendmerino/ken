@@ -75,13 +75,16 @@ type SearchResultRow struct {
 	Match *MatchInfo `json:"match,omitempty"`
 }
 
-// SearchFilterMeta documents how a filter affected the result count.
+// SearchFilterMeta documents a search's filter and the scope it produced.
 type SearchFilterMeta struct {
-	Languages              []string `json:"languages,omitempty"`
-	PathContains           string   `json:"path_contains,omitempty"`
-	ExcludePathContains    string   `json:"exclude_path_contains,omitempty"`
-	CandidatesBeforeFilter int      `json:"candidates_before_filter"`
-	ResultsAfterFilter     int      `json:"results_after_filter"`
+	Languages           []string `json:"languages,omitempty"`
+	PathContains        string   `json:"path_contains,omitempty"`
+	ExcludePathContains string   `json:"exclude_path_contains,omitempty"`
+	// FilesInScope / ChunksInScope are how much of the index the filter
+	// left; the search ran over exactly those chunks.
+	FilesInScope       int `json:"files_in_scope"`
+	ChunksInScope      int `json:"chunks_in_scope"`
+	ResultsAfterFilter int `json:"results_after_filter"`
 }
 
 // FindRelatedResponse mirrors SearchResponse without the filter +

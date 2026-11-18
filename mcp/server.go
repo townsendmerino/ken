@@ -622,6 +622,8 @@ func runSearchWithTelemetry(ix queryIndex, args SearchArgs, log func(query strin
 // (RepoBundle.workspace).
 type queryIndex interface {
 	CurrentMode() engine.Mode
+	// ScopeSize is how many files and live chunks a Scope holds.
+	ScopeSize(s engine.Scope) (files, chunks int)
 	SearchResults(ctx context.Context, query string, k int, mode engine.Mode, opts engine.SearchOptions) ([]engine.Result, engine.Mode, error)
 	FindRelatedResults(ctx context.Context, filePath string, line, k int) ([]engine.Result, error)
 }
@@ -685,36 +687,43 @@ func searchCore(ix queryIndex, args SearchArgs, requestedMode engine.Mode, colle
 	if topK > MaxTopK {
 		topK = MaxTopK // C1: bound before the *10 over-fetch + the make([]Result,0,k) alloc
 	}
-	// 1.0 filters: when any of Languages / PathContains /
-	// ExcludePathContains is set, over-fetch by a factor so the
-	// post-filter top-K still has plausible candidates. The factor
-	// is generous (10× topK, capped at 200) because filter
-	// selectivity is unpredictable — "Go only" might keep 30% of
-	// hits while "src/api only" might keep 1%. Over-fetching past
-	// the cap caps wall-time at known-bounded levels.
-	fetchK := topK
-	hasFilters := len(args.Languages) > 0 || args.PathContains != "" || args.ExcludePathContains != ""
+	// Languages / PathContains / ExcludePathContains restrict the search
+	// itself: the scope goes into both retrieval arms, so the top-k is exact
+	// over the files in scope, however few they are (F1).
+	scope := engine.Scope{
+		Languages:           args.Languages,
+		PathContains:        args.PathContains,
+		ExcludePathContains: args.ExcludePathContains,
+	}
+	hasFilters := !scope.IsZero()
+	var scopeFiles, scopeChunks int
 	if hasFilters {
-		fetchK = min(topK*10, 200)
+		scopeFiles, scopeChunks = ix.ScopeSize(scope)
 	}
 	var (
 		results       []engine.Result
 		effectiveMode engine.Mode
 		tel           engine.Telemetry
 	)
-	var opts engine.SearchOptions
+	opts := engine.SearchOptions{Scope: scope}
 	if collectTel {
 		opts.Telemetry = &tel
 	}
-	// The error is a cancelled context only; the handlers pass none.
-	results, effectiveMode, _ = ix.SearchResults(context.Background(), args.Query, fetchK, requestedMode, opts)
-	// Apply filters and truncate. recall@filter is reported in the
-	// header (`X of Y results matched filters`) so callers can see
-	// when the filter was the limiting factor.
-	rawCount := len(results)
-	if hasFilters {
-		results = applySearchFilters(results, args)
+	// An empty scope is answered before searching, naming the filter.
+	if hasFilters && scopeChunks == 0 {
+		resp := SearchResponse{
+			Query:   args.Query,
+			Mode:    engine.ModeNames()[int(requestedMode)],
+			Results: []SearchResultRow{},
+			Filter:  searchFilterMeta(args, scopeFiles, scopeChunks, 0),
+		}
+		if warming {
+			resp.Semantic = "warming"
+		}
+		return resp, tel, fmt.Sprintf("No files match the filters (%s). Try loosening languages / path_contains / exclude_path_contains.", describeFilters(args))
 	}
+	// The error is a cancelled context only; the handlers pass none.
+	results, effectiveMode, _ = ix.SearchResults(context.Background(), args.Query, topK, requestedMode, opts)
 	if len(results) > topK {
 		results = results[:topK]
 	}
@@ -734,21 +743,15 @@ func searchCore(ix queryIndex, args SearchArgs, requestedMode engine.Mode, colle
 		resp.Semantic = "warming"
 	}
 	if hasFilters {
-		resp.Filter = &SearchFilterMeta{
-			Languages:              args.Languages,
-			PathContains:           args.PathContains,
-			ExcludePathContains:    args.ExcludePathContains,
-			CandidatesBeforeFilter: rawCount,
-			ResultsAfterFilter:     len(results),
-		}
+		resp.Filter = searchFilterMeta(args, scopeFiles, scopeChunks, len(results))
 	}
 	if len(results) == 0 {
 		resp.Results = []SearchResultRow{}
-		if hasFilters && rawCount > 0 {
+		if hasFilters {
 			return resp, tel, fmt.Sprintf(
-				"No results match the filters (search returned %d candidate%s before filtering). "+
-					"Try removing or loosening languages / path_contains / exclude_path_contains.",
-				rawCount, pluralS(rawCount))
+				"No chunk in the %d file%s in scope (%s) matches the query. "+
+					"Try different terms, or loosen languages / path_contains / exclude_path_contains.",
+				scopeFiles, pluralS(scopeFiles), describeFilters(args))
 		}
 		return resp, tel, "No results found."
 	}
@@ -780,8 +783,8 @@ func searchCore(ix queryIndex, args SearchArgs, requestedMode engine.Mode, colle
 		header += " — semantic index still warming (BM25 results now; hybrid arriving shortly)"
 	}
 	if hasFilters {
-		header += fmt.Sprintf(" — %d of %d candidate%s passed filter",
-			len(results), rawCount, pluralS(rawCount))
+		header += fmt.Sprintf(" — searched %d chunk%s in %d file%s in scope",
+			scopeChunks, pluralS(scopeChunks), scopeFiles, pluralS(scopeFiles))
 	}
 	var body string
 	if args.Explain {
@@ -795,47 +798,32 @@ func searchCore(ix queryIndex, args SearchArgs, requestedMode engine.Mode, colle
 	return resp, tel, body
 }
 
-// applySearchFilters drops results whose file path doesn't satisfy
-// the args' Languages / PathContains / ExcludePathContains
-// constraints. Filters are AND-ed; a result must pass every set
-// constraint to survive. Languages normalize a leading dot (so
-// both "py" and ".py" work); path filters are case-sensitive
-// substring matches.
-func applySearchFilters(results []engine.Result, args SearchArgs) []engine.Result {
-	// Build a quick-lookup extension set; tolerate either "py" or
-	// ".py" inputs.
-	var allowExt map[string]bool
+// searchFilterMeta is the response's filter block: the filter as given, how
+// much of the index it left in scope, and how many results came back.
+func searchFilterMeta(args SearchArgs, files, chunks, results int) *SearchFilterMeta {
+	return &SearchFilterMeta{
+		Languages:           args.Languages,
+		PathContains:        args.PathContains,
+		ExcludePathContains: args.ExcludePathContains,
+		FilesInScope:        files,
+		ChunksInScope:       chunks,
+		ResultsAfterFilter:  results,
+	}
+}
+
+// describeFilters renders the filters that are set, for messages.
+func describeFilters(args SearchArgs) string {
+	var parts []string
 	if len(args.Languages) > 0 {
-		allowExt = make(map[string]bool, len(args.Languages))
-		for _, lang := range args.Languages {
-			lang = strings.TrimSpace(lang)
-			if lang == "" {
-				continue
-			}
-			if !strings.HasPrefix(lang, ".") {
-				lang = "." + lang
-			}
-			allowExt[strings.ToLower(lang)] = true
-		}
+		parts = append(parts, "languages="+strings.Join(args.Languages, ","))
 	}
-	out := results[:0]
-	for _, r := range results {
-		path := r.Chunk.File
-		if allowExt != nil {
-			ext := strings.ToLower(filepath.Ext(path))
-			if !allowExt[ext] {
-				continue
-			}
-		}
-		if args.PathContains != "" && !strings.Contains(path, args.PathContains) {
-			continue
-		}
-		if args.ExcludePathContains != "" && strings.Contains(path, args.ExcludePathContains) {
-			continue
-		}
-		out = append(out, r)
+	if args.PathContains != "" {
+		parts = append(parts, fmt.Sprintf("path_contains=%q", args.PathContains))
 	}
-	return out
+	if args.ExcludePathContains != "" {
+		parts = append(parts, fmt.Sprintf("exclude_path_contains=%q", args.ExcludePathContains))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // recordSearchUsage computes snippet_chars + file_chars (the unique-

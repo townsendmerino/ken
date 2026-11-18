@@ -210,3 +210,16 @@ func TestBench_StdinDrivenJSON(t *testing.T) {
 		t.Errorf("expected 'ken bench: indexed …' on stderr, got:\n%s", stderr.String())
 	}
 }
+
+func TestParseSearchArgs_PathScope(t *testing.T) {
+	got, err := parseSearchArgs([]string{"repo", "find", "--path", "src/api", "this", "--exclude-path=_test", "-k", "3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.pathContains != "src/api" || got.excludePath != "_test" || got.query != "find this" || got.k != 3 {
+		t.Errorf("got %+v", got)
+	}
+	if _, err := parseSearchArgs([]string{"repo", "q", "--path"}); err == nil {
+		t.Error("--path without a value should be an error")
+	}
+}

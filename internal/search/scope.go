@@ -1,11 +1,8 @@
 package search
 
 import (
-	"slices"
-
 	"github.com/townsendmerino/aikit/ann"
 	"github.com/townsendmerino/aikit/bm25"
-	"github.com/townsendmerino/aikit/topk"
 )
 
 // ChunkSet is a per-query set of chunk indexes: the scope a search is
@@ -41,26 +38,30 @@ func (s *ChunkSet) Len() int {
 // chunks are left out, so a scoped search never has to over-fetch for them.
 func (ix *Index) ScopeOfFiles(keep func(file string) bool) (set *ChunkSet, files, chunks int) {
 	set = &ChunkSet{bits: make([]uint64, (len(ix.chunks)+63)/64)}
-	decided := make(map[string]bool, 256)
-	counted := make(map[string]bool, 256)
+	// A file's chunks are normally adjacent, so decide on a file change and
+	// reuse the answer for the run; a file split by incremental updates is
+	// simply decided again (keep is pure). Distinct in-scope files are counted
+	// through a set touched only on a change.
+	var (
+		last    string
+		lastOK  bool
+		counted = make(map[string]struct{}, 64)
+	)
 	for i := range ix.chunks {
 		c := &ix.chunks[i]
-		ok, seen := decided[c.File]
-		if !seen {
-			ok = keep(c.File)
-			decided[c.File] = ok
+		if i == 0 || c.File != last {
+			last, lastOK = c.File, keep(c.File)
 		}
-		if !ok || c.Tombstoned {
+		if !lastOK || c.Tombstoned {
 			continue
 		}
 		set.bits[i>>6] |= 1 << (uint(i) & 63)
 		set.n++
-		if !counted[c.File] {
-			counted[c.File] = true
-			files++
+		if _, ok := counted[c.File]; !ok {
+			counted[c.File] = struct{}{}
 		}
 	}
-	return set, files, set.n
+	return set, len(counted), set.n
 }
 
 // filterableDense is a dense retriever that can skip rows before scoring them
@@ -95,28 +96,12 @@ func queryDense(flat denseRetriever, q []float32, k int, allow *ChunkSet) []ann.
 // bm25TopK is bm.TopK restricted to allow: the k best-scoring in-scope
 // documents with a positive score, ties broken by ascending document id.
 // Corpus statistics (IDF, length norm) are the whole corpus's, so a chunk
-// scores the same with or without the scope. A nil allow is exactly TopK.
+// scores the same with or without the scope; aikit's TopKFilter keeps its
+// dynamic pruning and never scores a rejected document. A nil allow is
+// exactly TopK.
 func bm25TopK(bm *bm25.Index, terms []string, k int, allow *ChunkSet) []bm25.Result {
 	if allow == nil {
 		return bm.TopK(terms, k)
 	}
-	if k <= 0 {
-		return nil
-	}
-	scores := bm.Scores(terms)
-	sel := topk.New[int](k)
-	th := sel.Threshold()
-	for d, s := range scores {
-		if s > 0 && s > th && allow.Has(d) {
-			sel.Push(d, s)
-			th = sel.Threshold()
-		}
-	}
-	items := sel.Result()
-	slices.SortFunc(items, topk.ItemCmp[int])
-	out := make([]bm25.Result, len(items))
-	for i, it := range items {
-		out[i] = bm25.Result{Doc: it.Item, Score: it.Score}
-	}
-	return out
+	return bm.TopKFilter(terms, k, allow.Has)
 }
