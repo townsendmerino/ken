@@ -195,13 +195,14 @@ func NewServer(cfg Config) *sdk.Server {
 	}
 	// Which typed tools this server offers is decided once, here: the instructions name the ones that are offered and
 	// no others.
+	gt := goTierFor(&cfg)
 	typed := typedTools{
-		goTools: engine.GoPath() != "",
-		ts:      tsToolsAvailable(&cfg),
-		py:      pyToolsAvailable(&cfg),
+		goTools:  gt.tools,
+		goRename: gt.rename,
+		ts:       tsToolsAvailable(&cfg),
+		py:       pyToolsAvailable(&cfg),
 	}
 	typed.pyRename = typed.py && pyRenameAvailable(&cfg)
-	typed.goRename = typed.goTools && (!cfg.GoTyped.NeedsGopls() || engine.GoplsPath() != "")
 	if cfg.Instructions == "" {
 		cfg.Instructions = defaultInstructions(typed)
 	}
@@ -285,7 +286,8 @@ func NewServer(cfg Config) *sdk.Server {
 		// the client sent no progressToken.
 		stop := startProgressHeartbeat(ctx, req, "ken definition")
 		defer stop()
-		return handleDefinition(ctx, &cfg, args)
+		res, a, err := handleDefinition(ctx, &cfg, args)
+		return noteStale(ctx, &cfg, args.Repo, args.Output, res, a, err)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -300,7 +302,8 @@ func NewServer(cfg Config) *sdk.Server {
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args ReferencesArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken references")
 		defer stop()
-		return handleReferences(ctx, &cfg, args)
+		res, a, err := handleReferences(ctx, &cfg, args)
+		return noteStale(ctx, &cfg, args.Repo, args.Output, res, a, err)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -315,7 +318,8 @@ func NewServer(cfg Config) *sdk.Server {
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args CallersArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken callers")
 		defer stop()
-		return handleCallers(ctx, &cfg, args)
+		res, a, err := handleCallers(ctx, &cfg, args)
+		return noteStale(ctx, &cfg, args.Repo, args.Output, res, a, err)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -333,6 +337,20 @@ func NewServer(cfg Config) *sdk.Server {
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
+		Name: "text_refs",
+		Description: "Find the code that reads a file as text: string literals and `//go:embed` patterns " +
+			"that contain the file's repo path or base name, with file, line and enclosing function. " +
+			"Use it for source-scan tests and embeds, which neither a call graph nor a reference search sees. " +
+			"In Go it reads the syntax tree, so comments and identifiers don't match; in other languages it " +
+			"reads the string literals on indexed lines. It is a lead list, not an exhaustive answer: a path " +
+			"built at run time is missed. Use grep for every literal match.",
+	}, func(ctx context.Context, req *sdk.CallToolRequest, args TextRefsArgs) (*sdk.CallToolResult, any, error) {
+		stop := startProgressHeartbeat(ctx, req, "ken text_refs")
+		defer stop()
+		return handleTextRefs(ctx, &cfg, args)
+	})
+
+	sdk.AddTool(srv, &sdk.Tool{
 		Name: "outline",
 		Description: "Show the structural outline of a file or directory. " +
 			"For a file path: returns every top-level function, class, and method " +
@@ -343,7 +361,8 @@ func NewServer(cfg Config) *sdk.Server {
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args OutlineArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken outline")
 		defer stop()
-		return handleOutline(ctx, &cfg, args)
+		res, a, err := handleOutline(ctx, &cfg, args)
+		return noteStale(ctx, &cfg, args.Repo, args.Output, res, a, err)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -355,7 +374,8 @@ func NewServer(cfg Config) *sdk.Server {
 	}, func(ctx context.Context, req *sdk.CallToolRequest, args SymbolsArgs) (*sdk.CallToolResult, any, error) {
 		stop := startProgressHeartbeat(ctx, req, "ken symbols")
 		defer stop()
-		return handleSymbols(ctx, &cfg, args)
+		res, a, err := handleSymbols(ctx, &cfg, args)
+		return noteStale(ctx, &cfg, args.Repo, args.Output, res, a, err)
 	})
 
 	sdk.AddTool(srv, &sdk.Tool{

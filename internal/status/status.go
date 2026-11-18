@@ -84,6 +84,10 @@ type Status struct {
 	// the resident gopls processes with their memory, and the answer cache.
 	GoTyped *GoTypedInfo `json:",omitempty"`
 
+	// TypedTier is non-nil only on the MCP surface: whether the go_* tools
+	// are on, and if not, why.
+	TypedTier *TypedTierInfo `json:",omitempty"`
+
 	// Process / runtime. Populated by Build; useful for "is this
 	// the binary I think it is" sanity checks.
 	Process ProcessInfo
@@ -230,6 +234,19 @@ type GoTypedSession struct {
 	Requests int
 }
 
+// TypedTierInfo says whether the Go typed tools (go_references,
+// go_implementations, go_uses, go_check_edit, go_rename_plan) are offered by
+// this server and, when not, why (MCP-only). Their absence from tools/list
+// is otherwise undiagnosable from one call.
+type TypedTierInfo struct {
+	GoTools      bool   // the go_* tools are registered
+	GoPath       string // the go command, when GoTools
+	GoVersion    string // e.g. "go1.27.3"; "" if unreadable
+	Gopls        string // gopls on PATH, "" if none
+	GoRenamePlan bool   // go_rename_plan is registered
+	Why          string // set when something is off
+}
+
 // ParseBudgetInfo counts what the per-file parse budget
 // (KEN_ENRICH_FILE_BUDGET_MS) did to this process's index builds (MCP-only).
 type ParseBudgetInfo struct {
@@ -297,6 +314,9 @@ type BuildOptions struct {
 	// GoTyped, when non-nil, is reported as Status.GoTyped (MCP only).
 	GoTyped *GoTypedInfo
 
+	// TypedTier, when non-nil, is reported as Status.TypedTier (MCP only).
+	TypedTier *TypedTierInfo
+
 	// Now overrides the clock for tests. Zero = time.Now().
 	Now time.Time
 }
@@ -336,6 +356,7 @@ func Build(opts BuildOptions) Status {
 	}
 	st.ParseBudget = opts.ParseBudget
 	st.GoTyped = opts.GoTyped
+	st.TypedTier = opts.TypedTier
 	return st
 }
 

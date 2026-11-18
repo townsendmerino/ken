@@ -133,6 +133,28 @@ func RenderText(s Status, verbose bool) string {
 		fmt.Fprintln(&b)
 	}
 
+	// ---------- Typed tools (MCP only) ----------
+	if t := s.TypedTier; t != nil {
+		fmt.Fprintln(&b, "Typed tools (go_*)")
+		if t.GoTools {
+			v := t.GoVersion
+			if v == "" {
+				v = "version unreadable"
+			}
+			gopls := "gopls not found"
+			if t.Gopls != "" {
+				gopls = "gopls " + t.Gopls
+			}
+			fmt.Fprintf(&b, "  on:  %s (%s), %s\n", v, t.GoPath, gopls)
+			if t.Why != "" {
+				fmt.Fprintf(&b, "  note: %s\n", t.Why)
+			}
+		} else {
+			fmt.Fprintf(&b, "  off: %s\n", t.Why)
+		}
+		fmt.Fprintln(&b)
+	}
+
 	// ---------- Go typed tier (MCP only, when it keeps something) ----------
 	if g := s.GoTyped; g != nil {
 		fmt.Fprintln(&b, "Go typed tier (kept between queries)")

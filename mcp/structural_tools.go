@@ -27,7 +27,10 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,17 +69,87 @@ func resolveBundleForTool(ctx context.Context, cfg *Config, repoArg, outputMode 
 // StructuralIndex yielded nil. It distinguishes "still building" from
 // "genuinely no structural index" (audit R3) so an agent on a large repo
 // retries instead of concluding the repo has no symbols.
-func structuralUnavailableResult(bundle *RepoBundle, outputMode string) *sdk.CallToolResult {
-	if bundle.StructuralPending() {
+//
+// err is why the lookup came back empty (bundle.structuralErr); nil on a
+// bundle path that cannot say, which falls back to StructuralPending.
+// Three distinct messages: building, failed (with the build error), and
+// unsupported (with file counts by language).
+func structuralUnavailableResult(bundle *RepoBundle, err error, outputMode string) *sdk.CallToolResult {
+	switch {
+	case errors.Is(err, engine.ErrStructuralFailed):
+		return errorResult(outputMode, fmt.Sprintf(
+			"The structural index failed to build for this repo: %v. "+
+				"It will be retried automatically after a short cooldown; try again in about a minute.",
+			strings.TrimPrefix(err.Error(), engine.ErrStructuralFailed.Error()+": ")))
+	case err == nil && bundle.Workspace != nil:
+		// The build finished between StructuralIndex and the state read.
+		return errorResult(outputMode,
+			"The structural index finished building just now. Retry the call.")
+	case errors.Is(err, engine.ErrStructuralBuilding) || (err == nil && bundle.StructuralPending()):
 		return errorResult(outputMode,
 			"The structural index is still building for this repo (large corpus). "+
 				"Retry in a few seconds.")
 	}
 	return errorResult(outputMode,
-		"No structural index available for this repo. "+
+		"No structural index available for this repo: "+unsupportedDetail(bundle)+
 			"The structural index has no extractors registered for any file in this corpus "+
 			"(a repo with no supported source files has no structural index).")
 }
+
+// unsupportedDetail lists the indexed files by extension, so an agent can
+// see what the corpus holds. Empty when the bundle has no Workspace.
+func unsupportedDetail(bundle *RepoBundle) string {
+	if bundle.Workspace == nil {
+		return ""
+	}
+	counts := bundle.Workspace.FileCountsByLanguage()
+	if len(counts) == 0 {
+		return "the index holds no files. "
+	}
+	exts := make([]string, 0, len(counts))
+	for e := range counts {
+		exts = append(exts, e)
+	}
+	sort.Slice(exts, func(i, j int) bool {
+		if counts[exts[i]] != counts[exts[j]] {
+			return counts[exts[i]] > counts[exts[j]]
+		}
+		return exts[i] < exts[j]
+	})
+	parts := make([]string, 0, len(exts))
+	for i, e := range exts {
+		if i == 8 {
+			parts = append(parts, "…")
+			break
+		}
+		if e == "" {
+			e = "(no extension)"
+		}
+		parts = append(parts, fmt.Sprintf("%s ×%d", e, counts[e]))
+	}
+	return "files by extension: " + strings.Join(parts, ", ") + ". "
+}
+
+// noteStale prepends staleNote to a markdown answer when the repo's
+// structural answers currently come from the last good index during a
+// rebuild. JSON and error results pass through unchanged.
+func noteStale(ctx context.Context, cfg *Config, repo, output string, res *sdk.CallToolResult, a any, err error) (*sdk.CallToolResult, any, error) {
+	if res == nil || res.IsError || (output != "" && output != "markdown") || len(res.Content) == 0 || cfg.Cache == nil {
+		return res, a, err
+	}
+	bundle, errRes := resolveBundleForTool(ctx, cfg, repo, output)
+	if errRes != nil || bundle.Workspace == nil || !bundle.Workspace.StructuralStale() {
+		return res, a, err
+	}
+	if tc, ok := res.Content[0].(*sdk.TextContent); ok {
+		tc.Text = staleNote + tc.Text
+	}
+	return res, a, err
+}
+
+// staleNote is prepended to a markdown structural answer served from the
+// last good index while a rebuild runs.
+const staleNote = "_Note: the structural index is rebuilding after a file change; this answer is from the index before that change._\n\n"
 
 // resolveStructuralIndex is the shared preamble for every structural handler:
 // resolve the repo bundle, then build/fetch its StructuralIndex, nil-checking
@@ -91,7 +164,7 @@ func resolveStructuralIndex(ctx context.Context, cfg *Config, repoArg, outputMod
 	// Builds the structural symbol index on first use (lazy — cold-start M0);
 	// nil on unsupported corpus or build failure.
 	if bundle.StructuralIndex(ctx) == nil {
-		return nil, structuralUnavailableResult(bundle, outputMode)
+		return nil, structuralUnavailableResult(bundle, bundle.structuralErr(), outputMode)
 	}
 	return &structuralLookups{ctx: ctx, ws: bundle.workspace()}, nil
 }
@@ -140,6 +213,18 @@ func (l *structuralLookups) Outline(path string) []engine.OutlineEntry {
 func (l *structuralLookups) FilesUnderPath(path string) []string {
 	out, _ := l.ws.StructuralFilesUnder(l.ctx, path)
 	return out
+}
+
+// noMatchHint says what a zero-match path argument was matched as and
+// names the nearest directory that does exist.
+func (l *structuralLookups) noMatchHint(path string) string {
+	dir, _ := l.ws.StructuralNearestDir(l.ctx, path)
+	if dir == "" {
+		dir = "the repo root"
+	}
+	return fmt.Sprintf("%q was matched as a path prefix on the indexed files' repo-relative paths "+
+		"(an exact file, a directory, or the start of a file name); nothing starts with it. "+
+		"The nearest existing directory: %s", path, dir)
 }
 
 func (l *structuralLookups) Symbols() []string {
@@ -459,9 +544,18 @@ func handleOutline(ctx context.Context, cfg *Config, args OutlineArgs) (*sdk.Cal
 	files := sidx.FilesUnderPath(path)
 	if len(files) == 0 {
 		resp := OutlineResponse{Path: path, Entries: []OutlineEntryOut{}}
-		md := fmt.Sprintf("No indexed files found at or under %q. "+
-			"Possible reasons: the path doesn't exist, the files aren't a supported "+
-			"language (no registered extractor for that file extension), or the corpus excluded them.", path)
+		if st, err := os.Stat(filepath.Join(sidx.ws.Root(), filepath.FromSlash(path))); err == nil && st.Mode().IsRegular() {
+			// One file out of the structural index while the rest work: name
+			// that, not a repo-wide "no extractors" (F2).
+			md := fmt.Sprintf("%q exists but is not in the structural index. Either its extension (%q) has no "+
+				"registered extractor, it is over the structural size cap (KEN_STRUCTURAL_MAX_FILE_BYTES), "+
+				"or parsing it failed; ken does not record which. It is not retried until the file changes. "+
+				"Other files are indexed normally.", path, filepath.Ext(path))
+			return dispatchOutput(args.Output, resp, md)
+		}
+		md := "No indexed files found at or under " + fmt.Sprintf("%q", path) + ". " + sidx.noMatchHint(path) + ". " +
+			"Other possible reasons: the files aren't a supported " +
+			"language (no registered extractor for that file extension), or the corpus excluded them."
 		return dispatchOutput(args.Output, resp, md)
 	}
 
@@ -580,7 +674,7 @@ func handleSymbols(ctx context.Context, cfg *Config, args SymbolsArgs) (*sdk.Cal
 			md = "No symbols indexed. " +
 				"The structural index has no extractors for this corpus."
 		} else {
-			md = fmt.Sprintf("No symbols found at or under %q.", path)
+			md = fmt.Sprintf("No symbols found at or under %q. %s.", path, sidx.noMatchHint(path))
 		}
 		return dispatchOutput(args.Output, resp, md)
 	}

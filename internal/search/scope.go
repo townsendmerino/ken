@@ -1,11 +1,8 @@
 package search
 
 import (
-	"slices"
-
 	"github.com/townsendmerino/aikit/ann"
 	"github.com/townsendmerino/aikit/bm25"
-	"github.com/townsendmerino/aikit/topk"
 )
 
 // ChunkSet is a per-query set of chunk indexes: the scope a search is
@@ -99,31 +96,12 @@ func queryDense(flat denseRetriever, q []float32, k int, allow *ChunkSet) []ann.
 // bm25TopK is bm.TopK restricted to allow: the k best-scoring in-scope
 // documents with a positive score, ties broken by ascending document id.
 // Corpus statistics (IDF, length norm) are the whole corpus's, so a chunk
-// scores the same with or without the scope. A nil allow is exactly TopK.
+// scores the same with or without the scope; aikit's TopKFilter keeps its
+// dynamic pruning and never scores a rejected document. A nil allow is
+// exactly TopK.
 func bm25TopK(bm *bm25.Index, terms []string, k int, allow *ChunkSet) []bm25.Result {
 	if allow == nil {
 		return bm.TopK(terms, k)
 	}
-	if k <= 0 {
-		return nil
-	}
-	// aikit's TopK has no filter, so score every document (whole-corpus IDF and
-	// length norms, as unscoped) and select over the in-scope ones. A widening
-	// TopK(kk) that keeps aikit's pruning was tried and measured slower here.
-	scores := bm.Scores(terms)
-	sel := topk.New[int](k)
-	th := sel.Threshold()
-	for d, s := range scores {
-		if s > 0 && s > th && allow.Has(d) {
-			sel.Push(d, s)
-			th = sel.Threshold()
-		}
-	}
-	items := sel.Result()
-	slices.SortFunc(items, topk.ItemCmp[int])
-	out := make([]bm25.Result, len(items))
-	for i, it := range items {
-		out[i] = bm25.Result{Doc: it.Item, Score: it.Score}
-	}
-	return out
+	return bm.TopKFilter(terms, k, allow.Has)
 }

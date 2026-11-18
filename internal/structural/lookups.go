@@ -1,6 +1,7 @@
 package structural
 
 import (
+	pathpkg "path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -635,22 +636,19 @@ func (ix *Index) Symbols() []string {
 	return out
 }
 
-// SymbolsInPath returns the top-level names defined under path
-// (treated as a directory prefix on the file paths the index was
-// built with). Empty path returns the same as Symbols(). Used by
+// SymbolsInPath returns the top-level names defined in files whose path
+// starts with path: an exact file, a directory, or a plain string prefix
+// that ends inside a file name ("pkg/residency" matches residency.go and
+// residency_build.go). Empty path returns the same as Symbols(). Used by
 // the Track 2 `symbols` tool for "what's defined under foo/bar/?".
 func (ix *Index) SymbolsInPath(path string) []string {
 	if path == "" || path == "." {
 		return ix.Symbols()
 	}
-	prefix := path
-	if !strings.HasSuffix(prefix, "/") {
-		prefix = prefix + "/"
-	}
 	matches := make(map[string]struct{})
 	for name, files := range ix.defs {
 		for _, f := range files {
-			if strings.HasPrefix(f, prefix) || f == path {
+			if strings.HasPrefix(f, path) {
 				matches[name] = struct{}{}
 				break
 			}
@@ -662,6 +660,21 @@ func (ix *Index) SymbolsInPath(path string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// NearestDir returns the longest parent directory of path (with a trailing
+// slash) that holds at least one indexed file, or "" for the repo root. It
+// is for explaining a zero-match path argument.
+func (ix *Index) NearestDir(path string) string {
+	for dir := pathpkg.Dir(path); dir != "." && dir != "/" && dir != ""; dir = pathpkg.Dir(dir) {
+		prefix := dir + "/"
+		for f := range ix.files {
+			if strings.HasPrefix(f, prefix) {
+				return prefix
+			}
+		}
+	}
+	return ""
 }
 
 // FilesUnderPath returns every indexed file under the given path

@@ -230,11 +230,26 @@ func (b *RepoBundle) stopStructuralBuild() {
 	}
 }
 
+// structuralErr says why StructuralIndex came back nil on the Workspace path:
+// engine.ErrStructuralBuilding, a wrapped engine.ErrStructuralFailed, or
+// engine.ErrNoStructuralIndex (engine.Workspace.StructuralState). It does not
+// wait or build: StructuralIndex has already waited once. nil means no
+// Workspace, or the build finished between the two calls.
+func (b *RepoBundle) structuralErr() error {
+	if b.Workspace == nil {
+		return nil
+	}
+	return b.Workspace.StructuralState()
+}
+
 // StructuralPending reports whether a structural build is currently running
 // (or a fresh call would start one because there's no cached result and no
 // active cooldown). Handlers use it to tell an agent "still building, retry
 // shortly" apart from "this corpus has no structural index" (audit R3).
 func (b *RepoBundle) StructuralPending() bool {
+	if b.Workspace != nil {
+		return b.Workspace.StructuralPending()
+	}
 	if b.Structural != nil {
 		return b.Structural.StructuralPending()
 	}
