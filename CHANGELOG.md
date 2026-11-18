@@ -15,15 +15,25 @@ pre-built binaries.
 
 ## [Unreleased]
 
+## [1.20.0] — 2026-11-17 — fixes from agent field reports (F1–F9)
+
+Eight reports from agent sessions on three machines, about 100 ken calls, asked for these (`docs/internal/agent-feedback-fixes-plan-2026-11.md`). Before upgrading: a setup that has only the PreToolUse edit hook goes quiet for Go edits until the Stop hook is added (see Changed). The build now needs aikit v1.77.0. Not measured here: a real agent session on the new hook default.
+
 ### Changed
 
 - **The edit hook reports a Go edit's errors at the end of the turn by default. A setup without the Stop hook goes quiet for Go after upgrading.** `ken hook check-edit` now keeps a Go edit's errors and says nothing at the edit; `ken hook stop`, on the `Stop` event, hands over the ones still there when the turn ends. A settings file that has only the PreToolUse hook therefore gets no Go reports at all until the Stop hook is added (see the snippet in `docs/USERS.md`). `--at-edit` restores the report at each edit. `--end-of-turn`, the flag 1.19.x callers may have written, is accepted and does nothing. TypeScript and Python are still reported at the edit.
 
 ### Fixed
+- **A structural index that is still building, or failed to build, no longer reads as "no extractors registered" (F2).** `outline`, `references` and the other structural tools now say "building" (retry shortly), "failed" (with the build error) or "unsupported" (with file counts by extension). While a rebuild after a watcher resync runs, they answer from the last good index and say so in markdown answers. `outline` of one file outside the structural index names that file and lists the possible causes. Engine: `Workspace.StructuralState`, `StructuralStale`, `FileCountsByLanguage`, `ErrStructuralFailed`.
+- **`symbols` takes a plain path prefix (F3).** `backend/webgpu/residency` lists the symbols of `residency.go` and `residency_build.go`; a prefix such as `backend/web` also matches `backend/webgpu/...`. A zero-match `symbols` or `outline` says what was matched and names the nearest directory that exists.
+- **A data race in the Go typed tier's type checker (internal/gotypes).** `parse` returned a file's syntax without a lock while another package's check dropped it, caught intermittently by the `-race` job in `TestCheckEdit_aNewFileOrPackageChecksOnlyWhatItReaches`. Both now take `parseMu`.
 - `search` filters (`languages`, `path_contains`, `exclude_path_contains`) no longer run after retrieval. They go into both retrieval arms as a per-query chunk scope, so a filtered top-k is exact over the scope with no 200-candidate limit; a file the unfiltered ranking puts below 200 is now found. The response's `filter` block reports `files_in_scope` / `chunks_in_scope` instead of `candidates_before_filter`, an empty scope is answered before searching, and a zero result says no chunk in the N files in scope matches.
 
 ### Added
 
+- **`callers` groups its results and takes path filters (F4).** Go callers are grouped by package import path (and name the module under a `go.work` that lists several); other languages by directory. JSON gains `groups` and keeps `sites` / `value_uses`. `path_contains` / `exclude_path_contains` filter the callers through `engine.Scope` (new `Scope.Match`). Still name-resolved: `go_references` is the type-resolved answer.
+- **`status` says whether the `go_*` tools are on (F8).** A "Typed tools (go_*)" section and a `TypedTier` JSON field: on with the go version and gopls path, or off with the reason (no `go` on the server's `PATH`).
+- A test locks in that `callers` lists a method passed only as a struct-field value (`Emit: s.emitTurn`) under "Passed as a value" (F7; the code change was in 1.19.2).
 - `ken search --path SUBSTR` / `--exclude-path SUBSTR`, the same scope from the CLI. `engine.SearchOptions.Scope` and `Workspace.ScopeSize` for library callers.
 - **`ken hook stop`, and end-of-turn reporting for `ken hook check-edit`: report a Go edit's errors only if they are still there at the end of the turn.** In the F9 trial, 38 of 44 hook reports described breakage that the agent's next edit mended. The PreToolUse hook keeps the errors an edit would cause and says nothing; the Stop hook re-checks and hands over what still stands (and `MOVED` notes), once. `go_check_edit`'s result gains `existing` (the compile errors there now in the packages it re-checked), which the Stop check reads. Made the default in the same release (see Changed).
 - **`text_refs(path)`, and `engine.Workspace.TextRefs`: which files read a file as text.** Lists the string literals and `//go:embed` patterns that contain a file's repo path (or its base name, where the directory part fits), with file, line and enclosing function. Go is read from the syntax tree, so comments and identifiers do not match; other languages use the string literals on indexed lines. It is a lead list for source-scan tests and embeds; use grep for every match.
