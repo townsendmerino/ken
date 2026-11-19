@@ -42,6 +42,8 @@ type ProgramCache struct {
 	dropped   int64
 	reapT     *time.Timer
 	freeT     *time.Timer
+	// freeOS gives freed memory back to the operating system; nil is debug.FreeOSMemory. A test counts calls with it.
+	freeOS func()
 }
 
 type heldProgram struct {
@@ -486,14 +488,47 @@ func (c *ProgramCache) Renew(ctx context.Context, repo string) {
 	wg.Wait()
 }
 
-// freeSoon gives the memory of replaced programs back to the operating system shortly after the last replacement,
-// off the path of any query: the runtime would otherwise keep those pages for minutes, and a process that holds
-// programs should not also hold what they replaced. c.mu is held.
+// freeSoon gives the memory of replaced or dropped programs back to the operating system shortly after the last
+// replacement, off the path of any query: the runtime would otherwise keep those pages for minutes, and a process
+// that holds programs should not also hold what they replaced. While a query is using or loading a program it waits
+// again, so the stop-the-world collection does not land in the middle of one. c.mu is held.
 func (c *ProgramCache) freeSoon() {
 	if c.freeT != nil {
 		c.freeT.Stop()
 	}
-	c.freeT = time.AfterFunc(2*time.Second, debug.FreeOSMemory)
+	c.freeT = time.AfterFunc(2*time.Second, func() {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return
+		}
+		if c.inUse() {
+			c.freeSoon()
+			c.mu.Unlock()
+			return
+		}
+		c.mu.Unlock()
+		c.free()
+	})
+}
+
+// inUse reports whether a query is using a held program or one is loading. c.mu is held.
+func (c *ProgramCache) inUse() bool {
+	for _, h := range c.held {
+		if h.prog == nil || h.busy > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// free gives freed memory back to the operating system now. c.mu is not held: it stops the world for a while.
+func (c *ProgramCache) free() {
+	if c.freeOS != nil {
+		c.freeOS()
+		return
+	}
+	debug.FreeOSMemory()
 }
 
 // trim gives back to the operating system, shortly, what a piece of work on the held programs left behind: a
@@ -526,20 +561,37 @@ func (c *ProgramCache) armReaper() {
 	c.reapT = time.AfterFunc(c.idle/4+time.Millisecond, c.reap)
 }
 
+// reap is the idle sweep: it drops the programs nobody has asked for in the idle timeout. A sweep that drops one
+// gives the memory back to the operating system once, now if no query is running and otherwise when they are done
+// (freeSoon); the runtime frees the heap but would keep its pages. A sweep that drops nothing does nothing more.
 func (c *ProgramCache) reap() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		c.mu.Unlock()
 		return
 	}
 	now := time.Now()
+	dropped := 0
 	for k, h := range c.held {
 		if h.prog != nil && h.busy == 0 && now.Sub(h.lastUsed) >= c.idle {
 			delete(c.held, k)
 			c.reaped++
+			dropped++
 		}
 	}
 	c.armReaper()
+	freeNow := false
+	if dropped > 0 {
+		if c.inUse() {
+			c.freeSoon()
+		} else {
+			freeNow = true
+		}
+	}
+	c.mu.Unlock()
+	if freeNow {
+		c.free()
+	}
 }
 
 // Invalidate drops every program of repo that is not in use, to give their memory back now. It is not what a change
