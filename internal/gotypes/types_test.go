@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -937,5 +938,39 @@ func TestTypesEngine_labelsHitsDirectOrThroughAnotherMethod(t *testing.T) {
 	ires, err := r.Implementations(ctx, "Shape")
 	if err != nil || ires.Labelled {
 		t.Errorf("implementations are not labelled: %v %v", ires.Labelled, err)
+	}
+}
+
+// The idle sweep that drops a program gives its memory back to the operating system once, and a sweep that drops
+// nothing gives nothing back.
+func TestProgramCache_idleDropReturnsMemoryOncePerSweep(t *testing.T) {
+	needGo(t)
+	root := writeTree(t, tricky)
+	const idle = 200 * time.Millisecond // swept every 50ms
+	pc := NewProgramCache(1, idle)
+	defer pc.Close()
+	var frees atomic.Int32
+	pc.freeOS = func() { frees.Add(1) }
+	r := &Runner{Repo: root, Config: trickyConfigs, Engine: EngineTypes, Programs: pc}
+	if _, err := r.References(context.Background(), "a.Total"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(idle / 2) // two sweeps that find the program in use too recently
+	if len(pc.Status().Programs) != 1 {
+		t.Fatalf("the program was dropped before its idle timeout: %+v", pc.Status())
+	}
+	if n := frees.Load(); n != 0 {
+		t.Errorf("sweeps that dropped nothing gave memory back %d times, want 0", n)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(pc.Status().Programs) > 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := pc.Status(); len(st.Programs) != 0 || st.IdleStops != 1 {
+		t.Fatalf("after the idle timeout: %+v, want the program dropped by one sweep", st)
+	}
+	time.Sleep(idle) // nothing is held: no further sweep may give anything back
+	if n := frees.Load(); n != 1 {
+		t.Errorf("the sweep that dropped the program gave memory back %d times, want 1", n)
 	}
 }
