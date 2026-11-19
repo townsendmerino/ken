@@ -23,6 +23,10 @@ cite as evidence. Moved here — tracked **deliberately** — from the gitignore
   they don't promote cleanly — the load-bearing numbers already live inline in
   the code comments that used to cite them.
 
+- **`mbp2-ken-measure-2026-11-18.md`** — two read-only measurements on Linux
+  amd64: the Go typed tier's resident memory (goinfer, tack) and
+  `ApproxTokens` against real tokenizers.
+
 These are **archival** — they record what was measured at the time and are not
 updated. `outputs/` itself stays gitignored for live scratch work; only these
 load-bearing memos are promoted into version control.
