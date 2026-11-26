@@ -113,6 +113,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/townsendmerino/aikit v1.77.0 h1:pddC6A1CYJSX5jL14M8oUv9rgd0tbf56Kl8mryBtCQA=
 github.com/townsendmerino/aikit v1.77.0/go.mod h1:Pv+U5no9SEkFz0DC+whRtFkgVSZHaklf4XYpInTkM9I=
+github.com/townsendmerino/aikit v1.80.0 h1:wFr+zBmWtvr4Zwmf+SryZb3Y2Ws85ehealV9NAmVa9g=
+github.com/townsendmerino/aikit v1.80.0/go.mod h1:Pv+U5no9SEkFz0DC+whRtFkgVSZHaklf4XYpInTkM9I=
 github.com/townsendmerino/aikit/chunk/treesitter v1.2.0 h1:pqwRl3cIfadQ1aixraw60Hupg3lIC76LG/cpnr+Ya74=
 github.com/townsendmerino/aikit/chunk/treesitter v1.2.0/go.mod h1:+bzbmxKoUhtazBqzxs7CFJiFmyj+qubUo41LHpQS2Ao=
 github.com/xanzy/ssh-agent v0.3.3 h1:+/15pJfg/RsTxqYcX6fHqOXZwwMP+2VyYWJeWM2qQFM=

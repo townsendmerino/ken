@@ -11,7 +11,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/odvcencio/gotreesitter v0.57.0
 	github.com/pkoukk/tiktoken-go v0.1.8
-	github.com/townsendmerino/aikit v1.77.0
+	github.com/townsendmerino/aikit v1.80.0
 	github.com/townsendmerino/aikit/chunk/treesitter v1.2.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.25.0

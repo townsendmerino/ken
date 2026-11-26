@@ -15,6 +15,26 @@ pre-built binaries.
 
 ## [Unreleased]
 
+## [1.20.1] — 2026-11-25 — aikit v1.80.0
+
+### Changed
+
+- **Builds against aikit v1.80.0** (from v1.77.0). aikit's `linalg` surface rework moved `PackSignBitsRow` to
+  `linalg/bitvec`; ken's one call (`internal/search/dense_store.go`) follows. aikit marks this range as touching its
+  retrieval zone, so the checks a retrieval change needs ran: `GOWORK=off make check` (gofmt, lint, vet with the bench
+  tag, the full suite with the potion-code-16M model) passes, and aikit's embedding goldens (`TestGolden_EmbeddingCosine`
+  and its siblings) pass at v1.80.0 with the same model.
+
+### Fixed
+
+- **ken-mcp gives a dropped Go program's memory back to the OS after the idle sweep.** The sweep that deletes resident
+  type-checked programs after `KEN_MCP_GO_IDLE` now calls `debug.FreeOSMemory` once, off the query path, so RSS falls
+  back instead of staying at its peak.
+
+### Internal
+
+- `github.com/jackc/pgx/v5` 5.12.0 → 5.13.0.
+
 ## [1.20.0] — 2026-11-17 — fixes from agent field reports (F1–F9)
 
 Eight reports from agent sessions on three machines, about 100 ken calls, asked for these (`docs/internal/agent-feedback-fixes-plan-2026-11.md`). Before upgrading: a setup that has only the PreToolUse edit hook goes quiet for Go edits until the Stop hook is added (see Changed). The build now needs aikit v1.77.0. Not measured here: a real agent session on the new hook default.

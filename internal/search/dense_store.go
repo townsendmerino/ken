@@ -6,6 +6,7 @@ import (
 
 	"github.com/townsendmerino/aikit/ann"
 	"github.com/townsendmerino/aikit/linalg"
+	"github.com/townsendmerino/aikit/linalg/bitvec"
 )
 
 // Memory layouts mirroring internal aikit/ann structs for zero-copy row compaction,
@@ -339,7 +340,7 @@ func (s *flatBinaryI8Store) Append(newVecs [][]float32) denseStore {
 			}
 			centered[j] = v[j] - c
 		}
-		linalg.PackSignBitsRow(newCodes[idx*words:(idx+1)*words], centered)
+		bitvec.PackSignBitsRow(newCodes[idx*words:(idx+1)*words], centered)
 	}
 
 	nf := new(ann.FlatBinaryI8)
